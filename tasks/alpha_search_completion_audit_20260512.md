@@ -13,6 +13,14 @@ claim a profitable strategy.
 
 Status: `partially complete`.
 
+2026-05-13 update: the previous ready dry-run handoff is not currently a
+profitable strategy. The live dry-run evidence for
+`pm5d.threelayer.settlement-probability-btc-eth.dryrun` is negative, and old
+runtime rows must be cleared before any new dry-run performance claim is made.
+The reset path is now implemented and guarded, but the destructive reset has
+not been executed because the deployment is still running and requires explicit
+operator approval to pause.
+
 The repo can automatically generate and explore alpha candidates through the
 hosted Factor Walk-Forward V2 path, and run `25687766026` produced a ready
 dry-run handoff. PR `#433` merged that handoff into the
@@ -49,6 +57,41 @@ Latest read-only remote config check:
 - interpretation: protected dry-run deployment is still required because the
   running settlement-probability dry-run lane has not yet picked up the ready
   hosted handoff merged by PR `#433`.
+
+Latest reset / data-quality evidence:
+
+- 24h data audit run: `25747004738`
+  - `quick` 1h status: `ok`
+  - 24h retained coverage: `critical`
+  - blocker: `binance_lob/BTCUSDT` and `binance_lob/ETHUSDT` still contain the
+    known 80-minute gap from `2026-05-12 09:28 +08` to `10:48 +08`
+  - interpretation: do not run promotion-grade 24h/48h walk-forward over this
+    retained window.
+- reset preview run: `25748008417`
+  - workflow: `reset-strategy-runtime-evidence.yml`
+  - input: `execute=false`
+  - matched rows: `185` orders, `20` fills
+  - interpretation: old runtime evidence can be backed up and cleared, but no
+    deletion was executed.
+- guard verification run: `25748940434`
+  - workflow: `reset-strategy-runtime-evidence.yml`
+  - input: `execute=true`, `allow_running=false`
+  - result: intentional failure before SSH/reset execution
+  - artifact: `guard-status.json`
+  - status: `blocked`
+  - reason: `deployment_running`
+  - desired/observed state: `running` / `running`
+  - interpretation: the destructive reset is correctly blocked until the dry-run
+    deployment is paused or stopped.
+
+Current dry-run profitability read:
+
+- checked_at: `2026-05-13 00:15 +08` range
+- closed trades: `17`
+- realized PnL: `-72.34`
+- profit factor: `0.3971`
+- max drawdown: `-93.5018`
+- interpretation: current dry-run is rejected / not tradeable; do not promote.
 
 Historical parity runs that led to the ready handoff:
 
@@ -103,7 +146,9 @@ Earlier blocker runs:
 | A dry-run config PR can be generated from ready handoff | `create_config_pr=true` path in hosted workflow, PR `#433` | `ready` | PR `#433` merged `autofactor_formula:auto_settlement_conservative_settlement_edge` into the dry-run config. |
 | Latest deploy bundle can be built without mutating remote services | `deploy-tango-1-1.yml` run `25688999691` with `deploy=false` | `ready` | Build-only run built the release runner, research tools, optimize-backtest, deploy bundle, and live-paused bundle guard. |
 | Remote dry-run config matches the ready handoff on `main` | read-only `tango-1-1` config comparison | `blocked` | Remote is still `auto_settlement_full_depth_settlement_edge`; `origin/main` is `auto_settlement_conservative_settlement_edge`, so protected dry-run deploy is required. |
-| A profitable strategy has been produced | ready handoff plus post-merge dry-run/executable evidence | `not ready` | The system has a dry-run candidate. It still needs deployment, fresh sample collection, and post-merge executable PnL/risk evidence before profitability can be claimed. |
+| Old dry-run runtime evidence can be cleared without touching raw data | PRs `#464`, `#465`, `#466`; reset preview `25748008417`; guard run `25748940434` | `ready but not executed` | Tooling is merged and guarded. Actual deletion remains blocked until explicit approval to pause the running deployment. |
+| Current retained data window supports promotion-grade search | market-data audit `25747004738` | `blocked` | 24h coverage still includes the known Binance LOB gap. Wait for a clean 48-72h window or use shorter diagnostic-only snapshots. |
+| A profitable strategy has been produced | ready handoff plus post-merge dry-run/executable evidence | `not ready` | Current dry-run is negative: 17 closed trades, PnL `-72.34`, profit factor `0.3971`, max drawdown `-93.5018`. |
 
 ## Latest Alpha-Search Evidence
 
@@ -140,19 +185,30 @@ All runs used:
   `config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml`.
 - PR #434: fixed hosted replay parity artifact option parsing so
   `<run-id>:<artifact-name>` inputs route correctly.
+- PR #464: added backup-first `reset_strategy_runtime_evidence.py` and
+  `reset-strategy-runtime-evidence.yml` for deployment-scoped dry-run runtime
+  evidence cleanup.
+- PR #465: added a fail-closed guard so `execute=true` refuses to run while the
+  target deployment is desired/observed `running`, unless `allow_running=true`
+  is explicitly supplied.
+- PR #466: made running-guard failures upload `guard-status.json` so blocked
+  destructive reset attempts have artifact evidence.
 
 ## Remaining Actions
 
-1. With explicit operator approval, deploy current `main` to the protected
-   `tango-1-1` dry-run path while keeping live paused.
-2. Collect a fresh settlement-probability BTC/ETH dry-run sample from the
-   newly deployed binary/config.
-3. Rerun `recorded-replay-parity.yml` against that fresh sample to prove the
-   merged config reproduces runtime behavior after deployment.
-4. Review fresh dry-run PnL, fills, drawdown, capacity, and settlement-exit
-   evidence before calling the strategy profitable.
-5. Only after dry-run/replay parity and executable evidence remain clean should
-   any live deployment discussion start.
+1. With explicit operator approval, pause or stop
+   `pm5d.threelayer.settlement-probability-btc-eth.dryrun`.
+2. Verify the target deployment is no longer desired/observed `running`.
+3. Execute `reset-strategy-runtime-evidence.yml` with `execute=true`,
+   `allow_running=false`, and `confirm=delete-strategy-runtime-evidence`.
+4. Download and inspect the reset artifacts, then verify `/api/reports/dry-run`
+   starts from a clean baseline for this deployment.
+5. Resume the dry-run only after reset verification.
+6. Wait for a clean 48-72h retained data window after the 2026-05-12 LOB gap
+   ages out, then run hosted walk-forward / MCTS alpha search again.
+7. Rerun recorded replay parity against the fresh clean sample.
+8. Review fresh dry-run PnL, fills, drawdown, capacity, and settlement-exit
+   evidence before calling any strategy profitable.
 
 ## Completion Rule
 
@@ -162,6 +218,10 @@ Do not mark the user objective complete until all of the following are true:
 - `autofactor-strategy-handoff.json` reports `status=ready`;
 - recorded replay/dry-run parity reports strict readiness for both runtime and
   event evidence;
+- old runtime rows are reset or the report is explicitly filtered to a clean
+  post-reset observation window;
+- the retained data window used for promotion is clean enough for the declared
+  evidence stage;
 - the dry-run config PR is generated from the ready handoff and passes CI;
 - executable dry-run evidence supports profitability after costs, fills,
   settlement, and drawdown constraints.
