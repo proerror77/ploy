@@ -1,0 +1,181 @@
+name: Reset Strategy Runtime Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref"
+        required: true
+        default: "main"
+      deployment_id:
+        description: "Deployment id to reset"
+        required: true
+        default: "pm5d.threelayer.settlement-probability-btc-eth.dryrun"
+      strategy_id:
+        description: "Optional strategy_id filter"
+        required: false
+        default: ""
+      runtime_modes:
+        description: "Comma-separated runtime modes"
+        required: true
+        default: "dry_run,dryrun,paper"
+      after_ts:
+        description: "Optional inclusive lower bound, ISO-8601"
+        required: false
+        default: ""
+      before_ts:
+        description: "Optional exclusive upper bound, ISO-8601"
+        required: false
+        default: ""
+      execute:
+        description: "Actually delete rows after backup"
+        type: boolean
+        required: true
+        default: false
+      confirm:
+        description: "Required when execute=true: delete-strategy-runtime-evidence"
+        required: false
+        default: ""
+
+concurrency:
+  group: reset-strategy-runtime-evidence-${{ github.event.inputs.deployment_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DEPLOY_HOST: ${{ secrets.TANGO_1_1_HOST }}
+  DEPLOY_ROOT: ${{ vars.PLOY_DEPLOY_ROOT || '/opt/ploy' }}
+
+jobs:
+  reset:
+    name: Backup and optionally reset runtime evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: tango-1-1
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Validate reset inputs
+        env:
+          DEPLOYMENT_ID: ${{ github.event.inputs.deployment_id }}
+          RUNTIME_MODES: ${{ github.event.inputs.runtime_modes }}
+          EXECUTE: ${{ github.event.inputs.execute }}
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import sys
+
+          deployment_id = os.environ["DEPLOYMENT_ID"].strip()
+          if not deployment_id:
+              raise SystemExit("deployment_id is required")
+          modes = [item.strip() for item in os.environ["RUNTIME_MODES"].split(",") if item.strip()]
+          if not modes:
+              raise SystemExit("runtime_modes must include at least one mode")
+          execute = os.environ["EXECUTE"].lower() == "true"
+          if execute and os.environ["CONFIRM"] != "delete-strategy-runtime-evidence":
+              raise SystemExit("execute=true requires confirm=delete-strategy-runtime-evidence")
+          if any(mode not in {"dry_run", "dryrun", "paper"} for mode in modes):
+              raise SystemExit("this workflow only resets dry-run/paper runtime modes")
+          PY
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' '${{ secrets.TANGO_1_1_SSH_KEY }}' > ~/.ssh/tango_1_1_key
+          chmod 600 ~/.ssh/tango_1_1_key
+          cat > ~/.ssh/config <<EOF
+          Host tango-1-1
+            HostName ${DEPLOY_HOST}
+            User root
+            IdentityFile ~/.ssh/tango_1_1_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ServerAliveInterval 30
+            ServerAliveCountMax 20
+            ConnectTimeout 30
+          EOF
+
+      - name: Run reset tool on tango-1-1
+        env:
+          DEPLOYMENT_ID: ${{ github.event.inputs.deployment_id }}
+          STRATEGY_ID: ${{ github.event.inputs.strategy_id }}
+          RUNTIME_MODES: ${{ github.event.inputs.runtime_modes }}
+          AFTER_TS: ${{ github.event.inputs.after_ts }}
+          BEFORE_TS: ${{ github.event.inputs.before_ts }}
+          EXECUTE: ${{ github.event.inputs.execute }}
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          set -euo pipefail
+          run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          remote_dir="${DEPLOY_ROOT}/tmp/reset-strategy-runtime-evidence-${run_id}"
+          remote_backup="${DEPLOY_ROOT}/reports/reset-strategy-runtime-evidence/${run_id}"
+          mkdir -p artifacts/reset-strategy-runtime-evidence
+          # shellcheck disable=SC2029
+          ssh tango-1-1 "mkdir -p '${remote_dir}' '${remote_backup}'"
+          scp scripts/reset_strategy_runtime_evidence.py "tango-1-1:${remote_dir}/reset_strategy_runtime_evidence.py"
+
+          args=(
+            "--deployment-id" "${DEPLOYMENT_ID}"
+            "--runtime-modes" "${RUNTIME_MODES}"
+            "--backup-dir" "${remote_backup}"
+          )
+          if [ -n "${STRATEGY_ID}" ]; then
+            args+=("--strategy-id" "${STRATEGY_ID}")
+          fi
+          if [ -n "${AFTER_TS}" ]; then
+            args+=("--after-ts" "${AFTER_TS}")
+          fi
+          if [ -n "${BEFORE_TS}" ]; then
+            args+=("--before-ts" "${BEFORE_TS}")
+          fi
+          if [ "${EXECUTE}" = "true" ]; then
+            args+=("--execute" "--confirm" "${CONFIRM}")
+          fi
+
+          remote_cmd="$(printf '%q ' python3 "${remote_dir}/reset_strategy_runtime_evidence.py" "${args[@]}")"
+          printf '%s\n' "${remote_cmd}" > artifacts/reset-strategy-runtime-evidence/argv.txt
+          # shellcheck disable=SC2029
+          ssh tango-1-1 "${remote_cmd}"
+          scp -r "tango-1-1:${remote_backup}/." artifacts/reset-strategy-runtime-evidence/
+
+      - name: Publish summary
+        if: always()
+        run: |
+          set -euo pipefail
+          manifest="artifacts/reset-strategy-runtime-evidence/manifest.json"
+          if [ ! -f "${manifest}" ]; then
+            echo "No reset manifest found." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("artifacts/reset-strategy-runtime-evidence/manifest.json").read_text())
+          print("## Strategy Runtime Evidence Reset")
+          print("")
+          print(f"- Deployment: `{payload['deployment_id']}`")
+          print(f"- Execute: `{payload['execute']}`")
+          print(f"- Runtime modes: `{','.join(payload['runtime_modes'])}`")
+          print(f"- Before: orders=`{payload['before']['orders']}`, fills=`{payload['before']['fills']}`")
+          print(f"- Deleted orders: `{payload['deleted_orders']}`")
+          print(f"- After: orders=`{payload['after']['orders']}`, fills=`{payload['after']['fills']}`")
+          print("- Raw market data tables were not touched.")
+          PY
+
+      - name: Upload reset artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reset-strategy-runtime-evidence-${{ github.run_id }}
+          path: artifacts/reset-strategy-runtime-evidence/
+          retention-days: 30
