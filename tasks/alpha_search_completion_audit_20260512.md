@@ -168,7 +168,7 @@ Earlier blocker runs:
 | Remote dry-run config matches the ready handoff on `main` | read-only `tango-1-1` config comparison | `blocked` | Remote is still `auto_settlement_full_depth_settlement_edge`; `origin/main` is `auto_settlement_conservative_settlement_edge`, so protected dry-run deploy is required. |
 | Old dry-run runtime evidence can be cleared without touching raw data | PRs `#464`, `#465`, `#466`; reset preview `25748008417`; guard run `25748940434` | `ready but not executed` | Tooling is merged and guarded. Actual deletion remains blocked until explicit approval to pause the running deployment. |
 | Reset procedure is documented and operator-gated | `docs/runbooks/strategy-runtime-evidence-reset.md`; PR `#470` | `ready` | Runbook records preflight, approval text, preview, pause, guarded execute, artifact inspection, resume, and post-reset gates. |
-| Clean post-reset baseline can be machine-checked | `scripts/check_dryrun_candidate_gate.py`; PR `#471`; workflow `dryrun-candidate-gate.yml`; PR `#472`; run `25751440786` | `ready and currently blocked` | The gate blocks the current report with `residual_runtime_evidence`: 20 trades and 185 orders remain. |
+| Clean post-reset baseline can be machine-checked | `scripts/check_dryrun_candidate_gate.py`; PR `#471`; workflow `dryrun-candidate-gate.yml`; PR `#472`; reset-workflow post-gate PR `#474`; run `25751440786` | `ready and currently blocked` | The standalone gate blocks the current report with `residual_runtime_evidence`: 20 trades and 185 orders remain. The reset workflow now runs the same clean-baseline gate automatically after `execute=true`. |
 | Current retained data window supports promotion-grade search | market-data audit `25747004738` | `blocked` | 24h coverage still includes the known Binance LOB gap. Wait for a clean 48-72h window or use shorter diagnostic-only snapshots. |
 | A profitable strategy has been produced | ready handoff plus post-merge dry-run/executable evidence | `not ready` | Current dry-run is negative: 20 closed trades, PnL `-115.17`, profit factor `0.2927`, max drawdown `-136.3244`. |
 
@@ -225,6 +225,10 @@ All runs used:
   uploads dry-run report and gate-result artifacts for reset/promotion review.
 - Run `25751440786`: proved the dry-run candidate gate blocks the current
   settlement-probability dry-run with `residual_runtime_evidence`.
+- PR #474: wired the clean-baseline gate into
+  `reset-strategy-runtime-evidence.yml` after `execute=true`, uploading
+  `post-reset-dryrun-report.json` and
+  `post-reset-clean-baseline-gate.json` in the reset artifact.
 
 ## Remaining Actions
 
@@ -234,9 +238,10 @@ All runs used:
 3. Execute `reset-strategy-runtime-evidence.yml` with `execute=true`,
    `allow_running=false`, and `confirm=delete-strategy-runtime-evidence`.
 4. Download and inspect the reset artifacts, then verify `/api/reports/dry-run`
-   starts from a clean baseline for this deployment with
-   `scripts/check_dryrun_candidate_gate.py --mode clean-baseline` or
-   `dryrun-candidate-gate.yml`.
+   starts from a clean baseline for this deployment. The reset workflow should
+   upload `post-reset-clean-baseline-gate.json` with `status=passed`; manual
+   rechecks can use `scripts/check_dryrun_candidate_gate.py --mode clean-baseline`
+   or `dryrun-candidate-gate.yml`.
 5. Resume the dry-run only after reset verification.
 6. Wait for a clean 48-72h retained data window after the 2026-05-12 LOB gap
    ages out, then run hosted walk-forward / MCTS alpha search again.
@@ -254,8 +259,10 @@ Do not mark the user objective complete until all of the following are true:
   event evidence;
 - old runtime rows are reset or the report is explicitly filtered to a clean
   post-reset observation window;
-- `check_dryrun_candidate_gate.py --mode clean-baseline` or
-  `dryrun-candidate-gate.yml` passes for the selected dry-run deployment;
+- reset artifact `post-reset-clean-baseline-gate.json` has `status=passed`, or
+  a manual `check_dryrun_candidate_gate.py --mode clean-baseline` /
+  `dryrun-candidate-gate.yml` recheck passes for the selected dry-run
+  deployment;
 - the retained data window used for promotion is clean enough for the declared
   evidence stage;
 - the dry-run config PR is generated from the ready handoff and passes CI;
