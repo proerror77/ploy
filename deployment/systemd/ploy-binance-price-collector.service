@@ -5,18 +5,22 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/ploy
+WorkingDirectory=/opt/ploy
 Environment=BINANCE_PRICE_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT
+Environment=BINANCE_PRICE_COMMIT_BATCH_SIZE=25
 Environment=PLOY_DATABASE__URL=postgresql://postgres:postgres@localhost:5432/ploy
-ExecStart=/usr/bin/python3 /root/ploy/scripts/binance_price_collector.py
+ExecStartPre=/bin/sleep 7
+ExecStart=/opt/ploy/bin/ploy-runner collect-binance-price \
+    --symbols ${BINANCE_PRICE_SYMBOLS} \
+    --batch-size ${BINANCE_PRICE_COMMIT_BATCH_SIZE}
 Restart=always
-RestartSec=5
+RestartSec=7
 StandardOutput=journal
 StandardError=journal
 
-# Memory limits
 MemoryHigh=256M
 MemoryMax=512M
+CPUQuota=35%
 OOMPolicy=kill
 
 [Install]

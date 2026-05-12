@@ -8,15 +8,19 @@ Type=simple
 WorkingDirectory=/opt/ploy
 Environment=DERIBIT_GREEKS_CURRENCIES=BTC,ETH,SOL
 Environment=DERIBIT_GREEKS_POLL_SECS=30
-Environment=DERIBIT_GREEKS_HTTP_TIMEOUT_SECS=20
-ExecStart=/usr/bin/env bash -lc 'if [ -f /opt/ploy/.env ]; then set -a; . /opt/ploy/.env >/dev/null 2>&1; set +a; fi; exec /usr/bin/python3 /opt/ploy/scripts/deribit_atm_greeks_collector.py'
+Environment=PLOY_DATABASE__URL=postgresql://postgres:postgres@localhost:5432/ploy
+ExecStartPre=/bin/sleep 29
+ExecStart=/opt/ploy/bin/ploy-runner collect-deribit-greeks \
+    --currencies ${DERIBIT_GREEKS_CURRENCIES} \
+    --poll-secs ${DERIBIT_GREEKS_POLL_SECS}
 Restart=always
-RestartSec=5
+RestartSec=29
 StandardOutput=journal
 StandardError=journal
 
-MemoryHigh=1280M
-MemoryMax=1536M
+MemoryHigh=256M
+MemoryMax=512M
+CPUQuota=25%
 OOMPolicy=kill
 
 [Install]

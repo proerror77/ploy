@@ -74,8 +74,12 @@ CI-built artifacts for the tango collector migration.
 - [x] Recreate the failing branch in a clean worktree and inspect failed CI logs.
 - [x] Fix the full runner compile errors without broad dependency churn.
 - [x] Run focused local compile checks matching release/deploy feature usage.
-- [ ] Commit and push the fix to `feat/rust-collectors`.
-- [ ] Re-run/monitor CI and only deploy CI-built artifacts after green checks.
+- [x] Commit and push the fix to `feat/rust-collectors`.
+- [x] Re-run/monitor CI and only deploy CI-built artifacts after green checks.
+- [x] Wire tango collector units and deploy workflow to start the Rust collector
+  commands instead of the Python scripts.
+- [ ] Land on `main`, run the protected `deploy-tango-1-1` workflow, and verify
+  remote service state/CPU.
 
 ## Review
 
@@ -94,6 +98,19 @@ CI-built artifacts for the tango collector migration.
   `CARGO_TARGET_DIR=/tmp/ploy-rust-collectors-ops /opt/homebrew/bin/timeout 300 rtk cargo check --locked --features ops -p ploy-runner-host`,
   `CARGO_TARGET_DIR=/tmp/ploy-rust-collectors-ops /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p new-ploy-runner --features full`,
   `rustfmt --edition 2021 --check crates/ploy-market-data/src/binance_collectors.rs crates/ploy-market-data/src/deribit_collectors.rs`,
+  and `rtk git diff --check`.
+- 2026-05-12: Commit `22218348` was pushed to `feat/rust-collectors`, and
+  release-platform build-only run `25705959622` completed successfully for that
+  SHA.
+- 2026-05-12: The initial branch only added runner commands; it did not switch
+  the tango collector units. Updated the five collector units to call
+  `/opt/ploy/bin/ploy-runner collect-*`, added staggered startup/restart delays
+  and CPU quotas, and made both SSH and Cloud Assistant deploy paths install
+  and verify all five collector units. Verification passed:
+  Ruby YAML parse for `.github/workflows/deploy-tango-1-1.yml`,
+  `python3 -m py_compile scripts/ci/deploy_tango_cloud_assist.py`,
+  `CARGO_TARGET_DIR=/tmp/ploy-rust-collectors-deploy /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test workflow_security tango_deploy_keeps_pm5d_live_paused`,
+  `CARGO_TARGET_DIR=/tmp/ploy-rust-collectors-deploy /opt/homebrew/bin/timeout 300 rtk cargo check --locked --features ops -p ploy-runner-host`,
   and `rtk git diff --check`.
 
 # Deploy Live-Paused Stderr Guard Repair (2026-05-12)
