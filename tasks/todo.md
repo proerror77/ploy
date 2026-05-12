@@ -353,7 +353,7 @@ text incorrectly framed `ploy-ci-1` as the current default research runner.
 - [x] Preserve near-terminal binary-option quote prices such as `0.99` and
   `0.01` instead of filtering them as non-tradeable placeholders.
 - [x] Run focused collector/runner checks.
-- [ ] Land through PR, deploy from `main`, and verify active BTC/ETH quote ages
+- [x] Land through PR, deploy from `main`, and verify active BTC/ETH quote ages
   plus collector reset logs on tango.
 
 ## Review
@@ -372,6 +372,13 @@ text incorrectly framed `ploy-ci-1` as the current default research runner.
   `cargo test -p ploy-market-data --features live --lib collector_config`, and
   `cargo check -p ploy-runner-host --features ops`. Existing warning-only
   output remains in strategy/market-data dead-code lints.
+- 2026-05-13: After deploy run `25756032457` from `main@6a6240cf`, tango
+  quote freshness was rechecked for active BTC/ETH markets: `20` active tokens,
+  `0` missing quotes, `0` quotes older than 15s, `0` missing ask/ask_size, and
+  max quote age `5.5s`. Recent `ploy-quote-collector.service` logs still showed
+  a WebSocket reset / heartbeat timeout around restart, but reconnect and
+  subscription refresh succeeded, `quotes_inserted` continued increasing, and
+  `persist_errors=0`.
 
 # PM5D Prior Factor Reuse For Alpha Search (2026-05-12)
 
