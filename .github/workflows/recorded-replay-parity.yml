@@ -316,8 +316,11 @@ jobs:
                   stripped = raw.strip()
                   if stripped.startswith("mode = "):
                       lines.append('mode = "replay"')
+                      lines.append("skip_settlement_exits = true")
                       lines.append(f'replay_market_updates_from = "{recording}"')
                       inserted_replay_path = True
+                      continue
+                  if stripped.startswith("skip_settlement_exits"):
                       continue
                   if stripped.startswith("record_market_updates_to"):
                       continue
