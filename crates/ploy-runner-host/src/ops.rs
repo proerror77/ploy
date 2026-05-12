@@ -5,7 +5,7 @@ use ploy_market_data::collector::{CollectorConfig, QuoteCollector};
 use ploy_market_data::deribit_collectors::{collect_deribit_greeks, collect_deribit_iv};
 use ploy_market_data::diagnostics::check_database;
 use ploy_market_data::pm_trades::{TradeCollector, TradeCollectorConfig};
-use ploy_market_data::scanner::{MarketDiscoveryCollectorConfig, run_market_discovery_collector};
+use ploy_market_data::scanner::{run_market_discovery_collector, MarketDiscoveryCollectorConfig};
 use sqlx::postgres::PgPoolOptions;
 
 pub fn print_usage() {
@@ -25,6 +25,9 @@ pub fn print_usage() {
     );
     eprintln!(
         "  env PLOY_QUOTE_COLLECTOR_STALE_AFTER_SECS Stale self-restart threshold (default: 120)"
+    );
+    eprintln!(
+        "  env PLOY_QUOTE_COLLECTOR_SNAPSHOT_SAMPLE_MS Raw snapshot sample interval per token (default: 1000, 0=all)"
     );
     eprintln!();
     eprintln!("Options for 'collect-markets':");
@@ -189,6 +192,7 @@ pub async fn run_collect_quotes(args: &[String]) {
         persist_queue_capacity: env_usize("PLOY_QUOTE_COLLECTOR_QUEUE_CAPACITY", 4_096),
         persist_workers: env_usize("PLOY_QUOTE_COLLECTOR_PERSIST_WORKERS", 4),
         stale_after_secs: env_u64("PLOY_QUOTE_COLLECTOR_STALE_AFTER_SECS", 120),
+        snapshot_sample_ms: env_u64("PLOY_QUOTE_COLLECTOR_SNAPSHOT_SAMPLE_MS", 1_000),
     };
 
     let collector = QuoteCollector::new(config, pool);
@@ -335,7 +339,11 @@ pub async fn run_collect_binance_lob(args: &[String]) {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(25);
 
-    let pool = match PgPoolOptions::new().max_connections(3).connect(&db_url).await {
+    let pool = match PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&db_url)
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             eprintln!("DB connection failed: {e}");
@@ -361,7 +369,11 @@ pub async fn run_collect_binance_price(args: &[String]) {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(25);
 
-    let pool = match PgPoolOptions::new().max_connections(3).connect(&db_url).await {
+    let pool = match PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&db_url)
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             eprintln!("DB connection failed: {e}");
@@ -387,7 +399,11 @@ pub async fn run_collect_binance_aggtrade(args: &[String]) {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(50);
 
-    let pool = match PgPoolOptions::new().max_connections(3).connect(&db_url).await {
+    let pool = match PgPoolOptions::new()
+        .max_connections(3)
+        .connect(&db_url)
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             eprintln!("DB connection failed: {e}");
@@ -417,7 +433,11 @@ pub async fn run_collect_deribit_iv(args: &[String]) {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(30);
 
-    let pool = match PgPoolOptions::new().max_connections(2).connect(&db_url).await {
+    let pool = match PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             eprintln!("DB connection failed: {e}");
@@ -443,7 +463,11 @@ pub async fn run_collect_deribit_greeks(args: &[String]) {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(30);
 
-    let pool = match PgPoolOptions::new().max_connections(2).connect(&db_url).await {
+    let pool = match PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             eprintln!("DB connection failed: {e}");

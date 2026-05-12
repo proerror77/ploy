@@ -45,6 +45,9 @@ pub struct CollectorConfig {
     pub persist_queue_capacity: usize,
     pub persist_workers: usize,
     pub stale_after_secs: u64,
+    /// Minimum milliseconds between raw orderbook snapshot persists per token.
+    /// Set to 0 to persist every book update. Top-of-book quote ticks are not sampled.
+    pub snapshot_sample_ms: u64,
 }
 
 /// Metadata for a tracked token.
@@ -111,6 +114,7 @@ struct BookPersistJob {
     best_ask: Option<Decimal>,
     bid_size: Option<Decimal>,
     ask_size: Option<Decimal>,
+    include_snapshot: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -355,6 +359,29 @@ fn book_timestamp(timestamp_ms: i64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_millis(timestamp_ms)
 }
 
+fn should_persist_snapshot(
+    last_snapshot_by_token: &mut HashMap<String, DateTime<Utc>>,
+    token_id: &str,
+    now: DateTime<Utc>,
+    snapshot_sample_ms: u64,
+) -> bool {
+    if snapshot_sample_ms == 0 {
+        return true;
+    }
+
+    match last_snapshot_by_token.get(token_id) {
+        Some(last_snapshot_at)
+            if (now - *last_snapshot_at).num_milliseconds() < snapshot_sample_ms as i64 =>
+        {
+            false
+        }
+        _ => {
+            last_snapshot_by_token.insert(token_id.to_string(), now);
+            true
+        }
+    }
+}
+
 fn collector_market_data_ws_config() -> PolymarketWsConfig {
     let mut config = PolymarketWsConfig::default();
     // The collector only needs a healthy market-data stream, not a tightly policed
@@ -466,6 +493,7 @@ impl QuoteCollector {
             // Listen for quotes until refresh interval
             let refresh_deadline = tokio::time::Instant::now()
                 + StdDuration::from_secs(self.config.refresh_interval_secs);
+            let mut last_snapshot_by_token: HashMap<String, DateTime<Utc>> = HashMap::new();
 
             loop {
                 tokio::select! {
@@ -534,6 +562,12 @@ impl QuoteCollector {
                                 };
 
                                 if let Some(meta) = meta {
+                                    let include_snapshot = should_persist_snapshot(
+                                        &mut last_snapshot_by_token,
+                                        &token_id,
+                                        Utc::now(),
+                                        self.config.snapshot_sample_ms,
+                                    );
                                     let job = BookPersistJob {
                                         timeframe: self.config.timeframe.clone(),
                                         meta,
@@ -543,6 +577,7 @@ impl QuoteCollector {
                                         best_ask,
                                         bid_size,
                                         ask_size,
+                                        include_snapshot,
                                     };
 
                                     match persist_tx.try_send(job) {
@@ -1196,32 +1231,41 @@ async fn persist_book_updates(
     let received_at = Utc::now();
     let mut tx = pool.begin().await?;
 
-    let mut snapshot_insert = QueryBuilder::new(
-        r#"
-        INSERT INTO clob_orderbook_snapshots (
-            domain, token_id, market, bids, asks,
-            book_timestamp, hash, source, context, received_at
-        )
-        "#,
-    );
-    snapshot_insert.push_values(jobs, |mut row, job| {
-        row.push_bind("Crypto")
-            .push_bind(job.token_id.clone())
-            .push_bind(job.book.market.to_string())
-            .push_bind(orderbook_levels_json(&job.book.bids))
-            .push_bind(orderbook_levels_json(&job.book.asks))
-            .push_bind(book_timestamp(job.book.timestamp))
-            .push_bind(job.book.hash.clone())
-            .push_bind("polymarket_ws_collector")
-            .push_bind(snapshot_context_json(&job.meta, &job.timeframe))
-            .push_bind(received_at);
-    });
+    let snapshot_jobs = jobs
+        .iter()
+        .filter(|job| job.include_snapshot)
+        .collect::<Vec<_>>();
 
-    let snapshot_rows = snapshot_insert
-        .build()
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+    let snapshot_rows = if snapshot_jobs.is_empty() {
+        0
+    } else {
+        let mut snapshot_insert = QueryBuilder::new(
+            r#"
+            INSERT INTO clob_orderbook_snapshots (
+                domain, token_id, market, bids, asks,
+                book_timestamp, hash, source, context, received_at
+            )
+            "#,
+        );
+        snapshot_insert.push_values(snapshot_jobs, |mut row, job| {
+            row.push_bind("Crypto")
+                .push_bind(job.token_id.clone())
+                .push_bind(job.book.market.to_string())
+                .push_bind(orderbook_levels_json(&job.book.bids))
+                .push_bind(orderbook_levels_json(&job.book.asks))
+                .push_bind(book_timestamp(job.book.timestamp))
+                .push_bind(job.book.hash.clone())
+                .push_bind("polymarket_ws_collector")
+                .push_bind(snapshot_context_json(&job.meta, &job.timeframe))
+                .push_bind(received_at);
+        });
+
+        snapshot_insert
+            .build()
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+    };
 
     let quote_jobs = jobs
         .iter()
@@ -1272,11 +1316,12 @@ mod tests {
     use super::{
         best_tradeable_ask_level, best_tradeable_bid_level, book_timestamp, bridge_sdk_json,
         collector_market_data_ws_config, parse_official_market_settlements,
-        serialize_orderbook_levels, snapshot_context, CollectorConfig,
+        serialize_orderbook_levels, should_persist_snapshot, snapshot_context, CollectorConfig,
         OfficialMarketSettlementPayload, OrderBookLevel, TokenMetadata,
     };
     use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;
+    use std::collections::HashMap;
     use std::time::Duration;
 
     #[test]
@@ -1385,6 +1430,52 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_sampling_allows_first_and_interval_elapsed_updates() {
+        let mut last_snapshot_by_token = HashMap::new();
+        let first = Utc.with_ymd_and_hms(2026, 5, 12, 1, 0, 0).unwrap();
+        let same_window = first + chrono::Duration::milliseconds(999);
+        let next_window = first + chrono::Duration::milliseconds(1_000);
+
+        assert!(should_persist_snapshot(
+            &mut last_snapshot_by_token,
+            "token-a",
+            first,
+            1_000
+        ));
+        assert!(!should_persist_snapshot(
+            &mut last_snapshot_by_token,
+            "token-a",
+            same_window,
+            1_000
+        ));
+        assert!(should_persist_snapshot(
+            &mut last_snapshot_by_token,
+            "token-a",
+            next_window,
+            1_000
+        ));
+    }
+
+    #[test]
+    fn snapshot_sampling_zero_keeps_full_resolution() {
+        let mut last_snapshot_by_token = HashMap::new();
+        let first = Utc.with_ymd_and_hms(2026, 5, 12, 1, 0, 0).unwrap();
+
+        assert!(should_persist_snapshot(
+            &mut last_snapshot_by_token,
+            "token-a",
+            first,
+            0
+        ));
+        assert!(should_persist_snapshot(
+            &mut last_snapshot_by_token,
+            "token-a",
+            first,
+            0
+        ));
+    }
+
+    #[test]
     fn collector_market_data_uses_relaxed_ws_heartbeat_settings() {
         let config = collector_market_data_ws_config();
         assert_eq!(config.heartbeat_interval, Duration::from_secs(15));
@@ -1401,12 +1492,14 @@ mod tests {
             persist_queue_capacity: 0,
             persist_workers: 0,
             stale_after_secs: 0,
+            snapshot_sample_ms: 0,
         }
         .with_safe_defaults();
 
         assert_eq!(config.persist_queue_capacity, 4_096);
         assert_eq!(config.persist_workers, 4);
         assert_eq!(config.stale_after_secs, 120);
+        assert_eq!(config.snapshot_sample_ms, 0);
     }
 
     #[test]
