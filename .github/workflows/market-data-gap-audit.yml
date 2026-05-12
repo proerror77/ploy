@@ -126,6 +126,9 @@ jobs:
           symbols="${INPUT_SYMBOLS:-${DEFAULT_SYMBOLS}}"
           fail_on="${INPUT_FAIL_ON:-critical}"
           gate_mode="${INPUT_GATE_MODE:-freshness}"
+          if [ "${EVENT_NAME}" = "schedule" ] && [ "${EVENT_SCHEDULE}" = "17 */6 * * *" ]; then
+            gate_mode="coverage"
+          fi
 
           case "${run_full}" in
             true|false) ;;

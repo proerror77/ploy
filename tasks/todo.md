@@ -1,3 +1,28 @@
+# Market Data Coverage Audit Automation (2026-05-13)
+
+## Goal
+
+Make the scheduled full market-data audit enforce retained-window coverage, so
+PM5D promotion-grade search does not depend only on manual `gate_mode=coverage`
+dispatches after known data gaps age out.
+
+## Plan
+
+- [x] Keep 30-minute scheduled collector-health checks on freshness mode.
+- [x] Switch the 6-hour full scheduled audit to coverage mode.
+- [x] Add workflow-scope regression coverage.
+- [x] Validate workflow YAML and focused audit tests.
+
+## Review
+
+- 2026-05-13: `.github/workflows/market-data-gap-audit.yml` now forces
+  `gate_mode=coverage` for the `17 */6 * * *` full scheduled audit while
+  preserving manual `workflow_dispatch` input behavior.
+- 2026-05-13: Verification passed:
+  `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/market-data-gap-audit.yml"); puts "yaml ok"'`
+  and
+  `python3 -m unittest tests.test_market_data_gap_audit_scope tests.test_audit_market_data_gaps`.
+
 # PM5D Entry-Price Quality Alpha Prior (2026-05-13)
 
 ## Goal
