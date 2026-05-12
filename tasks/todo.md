@@ -29,6 +29,65 @@ windows, which forced snapshots to include same-day LOB gaps.
   `--start-date` / `--end-date` as the default path.
 - 2026-05-12: Local validation passed:
   `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/research-snapshot.yml")'`.
+- 2026-05-12: Post-gap diagnostic snapshot run `25746212164` completed from
+  `main@9863844f75fe7a3adf172fe811795def2bb88757` with exact window
+  `2026-05-12 11:00:00 +08` to `2026-05-12 23:30:00 +08`. Data audit was
+  `ok`; artifact rows were observations=`5929`, Deribit=`3002`, PM books=`2884`.
+  This is a diagnostic/factor-attribution input, not promotion-grade
+  walk-forward evidence.
+- 2026-05-12: Diagnostic hosted factor review run `25746661147` succeeded from
+  snapshot `25746212164`. It showed positive short-window buckets for
+  `side=down` and `entry_liquidity_usd=150..500u`, while current model-edge
+  probability buckets still had poor executable PnL. Next tradeable-strategy
+  step is a clean 48-72h snapshot plus hosted walk-forward/MCTS chain, not
+  promotion from this intraday diagnostic.
+- 2026-05-13: 24h BTC/ETH market-data coverage audit run `25747004738`
+  completed with `quick` 1h status `ok`, but 24h retained coverage still
+  `critical` because `binance_lob/BTCUSDT` and `binance_lob/ETHUSDT` have the
+  known 80-minute gap from `2026-05-12 09:28 +08` to `10:48 +08`. Do not run a
+  promotion-grade 24h/48h walk-forward over this window.
+- 2026-05-13: Current settlement-probability dry-run report remains negative:
+  17 closed trades, realized PnL `-72.34`, profit factor `0.3971`, max drawdown
+  `-93.5018`. This is still a rejected/currently-bad dry-run, not a candidate.
+
+# Strategy Runtime Evidence Reset Tooling (2026-05-13)
+
+## Goal
+
+Make dry-run evidence resets reproducible and auditable so old runtime rows do
+not contaminate post-cutover PM5D strategy evaluation. The reset must preserve
+raw market data and default to preview/backup only.
+
+## Plan
+
+- [x] Add a deployment-scoped reset script for `strategy_runtime_orders` and
+  `strategy_runtime_fills`.
+- [x] Require backup artifacts before optional deletion.
+- [x] Require explicit confirmation for destructive execution.
+- [x] Add a GitHub Actions workflow that runs the tool on `tango-1-1` under the
+  existing environment gate and uploads the backup/manifest artifact.
+- [x] Add focused tests for predicate scoping, fill ownership, confirmation,
+  and timestamp-window validation.
+
+## Review
+
+- 2026-05-13: Added `scripts/reset_strategy_runtime_evidence.py`. It scopes by
+  deployment id, dry-run/paper runtime modes, optional strategy id, and optional
+  timestamp bounds; it backs up orders/fills to JSON plus `manifest.json`; it
+  deletes only via `--execute --confirm delete-strategy-runtime-evidence`.
+  Raw market data, PM metadata, settlements, Binance, Deribit, and orderbook
+  tables are explicitly not touched.
+- 2026-05-13: Added `.github/workflows/reset-strategy-runtime-evidence.yml` as
+  the remote execution surface. It validates dry-run/paper modes, uses the
+  `tango-1-1` environment approval gate, copies the checked-out script to a
+  remote temp dir, retrieves backup artifacts, and uploads them with 30-day
+  retention.
+- 2026-05-13: Verification passed:
+  `python3 -m unittest tests.test_reset_strategy_runtime_evidence`,
+  `python3 -m py_compile scripts/reset_strategy_runtime_evidence.py
+  tests/test_reset_strategy_runtime_evidence.py`, YAML parse for
+  `.github/workflows/reset-strategy-runtime-evidence.yml`, and `git diff
+  --check` on the touched files.
 
 # Recorded Replay No-Sample Classification Fix (2026-05-12)
 
