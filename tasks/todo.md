@@ -1,3 +1,43 @@
+# PM5D Quote Freshness And Hosted Evidence Correction (2026-05-12)
+
+## Goal
+
+Fix the PM quote caveat that blocked dry-run confidence: active BTC/ETH tokens
+showed stale quote ages despite the collector still running, and the evidence
+text incorrectly framed `ploy-ci-1` as the current default research runner.
+
+## Plan
+
+- [x] Re-read `docs/PROJECT_SEMANTICS.md` and identify the evidence stage as
+  `dry_run_candidate` with `execution_quality` and `runtime_parity` caveats.
+- [x] Correct the evidence path: use GitHub-hosted artifact workflows as the
+  default downstream research path; keep `ploy-ci-1` only as a legacy/fresh DB
+  export fallback.
+- [x] Repair quote collector freshness so unchanged but connected active books
+  refresh cached top-of-book quote rows inside the 15s strategy lag gate.
+- [x] Preserve near-terminal binary-option quote prices such as `0.99` and
+  `0.01` instead of filtering them as non-tradeable placeholders.
+- [x] Run focused collector/runner checks.
+- [ ] Land through PR, deploy from `main`, and verify active BTC/ETH quote ages
+  plus collector reset logs on tango.
+
+## Review
+
+- 2026-05-12: Quote collector now breaks and rebuilds the subscription on WS
+  stream errors instead of continuing on a possibly unhealthy stream. It also
+  refreshes cached unchanged top-of-book rows every 5s via
+  `PLOY_QUOTE_COLLECTOR_REFRESH_SECS`, which gives margin against the
+  strategy's `three_layer_max_pm_lag_secs=15` gate.
+- 2026-05-12: Updated PM5D dry-run diagnostic evidence to stop treating
+  `ploy-ci-1` as the current default runner. Hosted artifact workflows are the
+  right next research/backtest path when retained artifacts exist.
+- 2026-05-12: Verification passed:
+  `cargo test -p ploy-market-data --features live --lib best_tradeable`,
+  `cargo test -p ploy-market-data --features live --lib quote`,
+  `cargo test -p ploy-market-data --features live --lib collector_config`, and
+  `cargo check -p ploy-runner-host --features ops`. Existing warning-only
+  output remains in strategy/market-data dead-code lints.
+
 # PM5D Prior Factor Reuse For Alpha Search (2026-05-12)
 
 ## Goal

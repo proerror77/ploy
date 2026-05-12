@@ -107,10 +107,15 @@ blocked and quote freshness has intermittent Polymarket WebSocket resets.
   residual settlement while the replay/runtime lifecycle is not strictly
   equivalent.
 - Polymarket quote collector had repeated WebSocket
-  `ResetWithoutClosingHandshake` errors in the prior 30 minutes. The collector
-  continued writing fresh rows, but quote freshness is not uniformly stable.
-- Backtest workflow run `25714741515` was queued because the `ploy-ci-1`
-  self-hosted runner was offline; no new backtest evidence was produced.
+  `ResetWithoutClosingHandshake` errors in the prior 30 minutes. Code change in
+  this branch now rebuilds the subscription after stream errors, refreshes
+  unchanged cached top-of-book rows every 5 seconds, and preserves valid near-
+  terminal binary-option prices such as `0.99` / `0.01`.
+- Legacy DB backtest workflow run `25714741515` targeted the old `ploy-ci-1`
+  self-hosted path and did not produce usable evidence. Current follow-up should
+  use GitHub-hosted artifact workflows when a retained snapshot/artifact is
+  available; `ploy-ci-1` is only a DB-adjacent export fallback, not the default
+  research runner.
 
 ## Follow-Up
 
@@ -119,7 +124,8 @@ blocked and quote freshness has intermittent Polymarket WebSocket resets.
 - Decide whether dry-run should persist synthetic settlement SELL fills or
   parity should compare official residual settlement rows without requiring
   synthetic order/fill parity.
-- Improve quote collector reconnect/freshness diagnostics and alert if active
-  BTC/ETH token quote age exceeds the strategy lag gate.
-- Restore `ploy-ci-1` or move the DB backtest workflow to a currently available
-  runner before treating backtest evidence as current.
+- Deploy the quote collector freshness fix from `main`, then re-check active
+  BTC/ETH token quote age against `three_layer_max_pm_lag_secs=15`.
+- Re-run parity/backtest evidence through the GitHub-hosted artifact path when
+  a suitable retained snapshot exists; only use `ploy-ci-1` for fresh DB export
+  work that cannot yet run from a portable artifact.
