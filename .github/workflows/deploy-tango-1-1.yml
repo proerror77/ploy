@@ -49,6 +49,7 @@ env:
     039_fix_strategy_track_record_side_key.sql
     038_track_record_official_residual_settlement.sql
     040_polymarket_v2_indexer_events.sql
+    041_repair_strategy_track_record_side_residual.sql
 
 jobs:
   build-and-deploy:
