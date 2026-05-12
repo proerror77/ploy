@@ -149,6 +149,17 @@ curl -fsS --max-time 10 http://8.221.143.151/api/reports/dry-run \
       --deployment-id pm5d.threelayer.settlement-probability-btc-eth.dryrun
 ```
 
+Or run the same check as an auditable GitHub Actions artifact:
+
+```bash
+gh workflow run dryrun-candidate-gate.yml \
+  --repo proerror77/ploy \
+  --ref main \
+  -f git_ref=main \
+  -f deployment_id=pm5d.threelayer.settlement-probability-btc-eth.dryrun \
+  -f mode=clean-baseline
+```
+
 The post-reset dry-run report should start from a clean baseline. A new
 profitability claim needs a fresh observation window, not the reset itself.
 
