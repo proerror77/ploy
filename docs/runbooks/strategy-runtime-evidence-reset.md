@@ -121,6 +121,7 @@ download the reset artifact and verify:
 - `deleted_orders` equals the expected target order count.
 - `after.orders=0` and `after.fills=0` for the reset scope.
 - Backup JSON files are present in the artifact.
+- `post-reset-clean-baseline-gate.json` has `status=passed`.
 
 ## Resume Clean Observation
 
@@ -159,6 +160,10 @@ gh workflow run dryrun-candidate-gate.yml \
   -f deployment_id=pm5d.threelayer.settlement-probability-btc-eth.dryrun \
   -f mode=clean-baseline
 ```
+
+The destructive reset workflow also runs this clean-baseline gate automatically
+after `execute=true`. The standalone workflow is for manual rechecks or later
+promotion reviews.
 
 The post-reset dry-run report should start from a clean baseline. A new
 profitability claim needs a fresh observation window, not the reset itself.
