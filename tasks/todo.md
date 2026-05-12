@@ -14740,3 +14740,25 @@ settlement-probability dry-run config without touching live trading.
   `python3 -m unittest tests.test_apply_autofactor_handoff_to_config tests.test_factor_walk_forward_sweep`,
   `CARGO_TARGET_DIR=/tmp/ploy-sweep-config /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles settlement_probability_config_carries_autofactor_handoff_score --lib`,
   and `git diff --check`.
+
+# Tango CPU Loading Follow-Up: PM Trade De-Dupe (2026-05-12)
+
+## Goal
+
+Reduce `tango-1-1` CPU/IO load after the Rust collector deployment by stopping
+the Polymarket trade collector from repeatedly persisting the same two-hour
+lookback window.
+
+## Files / Ownership
+
+- `crates/ploy-market-data/src/pm_trades.rs`
+  - Owner: add DB-backed trade cursor filtering and batch inserts.
+
+## Tasks
+
+- [x] Verify the deployed collector and identify the remaining hot path.
+- [x] Confirm remote `clob_trade_ticks` is missing the trade idempotency unique
+  index and is accumulating duplicate rows.
+- [x] Implement collector-side de-dupe and batch persistence.
+- [x] Run focused local Rust checks.
+- [ ] Push PR, merge, deploy from `main`, and verify remote CPU/freshness.
