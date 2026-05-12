@@ -140,6 +140,15 @@ curl -fsS --max-time 10 http://8.221.143.151/api/reports/dry-run \
   | jq '.strategies[]? | select(.deployment_id=="pm5d.threelayer.settlement-probability-btc-eth.dryrun") | {summary,metrics,execution_diagnostics}'
 ```
 
+Machine-check the clean baseline from the dry-run API payload:
+
+```bash
+curl -fsS --max-time 10 http://8.221.143.151/api/reports/dry-run \
+  | python3 scripts/check_dryrun_candidate_gate.py \
+      --mode clean-baseline \
+      --deployment-id pm5d.threelayer.settlement-probability-btc-eth.dryrun
+```
+
 The post-reset dry-run report should start from a clean baseline. A new
 profitability claim needs a fresh observation window, not the reset itself.
 
