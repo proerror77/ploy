@@ -20,7 +20,6 @@ use futures::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::PgPool;
-use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
 
@@ -29,7 +28,6 @@ use tracing::{error, info, warn};
 // ---------------------------------------------------------------------------
 
 const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/stream";
-const DEFAULT_SYMBOLS: &str = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT";
 
 fn parse_symbols(raw: &str) -> Vec<String> {
     raw.split(',')
@@ -46,6 +44,7 @@ fn ms_to_utc(ms: i64) -> DateTime<Utc> {
 
 /// Shared signal — set to false on shutdown request.
 type SharedRunning = Arc<AtomicBool>;
+type CollectorResult<T> = Result<T, String>;
 
 fn running_flag() -> SharedRunning {
     let flag = Arc::new(AtomicBool::new(true));
@@ -63,21 +62,23 @@ async fn binance_connect(
     streams: &[String],
 ) -> Result<
     (
-        futures_util::stream::SplitSink<
+        futures::stream::SplitSink<
             tokio_tungstenite::WebSocketStream<
                 tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
             >,
             Message,
         >,
-        futures_util::stream::SplitStream<
+        futures::stream::SplitStream<
             tokio_tungstenite::WebSocketStream<
                 tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
             >,
         >,
     ),
-    anyhow::Error,
+    String,
 > {
-    let (ws, _) = connect_async(BINANCE_WS_URL).await?;
+    let (ws, _) = connect_async(BINANCE_WS_URL)
+        .await
+        .map_err(|error| error.to_string())?;
     let (mut write, read) = ws.split();
 
     let subscribe = serde_json::json!({
@@ -87,7 +88,8 @@ async fn binance_connect(
     });
     write
         .send(Message::Text(subscribe.to_string().into()))
-        .await?;
+        .await
+        .map_err(|error| error.to_string())?;
 
     Ok((write, read))
 }
@@ -102,9 +104,15 @@ async fn binance_connect(
 pub async fn collect_binance_price(pool: PgPool, symbols_raw: &str, batch_size: usize) {
     let symbols = parse_symbols(symbols_raw);
     let running = running_flag();
-    let streams: Vec<String> = symbols.iter().map(|s| format!("{}@trade", s.to_lowercase())).collect();
+    let streams: Vec<String> = symbols
+        .iter()
+        .map(|s| format!("{}@trade", s.to_lowercase()))
+        .collect();
 
-    info!("[binance-price] Starting collector for symbols: {:?}", symbols);
+    info!(
+        "[binance-price] Starting collector for symbols: {:?}",
+        symbols
+    );
 
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -127,13 +135,16 @@ pub async fn collect_binance_price(pool: PgPool, symbols_raw: &str, batch_size: 
 
 async fn run_price_ws(
     pool: &PgPool,
-    symbols: &[String],
+    _symbols: &[String],
     streams: &[String],
     batch_size: usize,
     running: &SharedRunning,
-) -> Result<(), anyhow::Error> {
+) -> CollectorResult<()> {
     let (_write, mut read) = binance_connect(streams).await?;
-    info!("[binance-price] WebSocket connected, subscribed to {} streams", streams.len());
+    info!(
+        "[binance-price] WebSocket connected, subscribed to {} streams",
+        streams.len()
+    );
 
     let mut pending = 0u32;
     let mut inserted: u64 = 0;
@@ -153,7 +164,7 @@ async fn run_price_ws(
                         break;
                     }
                     Some(Ok(Message::Text(text))) => {
-                        let val: Value = serde_json::from_str(&text)?;
+                        let val: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
                         // Skip subscription confirmation
                         if val.get("result").is_some() { continue; }
                         let data = match val.get("data") {
@@ -178,7 +189,8 @@ async fn run_price_ws(
                         .bind(qty)
                         .bind(trade_time)
                         .execute(pool)
-                        .await?;
+                        .await
+                        .map_err(|error| error.to_string())?;
 
                         pending += 1;
                         inserted += 1;
@@ -194,7 +206,7 @@ async fn run_price_ws(
                             last_report = Instant::now();
                         }
                     }
-                    Some(Ok(Message::Ping(data))) => continue,
+                    Some(Ok(Message::Ping(_))) => continue,
                     Some(Ok(Message::Pong(_))) => continue,
                     Some(Ok(Message::Close(_))) => {
                         warn!("[binance-price] WebSocket closed by server");
@@ -222,9 +234,15 @@ async fn run_price_ws(
 pub async fn collect_binance_aggtrade(pool: PgPool, symbols_raw: &str, batch_size: usize) {
     let symbols = parse_symbols(symbols_raw);
     let running = running_flag();
-    let streams: Vec<String> = symbols.iter().map(|s| format!("{}@aggTrade", s.to_lowercase())).collect();
+    let streams: Vec<String> = symbols
+        .iter()
+        .map(|s| format!("{}@aggTrade", s.to_lowercase()))
+        .collect();
 
-    info!("[binance-aggtrade] Starting collector for symbols: {:?}", symbols);
+    info!(
+        "[binance-aggtrade] Starting collector for symbols: {:?}",
+        symbols
+    );
 
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -251,9 +269,12 @@ async fn run_aggtrade_ws(
     streams: &[String],
     batch_size: usize,
     running: &SharedRunning,
-) -> Result<(), anyhow::Error> {
+) -> CollectorResult<()> {
     let (_write, mut read) = binance_connect(streams).await?;
-    info!("[binance-aggtrade] WebSocket connected, subscribed to {} streams", streams.len());
+    info!(
+        "[binance-aggtrade] WebSocket connected, subscribed to {} streams",
+        streams.len()
+    );
 
     let mut pending = 0u32;
     let mut inserted: u64 = 0;
@@ -268,7 +289,7 @@ async fn run_aggtrade_ws(
                     None => { warn!("[binance-aggtrade] WebSocket stream ended"); break; }
                     Some(Err(e)) => { warn!("[binance-aggtrade] WebSocket error: {e}"); break; }
                     Some(Ok(Message::Text(text))) => {
-                        let val: Value = serde_json::from_str(&text)?;
+                        let val: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
                         if val.get("result").is_some() { continue; }
                         let data = match val.get("data") { Some(d) => d, None => continue, };
 
@@ -297,7 +318,8 @@ async fn run_aggtrade_ws(
                         .bind(event_time)
                         .bind(is_buyer_maker)
                         .execute(pool)
-                        .await?;
+                        .await
+                        .map_err(|error| error.to_string())?;
 
                         if result.rows_affected() > 0 {
                             inserted += 1;
@@ -341,7 +363,12 @@ async fn run_aggtrade_ws(
 /// Schema: `binance_lob_ticks (symbol, update_id, best_bid, best_ask, mid_price,
 ///          spread_bps, obi_5, obi_10, bid_volume_5, ask_volume_5, bids, asks,
 ///          event_time, source)`
-pub async fn collect_binance_lob(pool: PgPool, symbols_raw: &str, depth_levels: usize, batch_size: usize) {
+pub async fn collect_binance_lob(
+    pool: PgPool,
+    symbols_raw: &str,
+    depth_levels: usize,
+    batch_size: usize,
+) {
     let symbols = parse_symbols(symbols_raw);
     let running = running_flag();
     let streams: Vec<String> = symbols
@@ -349,14 +376,26 @@ pub async fn collect_binance_lob(pool: PgPool, symbols_raw: &str, depth_levels: 
         .map(|s| format!("{}@depth{}@100ms", s.to_lowercase(), depth_levels))
         .collect();
 
-    info!("[binance-lob] Starting collector symbols={:?} depth={}", symbols, depth_levels);
+    info!(
+        "[binance-lob] Starting collector symbols={:?} depth={}",
+        symbols, depth_levels
+    );
 
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
         }
 
-        match run_lob_ws(&pool, &symbols, &streams, depth_levels, batch_size, &running).await {
+        match run_lob_ws(
+            &pool,
+            &symbols,
+            &streams,
+            depth_levels,
+            batch_size,
+            &running,
+        )
+        .await
+        {
             Ok(()) => {
                 info!("[binance-lob] Collector finished (shutdown)");
                 break;
@@ -403,9 +442,7 @@ fn obi(bid_vol: Decimal, ask_vol: Decimal) -> Decimal {
 fn levels_to_json(levels: &[(Decimal, Decimal)]) -> Value {
     let arr: Vec<Value> = levels
         .iter()
-        .map(|(p, s)| {
-            serde_json::json!({"price": format!("{}", p), "size": format!("{}", s)})
-        })
+        .map(|(p, s)| serde_json::json!({"price": format!("{}", p), "size": format!("{}", s)}))
         .collect();
     Value::Array(arr)
 }
@@ -417,9 +454,12 @@ async fn run_lob_ws(
     depth_levels: usize,
     batch_size: usize,
     running: &SharedRunning,
-) -> Result<(), anyhow::Error> {
+) -> CollectorResult<()> {
     let (_write, mut read) = binance_connect(streams).await?;
-    info!("[binance-lob] WebSocket connected, subscribed to {} streams", streams.len());
+    info!(
+        "[binance-lob] WebSocket connected, subscribed to {} streams",
+        streams.len()
+    );
 
     let mut pending = 0u32;
     let mut inserted: u64 = 0;
@@ -433,7 +473,7 @@ async fn run_lob_ws(
                     None => { warn!("[binance-lob] WebSocket stream ended"); break; }
                     Some(Err(e)) => { warn!("[binance-lob] WebSocket error: {e}"); break; }
                     Some(Ok(Message::Text(text))) => {
-                        let val: Value = serde_json::from_str(&text)?;
+                        let val: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
                         if val.get("result").is_some() { continue; }
                         let data = match val.get("data") { Some(d) => d, None => continue, };
 
@@ -453,8 +493,8 @@ async fn run_lob_ws(
                             _ => continue,
                         };
 
-                        let bids = raw_bids.map(parse_level).unwrap_or_default();
-                        let asks = raw_asks.map(parse_level).unwrap_or_default();
+                        let bids = raw_bids.map(|levels| parse_level(levels)).unwrap_or_default();
+                        let asks = raw_asks.map(|levels| parse_level(levels)).unwrap_or_default();
 
                         if bids.is_empty() || asks.is_empty() { continue; }
 
@@ -497,7 +537,8 @@ async fn run_lob_ws(
                         .bind(asks_json)
                         .bind(event_time)
                         .execute(pool)
-                        .await?;
+                        .await
+                        .map_err(|error| error.to_string())?;
 
                         pending += 1;
                         inserted += 1;

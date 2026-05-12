@@ -53,6 +53,49 @@ without allowing free-form generated code into the research loop.
   lean replay/backtest, and Rust runner live/default. CodeRabbit review was
   still pending when this evidence was recorded.
 
+# Rust Collector CI Repair (2026-05-12)
+
+## Goal
+
+Make `feat/rust-collectors` compile in the release/deploy workflows, then use
+CI-built artifacts for the tango collector migration.
+
+## Files / Ownership
+
+- `crates/ploy-market-data/src/binance_collectors.rs`
+  - Owner: remove accidental undeclared dependency references and keep collector
+    error handling within existing crate dependencies.
+- `crates/ploy-market-data/Cargo.toml`
+  - Owner: enable only the Tokio feature needed by long-running collector
+    shutdown handling.
+
+## Tasks
+
+- [x] Recreate the failing branch in a clean worktree and inspect failed CI logs.
+- [x] Fix the full runner compile errors without broad dependency churn.
+- [x] Run focused local compile checks matching release/deploy feature usage.
+- [ ] Commit and push the fix to `feat/rust-collectors`.
+- [ ] Re-run/monitor CI and only deploy CI-built artifacts after green checks.
+
+## Review
+
+- 2026-05-12: Release run `25705528136` failed on
+  `origin/feat/rust-collectors@d111518a` while building
+  `new-ploy-runner --features full`. The blocking errors are in
+  `ploy-market-data`: `tokio::signal` is gated off, `futures_util` is referenced
+  without a direct dependency, and `anyhow::Error` is referenced without a
+  direct dependency.
+- 2026-05-12: Fixed the collector compile blockers by enabling the workspace
+  Tokio `signal` feature, using `futures::stream` types, and keeping Binance
+  collector fallible helpers on `String` errors. The first compile pass also
+  exposed collector-local issues in LOB level parsing and Deribit `reqwest`
+  client construction; those were fixed without broad dependency changes.
+  Verification passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-rust-collectors-ops /opt/homebrew/bin/timeout 300 rtk cargo check --locked --features ops -p ploy-runner-host`,
+  `CARGO_TARGET_DIR=/tmp/ploy-rust-collectors-ops /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p new-ploy-runner --features full`,
+  `rustfmt --edition 2021 --check crates/ploy-market-data/src/binance_collectors.rs crates/ploy-market-data/src/deribit_collectors.rs`,
+  and `rtk git diff --check`.
+
 # Deploy Live-Paused Stderr Guard Repair (2026-05-12)
 
 ## Goal

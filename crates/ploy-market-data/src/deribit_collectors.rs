@@ -43,20 +43,6 @@ fn parse_currencies(raw: &str) -> Vec<String> {
         .collect()
 }
 
-fn to_opt_decimal(val: Option<&Value>) -> Option<Decimal> {
-    let s = val?.as_str().or_else(|| {
-        val.as_f64().map(|f| {
-            // Float path: just format it
-            Box::leak(format!("{}", f).into_boxed_str())
-        })
-    })?;
-    Decimal::from_str_exact(s).ok().or_else(|| {
-        // Fallback: try parsing as float
-        val.and_then(|v| v.as_f64())
-            .map(|f| Decimal::try_from(f).unwrap_or(Decimal::ZERO))
-    })
-}
-
 // ---------------------------------------------------------------------------
 // IV collector (deribit_iv_ticks)
 // ---------------------------------------------------------------------------
@@ -68,7 +54,10 @@ fn to_opt_decimal(val: Option<&Value>) -> Option<Decimal> {
 pub async fn collect_deribit_iv(pool: PgPool, currencies_raw: &str, poll_secs: u64) {
     let currencies = parse_currencies(currencies_raw);
     let running = running_flag();
-    info!("[deribit-iv] Starting collector currencies={:?} poll_secs={}", currencies, poll_secs);
+    info!(
+        "[deribit-iv] Starting collector currencies={:?} poll_secs={}",
+        currencies, poll_secs
+    );
 
     while running.load(Ordering::SeqCst) {
         let start = Instant::now();
@@ -95,9 +84,14 @@ pub async fn collect_deribit_iv(pool: PgPool, currencies_raw: &str, poll_secs: u
     info!("[deribit-iv] Collector stopped");
 }
 
-async fn fetch_and_store_iv(pool: &PgPool, currency: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn fetch_and_store_iv(
+    pool: &PgPool,
+    currency: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let url = format!("{DERIBIT_API_BASE}/get_book_summary_by_currency");
-    let resp = reqwest::get(&url)
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
         .query(&[("currency", currency), ("kind", "option")])
         .timeout(Duration::from_secs(20))
         .send()
@@ -115,17 +109,21 @@ async fn fetch_and_store_iv(pool: &PgPool, currency: &str) -> Result<(), Box<dyn
 
         // Parse expiry / strike / option_type from instrument name like "BTC-29MAR24-50000-C"
         let parts: Vec<&str> = instrument_name.split('-').collect();
-        let (expiry_ts, strike, option_type) = if parts.len() >= 4 {
-            (parse_deribit_expiry(parts.get(1).unwrap_or(&"")),
-             parts.get(2).and_then(|s| s.parse::<Decimal>().ok()),
-             parts.get(3).map(|s| s.to_string()))
+        let (expiry_ts, _strike, _option_type) = if parts.len() >= 4 {
+            (
+                parse_deribit_expiry(parts.get(1).unwrap_or(&"")),
+                parts.get(2).and_then(|s| s.parse::<Decimal>().ok()),
+                parts.get(3).map(|s| s.to_string()),
+            )
         } else {
             (None, None, None)
         };
 
         let creation_ms = item["creation_timestamp"].as_i64();
-        let creation_ts = creation_ms
-            .map(|ms| Utc.timestamp_opt(ms / 1000, ((ms % 1000) * 1_000_000) as u32).unwrap());
+        let creation_ts = creation_ms.map(|ms| {
+            Utc.timestamp_opt(ms / 1000, ((ms % 1000) * 1_000_000) as u32)
+                .unwrap()
+        });
 
         let mark_iv_raw = item["mark_iv"].as_f64();
         let bid_iv_raw = item["bid_iv"].as_f64();
@@ -133,24 +131,33 @@ async fn fetch_and_store_iv(pool: &PgPool, currency: &str) -> Result<(), Box<dyn
 
         let normalize = |raw: Option<f64>| -> Option<Decimal> {
             let v = raw?;
-            if v <= 0.0 { return None; }
+            if v <= 0.0 {
+                return None;
+            }
             let normalized = if v > 2.0 { v / 100.0 } else { v };
             Decimal::try_from(normalized).ok()
         };
 
-        let underlying_price = item["underlying_price"].as_f64()
+        let underlying_price = item["underlying_price"]
+            .as_f64()
             .and_then(|v| Decimal::try_from(v).ok());
-        let index_price = item["index_price"].as_f64()
+        let index_price = item["index_price"]
+            .as_f64()
             .and_then(|v| Decimal::try_from(v).ok());
-        let mark_price = item["mark_price"].as_f64()
+        let mark_price = item["mark_price"]
+            .as_f64()
             .and_then(|v| Decimal::try_from(v).ok());
-        let best_bid = item["bid_price"].as_f64()
+        let best_bid = item["bid_price"]
+            .as_f64()
             .and_then(|v| Decimal::try_from(v).ok());
-        let best_ask = item["ask_price"].as_f64()
+        let best_ask = item["ask_price"]
+            .as_f64()
             .and_then(|v| Decimal::try_from(v).ok());
-        let open_interest = item["open_interest"].as_f64()
+        let open_interest = item["open_interest"]
+            .as_f64()
             .and_then(|v| Decimal::try_from(v).ok());
-        let volume = item["volume"].as_f64()
+        let volume = item["volume"]
+            .as_f64()
             .and_then(|v| Decimal::try_from(v).ok());
 
         sqlx::query(
@@ -197,22 +204,37 @@ async fn fetch_and_store_iv(pool: &PgPool, currency: &str) -> Result<(), Box<dyn
         .await?;
     }
 
-    info!("[deribit-iv] Fetched {} instruments for currency={}", rows.len(), currency);
+    info!(
+        "[deribit-iv] Fetched {} instruments for currency={}",
+        rows.len(),
+        currency
+    );
     Ok(())
 }
 
 /// Parse Deribit expiry codes like "29MAR24" into UTC 08:00 timestamp.
 fn parse_deribit_expiry(code: &str) -> Option<DateTime<Utc>> {
-    if code.len() < 7 { return None; }
+    if code.len() < 7 {
+        return None;
+    }
     let day: u32 = code[0..2].parse().ok()?;
-    let mon_str = &code[2..5].to_uppercase();
+    let mon_str = code[2..5].to_uppercase();
     let year: i32 = code[5..].parse().ok()?;
     let year = if year < 100 { year + 2000 } else { year };
 
-    let month = match mon_str {
-        "JAN" => 1, "FEB" => 2, "MAR" => 3, "APR" => 4,
-        "MAY" => 5, "JUN" => 6, "JUL" => 7, "AUG" => 8,
-        "SEP" => 9, "OCT" => 10, "NOV" => 11, "DEC" => 12,
+    let month = match mon_str.as_str() {
+        "JAN" => 1,
+        "FEB" => 2,
+        "MAR" => 3,
+        "APR" => 4,
+        "MAY" => 5,
+        "JUN" => 6,
+        "JUL" => 7,
+        "AUG" => 8,
+        "SEP" => 9,
+        "OCT" => 10,
+        "NOV" => 11,
+        "DEC" => 12,
         _ => return None,
     };
 
@@ -232,7 +254,10 @@ fn parse_deribit_expiry(code: &str) -> Option<DateTime<Utc>> {
 pub async fn collect_deribit_greeks(pool: PgPool, currencies_raw: &str, poll_secs: u64) {
     let currencies = parse_currencies(currencies_raw);
     let running = running_flag();
-    info!("[deribit-greeks] Starting collector currencies={:?} poll_secs={}", currencies, poll_secs);
+    info!(
+        "[deribit-greeks] Starting collector currencies={:?} poll_secs={}",
+        currencies, poll_secs
+    );
 
     while running.load(Ordering::SeqCst) {
         let start = Instant::now();
@@ -260,7 +285,10 @@ pub async fn collect_deribit_greeks(pool: PgPool, currencies_raw: &str, poll_sec
 }
 
 /// Find the ATM instrument for a currency, then fetch its order book for Greeks.
-async fn pick_and_fetch_greeks(pool: &PgPool, currency: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn pick_and_fetch_greeks(
+    pool: &PgPool,
+    currency: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Pick ATM instrument from recent deribit_iv_ticks
     let instrument: Option<(String,)> = sqlx::query_as(
         r#"
@@ -297,23 +325,31 @@ async fn pick_and_fetch_greeks(pool: &PgPool, currency: &str) -> Result<(), Box<
 
     // Fetch order book via Deribit REST API
     let url = format!("{DERIBIT_API_BASE}/get_order_book");
-    let resp = reqwest::get(&url)
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
         .query(&[("instrument_name", &instrument_name)])
         .timeout(Duration::from_secs(20))
         .send()
         .await?;
     let payload: Value = resp.json().await?;
-    let result = payload["result"].as_object().ok_or("missing result object")?;
+    let result = payload["result"]
+        .as_object()
+        .ok_or("missing result object")?;
 
-    let ts_ms = result.get("timestamp")
+    let ts_ms = result
+        .get("timestamp")
         .and_then(|v| v.as_i64())
         .unwrap_or_else(|| Utc::now().timestamp_millis());
-    let source_ts = Utc.timestamp_opt(ts_ms / 1000, ((ts_ms % 1000) * 1_000_000) as u32).unwrap();
+    let source_ts = Utc
+        .timestamp_opt(ts_ms / 1000, ((ts_ms % 1000) * 1_000_000) as u32)
+        .unwrap();
 
     let greeks = result.get("greeks").and_then(|g| g.as_object());
 
     let to_dec = |key: &str| -> Option<Decimal> {
-        result.get(key)
+        result
+            .get(key)
             .and_then(|v| v.as_f64())
             .and_then(|f| Decimal::try_from(f).ok())
     };
