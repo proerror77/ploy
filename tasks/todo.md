@@ -1,3 +1,35 @@
+# Dry-Run Strategy Config-Only Sync (2026-05-13)
+
+## Goal
+
+Add a protected config-only sync path for reviewed PM5D dry-run strategy TOML
+changes, so the dry-run scorer can be aligned with `main` without using the
+full tango deploy workflow that restarts market-data collectors during
+clean-window waits.
+
+## Plan
+
+- [x] Add a `workflow_dispatch` sync workflow with preview-by-default behavior.
+- [x] Restrict the target to `.dryrun` deployments and `config/strategies/*.toml`.
+- [x] Gate execution on `git_ref=main`, live deployment still paused, and the
+      target dry-run deployment being flat.
+- [x] Install only the selected TOML and restart only the target dry-run worker
+      via `ployctl deployments pause/resume`.
+- [x] Upload diff/status artifacts and document the workflow in the strategy
+      research CI/CD runbook.
+- [x] Run local YAML/diff validation.
+
+## Review
+
+- 2026-05-13: Added
+  `.github/workflows/sync-dryrun-strategy-config-tango-1-1.yml` as the narrow
+  config sync path. It does not restart Binance/PM collectors and defaults to
+  preview mode.
+- 2026-05-13: Updated `docs/runbooks/strategy-research-cicd.md` workflow map.
+- 2026-05-13: Local validation passed: Ruby YAML parse for the new workflow and
+  `git diff --check` on touched files. Local `actionlint` was not installed, so
+  PR CI remains the workflow-lint authority.
+
 # Market Data Coverage Audit Automation (2026-05-13)
 
 ## Goal
