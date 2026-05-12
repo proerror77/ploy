@@ -14820,3 +14820,7 @@ trade lifecycle for PM5D binary-option events.
   is merged, deployed from `main`, migration 041 is applied on `tango-1-1`, the
   invalid mixed-side post-cutover rows are backed up/cleared, and a fresh dry-run
   window shows zero same-event UP/DOWN BUY pairs.
+- 2026-05-12: Follow-up deploy packaging check found
+  `.github/workflows/deploy-tango-1-1.yml` did not yet include migration 041 in
+  `DEPLOY_MIGRATIONS`; added a separate workflow-only fix before triggering any
+  tango deploy.
