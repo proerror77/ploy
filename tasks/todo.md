@@ -97,6 +97,10 @@ raw market data and default to preview/backup only.
   while the target deployment is desired/observed `running`, unless
   `allow_running=true` is explicitly supplied. This makes the pause-before-reset
   rule machine-enforced instead of chat-only.
+- 2026-05-13: Guard verification run `25748565967` correctly failed before SSH
+  or reset execution with deployment still `desired_state=running` /
+  `observed_state=running`. A follow-up patch now writes `guard-status.json` so
+  fail-closed reset attempts still upload auditable artifact evidence.
 
 # Recorded Replay No-Sample Classification Fix (2026-05-12)
 

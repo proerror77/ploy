@@ -98,7 +98,11 @@ jobs:
           ALLOW_RUNNING: ${{ github.event.inputs.allow_running }}
         run: |
           set -euo pipefail
+          mkdir -p artifacts/reset-strategy-runtime-evidence
           if [ "${EXECUTE}" != "true" ] || [ "${ALLOW_RUNNING}" = "true" ]; then
+            printf '{"allow_running":%s,"execute":%s,"guard":"running_deployment","schema_version":1,"status":"skipped"}\n' \
+              "${ALLOW_RUNNING}" "${EXECUTE}" \
+              > artifacts/reset-strategy-runtime-evidence/guard-status.json
             exit 0
           fi
           curl -fsS --max-time 10 "http://${DEPLOY_HOST}/api/deployments" > /tmp/deployments.json
@@ -115,11 +119,34 @@ jobs:
           desired = str(target.get("desired_state") or "").lower()
           observed = str(target.get("observed_state") or "").lower()
           if "running" in {desired, observed}:
+              Path("artifacts/reset-strategy-runtime-evidence/guard-status.json").write_text(
+                  json.dumps({
+                      "schema_version": 1,
+                      "guard": "running_deployment",
+                      "status": "blocked",
+                      "deployment_id": deployment_id,
+                      "desired_state": desired,
+                      "observed_state": observed,
+                      "reason": "deployment_running",
+                  }, indent=2, sort_keys=True) + "\n",
+                  encoding="utf-8",
+              )
               raise SystemExit(
                   f"deployment {deployment_id!r} is still running "
                   f"(desired_state={desired!r}, observed_state={observed!r}); "
                   "pause/stop it or set allow_running=true explicitly"
               )
+          Path("artifacts/reset-strategy-runtime-evidence/guard-status.json").write_text(
+              json.dumps({
+                  "schema_version": 1,
+                  "guard": "running_deployment",
+                  "status": "allowed",
+                  "deployment_id": deployment_id,
+                  "desired_state": desired,
+                  "observed_state": observed,
+              }, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
           print(
               f"deployment {deployment_id} is not running "
               f"(desired_state={desired!r}, observed_state={observed!r})"
