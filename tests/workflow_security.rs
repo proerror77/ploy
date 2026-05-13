@@ -288,6 +288,7 @@ fn recorded_replay_parity_supports_auto_window() {
         "official-settlement-report.json",
         "CREATE TEMP TABLE replay_token_ids",
         "\\copy replay_token_ids(token_id)",
+        "\\o ${official_db_rows_json}",
         "FROM pm_token_settlements s",
         "JOIN replay_token_ids t ON t.token_id = s.token_id",
         "--db-settlements-json \"${official_db_rows_json}\"",
