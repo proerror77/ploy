@@ -71,6 +71,7 @@ NUMERIC_FIELDS = {
     "fee",
     "quote",
     "entry_price",
+    "settlement",
     "pnl",
 }
 
@@ -462,7 +463,7 @@ def normalize_event(row: dict[str, Any]) -> dict[str, Any]:
         "side": normalize_text(canonical_field(row, "side"), upper=True),
         "entry_price": normalize_decimal(canonical_field(row, "entry_price")),
         "fill_status": normalize_status(canonical_field(row, "fill_status")),
-        "settlement": normalize_text(canonical_field(row, "settlement"), upper=True),
+        "settlement": normalize_decimal(canonical_field(row, "settlement")),
         "pnl": normalize_decimal(canonical_field(row, "pnl")),
     }
 

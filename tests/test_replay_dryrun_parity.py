@@ -136,6 +136,19 @@ class ReplayDryrunParityTests(unittest.TestCase):
         self.assertEqual(result["blocking_risk_flags"], [])
         self.assertEqual(result["advisory_flags"], [])
 
+    def test_runtime_evidence_normalizes_settlement_decimal_scale(self):
+        replay = evidence_payload()
+        dryrun = evidence_payload()
+        replay["runtime_evidence"]["events"][0]["settlement"] = "1.000000"
+        dryrun["runtime_evidence"]["events"][0]["settlement"] = "1.00000000000000000000"
+
+        result = self.run_script(replay, dryrun)
+
+        runtime = result["runtime_evidence_comparison"]
+        self.assertTrue(runtime["strict_parity_ready"])
+        self.assertEqual(runtime["events"]["mismatches"], [])
+        self.assertEqual(result["decision"], "continue")
+
     def test_runtime_evidence_matches_semantic_rows_with_different_generated_ids(self):
         result = self.run_script(
             evidence_payload(order_id="replay-order", fill_id="replay-fill", order_side="UNKNOWN"),
