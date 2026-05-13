@@ -1,3 +1,45 @@
+# Recorded Replay Partial-Fill Cancel Parity (2026-05-13)
+
+## Goal
+
+Fix recorded replay parity so entry orders that partially filled and then
+canceled their residual quantity do not block runtime parity when matching fill
+rows prove the executed cashflow is identical.
+
+## Files / Ownership
+
+- `scripts/replay_dryrun_parity.py`
+  - Owner: suppress only `PARTIALLY_FILLED` vs `CANCELED` status mismatches
+    when the same intent has strict-ready positive fill evidence.
+- `tests/test_replay_dryrun_parity.py`
+  - Owner: regression coverage for safe suppression and unsafe status drift.
+
+## Tasks
+
+- [x] Add narrow partial-fill residual-cancel parity suppression.
+- [x] Add regression coverage for matching fills and missing-fill blockers.
+- [x] Recompute run `25805852207` locally against downloaded artifacts.
+- [x] Run focused parity tests and syntax checks.
+- [ ] Merge and rerun recorded replay parity from `main`.
+
+## Review
+
+- 2026-05-13: Parity run `25805852207` succeeded as a workflow and had official
+  settlement enrichment (`official_settlement_event_count=11`,
+  `settlement_event_count=11`). Fills were strict-ready for 4/4 rows, but two
+  entry order/event rows differed only by dry-run `PARTIALLY_FILLED` vs replay
+  `CANCELED`, which likely represents replay canceling the residual quantity
+  after the same positive fill rather than a scorer/cashflow mismatch.
+- 2026-05-13: Local recompute against the downloaded run `25805852207`
+  artifacts now returns `decision=continue`, `blocking_risk_flags=[]`, and
+  `runtime_evidence_comparison.strict_parity_ready=true`. The evaluator ignores
+  only four audited status mismatches: event/order status for the two matched
+  entry intents whose fill rows are strict-ready.
+- 2026-05-13: Verification passed:
+  `python3 -m unittest tests.test_replay_dryrun_parity`,
+  `python3 -m py_compile scripts/replay_dryrun_parity.py tests/test_replay_dryrun_parity.py`,
+  and `rtk git diff --check`.
+
 # Recorded Replay Settlement Normalization (2026-05-13)
 
 ## Goal
@@ -19,7 +61,7 @@ different decimal scales do not block runtime parity.
 - [x] Normalize event settlement values through the decimal path.
 - [x] Add regression coverage for decimal-scale-only settlement differences.
 - [x] Run focused parity tests.
-- [ ] Merge and rerun recorded replay parity.
+- [x] Merge and rerun recorded replay parity.
 
 ## Review
 
@@ -54,7 +96,7 @@ settlement-probability dry-run config.
 - [x] Confirm latest handoff is ready after replay parity run `25802468869`.
 - [x] Apply the ready runtime score to the dry-run config.
 - [x] Run focused config handoff tests.
-- [ ] Merge and deploy dry-run config from `main`.
+- [x] Merge and deploy dry-run config from `main`.
 
 ## Review
 
@@ -72,6 +114,26 @@ settlement-probability dry-run config.
   `python3 -m py_compile scripts/apply_autofactor_handoff_to_config.py tests/test_apply_autofactor_handoff_to_config.py`,
   `CARGO_TARGET_DIR=/tmp/ploy-autofactor-config /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles settlement_probability_config_carries_autofactor_handoff_score --lib -- --nocapture`,
   and `rtk git diff --check`.
+- 2026-05-13: PR #508 was merged to `main` as
+  `7269e605f0b1ac4ab75beb523611b4bf98e37143`, then deployed to
+  `tango-1-1` by deploy run `25803601118`. Remote config now carries
+  `three_layer_autofactor_runtime_score =
+  "autofactor_formula:auto_settlement_full_depth_settlement_edge"`;
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun` is
+  `desired=Running observed=Running`, while `pm5d.threelayer.live` remains
+  `desired=Paused observed=Paused`.
+- 2026-05-13: A candidate-quality dry-run gate immediately after deploy
+  (`25804515569`) was correctly blocked because the target had only 8 closed
+  trades and still included pre-full-depth runtime evidence:
+  `realized_pnl=-5.91`, `profit_factor=0.8696`, `buy_fill_rate_pct=97.31`.
+  The target deployment was paused, backup-reset by run `25804613362`, and
+  resumed so full-depth scorer evidence starts from a clean baseline. The reset
+  backed up and deleted 16 orders / 9 fills, left 0 orders / 0 fills, and did
+  not touch raw market data.
+- 2026-05-13: Post-resume market-data freshness audit `25804779652` passed
+  with `overall_status=ok`. For BTC/ETH Polymarket quote quality, the audit
+  reported 8 active tokens, 0 quotes older than 15 seconds, 0 missing quotes,
+  0 missing ask/ask_size, and `max_age_seconds=0`.
 
 # AutoFactor Runtime-Mappable Search Reporting (2026-05-13)
 
