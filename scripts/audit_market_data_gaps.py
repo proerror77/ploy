@@ -438,7 +438,7 @@ WITH active AS (
   ) AS token(token_id)
   WHERE m.symbol IN ({symbol_list})
     AND now() >= m.start_time - interval '1 minute'
-    AND now() < m.end_time + interval '1 minute'
+    AND now() < m.end_time
 ),
 latest AS (
   SELECT
@@ -479,7 +479,31 @@ SELECT json_build_object(
   )::int,
   'max_age_seconds', max(age_seconds),
   'oldest_latest_quote', min(received_at),
-  'newest_latest_quote', max(received_at)
+  'newest_latest_quote', max(received_at),
+  'missing_ask_or_size_examples', coalesce(
+    (
+      SELECT json_agg(
+        json_build_object(
+          'symbol', symbol,
+          'market_slug', market_slug,
+          'token_id', token_id,
+          'end_time', end_time,
+          'received_at', received_at,
+          'best_ask', best_ask,
+          'ask_size', ask_size
+        )
+        ORDER BY end_time, symbol, token_id
+      )
+      FROM (
+        SELECT *
+        FROM latest
+        WHERE best_ask IS NULL OR ask_size IS NULL OR ask_size <= 0
+        ORDER BY end_time, symbol, token_id
+        LIMIT 8
+      ) missing_examples
+    ),
+    '[]'::json
+  )
 )::text
 FROM latest
 """

@@ -98,6 +98,18 @@ class AuditMarketDataGapsTests(unittest.TestCase):
         self.assertEqual(status, "critical")
         self.assertIn("1/20 active token quotes missing ask/ask_size", reasons)
 
+    def test_pm_quote_quality_query_excludes_expired_grace_tokens(self):
+        query = audit.pm_quote_quality_query(["BTCUSDT"], 20)
+
+        self.assertIn("AND now() < m.end_time", query)
+        self.assertNotIn("m.end_time + interval '1 minute'", query)
+
+    def test_pm_quote_quality_query_includes_missing_examples(self):
+        query = audit.pm_quote_quality_query(["BTCUSDT"], 20)
+
+        self.assertIn("'missing_ask_or_size_examples'", query)
+        self.assertIn("LIMIT 8", query)
+
     def test_pm_quote_quality_passes_fresh_complete_active_tokens(self):
         row = {
             "active_tokens": 20,
