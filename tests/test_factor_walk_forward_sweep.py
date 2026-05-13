@@ -199,6 +199,11 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             variant["best_runtime_mappable_factor"]["name"],
             "auto_settlement_conservative_settlement_edge",
         )
+        self.assertEqual(
+            variant["best_runtime_mappable_factor"]["top_bucket_avg_label"],
+            2.507843,
+        )
+        self.assertEqual(variant["best_runtime_mappable_factor"]["complexity"], 1)
         self.assertIsNone(variant["best_qualified_strategy"])
         self.assertIn("best runtime-mappable factor", summary_md)
 
