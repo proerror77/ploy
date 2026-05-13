@@ -69,6 +69,13 @@ closed dry-run rows when available, and falls back to current open rows when a
 fresh recording has not yet accumulated closed events. The workflow records the resolved window in the workflow summary, issue comment, and
 `resolved-window.json` artifact. Manual timestamps remain supported for
 reproducing a known incident window or an older research issue.
+The workflow is read-only evidence generation: it uses the deployed
+`/opt/ploy/bin/ploy-runner`, a temporary replay config, and report/database
+reads, but it does not deploy artifacts, restart services, or enable live
+orders. Its `approval_environment` input therefore defaults to
+`tango-1-1-build-only` so parity checks can run without the protected live
+deploy approval gate. Use `approval_environment=tango-1-1` only when an operator
+explicitly wants the protected environment approval for an incident replay.
 
 ## Research Issue Contract
 
