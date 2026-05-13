@@ -281,6 +281,12 @@ fn recorded_replay_parity_supports_auto_window() {
         "resolved-window.json",
         "resolved-window.env",
         "skip_settlement_exits = true",
+        "extract_official_settlement_evidence.py",
+        "official-settlement-token-ids.json",
+        "official-settlement-db-rows.json",
+        "official-settlement-report.json",
+        "FROM pm_token_settlements s",
+        "--db-settlements-json \"${official_db_rows_json}\"",
         "RESOLVED_SINCE",
         "RESOLVED_UNTIL",
         "Requested window",
@@ -290,6 +296,18 @@ fn recorded_replay_parity_supports_auto_window() {
         if !workflow.contains(needle) {
             offenders.push(format!("recorded-replay-parity.yml: missing `{needle}`"));
         }
+    }
+    if workflow.contains("extract_dryrun_settlement_evidence.py") {
+        offenders.push(
+            "recorded-replay-parity.yml: dry-run settlement extraction must not feed official replay enrichment"
+                .to_string(),
+        );
+    }
+    if workflow.contains("FROM strategy_runtime_event_track_record") {
+        offenders.push(
+            "recorded-replay-parity.yml: official replay enrichment must not source settlement labels from track-record rows"
+                .to_string(),
+        );
     }
 
     for needle in [
