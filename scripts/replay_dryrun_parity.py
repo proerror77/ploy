@@ -589,6 +589,15 @@ def is_zero_decimal(value: Any) -> bool:
         return False
 
 
+def is_positive_decimal(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    try:
+        return Decimal(str(value)) > 0
+    except (InvalidOperation, ValueError):
+        return False
+
+
 def is_non_executed_exit_attempt(row: dict[str, Any]) -> bool:
     """Return true for zero-fill exit attempts that should not block entry parity.
 
@@ -621,6 +630,16 @@ def filter_non_executed_exit_attempts(
         else:
             kept.append(row)
     return kept, ignored
+
+
+def recompute_strict_parity_ready(comparison: dict[str, Any]) -> bool:
+    return (
+        bool(comparison["shared_count"])
+        and not comparison["missing_strict_fields"]
+        and not comparison["mismatches"]
+        and not comparison["missing_replay_rows"]
+        and not comparison["missing_dryrun_rows"]
+    )
 
 
 def compare_normalized_rows(
@@ -675,6 +694,73 @@ def compare_normalized_rows(
         and not (set(dryrun_index) - set(replay_index))
         and not (set(replay_index) - set(dryrun_index)),
     }
+
+
+def strict_ready_fill_intents(
+    replay_fills: list[dict[str, Any]],
+    dryrun_fills: list[dict[str, Any]],
+) -> set[tuple[str | None, str | None]]:
+    replay_index = index_normalized_rows(replay_fills, FILL_KEY_CANDIDATES)
+    dryrun_index = index_normalized_rows(dryrun_fills, FILL_KEY_CANDIDATES)
+    ready: set[tuple[str | None, str | None]] = set()
+    for key in sorted(set(replay_index) & set(dryrun_index)):
+        replay = replay_index[key]
+        dryrun = dryrun_index[key]
+        intent_id = replay.get("intent_id")
+        if not intent_id or intent_id != dryrun.get("intent_id"):
+            continue
+        if not (
+            is_positive_decimal(replay.get("quantity"))
+            and is_positive_decimal(dryrun.get("quantity"))
+        ):
+            continue
+        if all(
+            replay.get(field) is not None
+            and dryrun.get(field) is not None
+            and values_match(field, replay.get(field), dryrun.get(field))
+            for field in FILL_STRICT_FIELDS
+        ):
+            ready.add((replay.get("deployment_id"), intent_id))
+    return ready
+
+
+def is_partial_fill_residual_cancel_mismatch(
+    mismatch: dict[str, Any],
+    ready_fill_intents: set[tuple[str | None, str | None]],
+) -> bool:
+    if mismatch.get("field") not in {"status", "fill_status"}:
+        return False
+    replay_status = normalize_status(mismatch.get("replay"))
+    dryrun_status = normalize_status(mismatch.get("dryrun"))
+    if {replay_status, dryrun_status} != {"PARTIALLY_FILLED", "CANCELED"}:
+        return False
+    replay_row = mismatch.get("replay_row") or {}
+    dryrun_row = mismatch.get("dryrun_row") or {}
+    if replay_row.get("intent_id") != dryrun_row.get("intent_id"):
+        return False
+    intent_key = (replay_row.get("deployment_id"), replay_row.get("intent_id"))
+    return intent_key in ready_fill_intents
+
+
+def suppress_partial_fill_residual_cancel_mismatches(
+    comparison: dict[str, Any],
+    *,
+    ready_fill_intents: set[tuple[str | None, str | None]],
+) -> dict[str, Any]:
+    kept: list[dict[str, Any]] = []
+    ignored: list[dict[str, Any]] = []
+    for mismatch in comparison["mismatches"]:
+        if is_partial_fill_residual_cancel_mismatch(mismatch, ready_fill_intents):
+            ignored.append(mismatch)
+        else:
+            kept.append(mismatch)
+    if not ignored:
+        return comparison
+    updated = dict(comparison)
+    updated["mismatches"] = kept[:100]
+    updated["ignored_partial_fill_cancel_status_mismatches"] = ignored[:100]
+    updated["strict_parity_ready"] = recompute_strict_parity_ready(updated)
+    return updated
 
 
 def is_settlement_exit_row(row: dict[str, Any] | None) -> bool:
@@ -783,12 +869,25 @@ def compare_runtime_evidence(
         key_candidates=FILL_KEY_CANDIDATES,
         strict_fields=FILL_STRICT_FIELDS,
     )
+    ready_fill_intents = strict_ready_fill_intents(replay_fills, dryrun_fills)
+    event_comparison = suppress_partial_fill_residual_cancel_mismatches(
+        event_comparison,
+        ready_fill_intents=ready_fill_intents,
+    )
+    order_comparison = suppress_partial_fill_residual_cancel_mismatches(
+        order_comparison,
+        ready_fill_intents=ready_fill_intents,
+    )
     missing_strict_fields = sorted(
         set(event_comparison["missing_strict_fields"])
         | set(order_comparison["missing_strict_fields"])
         | set(fill_comparison["missing_strict_fields"])
     )
     mismatches = event_comparison["mismatches"] + order_comparison["mismatches"] + fill_comparison["mismatches"]
+    ignored_partial_fill_cancel_status_mismatches = (
+        event_comparison.get("ignored_partial_fill_cancel_status_mismatches", [])
+        + order_comparison.get("ignored_partial_fill_cancel_status_mismatches", [])
+    )
     settlement_mismatches = settlement_exit_price_mismatches(mismatches)
     strict_parity_ready = (
         event_comparison["strict_parity_ready"]
@@ -802,6 +901,7 @@ def compare_runtime_evidence(
         "missing_strict_fields": missing_strict_fields,
         "mismatches": mismatches[:100],
         "settlement_exit_mismatches": settlement_mismatches,
+        "ignored_partial_fill_cancel_status_mismatches": ignored_partial_fill_cancel_status_mismatches[:100],
         "ignored_non_executed_exit_attempts": {
             "replay_events": [runtime_row_summary(row) for row in ignored_replay_events[:50]],
             "dryrun_events": [runtime_row_summary(row) for row in ignored_dryrun_events[:50]],

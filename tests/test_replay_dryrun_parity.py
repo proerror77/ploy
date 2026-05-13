@@ -149,6 +149,49 @@ class ReplayDryrunParityTests(unittest.TestCase):
         self.assertEqual(runtime["events"]["mismatches"], [])
         self.assertEqual(result["decision"], "continue")
 
+    def test_runtime_evidence_allows_partial_fill_then_residual_cancel_status_drift(self):
+        replay = evidence_payload()
+        dryrun = evidence_payload()
+        replay["runtime_evidence"]["events"][0]["fill_status"] = "CANCELED"
+        replay["runtime_evidence"]["orders"][0]["status"] = "CANCELED"
+        replay["runtime_evidence"]["orders"][0]["filled_quantity"] = "4"
+        replay["runtime_evidence"]["fills"][0]["quantity"] = "4"
+        dryrun["runtime_evidence"]["events"][0]["fill_status"] = "PARTIALLY_FILLED"
+        dryrun["runtime_evidence"]["orders"][0]["status"] = "PARTIALLY_FILLED"
+        dryrun["runtime_evidence"]["orders"][0]["filled_quantity"] = "4.0000000"
+        dryrun["runtime_evidence"]["fills"][0]["quantity"] = "4.0000000"
+
+        result = self.run_script(replay, dryrun)
+
+        runtime = result["runtime_evidence_comparison"]
+        self.assertTrue(runtime["strict_parity_ready"])
+        self.assertEqual(result["decision"], "continue")
+        self.assertEqual(runtime["mismatches"], [])
+        self.assertEqual(result["blocking_risk_flags"], [])
+        ignored = runtime["ignored_partial_fill_cancel_status_mismatches"]
+        self.assertEqual(len(ignored), 2)
+        self.assertEqual({mismatch["field"] for mismatch in ignored}, {"fill_status", "status"})
+
+    def test_runtime_evidence_blocks_partial_fill_cancel_status_drift_without_fill(self):
+        replay = evidence_payload()
+        dryrun = evidence_payload()
+        replay["runtime_evidence"]["events"][0]["fill_status"] = "CANCELED"
+        replay["runtime_evidence"]["orders"][0]["status"] = "CANCELED"
+        replay["runtime_evidence"]["orders"][0]["filled_quantity"] = "4"
+        replay["runtime_evidence"]["fills"] = []
+        dryrun["runtime_evidence"]["events"][0]["fill_status"] = "PARTIALLY_FILLED"
+        dryrun["runtime_evidence"]["orders"][0]["status"] = "PARTIALLY_FILLED"
+        dryrun["runtime_evidence"]["orders"][0]["filled_quantity"] = "4"
+        dryrun["runtime_evidence"]["fills"] = []
+
+        result = self.run_script(replay, dryrun)
+
+        runtime = result["runtime_evidence_comparison"]
+        self.assertFalse(runtime["strict_parity_ready"])
+        self.assertEqual(result["decision"], "fix-data-or-runtime-mismatch")
+        self.assertIn("runtime_evidence_field_mismatches", result["blocking_risk_flags"])
+        self.assertEqual(runtime["ignored_partial_fill_cancel_status_mismatches"], [])
+
     def test_runtime_evidence_matches_semantic_rows_with_different_generated_ids(self):
         result = self.run_script(
             evidence_payload(order_id="replay-order", fill_id="replay-fill", order_side="UNKNOWN"),
