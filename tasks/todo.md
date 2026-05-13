@@ -1,3 +1,42 @@
+# AutoFactor Runtime-Mappable Search Reporting (2026-05-13)
+
+## Goal
+
+Prevent hosted alpha-search artifacts from presenting high-scoring discovery
+factors as deployable strategy candidates when they lack a runtime scorer or
+the requested strategy profile mapping.
+
+## Files / Ownership
+
+- `scripts/run_factor_walk_forward_sweep.py`
+  - Owner: split sweep summary fields into discovery, runtime-mappable, and
+    qualified strategy candidates.
+- `tests/test_factor_walk_forward_sweep.py`
+  - Owner: cover rank-1 unmapped discovery factors with lower-ranked
+    settlement-native runtime-mappable candidates.
+
+## Tasks
+
+- [x] Add machine-readable summary fields for `best_discovery_factor`,
+      `best_runtime_mappable_factor`, and `best_qualified_strategy`.
+- [x] Make best-variant selection prefer runtime-mappable candidates before
+      unmapped discovery-only factors when no strategy qualifies.
+- [x] Update Markdown summaries so operators can see why the best discovery
+      factor is blocked.
+- [x] Run focused promotion/sweep tests and syntax checks.
+
+## Review
+
+- 2026-05-13: Current evidence stage remains `factor_attribution` /
+  `walk_forward`, not dry-run promotion. The latest hosted search found useful
+  discovery factors, but the top `mut_*` factor had no runtime strategy mapping.
+  The sweep summary now keeps that discovery signal visible while separately
+  identifying the best runtime-mappable settlement candidate.
+- 2026-05-13: Verification passed:
+  `python3 -m unittest tests.test_factor_walk_forward_sweep tests.test_autofactor_strategy_promotion`,
+  `python3 -m py_compile scripts/run_factor_walk_forward_sweep.py scripts/evaluate_autofactor_strategy_promotion.py tests/test_factor_walk_forward_sweep.py tests/test_autofactor_strategy_promotion.py`,
+  and `rtk git diff --check`.
+
 # Recorded Replay CI-Built Runner (2026-05-13)
 
 ## Goal

@@ -172,14 +172,16 @@ def promotion_args(args: argparse.Namespace, report: Path, variant_dir: Path) ->
     return command
 
 
-def best_factor(promotion: dict[str, Any], allowed_targets: set[str]) -> dict[str, Any] | None:
+def ranked_factor_rows(promotion: dict[str, Any], allowed_targets: set[str]) -> list[dict[str, Any]]:
     evaluated = promotion.get("evaluated_factors") or []
-    candidates: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for item in evaluated:
         factor = item.get("factor") or {}
         if factor.get("target") not in allowed_targets:
             continue
-        candidates.append(
+        mapping = item.get("runtime_mapping") or {}
+        blockers = item.get("blockers") or []
+        rows.append(
             {
                 "name": factor.get("name", ""),
                 "target": factor.get("target", ""),
@@ -192,22 +194,55 @@ def best_factor(promotion: dict[str, Any], allowed_targets: set[str]) -> dict[st
                 "positive_window_ratio": factor.get("positive_window_ratio"),
                 "symbol_positive_ratio": factor.get("symbol_positive_ratio"),
                 "qualified": bool(item.get("qualified")),
-                "blockers": item.get("blockers") or [],
+                "runtime_mapping": mapping,
+                "runtime_mappable": bool(mapping)
+                and not any(str(blocker).startswith("runtime_profile_mismatch:") for blocker in blockers)
+                and "empty_runtime_strategy_profile" not in blockers,
+                "blockers": blockers,
             }
         )
+    return rows
+
+
+def _factor_score(item: dict[str, Any]) -> tuple[float, float, float, float]:
+    return (
+        1.0 if item["decision"] == "candidate" and item["reason"] == "passed" else 0.0,
+        float(item.get("positive_window_ratio") or 0.0),
+        float(item.get("symbol_positive_ratio") or 0.0),
+        float(item.get("spearman_ic") or 0.0),
+    )
+
+
+def best_factor(promotion: dict[str, Any], allowed_targets: set[str]) -> dict[str, Any] | None:
+    candidates = ranked_factor_rows(promotion, allowed_targets)
     if not candidates:
         return None
 
     def score(item: dict[str, Any]) -> tuple[float, float, float, float, float]:
         return (
             1.0 if item["qualified"] else 0.0,
-            1.0 if item["decision"] == "candidate" else 0.0,
-            float(item.get("positive_window_ratio") or 0.0),
-            float(item.get("symbol_positive_ratio") or 0.0),
-            float(item.get("spearman_ic") or 0.0),
+            *_factor_score(item),
         )
 
     return max(candidates, key=score)
+
+
+def best_factor_by_kind(
+    promotion: dict[str, Any],
+    allowed_targets: set[str],
+    *,
+    kind: str,
+) -> dict[str, Any] | None:
+    candidates = ranked_factor_rows(promotion, allowed_targets)
+    if kind == "qualified":
+        candidates = [item for item in candidates if item["qualified"]]
+    elif kind == "runtime_mappable":
+        candidates = [item for item in candidates if item["runtime_mappable"]]
+    elif kind != "discovery":
+        raise ValueError(f"unknown factor kind: {kind}")
+    if not candidates:
+        return None
+    return max(candidates, key=_factor_score)
 
 
 def write_markdown(summary: dict[str, Any], path: Path) -> None:
@@ -218,20 +253,24 @@ def write_markdown(summary: dict[str, Any], path: Path) -> None:
         f"- Total elapsed seconds: `{summary['total_elapsed_seconds']:.2f}`",
         f"- Best variant: `{summary.get('best_variant') or '<none>'}`",
         "",
-        "| variant | status | decision | qualified | elapsed_s | best factor | best blockers |",
-        "| --- | --- | --- | ---: | ---: | --- | --- |",
+        "| variant | status | decision | qualified | elapsed_s | best qualified strategy | best runtime-mappable factor | best discovery factor | discovery blockers |",
+        "| --- | --- | --- | ---: | ---: | --- | --- | --- | --- |",
     ]
     for item in summary["variants"]:
-        best = item.get("best_factor") or {}
+        discovery = item.get("best_discovery_factor") or item.get("best_factor") or {}
+        runtime = item.get("best_runtime_mappable_factor") or {}
+        qualified = item.get("best_qualified_strategy") or {}
         lines.append(
-            "| {variant} | {status} | {decision} | {qualified} | {elapsed:.2f} | {factor} | {blockers} |".format(
+            "| {variant} | {status} | {decision} | {qualified_count} | {elapsed:.2f} | {qualified_factor} | {runtime_factor} | {discovery_factor} | {blockers} |".format(
                 variant=item["label"],
                 status=item["status"],
                 decision=item.get("decision") or "",
-                qualified=item.get("qualified_count", 0),
+                qualified_count=item.get("qualified_count", 0),
                 elapsed=item.get("elapsed_seconds", 0.0),
-                factor=best.get("name", ""),
-                blockers=", ".join(best.get("blockers") or []),
+                qualified_factor=qualified.get("name", ""),
+                runtime_factor=runtime.get("name", ""),
+                discovery_factor=discovery.get("name", ""),
+                blockers=", ".join(discovery.get("blockers") or []),
             )
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -315,6 +354,21 @@ def run_variant(
     item["qualified_count"] = len(promotion.get("qualified_strategies") or [])
     item["promotion_gate_ready"] = bool((promotion.get("promotion_gate") or {}).get("ready"))
     item["best_factor"] = best_factor(promotion, allowed_targets)
+    item["best_discovery_factor"] = best_factor_by_kind(
+        promotion,
+        allowed_targets,
+        kind="discovery",
+    )
+    item["best_runtime_mappable_factor"] = best_factor_by_kind(
+        promotion,
+        allowed_targets,
+        kind="runtime_mappable",
+    )
+    item["best_qualified_strategy"] = best_factor_by_kind(
+        promotion,
+        allowed_targets,
+        kind="qualified",
+    )
     return item
 
 
@@ -381,8 +435,19 @@ def main() -> int:
             completed,
             key=lambda item: (
                 item.get("qualified_count", 0),
-                float((item.get("best_factor") or {}).get("positive_window_ratio") or 0.0),
-                float((item.get("best_factor") or {}).get("spearman_ic") or 0.0),
+                1.0 if item.get("best_runtime_mappable_factor") else 0.0,
+                float(
+                    (item.get("best_runtime_mappable_factor") or item.get("best_factor") or {}).get(
+                        "positive_window_ratio"
+                    )
+                    or 0.0
+                ),
+                float(
+                    (item.get("best_runtime_mappable_factor") or item.get("best_factor") or {}).get(
+                        "spearman_ic"
+                    )
+                    or 0.0
+                ),
             ),
         )
     summary = {
