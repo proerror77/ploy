@@ -36,6 +36,12 @@ the requested strategy profile mapping.
   `python3 -m unittest tests.test_factor_walk_forward_sweep tests.test_autofactor_strategy_promotion`,
   `python3 -m py_compile scripts/run_factor_walk_forward_sweep.py scripts/evaluate_autofactor_strategy_promotion.py tests/test_factor_walk_forward_sweep.py tests/test_autofactor_strategy_promotion.py`,
   and `rtk git diff --check`.
+- 2026-05-13: Follow-up sweep run `25801348001` found the best
+  runtime-mappable blocked candidate in variant `auto-min50`:
+  `auto_settlement_full_depth_settlement_edge` with `icir=1.526091`,
+  `positive_window_ratio=0.875`, and `top_bucket_avg_label=1.979439`.
+  Promotion remains blocked by recorded replay parity mismatch, so this is still
+  `factor_attribution` / `walk_forward` evidence, not a dry-run strategy.
 
 # Recorded Replay CI-Built Runner (2026-05-13)
 

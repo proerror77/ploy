@@ -193,6 +193,10 @@ def ranked_factor_rows(promotion: dict[str, Any], allowed_targets: set[str]) -> 
                 "icir": factor.get("icir"),
                 "positive_window_ratio": factor.get("positive_window_ratio"),
                 "symbol_positive_ratio": factor.get("symbol_positive_ratio"),
+                "monotonicity": factor.get("monotonicity"),
+                "top_bucket_avg_label": factor.get("top_bucket_avg_label"),
+                "top_bucket_positive_label_rate": factor.get("top_bucket_positive_label_rate"),
+                "complexity": factor.get("complexity"),
                 "qualified": bool(item.get("qualified")),
                 "runtime_mapping": mapping,
                 "runtime_mappable": bool(mapping)
