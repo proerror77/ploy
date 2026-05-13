@@ -80,6 +80,11 @@ The build-only environment must still provide `TANGO_1_1_KNOWN_HOSTS` for
 pinned host verification. The SSH key may come from the protected environment
 secret or from the repository-level `TANGO_SSH_KEY` / `ALIYUN_ECS_SSH_KEY`
 fallbacks used by read-only research workflows.
+For the active settlement-probability BTC/ETH dry-run profile, use the matching
+recording path
+`/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson`;
+the older `pm5d-threelayer-canonical.ndjson` recording is historical and can
+fail auto-window resolution because it does not overlap current dry-run rows.
 
 ## Research Issue Contract
 

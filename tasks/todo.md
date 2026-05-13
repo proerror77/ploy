@@ -37,6 +37,14 @@ waiting on the protected `tango-1-1` deploy approval environment.
   ED25519 host key (`SHA256:VlrhRpcFm+j+25LkYXVMHQ3Pw4xO37ECM30wE5bCBOI`) and
   updated `recorded-replay-parity.yml` to reuse repository-level `TANGO_SSH_KEY`
   or `ALIYUN_ECS_SSH_KEY` when the protected environment key is unavailable.
+- 2026-05-13: Main run `25783222380` with the matching settlement-probability
+  recording path completed successfully. Its first parity evaluation was blocked
+  only by one dry-run-only `tl_tp_` take-profit exit attempt that was
+  `REJECTED`, had zero fill, and did not affect cashflow. Updated
+  `scripts/replay_dryrun_parity.py` to ignore such non-executed exit attempts
+  while preserving them in `ignored_non_executed_exit_attempts` metadata. A
+  recomputation against the run artifacts reported `strict_parity_ready=true`,
+  events/orders/fills `4/4`, and no blocking risk flags.
 
 # One-Day PM5D OOS Smoke Window (2026-05-13)
 

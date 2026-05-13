@@ -265,6 +265,8 @@ fn recorded_replay_parity_supports_auto_window() {
         "approval_environment:",
         "default: \"tango-1-1-build-only\"",
         "environment: ${{ inputs.approval_environment }}",
+        "pm5d.threelayer.settlement-probability-btc-eth.dryrun",
+        "pm5d-threelayer-settlement-probability-btc-eth.ndjson",
         "TANGO_SSH_KEY",
         "ALIYUN_ECS_SSH_KEY",
         "No SSH key secret found for tango-1-1",

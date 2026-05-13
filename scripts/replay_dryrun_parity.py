@@ -579,6 +579,49 @@ def runtime_row_summary(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def is_zero_decimal(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    try:
+        return Decimal(str(value)) == 0
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def is_non_executed_exit_attempt(row: dict[str, Any]) -> bool:
+    """Return true for zero-fill exit attempts that should not block entry parity.
+
+    Recorded replay parity currently injects `skip_settlement_exits = true` so
+    the replay focuses on entry/fill accounting. Dry-run reports can still carry
+    rejected take-profit attempts from live quote polling. These attempts did
+    not fill and do not affect cashflow/PnL, so they are tracked as ignored
+    metadata instead of blocking strict parity for executable entries.
+    """
+
+    intent_id = str(row.get("intent_id") or "").lower()
+    status = normalize_status(row.get("status") or row.get("fill_status"))
+    if not intent_id.startswith("tl_tp_") or status != "REJECTED":
+        return False
+    if row.get("filled_quantity") is not None and not is_zero_decimal(row.get("filled_quantity")):
+        return False
+    if row.get("pnl") is not None and not is_zero_decimal(row.get("pnl")):
+        return False
+    return True
+
+
+def filter_non_executed_exit_attempts(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    kept: list[dict[str, Any]] = []
+    ignored: list[dict[str, Any]] = []
+    for row in rows:
+        if is_non_executed_exit_attempt(row):
+            ignored.append(row)
+        else:
+            kept.append(row)
+    return kept, ignored
+
+
 def compare_normalized_rows(
     replay_rows: list[dict[str, Any]],
     dryrun_rows: list[dict[str, Any]],
@@ -713,6 +756,11 @@ def compare_runtime_evidence(
         until=until,
         timestamp_keys=("decision_ts",),
     )
+    replay_events, ignored_replay_events = filter_non_executed_exit_attempts(replay_events)
+    dryrun_events, ignored_dryrun_events = filter_non_executed_exit_attempts(dryrun_events)
+    replay_orders, ignored_replay_orders = filter_non_executed_exit_attempts(replay_orders)
+    dryrun_orders, ignored_dryrun_orders = filter_non_executed_exit_attempts(dryrun_orders)
+
     event_comparison = compare_normalized_rows(
         replay_events,
         dryrun_events,
@@ -753,6 +801,12 @@ def compare_runtime_evidence(
         "missing_strict_fields": missing_strict_fields,
         "mismatches": mismatches[:100],
         "settlement_exit_mismatches": settlement_mismatches,
+        "ignored_non_executed_exit_attempts": {
+            "replay_events": [runtime_row_summary(row) for row in ignored_replay_events[:50]],
+            "dryrun_events": [runtime_row_summary(row) for row in ignored_dryrun_events[:50]],
+            "replay_orders": [runtime_row_summary(row) for row in ignored_replay_orders[:50]],
+            "dryrun_orders": [runtime_row_summary(row) for row in ignored_dryrun_orders[:50]],
+        },
         "strict_parity_ready": strict_parity_ready,
     }
 
