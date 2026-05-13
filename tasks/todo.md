@@ -1,3 +1,35 @@
+# Recorded Replay Parity Read-Only Environment (2026-05-13)
+
+## Goal
+
+Unblock PM5D settlement-probability promotion evidence by letting
+`recorded-replay-parity.yml` run as read-only runtime-parity evidence without
+waiting on the protected `tango-1-1` deploy approval environment.
+
+## Plan
+
+- [x] Add an explicit read-only approval environment input to
+      `recorded-replay-parity.yml`, defaulting to `tango-1-1-build-only`.
+- [x] Add workflow-security coverage so recorded replay parity keeps the
+      read-only default and pinned SSH verification.
+- [x] Update the strategy research runbook with the read-only parity dispatch
+      semantics.
+- [x] Validate YAML/workflow guard tests and open a PR through the normal flow.
+
+## Review
+
+- 2026-05-13: `recorded-replay-parity.yml` now accepts
+  `approval_environment`, defaulting to `tango-1-1-build-only`, while retaining
+  the option to use protected `tango-1-1` approval for operator-requested
+  incident replays. The parity job still uses pinned SSH known_hosts and the
+  already deployed tango runner; it does not deploy, restart services, or enable
+  live orders.
+- 2026-05-13: Verification passed: YAML parse for
+  `.github/workflows/recorded-replay-parity.yml`, `git diff --check`,
+  `CARGO_TARGET_DIR=/tmp/ploy-recorded-parity-env /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy recorded_replay_parity_supports_auto_window --test workflow_security -- --exact --nocapture`,
+  and
+  `CARGO_TARGET_DIR=/tmp/ploy-recorded-parity-env /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy workflow_dispatch_inputs_stay_lintable --test workflow_security -- --exact --nocapture`.
+
 # One-Day PM5D OOS Smoke Window (2026-05-13)
 
 ## Goal

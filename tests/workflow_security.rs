@@ -262,10 +262,16 @@ fn recorded_replay_parity_supports_auto_window() {
     let mut offenders = Vec::new();
 
     for needle in [
+        "approval_environment:",
+        "default: \"tango-1-1-build-only\"",
+        "environment: ${{ inputs.approval_environment }}",
         "default: \"auto\"",
         "resolve_recorded_replay_window.py",
         "--recording \"${recording_path}\"",
         "--dryrun-json \"${dryrun_report}\"",
+        "StrictHostKeyChecking yes",
+        "UserKnownHostsFile ~/.ssh/known_hosts",
+        "TANGO_1_1_KNOWN_HOSTS",
         "resolved-window.json",
         "resolved-window.env",
         "skip_settlement_exits = true",
@@ -284,6 +290,8 @@ fn recorded_replay_parity_supports_auto_window() {
         "defaults `since=auto` and `until=auto`",
         "records the resolved window",
         "timestamps remain supported",
+        "`approval_environment` input therefore defaults to",
+        "`tango-1-1-build-only`",
     ] {
         if !runbook.contains(needle) {
             offenders.push(format!("strategy-research-cicd.md: missing `{needle}`"));

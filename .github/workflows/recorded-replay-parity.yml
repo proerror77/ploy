@@ -27,6 +27,14 @@ on:
         description: "Optional GitHub issue number for posting parity evidence"
         required: false
         default: "321"
+      approval_environment:
+        description: "GitHub environment for read-only tango access"
+        required: false
+        default: "tango-1-1-build-only"
+        type: choice
+        options:
+          - "tango-1-1-build-only"
+          - "tango-1-1"
 
 concurrency:
   group: recorded-replay-parity-${{ github.event.inputs.deployment_id }}-${{ github.event.inputs.since }}-${{ github.event.inputs.until }}
@@ -44,7 +52,7 @@ jobs:
     name: Replay recorded feed and compare dry-run evidence
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: tango-1-1
+    environment: ${{ inputs.approval_environment }}
 
     steps:
       - name: Checkout code
