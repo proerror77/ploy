@@ -591,8 +591,8 @@ def is_zero_decimal(value: Any) -> bool:
 def is_non_executed_exit_attempt(row: dict[str, Any]) -> bool:
     """Return true for zero-fill exit attempts that should not block entry parity.
 
-    Recorded replay parity currently injects `skip_settlement_exits = true` so
-    the replay focuses on entry/fill accounting. Dry-run reports can still carry
+    Recorded replay parity can run with `skip_settlement_exits = true` so the
+    replay focuses on entry/fill accounting. Dry-run reports can still carry
     rejected take-profit attempts from live quote polling. These attempts did
     not fill and do not affect cashflow/PnL, so they are tracked as ignored
     metadata instead of blocking strict parity for executable entries.
