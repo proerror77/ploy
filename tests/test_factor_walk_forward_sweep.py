@@ -27,6 +27,23 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
 """)
 '''
 
+FAKE_UNMAPPED_BEST_REPORT = r'''
+print("""=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=false stake_usd=15.00 min_entry_fill_rate=0.0500 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=2488 event_complete_rows=51989 replay_parity_ready=false
+gate,passed,evidence
+data_quality,true,mode=event_complete event_complete_events=2488 event_complete_rows=51989
+deribit_vol_surface,true,require_deribit=false include_deribit=false
+recorded_replay_parity,false,shared_event_count=0
+
+# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_avg_label,top_bucket_positive_label_rate,complexity
+1,mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted,full_depth_settlement_executable_pnl,candidate,passed,3335,0.067525,0.081201,14,1.288053,0.9286,2,1.0000,1.0000,1.660059,0.6132,6
+2,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,2798,0.067534,0.091002,12,1.018091,0.7500,2,1.0000,1.0000,2.507843,0.6250,1
+""")
+'''
+
 
 class FactorWalkForwardSweepTests(unittest.TestCase):
     def base_args(self, tmp: Path, binary: Path) -> list[str]:
@@ -90,6 +107,17 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         binary.chmod(0o755)
         return binary
 
+    def fake_binary_with_report(self, tmp: Path, report: str) -> Path:
+        binary = tmp / "fake_factor_walk_forward.py"
+        binary.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            f"{report}\n",
+            encoding="utf-8",
+        )
+        binary.chmod(0o755)
+        return binary
+
     def test_dry_run_expands_sweep_variants(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -142,6 +170,37 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertEqual(summary["variants"][0]["decision"], "qualified")
         self.assertEqual(summary["variants"][0]["qualified_count"], 1)
         self.assertIn("auto_settlement_conservative_settlement_edge", summary_md)
+
+    def test_summary_separates_discovery_from_runtime_mappable_candidates(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = self.fake_binary_with_report(tmp, FAKE_UNMAPPED_BEST_REPORT)
+            subprocess.run(
+                self.base_args(tmp, binary),
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            summary = json.loads((tmp / "out" / "sweep-summary.json").read_text(encoding="utf-8"))
+            summary_md = (tmp / "out" / "sweep-summary.md").read_text(encoding="utf-8")
+
+        variant = summary["variants"][0]
+        self.assertEqual(
+            variant["best_discovery_factor"]["name"],
+            "mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
+        )
+        self.assertIn(
+            "missing_runtime_strategy_mapping",
+            variant["best_discovery_factor"]["blockers"],
+        )
+        self.assertEqual(
+            variant["best_runtime_mappable_factor"]["name"],
+            "auto_settlement_conservative_settlement_edge",
+        )
+        self.assertIsNone(variant["best_qualified_strategy"])
+        self.assertIn("best runtime-mappable factor", summary_md)
 
     def test_hosted_workflow_passes_empty_factor_filter_to_sweep_runner(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
