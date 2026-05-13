@@ -32,6 +32,46 @@ different decimal scales do not block runtime parity.
   `python3 -m unittest tests.test_replay_dryrun_parity tests.test_resolve_recorded_replay_window`,
   `python3 -m py_compile scripts/replay_dryrun_parity.py tests/test_replay_dryrun_parity.py`,
   and `rtk git diff --check`.
+- 2026-05-13: PR #507 was squash-merged as
+  `b67634c29c7d15b8b434f3820b52f00ae5a3415c`. Rerun parity
+  `25802468869` returned `decision=continue`, no risk/advisory flags, and
+  strict parity ready for 4 events, 4 orders, and 4 fills.
+
+# AutoFactor Full-Depth Runtime Handoff (2026-05-13)
+
+## Goal
+
+Apply the ready AutoFactor handoff from run `25802811747` to the BTC/ETH PM5D
+settlement-probability dry-run config.
+
+## Files / Ownership
+
+- `config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml`
+  - Owner: update only `three_layer_autofactor_runtime_score`.
+
+## Tasks
+
+- [x] Confirm latest handoff is ready after replay parity run `25802468869`.
+- [x] Apply the ready runtime score to the dry-run config.
+- [x] Run focused config handoff tests.
+- [ ] Merge and deploy dry-run config from `main`.
+
+## Review
+
+- 2026-05-13: Factor sweep run `25802811747` selected variant `auto-min50`.
+  Best qualified strategy is `auto_settlement_full_depth_settlement_edge` with
+  runtime score
+  `autofactor_formula:auto_settlement_full_depth_settlement_edge`,
+  `icir=1.526091`, `positive_window_ratio=0.875`,
+  `top_bucket_avg_label=1.979439`, and promotion gate ready.
+  Config changed from
+  `autofactor_formula:auto_settlement_conservative_settlement_edge` to
+  `autofactor_formula:auto_settlement_full_depth_settlement_edge`.
+- 2026-05-13: Verification passed:
+  `python3 -m unittest tests.test_apply_autofactor_handoff_to_config tests.test_factor_walk_forward_sweep tests.test_autofactor_strategy_promotion`,
+  `python3 -m py_compile scripts/apply_autofactor_handoff_to_config.py tests/test_apply_autofactor_handoff_to_config.py`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-config /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles settlement_probability_config_carries_autofactor_handoff_score --lib -- --nocapture`,
+  and `rtk git diff --check`.
 
 # AutoFactor Runtime-Mappable Search Reporting (2026-05-13)
 
