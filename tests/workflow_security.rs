@@ -264,6 +264,12 @@ fn recorded_replay_parity_supports_auto_window() {
     for needle in [
         "approval_environment:",
         "default: \"tango-1-1-build-only\"",
+        "Build replay runner from workflow ref",
+        "--features new-ploy-runner/full",
+        "-p new-ploy-runner",
+        "target/${PLATFORM_TARGET}/release/new-ploy-runner",
+        "tango-1-1:\"${REMOTE_DIR}/ploy-runner\"",
+        "timeout 600 \"${remote_dir}/ploy-runner\" run",
         "skip_settlement_exits:",
         "Skip settlement exits for entry-only dry-run parity",
         "SKIP_SETTLEMENT_EXITS",
@@ -304,6 +310,16 @@ fn recorded_replay_parity_supports_auto_window() {
     ] {
         if !workflow.contains(needle) {
             offenders.push(format!("recorded-replay-parity.yml: missing `{needle}`"));
+        }
+    }
+    for needle in [
+        "builds `new-ploy-runner` on\n",
+        "does not deploy artifacts, restart\nservices, replace `/opt/ploy/bin/ploy-runner`, or enable live orders",
+    ] {
+        if !runbook.contains(needle) {
+            offenders.push(format!(
+                "strategy-research-cicd.md: missing recorded replay note `{needle}`"
+            ));
         }
     }
     if workflow.contains("extract_dryrun_settlement_evidence.py") {
