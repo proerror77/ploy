@@ -14,13 +14,15 @@ from typing import Any
 DEFAULT_DEPLOYMENT_ID = "pm5d.threelayer.settlement-probability-btc-eth.dryrun"
 
 
-def number(value: Any, default: float = 0.0) -> float:
+def number(value: Any, default: float = 0.0, *, allow_infinite: bool = False) -> float:
     if value is None:
         return default
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         return default
+    if allow_infinite and math.isinf(parsed):
+        return parsed
     if not math.isfinite(parsed):
         return default
     return parsed
@@ -99,10 +101,11 @@ def candidate_quality_result(args: argparse.Namespace, strategy: dict[str, Any] 
     summary = strategy.get("summary") or {}
     metrics = strategy.get("metrics") or {}
     diagnostics = diagnostics_summary(strategy)
+    profit_factor = number(metrics.get("profit_factor"), allow_infinite=True)
     values = {
         "closed_trades": integer(summary.get("closed_trades")),
         "realized_pnl": number(summary.get("realized_pnl")),
-        "profit_factor": number(metrics.get("profit_factor")),
+        "profit_factor": "Infinity" if profit_factor == math.inf else profit_factor,
         "max_drawdown": number(metrics.get("max_drawdown")),
         "buy_fill_rate_pct": number(diagnostics.get("buy_fill_rate_pct")),
     }
@@ -117,7 +120,7 @@ def candidate_quality_result(args: argparse.Namespace, strategy: dict[str, Any] 
             "actual": values["realized_pnl"],
             "minimum": args.min_realized_pnl,
         }
-    if values["profit_factor"] < args.min_profit_factor:
+    if profit_factor < args.min_profit_factor:
         failures["profit_factor"] = {
             "actual": values["profit_factor"],
             "minimum": args.min_profit_factor,

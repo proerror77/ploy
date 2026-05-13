@@ -109,6 +109,37 @@ class CheckDryrunCandidateGateTests(unittest.TestCase):
         self.assertIn('"profit_factor"', result.stdout)
         self.assertIn('"max_drawdown"', result.stdout)
 
+    def test_candidate_quality_treats_infinite_profit_factor_as_passing_metric(self):
+        payload = {
+            "strategies": [
+                {
+                    "deployment_id": DEPLOYMENT_ID,
+                    "summary": {
+                        "closed_trades": 4,
+                        "realized_pnl": 26.74,
+                    },
+                    "metrics": {
+                        "profit_factor": "Infinity",
+                        "max_drawdown": 0.0,
+                    },
+                    "execution_diagnostics": {
+                        "summary": {
+                            "buy_fill_rate_pct": 94.22,
+                        }
+                    },
+                }
+            ]
+        }
+
+        result = run_gate(payload, "--mode", "candidate-quality")
+        output = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(output["values"]["profit_factor"], "Infinity")
+        self.assertNotIn("profit_factor", output["failures"])
+        self.assertIn("closed_trades", output["failures"])
+        self.assertIn("buy_fill_rate_pct", output["failures"])
+
 
 if __name__ == "__main__":
     unittest.main()
