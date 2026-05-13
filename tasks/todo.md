@@ -364,6 +364,12 @@ the 15s strategy lag gate and executable ask/ask_size fields.
 - 2026-05-13: Live read-only validation on `tango-1-1` with the modified script
   reported `status=ok`, `active_tokens=8`, `missing_quotes=0`,
   `older_than_15s=0`, `missing_ask_or_size=0`, and `max_age_seconds=1`.
+- 2026-05-13: Follow-up audit run `25797954072` showed fresh quote rows but
+  `8/36` active tokens missing ask/ask_size. The quote-quality SQL now treats
+  only unexpired markets (`now() < end_time`) as requiring executable asks and
+  emits up to eight missing ask/size examples so future failures are
+  attributable to concrete symbols/markets/tokens instead of only an aggregate
+  count.
 
 # Dry-Run Strategy Config-Only Sync (2026-05-13)
 
