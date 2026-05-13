@@ -60,18 +60,39 @@ jobs:
 
       - name: Configure SSH
         env:
+          TANGO_1_1_SSH_KEY: ${{ secrets.TANGO_1_1_SSH_KEY }}
+          TANGO_SSH_KEY: ${{ secrets.TANGO_SSH_KEY }}
+          ALIYUN_ECS_SSH_KEY: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
           TANGO_1_1_KNOWN_HOSTS: ${{ secrets.TANGO_1_1_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
+          test -n "${DEPLOY_HOST}"
           install -m 700 -d ~/.ssh
           if [ -z "${TANGO_1_1_KNOWN_HOSTS}" ]; then
             echo "TANGO_1_1_KNOWN_HOSTS secret is required for pinned SSH host verification" >&2
             exit 1
           fi
+          key_source=""
+          selected_key=""
+          if [ -n "${TANGO_1_1_SSH_KEY}" ]; then
+            selected_key="${TANGO_1_1_SSH_KEY}"
+            key_source="TANGO_1_1_SSH_KEY"
+          elif [ -n "${TANGO_SSH_KEY}" ]; then
+            selected_key="${TANGO_SSH_KEY}"
+            key_source="TANGO_SSH_KEY"
+          elif [ -n "${ALIYUN_ECS_SSH_KEY}" ]; then
+            selected_key="${ALIYUN_ECS_SSH_KEY}"
+            key_source="ALIYUN_ECS_SSH_KEY"
+          else
+            echo "No SSH key secret found for tango-1-1 in this workflow context." >&2
+            exit 1
+          fi
           printf '%s\n' "${TANGO_1_1_KNOWN_HOSTS}" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
-          printf '%s\n' '${{ secrets.TANGO_1_1_SSH_KEY }}' > ~/.ssh/tango_1_1_key
+          printf '%s\n' "${selected_key}" > ~/.ssh/tango_1_1_key
           chmod 600 ~/.ssh/tango_1_1_key
+          echo "tango-1-1-key-source=${key_source}"
+          ssh-keygen -y -f ~/.ssh/tango_1_1_key >/dev/null
           cat > ~/.ssh/config <<EOF
           Host tango-1-1
             HostName ${DEPLOY_HOST}

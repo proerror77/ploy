@@ -76,6 +76,10 @@ orders. Its `approval_environment` input therefore defaults to
 `tango-1-1-build-only` so parity checks can run without the protected live
 deploy approval gate. Use `approval_environment=tango-1-1` only when an operator
 explicitly wants the protected environment approval for an incident replay.
+The build-only environment must still provide `TANGO_1_1_KNOWN_HOSTS` for
+pinned host verification. The SSH key may come from the protected environment
+secret or from the repository-level `TANGO_SSH_KEY` / `ALIYUN_ECS_SSH_KEY`
+fallbacks used by read-only research workflows.
 
 ## Research Issue Contract
 

@@ -265,6 +265,10 @@ fn recorded_replay_parity_supports_auto_window() {
         "approval_environment:",
         "default: \"tango-1-1-build-only\"",
         "environment: ${{ inputs.approval_environment }}",
+        "TANGO_SSH_KEY",
+        "ALIYUN_ECS_SSH_KEY",
+        "No SSH key secret found for tango-1-1",
+        "ssh-keygen -y -f ~/.ssh/tango_1_1_key",
         "default: \"auto\"",
         "resolve_recorded_replay_window.py",
         "--recording \"${recording_path}\"",
@@ -292,6 +296,7 @@ fn recorded_replay_parity_supports_auto_window() {
         "timestamps remain supported",
         "`approval_environment` input therefore defaults to",
         "`tango-1-1-build-only`",
+        "`TANGO_SSH_KEY` / `ALIYUN_ECS_SSH_KEY`",
     ] {
         if !runbook.contains(needle) {
             offenders.push(format!("strategy-research-cicd.md: missing `{needle}`"));
