@@ -349,6 +349,9 @@ fn factor_walk_forward_wires_alpha_prior_and_state_inputs() {
             "alpha_search_llm_prior_json",
             "alpha_search_state_json",
             "require_deribit",
+            "train_window_hours",
+            "test_window_hours",
+            "step_hours",
             "mcts-state.json",
             "--alpha-search-state-json",
             "--alpha-search-llm-prior-json",
@@ -370,6 +373,10 @@ fn factor_walk_forward_wires_alpha_prior_and_state_inputs() {
         "alpha_search_plan_artifact_name",
         "alpha_search_llm_prior_json",
         "alpha_search_state_json",
+        "require_deribit",
+        "train_window_hours",
+        "test_window_hours",
+        "step_hours",
     ] {
         if !route_allowlist.contains(needle) {
             offenders.push(format!(

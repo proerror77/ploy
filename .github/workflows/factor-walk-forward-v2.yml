@@ -30,7 +30,7 @@ on:
       options_json:
         description: "Advanced options JSON: walk windows, factor filters, snapshot/data/audit settings, local snapshot registry, optional replay parity artifact"
         required: false
-        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","compile_snapshot":true,"allow_direct_db_debug":false,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","data_quality_mode":"strict_continuous","min_event_complete_events":20,"min_event_complete_rows":40,"issue_number":"","snapshot_registry_dir":"","replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":""}'
+        default: '{"train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","compile_snapshot":true,"allow_direct_db_debug":false,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","data_quality_mode":"strict_continuous","min_event_complete_events":20,"min_event_complete_rows":40,"issue_number":"","snapshot_registry_dir":"","replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":""}'
 
 concurrency:
   group: factor-walk-forward-v2-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}
@@ -72,8 +72,11 @@ jobs:
 
           allowed = {
               "train_window_days",
+              "train_window_hours",
               "test_window_days",
+              "test_window_hours",
               "step_days",
+              "step_hours",
               "lob_sample_secs",
               "observation_sample_secs",
               "max_quote_age_secs",
@@ -88,6 +91,7 @@ jobs:
               "replay_parity_json",
               "replay_parity_run_id",
               "replay_parity_artifact_name",
+              "require_deribit",
               "alpha_search_plan_json",
               "alpha_search_plan_run_id",
               "alpha_search_plan_artifact_name",
@@ -174,8 +178,11 @@ jobs:
 
           defaults = {
               "train_window_days": "2",
+              "train_window_hours": "",
               "test_window_days": "1",
+              "test_window_hours": "",
               "step_days": "1",
+              "step_hours": "",
               "lob_sample_secs": "30",
               "observation_sample_secs": "30",
               "max_quote_age_secs": "30",
@@ -576,6 +583,15 @@ jobs:
           )
           if [ "${WALK_REQUIRE_DERIBIT}" = "true" ]; then
             args+=(--require-deribit)
+          fi
+          if [ -n "${WALK_TRAIN_WINDOW_HOURS}" ]; then
+            args+=(--train-window-hours "${WALK_TRAIN_WINDOW_HOURS}")
+          fi
+          if [ -n "${WALK_TEST_WINDOW_HOURS}" ]; then
+            args+=(--test-window-hours "${WALK_TEST_WINDOW_HOURS}")
+          fi
+          if [ -n "${WALK_STEP_HOURS}" ]; then
+            args+=(--step-hours "${WALK_STEP_HOURS}")
           fi
           if [ -n "${WALK_FACTOR_NAME_FILTER}" ]; then
             args+=(--factor-name-filter "${WALK_FACTOR_NAME_FILTER}")

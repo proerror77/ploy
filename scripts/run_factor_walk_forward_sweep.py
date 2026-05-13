@@ -18,8 +18,11 @@ from typing import Any
 SWEEP_KEYS = {
     "label",
     "train_window_days",
+    "train_window_hours",
     "test_window_days",
+    "test_window_hours",
     "step_days",
+    "step_hours",
     "lob_sample_secs",
     "observation_sample_secs",
     "max_quote_age_secs",
@@ -31,6 +34,12 @@ SWEEP_KEYS = {
     "data_quality_mode",
     "min_event_complete_events",
     "min_event_complete_rows",
+}
+
+OPTIONAL_SWEEP_KEYS = {
+    "train_window_hours",
+    "test_window_hours",
+    "step_hours",
 }
 
 
@@ -116,6 +125,12 @@ def factor_args(args: argparse.Namespace, variant: Variant, replay_parity_json: 
         "--min-event-complete-rows",
         values["min_event_complete_rows"],
     ]
+    if values.get("train_window_hours"):
+        command.extend(["--train-window-hours", values["train_window_hours"]])
+    if values.get("test_window_hours"):
+        command.extend(["--test-window-hours", values["test_window_hours"]])
+    if values.get("step_hours"):
+        command.extend(["--step-hours", values["step_hours"]])
     if values.get("factor_name_filter"):
         command.extend(["--factor-name-filter", values["factor_name_filter"]])
     if replay_parity_json:
@@ -327,7 +342,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fail-if-blocked", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     for key in sorted(SWEEP_KEYS - {"label"}):
-        parser.add_argument(f"--{key.replace('_', '-')}", required=True)
+        parser.add_argument(
+            f"--{key.replace('_', '-')}",
+            required=key not in OPTIONAL_SWEEP_KEYS,
+            default="",
+        )
     return parser.parse_args()
 
 

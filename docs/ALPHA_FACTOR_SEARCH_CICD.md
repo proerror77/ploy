@@ -295,6 +295,10 @@ dimension such as capacity, stability, or overfit risk.
 - `pm5d-execution` settlement-probability searches should not require Deribit by
   default. Use `options_json.require_deribit=true` only when the hypothesis
   explicitly depends on the `pm5d-vol`/Deribit surface.
+- One-day OOS smoke searches can use hourly windows, for example
+  `train_window_hours=12`, `test_window_hours=12`, and `step_hours=12`, when
+  only a clean 24h snapshot is available. Keep these marked as early
+  walk-forward evidence, not final promotion-grade history.
 - `autofactor-strategy-promotion.yml` should be used to re-evaluate an existing
   walk-forward artifact without rerunning search.
 - `event-ml-rolling-evidence.yml` is the supervised event-ML lane, not the
