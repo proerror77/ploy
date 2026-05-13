@@ -248,7 +248,7 @@ jobs:
 
           "${PSQL[@]}" \
             > "${official_db_rows_json}" <<SQL
-          CREATE TEMP TABLE replay_token_ids(token_id TEXT) ON COMMIT DROP;
+          CREATE TEMP TABLE replay_token_ids(token_id TEXT);
           \\copy replay_token_ids(token_id) FROM '${official_token_ids_tsv}'
           SELECT COALESCE(
             jsonb_agg(
