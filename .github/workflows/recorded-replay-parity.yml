@@ -35,6 +35,14 @@ on:
         options:
           - "tango-1-1-build-only"
           - "tango-1-1"
+      skip_settlement_exits:
+        description: "Skip settlement exits for entry-only dry-run parity; set false for executable settlement replay"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
 concurrency:
   group: recorded-replay-parity-${{ github.event.inputs.deployment_id }}-${{ github.event.inputs.since }}-${{ github.event.inputs.until }}
@@ -113,6 +121,7 @@ jobs:
           RECORDING_PATH: ${{ github.event.inputs.recording_path }}
           SINCE: ${{ github.event.inputs.since }}
           UNTIL: ${{ github.event.inputs.until }}
+          SKIP_SETTLEMENT_EXITS: ${{ github.event.inputs.skip_settlement_exits }}
           REMOTE_DIR: /opt/ploy/tmp/recorded-replay-parity-${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -140,7 +149,8 @@ jobs:
             "${RECORDING_PATH}" \
             "${REMOTE_DIR}" \
             "${SINCE}" \
-            "${UNTIL}" <<'EOF'
+            "${UNTIL}" \
+            "${SKIP_SETTLEMENT_EXITS}" <<'EOF'
           set -euo pipefail
           deployment_id="$1"
           config_path="$2"
@@ -148,6 +158,11 @@ jobs:
           remote_dir="$4"
           since_ts="$5"
           until_ts="$6"
+          skip_settlement_exits="$7"
+          case "${skip_settlement_exits}" in
+            true|false) ;;
+            *) echo "skip_settlement_exits must be true or false" >&2; exit 1 ;;
+          esac
 
           mkdir -p "${remote_dir}"
           test -x /opt/ploy/bin/ploy-runner
@@ -285,9 +300,9 @@ jobs:
           test -s "${enriched_recording}"
 
           replay_config="${remote_dir}/replay.toml"
-          python3 - "${config_path}" "${enriched_recording}" "${replay_config}" <<'PY'
+          python3 - "${config_path}" "${enriched_recording}" "${replay_config}" "${skip_settlement_exits}" <<'PY'
           import sys
-          src, recording, dst = sys.argv[1:]
+          src, recording, dst, skip_settlement_exits = sys.argv[1:]
           lines = []
           inserted_replay_path = False
           with open(src, encoding="utf-8") as handle:
@@ -295,7 +310,7 @@ jobs:
                   stripped = raw.strip()
                   if stripped.startswith("mode = "):
                       lines.append('mode = "replay"')
-                      lines.append("skip_settlement_exits = true")
+                      lines.append(f"skip_settlement_exits = {skip_settlement_exits}")
                       lines.append(f'replay_market_updates_from = "{recording}"')
                       inserted_replay_path = True
                       continue

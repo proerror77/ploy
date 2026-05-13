@@ -1,3 +1,32 @@
+# Recorded Replay Settlement Exit Option (2026-05-13)
+
+## Goal
+
+Allow the same recorded replay workflow to support both entry-only dry-run
+parity and executable settlement replay, so multi-day historical runs do not
+freeze after the first few open positions.
+
+## Plan
+
+- [x] Add a workflow input for `skip_settlement_exits`, defaulting to `true`
+      for strict dry-run parity compatibility.
+- [ ] Rerun multi-day replay with `skip_settlement_exits=false` to let
+      settlement exits release replay risk.
+- [ ] Record whether trade count and settlement PnL become usable evidence.
+
+## Review
+
+- 2026-05-13: Multi-day replay run `25795565611` proved official settlement
+  enrichment is fixed (`official_settlement_event_count=1014`) but still
+  produced only 4 replay fills. The replay config injected
+  `skip_settlement_exits=true`; after four open positions, risk reached the
+  60u cap and the strategy stopped taking later events.
+- 2026-05-13: Verification passed: YAML parse for
+  `.github/workflows/recorded-replay-parity.yml`, `python3 -m py_compile
+  scripts/replay_dryrun_parity.py`, `git diff --check`,
+  `recorded_replay_parity_supports_auto_window`, and
+  `workflow_dispatch_inputs_stay_lintable`.
+
 # Multi-Day Recorded Replay JSON Output Fix (2026-05-13)
 
 ## Goal
