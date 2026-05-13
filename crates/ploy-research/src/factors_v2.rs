@@ -755,6 +755,9 @@ pub struct FactorWalkForwardOptions {
     pub train_window_days: i64,
     pub test_window_days: i64,
     pub step_days: i64,
+    pub train_window_hours: Option<i64>,
+    pub test_window_hours: Option<i64>,
+    pub step_hours: Option<i64>,
     pub top_n: usize,
     pub factor_name_filter: Option<String>,
 }
@@ -766,9 +769,52 @@ impl Default for FactorWalkForwardOptions {
             train_window_days: 2,
             test_window_days: 1,
             step_days: 1,
+            train_window_hours: None,
+            test_window_hours: None,
+            step_hours: None,
             top_n: 20,
             factor_name_filter: None,
         }
+    }
+}
+
+impl FactorWalkForwardOptions {
+    pub fn train_duration(&self) -> Duration {
+        walk_forward_duration(self.train_window_days, self.train_window_hours)
+    }
+
+    pub fn test_duration(&self) -> Duration {
+        walk_forward_duration(self.test_window_days, self.test_window_hours)
+    }
+
+    pub fn step_duration(&self) -> Duration {
+        walk_forward_duration(self.step_days, self.step_hours)
+    }
+
+    pub fn train_window_label(&self) -> String {
+        walk_forward_duration_label(self.train_window_days, self.train_window_hours)
+    }
+
+    pub fn test_window_label(&self) -> String {
+        walk_forward_duration_label(self.test_window_days, self.test_window_hours)
+    }
+
+    pub fn step_label(&self) -> String {
+        walk_forward_duration_label(self.step_days, self.step_hours)
+    }
+}
+
+fn walk_forward_duration(days: i64, hours: Option<i64>) -> Duration {
+    match hours {
+        Some(hours) => Duration::hours(hours.max(1)),
+        None => Duration::days(days.max(1)),
+    }
+}
+
+fn walk_forward_duration_label(days: i64, hours: Option<i64>) -> String {
+    match hours {
+        Some(hours) => format!("{}h", hours.max(1)),
+        None => format!("{}d", days.max(1)),
     }
 }
 
@@ -2140,9 +2186,9 @@ fn walk_forward_factor_rows(
 ) -> FactorWalkForwardReport {
     v2_rows.sort_by_key(|row| row.tick_ts);
     let health = build_data_health_report(source_rows, v2_rows);
-    let train_duration = Duration::days(options.train_window_days.max(1));
-    let test_duration = Duration::days(options.test_window_days.max(1));
-    let step_duration = Duration::days(options.step_days.max(1));
+    let train_duration = options.train_duration();
+    let test_duration = options.test_duration();
+    let step_duration = options.step_duration();
     let descriptors: Vec<FactorV2Descriptor> = factor_v2_descriptors()
         .into_iter()
         .filter(is_walk_forward_candidate_descriptor)
@@ -2764,9 +2810,9 @@ pub fn walk_forward_settlement_probability_report(
 ) -> SettlementProbabilityWalkForwardReport {
     let mut rows = rows.to_vec();
     rows.sort_by_key(|row| row.tick_ts);
-    let train_duration = Duration::days(options.walk_forward.train_window_days.max(1));
-    let test_duration = Duration::days(options.walk_forward.test_window_days.max(1));
-    let step_duration = Duration::days(options.walk_forward.step_days.max(1));
+    let train_duration = options.walk_forward.train_duration();
+    let test_duration = options.walk_forward.test_duration();
+    let step_duration = options.walk_forward.step_duration();
     let probability_options =
         normalize_settlement_probability_report_options(options.probability.clone());
 
@@ -3348,10 +3394,10 @@ pub fn format_settlement_probability_walk_forward_report(
     let mut out = String::new();
     out.push_str("=== Settlement Probability Walk-Forward Report ===\n");
     out.push_str(&format!(
-        "train_days={} test_days={} step_days={} min_obs={} probability_min_bucket_obs={} top_edge_quantile={:.2}\n",
-        report.options.walk_forward.train_window_days,
-        report.options.walk_forward.test_window_days,
-        report.options.walk_forward.step_days,
+        "train_window={} test_window={} step={} min_obs={} probability_min_bucket_obs={} top_edge_quantile={:.2}\n",
+        report.options.walk_forward.train_window_label(),
+        report.options.walk_forward.test_window_label(),
+        report.options.walk_forward.step_label(),
         report.options.walk_forward.review.min_observations,
         report.options.probability.min_bucket_observations,
         report.options.probability.top_edge_quantile,
@@ -3494,9 +3540,9 @@ fn walk_forward_factor_combo_from_v2_rows(
 ) -> FactorComboV1Report {
     let health = build_data_health_report(source_rows, v2_rows);
     let mut windows = Vec::new();
-    let train_duration = Duration::days(options.walk_forward.train_window_days.max(1));
-    let test_duration = Duration::days(options.walk_forward.test_window_days.max(1));
-    let step_duration = Duration::days(options.walk_forward.step_days.max(1));
+    let train_duration = options.walk_forward.train_duration();
+    let test_duration = options.walk_forward.test_duration();
+    let step_duration = options.walk_forward.step_duration();
     let mut train_start = start;
     let mut window_index = 0usize;
     while train_start + train_duration + test_duration <= end + Duration::seconds(1) {
@@ -3980,11 +4026,11 @@ pub fn format_factor_walk_forward_v2_report(report: &FactorWalkForwardReport) ->
     ));
     push_full_depth_health_line(&mut out, &report.health);
     out.push_str(&format!(
-        "stake_usd={:.2} train_days={} test_days={} step_days={} top_quantile={:.2} factor_name_filter={}\n\n",
+        "stake_usd={:.2} train_window={} test_window={} step={} top_quantile={:.2} factor_name_filter={}\n\n",
         report.options.review.stake_usd,
-        report.options.train_window_days,
-        report.options.test_window_days,
-        report.options.step_days,
+        report.options.train_window_label(),
+        report.options.test_window_label(),
+        report.options.step_label(),
         report.options.review.top_quantile,
         report
             .options
@@ -4102,10 +4148,10 @@ pub fn format_factor_combo_v1_report(report: &FactorComboV1Report) -> String {
     ));
     push_full_depth_health_line(&mut out, &report.health);
     out.push_str(&format!(
-        "train_days={} test_days={} step_days={} top_quantile={:.2} max_family={} max_total={} min_abs_train_pnl_ic={:.4} factor_name_filter={}\n\n",
-        report.options.walk_forward.train_window_days,
-        report.options.walk_forward.test_window_days,
-        report.options.walk_forward.step_days,
+        "train_window={} test_window={} step={} top_quantile={:.2} max_family={} max_total={} min_abs_train_pnl_ic={:.4} factor_name_filter={}\n\n",
+        report.options.walk_forward.train_window_label(),
+        report.options.walk_forward.test_window_label(),
+        report.options.walk_forward.step_label(),
         report.options.walk_forward.review.top_quantile,
         report.options.max_factors_per_family,
         report.options.max_total_factors,
@@ -4286,11 +4332,11 @@ pub fn format_liquidity_gated_alpha_v1_report(
     ));
     push_full_depth_health_line(&mut out, &report.baseline_health);
     out.push_str(&format!(
-        "stake_usd={:.2} train_days={} test_days={} step_days={} top_quantile={:.2} factor_name_filter={}\n\n",
+        "stake_usd={:.2} train_window={} test_window={} step={} top_quantile={:.2} factor_name_filter={}\n\n",
         report.options.walk_forward.review.stake_usd,
-        report.options.walk_forward.train_window_days,
-        report.options.walk_forward.test_window_days,
-        report.options.walk_forward.step_days,
+        report.options.walk_forward.train_window_label(),
+        report.options.walk_forward.test_window_label(),
+        report.options.walk_forward.step_label(),
         report.options.walk_forward.review.top_quantile,
         report
             .options
@@ -10103,6 +10149,69 @@ mod tests {
     }
 
     #[test]
+    fn settlement_probability_walk_forward_supports_intraday_oos_windows() {
+        let start = Utc::now();
+        let source_rows = (0..24)
+            .map(|idx| {
+                let mut obs = base_obs();
+                obs.event_id = format!("intraday-oos-evt-{idx}");
+                obs.tick_ts = start + Duration::hours(idx);
+                obs.settlement_up = if idx % 2 == 0 { 1.0 } else { 0.0 };
+                obs.pm_up_bid = 0.42;
+                obs.pm_up_ask = 0.46;
+                obs.pm_down_bid = 0.52;
+                obs.pm_down_ask = 0.56;
+                obs.distance_over_sigma = if idx % 2 == 0 { 0.6 } else { -0.4 };
+                obs
+            })
+            .collect::<Vec<_>>();
+        let mut rows = build_factor_observations_v2(&source_rows, &FactorReviewOptions::default());
+        rows.retain(|row| row.side == ReviewSide::Up);
+        for row in &mut rows {
+            row.label_full_depth_entry_fillable = true;
+            row.entry_sweep_avg_price_15u = row.entry_ask;
+            row.entry_sweep_shares_15u = 15.0 / row.entry_sweep_avg_price_15u;
+            row.label_full_depth_executable_pnl_15u = row
+                .label_settlement_win
+                .map(|win| win * row.entry_sweep_shares_15u - 15.0);
+        }
+
+        let report = walk_forward_settlement_probability_report(
+            &rows,
+            start,
+            start + Duration::hours(24),
+            SettlementProbabilityWalkForwardOptions {
+                walk_forward: FactorWalkForwardOptions {
+                    review: FactorReviewOptions {
+                        min_observations: 1,
+                        ..Default::default()
+                    },
+                    train_window_hours: Some(12),
+                    test_window_hours: Some(12),
+                    step_hours: Some(12),
+                    ..Default::default()
+                },
+                probability: SettlementProbabilityReportOptions {
+                    min_bucket_observations: 1,
+                    event_surface_min_bucket_observations: 1,
+                    event_surface_shrinkage_observations: 1,
+                    ..Default::default()
+                },
+            },
+        );
+
+        assert!(report
+            .windows
+            .iter()
+            .any(|row| row.model == "q_final_logit_blend"));
+        assert!(report.aggregates.iter().any(|row| {
+            row.model == "q_final_logit_blend" && row.windows >= 1
+        }));
+        let text = format_settlement_probability_walk_forward_report(&report);
+        assert!(text.contains("train_window=12h test_window=12h step=12h"));
+    }
+
+    #[test]
     fn settlement_probability_promotion_gate_blocks_without_replay_parity() {
         let probability = SettlementProbabilityReport {
             options: SettlementProbabilityReportOptions::default(),
@@ -10606,6 +10715,9 @@ mod tests {
                     train_window_days: 2,
                     test_window_days: 1,
                     step_days: 1,
+                    train_window_hours: None,
+                    test_window_hours: None,
+                    step_hours: None,
                     top_n: 10,
                     factor_name_filter: Some("side_model_prob".to_string()),
                 },
@@ -11221,6 +11333,9 @@ mod tests {
                 train_window_days: 2,
                 test_window_days: 1,
                 step_days: 1,
+                train_window_hours: None,
+                test_window_hours: None,
+                step_hours: None,
                 top_n: 10,
                 factor_name_filter: None,
             },
@@ -11421,6 +11536,9 @@ mod tests {
                     train_window_days: 2,
                     test_window_days: 1,
                     step_days: 1,
+                    train_window_hours: None,
+                    test_window_hours: None,
+                    step_hours: None,
                     top_n: 10,
                     factor_name_filter: Some("side_model_prob".to_string()),
                 },

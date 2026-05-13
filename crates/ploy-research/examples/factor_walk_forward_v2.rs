@@ -302,6 +302,15 @@ async fn main() {
         step_days: flag_value(&args, "--step-days")
             .and_then(|raw| raw.parse().ok())
             .unwrap_or(1),
+        train_window_hours: flag_value(&args, "--train-window-hours")
+            .filter(|raw| !raw.trim().is_empty())
+            .and_then(|raw| raw.parse().ok()),
+        test_window_hours: flag_value(&args, "--test-window-hours")
+            .filter(|raw| !raw.trim().is_empty())
+            .and_then(|raw| raw.parse().ok()),
+        step_hours: flag_value(&args, "--step-hours")
+            .filter(|raw| !raw.trim().is_empty())
+            .and_then(|raw| raw.parse().ok()),
         top_n: flag_value(&args, "--top-n")
             .and_then(|raw| raw.parse().ok())
             .unwrap_or(20),
@@ -310,13 +319,14 @@ async fn main() {
     let report_suite = ReportSuite::parse(flag_value(&args, "--report-suite"));
 
     eprintln!(
-        "factor_walk_forward_v2: {} -> {} for {:?}, stake_usd={:.2}, train_days={}, test_days={}, observation_sample_secs={}, factor_name_filter={}, report_suite={}",
+        "factor_walk_forward_v2: {} -> {} for {:?}, stake_usd={:.2}, train_window={}, test_window={}, step={}, observation_sample_secs={}, factor_name_filter={}, report_suite={}",
         start,
         end,
         symbols,
         options.review.stake_usd,
-        options.train_window_days,
-        options.test_window_days,
+        options.train_window_label(),
+        options.test_window_label(),
+        options.step_label(),
         observation_sample_secs,
         options.factor_name_filter.as_deref().unwrap_or("<none>"),
         report_suite.as_str()

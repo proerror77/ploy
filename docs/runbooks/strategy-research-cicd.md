@@ -205,6 +205,11 @@ different.
   Deribit IV/Greeks are not a required promotion surface. Set
   `options_json.require_deribit=true` only for PRD or volatility hypotheses that
   intentionally require `pm5d-vol` / Deribit evidence.
+- For one-day PM5D OOS smoke runs, keep the evidence stage as `walk_forward`
+  but use hourly windows such as
+  `options_json.train_window_hours=12`, `test_window_hours=12`, and
+  `step_hours=12` on a clean 24h snapshot. This is an early OOS filter, not a
+  replacement for longer promotion-grade rolling evidence.
 - Event ML rolling evidence should also default to GitHub-hosted runners after
   the source event-root dataset is artifactized. Pass `source_dataset_run_id`
   to `event-ml-rolling-evidence.yml`; only the fresh DB export branch should

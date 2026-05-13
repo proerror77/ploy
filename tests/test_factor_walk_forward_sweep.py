@@ -148,6 +148,7 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
 
         self.assertIn("--sweep-json \"${SWEEP_JSON}\"", workflow)
         self.assertIn("--factor-name-filter \"${WALK_FACTOR_NAME_FILTER}\"", workflow)
+        self.assertIn("--train-window-hours \"${WALK_TRAIN_WINDOW_HOURS}\"", workflow)
 
     def test_alpha_search_prior_and_state_args_pass_through_to_factor_binary(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -213,6 +214,42 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             captured = json.loads(capture.read_text(encoding="utf-8"))
 
         self.assertIn("--require-deribit", captured)
+
+    def test_hour_window_args_pass_through_to_factor_binary(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = tmp / "capture_factor_args.py"
+            capture = tmp / "captured_args.json"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                f"open({str(capture)!r}, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+                f"{FAKE_REPORT}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+
+            subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--train-window-hours",
+                    "12",
+                    "--test-window-hours",
+                    "12",
+                    "--step-hours",
+                    "12",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            captured = json.loads(capture.read_text(encoding="utf-8"))
+
+        self.assertIn("--train-window-hours", captured)
+        self.assertIn("--test-window-hours", captured)
+        self.assertIn("--step-hours", captured)
 
 
 if __name__ == "__main__":

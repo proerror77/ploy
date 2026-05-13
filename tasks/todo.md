@@ -1,3 +1,36 @@
+# One-Day PM5D OOS Smoke Window (2026-05-13)
+
+## Goal
+
+Allow the hosted PM5D factor walk-forward path to produce a real OOS smoke
+signal from a clean 24h snapshot, instead of requiring the default 2d train + 1d
+test window before any OOS rows can exist.
+
+## Plan
+
+- [x] Add optional hourly train/test/step windows to the factor walk-forward
+      runner while preserving day-based defaults.
+- [x] Wire hourly windows through hosted and self-hosted factor walk-forward
+      workflow `options_json`.
+- [x] Add tests proving 12h train / 12h test produces settlement-probability
+      OOS windows on a 24h sample.
+- [ ] Run a hosted 24h OOS smoke from the retained clean snapshot.
+
+## Review
+
+- 2026-05-13: Added optional `train_window_hours`, `test_window_hours`, and
+  `step_hours` knobs to `factor_walk_forward_v2`. Day-based defaults remain
+  unchanged, while hosted runs can now use `12h/12h/12h` on a clean 24h
+  snapshot to produce an early OOS smoke instead of waiting for the default
+  2d train + 1d test window.
+- 2026-05-13: Verification passed:
+  `python3 -m unittest tests.test_factor_walk_forward_sweep tests.test_autofactor_strategy_promotion`,
+  `python3 -m py_compile scripts/run_factor_walk_forward_sweep.py tests/test_factor_walk_forward_sweep.py`,
+  `CARGO_TARGET_DIR=/tmp/ploy-one-day-oos /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research settlement_probability_walk_forward_supports_intraday_oos_windows --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-one-day-oos /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy factor_walk_forward_wires_alpha_prior_and_state_inputs --test workflow_security`,
+  `CARGO_TARGET_DIR=/tmp/ploy-one-day-oos /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research --features db --example factor_walk_forward_v2`,
+  YAML parse for the two factor walk-forward workflows, and `git diff --check`.
+
 # Settlement Probability Deribit Gate Alignment (2026-05-13)
 
 ## Goal

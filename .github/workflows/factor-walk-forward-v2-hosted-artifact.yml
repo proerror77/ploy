@@ -33,7 +33,7 @@ on:
       options_json:
         description: "Advanced options JSON: walk windows, factor filters, event-complete gates, replay parity, promotion gate, optional issue/config handoff"
         required: false
-        default: '{"train_window_days":2,"test_window_days":1,"step_days":1,"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":"","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
+        default: '{"train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":"","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
       sweep_json:
         description: "Optional JSON array of walk-forward option overrides to run in one job after one download/build"
         required: false
@@ -76,8 +76,11 @@ jobs:
 
           defaults = {
               "train_window_days": "2",
+              "train_window_hours": "",
               "test_window_days": "1",
+              "test_window_hours": "",
               "step_days": "1",
+              "step_hours": "",
               "lob_sample_secs": "30",
               "observation_sample_secs": "30",
               "max_quote_age_secs": "30",
@@ -336,8 +339,11 @@ jobs:
             --end-ts "${WALK_END_TS}"
             --stake-usd "${{ github.event.inputs.stake_usd }}"
             --train-window-days "${WALK_TRAIN_WINDOW_DAYS}"
+            --train-window-hours "${WALK_TRAIN_WINDOW_HOURS}"
             --test-window-days "${WALK_TEST_WINDOW_DAYS}"
+            --test-window-hours "${WALK_TEST_WINDOW_HOURS}"
             --step-days "${WALK_STEP_DAYS}"
+            --step-hours "${WALK_STEP_HOURS}"
             --lob-sample-secs "${WALK_LOB_SAMPLE_SECS}"
             --observation-sample-secs "${WALK_OBSERVATION_SAMPLE_SECS}"
             --max-quote-age-secs "${WALK_MAX_QUOTE_AGE_SECS}"
