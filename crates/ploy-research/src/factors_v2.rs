@@ -589,7 +589,7 @@ impl Default for SettlementProbabilityPromotionGateOptions {
             min_entry_fill_rate: 0.05,
             max_expected_calibration_error: 0.05,
             min_positive_window_ratio: 0.60,
-            require_deribit: true,
+            require_deribit: false,
             include_deribit: false,
             data_audit_status: None,
             data_quality_mode: SettlementProbabilityDataQualityMode::StrictContinuous,
@@ -10230,13 +10230,41 @@ mod tests {
             &execution,
             &execution,
             SettlementProbabilityPromotionGateOptions {
-                include_deribit: true,
+                include_deribit: false,
                 data_audit_status: Some("ok".to_string()),
                 replay_parity_ready: true,
                 ..Default::default()
             },
         );
         assert!(ready.ready_for_dry_run_handoff);
+        let deribit_gate = ready
+            .gates
+            .iter()
+            .find(|gate| gate.gate == "deribit_vol_surface")
+            .expect("deribit_vol_surface gate");
+        assert!(deribit_gate.passed);
+        assert!(deribit_gate.evidence.contains("require_deribit=false"));
+
+        let deribit_required = build_settlement_probability_promotion_gate_report(
+            &probability,
+            &walk_forward,
+            &execution,
+            &execution,
+            SettlementProbabilityPromotionGateOptions {
+                require_deribit: true,
+                include_deribit: false,
+                data_audit_status: Some("ok".to_string()),
+                replay_parity_ready: true,
+                ..Default::default()
+            },
+        );
+        assert!(!deribit_required.ready_for_dry_run_handoff);
+        assert!(deribit_required.gates.iter().any(|gate| {
+            gate.gate == "deribit_vol_surface"
+                && !gate.passed
+                && gate.evidence.contains("require_deribit=true include_deribit=false")
+        }));
+
         let text = format_settlement_probability_promotion_gate_report(&blocked);
         assert!(text.contains("Settlement Probability PRD Promotion Gate"));
         assert!(text.contains("ready_for_dry_run_handoff=false"));

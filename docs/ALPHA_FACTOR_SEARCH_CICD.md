@@ -292,6 +292,9 @@ dimension such as capacity, stability, or overfit risk.
   search surface once a full snapshot artifact exists.
 - `factor-walk-forward-v2.yml` should be used when a fresh DB-adjacent snapshot
   or data audit is required.
+- `pm5d-execution` settlement-probability searches should not require Deribit by
+  default. Use `options_json.require_deribit=true` only when the hypothesis
+  explicitly depends on the `pm5d-vol`/Deribit surface.
 - `autofactor-strategy-promotion.yml` should be used to re-evaluate an existing
   walk-forward artifact without rerunning search.
 - `event-ml-rolling-evidence.yml` is the supervised event-ML lane, not the

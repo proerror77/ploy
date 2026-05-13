@@ -194,6 +194,7 @@ jobs:
               "data_quality_mode": "strict_continuous",
               "min_event_complete_events": "20",
               "min_event_complete_rows": "40",
+              "require_deribit": "false",
               "issue_number": "",
               "snapshot_registry_dir": "",
               "replay_parity_json": "",
@@ -206,7 +207,7 @@ jobs:
               "alpha_search_llm_prior_json": "",
               "alpha_search_state_json": "",
           }
-          bool_keys = {"compile_snapshot", "allow_direct_db_debug"}
+          bool_keys = {"compile_snapshot", "allow_direct_db_debug", "require_deribit"}
           choices = {
               "report_suite": {"core", "full"},
               "data_profile": {"pm5d-execution", "pm5d-vol", "all", "custom"},
@@ -573,6 +574,9 @@ jobs:
             --min-event-complete-rows "${WALK_MIN_EVENT_COMPLETE_ROWS}"
             --alpha-search-output-dir artifacts/factor-walk-forward-v2/alpha-search
           )
+          if [ "${WALK_REQUIRE_DERIBIT}" = "true" ]; then
+            args+=(--require-deribit)
+          fi
           if [ -n "${WALK_FACTOR_NAME_FILTER}" ]; then
             args+=(--factor-name-filter "${WALK_FACTOR_NAME_FILTER}")
           fi

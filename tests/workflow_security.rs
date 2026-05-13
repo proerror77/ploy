@@ -348,9 +348,11 @@ fn factor_walk_forward_wires_alpha_prior_and_state_inputs() {
         for needle in [
             "alpha_search_llm_prior_json",
             "alpha_search_state_json",
+            "require_deribit",
             "mcts-state.json",
             "--alpha-search-state-json",
             "--alpha-search-llm-prior-json",
+            "--require-deribit",
         ] {
             if !workflow.contains(needle) {
                 offenders.push(format!("{name}: missing `{needle}`"));

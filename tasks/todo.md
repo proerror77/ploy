@@ -1,3 +1,37 @@
+# Settlement Probability Deribit Gate Alignment (2026-05-13)
+
+## Goal
+
+Fix the hosted AutoFactor promotion blocker where `pm5d-execution` settlement
+probability searches were incorrectly blocked by `require_deribit=true` even
+though that scoped data profile intentionally excludes Deribit.
+
+## Plan
+
+- [x] Make the settlement-probability promotion gate not require Deribit by
+      default.
+- [x] Add an explicit `--require-deribit` override for PRD/volatility runs.
+- [x] Wire `options_json.require_deribit` through hosted and self-hosted
+      factor walk-forward workflows.
+- [x] Update tests and docs so `pm5d-execution` and `pm5d-vol` semantics stay
+      distinct.
+
+## Review
+
+- 2026-05-13: Changed the settlement-probability promotion gate default to
+  `require_deribit=false`, added the explicit `--require-deribit` CLI override,
+  and wired `options_json.require_deribit` through both factor walk-forward
+  workflows. This fixes the `pm5d-execution` handoff blocker without relaxing
+  replay parity, walk-forward OOS, calibration, execution-depth, or dry-run
+  sample gates.
+- 2026-05-13: Verification passed:
+  `python3 -m unittest tests.test_autofactor_strategy_promotion tests.test_factor_walk_forward_sweep`,
+  `python3 -m py_compile scripts/run_factor_walk_forward_sweep.py tests/test_factor_walk_forward_sweep.py tests/test_autofactor_strategy_promotion.py`,
+  `CARGO_TARGET_DIR=/tmp/ploy-deribit-gate /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research settlement_probability_promotion_gate_blocks_without_replay_parity --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-deribit-gate /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy factor_walk_forward_wires_alpha_prior_and_state_inputs --test workflow_security`,
+  `CARGO_TARGET_DIR=/tmp/ploy-deribit-gate /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research --features db --example factor_walk_forward_v2`,
+  YAML parse for the two factor walk-forward workflows, and `git diff --check`.
+
 # PM5D Active Quote Quality Gate (2026-05-13)
 
 ## Goal

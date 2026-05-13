@@ -11,16 +11,18 @@ SCRIPT = ROOT / "scripts" / "evaluate_autofactor_strategy_promotion.py"
 
 
 READY_GATE = """=== Settlement Probability PRD Promotion Gate ===
-ready_for_dry_run_handoff=true stake_usd=15.00 min_entry_fill_rate=0.0500 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=true include_deribit=true data_quality_mode=event_complete event_complete_events=2488 event_complete_rows=51989 replay_parity_ready=true
+ready_for_dry_run_handoff=true stake_usd=15.00 min_entry_fill_rate=0.0500 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=2488 event_complete_rows=51989 replay_parity_ready=true
 gate,passed,evidence
 data_quality,true,mode=event_complete event_complete_events=2488 event_complete_rows=51989
+deribit_vol_surface,true,require_deribit=false include_deribit=false
 recorded_replay_parity,true,blocking_flags=<none>
 """
 
 BLOCKED_GATE = """=== Settlement Probability PRD Promotion Gate ===
-ready_for_dry_run_handoff=false stake_usd=15.00 min_entry_fill_rate=0.0500 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=true include_deribit=true data_quality_mode=event_complete event_complete_events=0 event_complete_rows=0 replay_parity_ready=false
+ready_for_dry_run_handoff=false stake_usd=15.00 min_entry_fill_rate=0.0500 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=0 event_complete_rows=0 replay_parity_ready=false
 gate,passed,evidence
 data_quality,false,mode=event_complete event_complete_events=0 event_complete_rows=0
+deribit_vol_surface,true,require_deribit=false include_deribit=false
 recorded_replay_parity,false,missing replay parity
 """
 
