@@ -1,3 +1,38 @@
+# Recorded Replay Settlement Normalization (2026-05-13)
+
+## Goal
+
+Fix recorded replay parity so equivalent official settlement prices with
+different decimal scales do not block runtime parity.
+
+## Files / Ownership
+
+- `scripts/replay_dryrun_parity.py`
+  - Owner: normalize `settlement` as a numeric strict field when possible.
+- `tests/test_replay_dryrun_parity.py`
+  - Owner: regression coverage for replay `1.000000` vs dry-run
+    `1.00000000000000000000`.
+
+## Tasks
+
+- [x] Reproduce the current blocker from parity run `25801826502`.
+- [x] Normalize event settlement values through the decimal path.
+- [x] Add regression coverage for decimal-scale-only settlement differences.
+- [x] Run focused parity tests.
+- [ ] Merge and rerun recorded replay parity.
+
+## Review
+
+- 2026-05-13: Run `25801826502` had 4 shared runtime events, 4 shared orders,
+  and 4 shared fills. Orders and fills were strict-ready; only event settlement
+  strings differed by scale (`1.00000000000000000000` vs `1.000000`,
+  `0.00000000000000000000` vs `0.000000`), producing
+  `runtime_evidence_field_mismatches`.
+- 2026-05-13: Verification passed:
+  `python3 -m unittest tests.test_replay_dryrun_parity tests.test_resolve_recorded_replay_window`,
+  `python3 -m py_compile scripts/replay_dryrun_parity.py tests/test_replay_dryrun_parity.py`,
+  and `rtk git diff --check`.
+
 # AutoFactor Runtime-Mappable Search Reporting (2026-05-13)
 
 ## Goal
