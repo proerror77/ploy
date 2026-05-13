@@ -1,3 +1,32 @@
+# Multi-Day Recorded Replay JSON Output Fix (2026-05-13)
+
+## Goal
+
+Unblock the larger PM5D `executable_replay` run by ensuring official settlement
+DB rows are written as pure JSON even when the workflow stages token ids through
+`psql` temp tables.
+
+## Plan
+
+- [x] Fix the workflow so `official-settlement-db-rows.json` captures only the
+      final JSON `SELECT`, not `CREATE TABLE` / `COPY` status output.
+- [x] Run focused YAML / workflow guard validation.
+- [ ] Merge the fix to `main` and rerun the multi-day recorded replay from
+      `main`.
+
+## Review
+
+- 2026-05-13: Multi-day replay run `25795098744` reached the official
+  settlement lookup but failed while parsing `official-settlement-db-rows.json`.
+  The likely cause is `psql` status output polluting a file that downstream
+  Python expects to be JSON.
+- 2026-05-13: Verification passed: YAML parse for
+  `.github/workflows/recorded-replay-parity.yml`, `git diff --check`, and
+  `CARGO_TARGET_DIR=/tmp/ploy-replay-json-output /opt/homebrew/bin/timeout 300
+  rtk cargo test --locked -p ploy
+  recorded_replay_parity_supports_auto_window --test workflow_security -- --exact
+  --nocapture`.
+
 # Official Settlement Replay Enrichment Fix (2026-05-13)
 
 ## Goal

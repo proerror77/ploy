@@ -246,10 +246,10 @@ jobs:
                   handle.write("\n")
           PY
 
-          "${PSQL[@]}" \
-            > "${official_db_rows_json}" <<SQL
+          "${PSQL[@]}" <<SQL
           CREATE TEMP TABLE replay_token_ids(token_id TEXT);
           \\copy replay_token_ids(token_id) FROM '${official_token_ids_tsv}'
+          \\o ${official_db_rows_json}
           SELECT COALESCE(
             jsonb_agg(
               jsonb_build_object(
@@ -268,6 +268,7 @@ jobs:
           JOIN replay_token_ids t ON t.token_id = s.token_id
           WHERE s.resolved = true
             AND s.settled_price IS NOT NULL;
+          \\o
           SQL
 
           python3 "${remote_dir}/extract_official_settlement_evidence.py" \
