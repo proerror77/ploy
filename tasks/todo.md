@@ -1,3 +1,112 @@
+# Official Settlement Replay Enrichment Fix (2026-05-13)
+
+## Goal
+
+Fix `recorded-replay-parity.yml` so `settlement_event_count=0` means the
+official settlement table truly has no matching settled tokens, not that the
+workflow accidentally overwrote official settlement evidence with dry-run report
+rows.
+
+## Plan
+
+- [x] Add a recording-aware official settlement extractor keyed by
+      `event_discovered` up/down token ids and `pm_token_settlements`.
+- [x] Wire recorded replay parity to use official DB settlement rows first and
+      keep dry-run settlement extraction out of the official enrichment path.
+- [x] Add tests for extractor semantics and workflow regression coverage.
+- [x] Run focused tests and record the outcome.
+
+## Review
+
+- 2026-05-13: Root cause confirmed: the workflow queried a settlement JSON and
+  then overwrote the same file with dry-run report-derived settlement evidence.
+  After the clean dry-run reset, that fallback could be empty, producing
+  `settlement_event_count=0` even though official DB rows existed.
+- 2026-05-13: Added `scripts/extract_official_settlement_evidence.py`. It reads
+  `event_discovered` rows from the recording to map `event_id` to `up_token` /
+  `down_token`, then joins official `pm_token_settlements` token prices into
+  replay settlement evidence. Dry-run rows are no longer a settlement label
+  source for recorded replay enrichment.
+- 2026-05-13: Direct tango DB check found official settlement rows for all 4
+  replay tokens from run `25789692556`.
+- 2026-05-13: Smoke against
+  `/opt/ploy/tmp/pm5d-settlement-24h-20260512T090000Z-20260513T090000Z.ndjson`
+  produced `official_settlement_event_count=218`,
+  `official_settlement_count=436`, and `conflicting_event_count=0`.
+  Re-running recording enrichment with those official rows produced
+  `settlement_event_count=218` and `event_expired_enriched=182` out of 190
+  expired rows. The 8 unmatched expired rows were boundary events ending at
+  `2026-05-12T09:00:00Z`, `09:05:00Z`, or `09:10:00Z` whose
+  `event_discovered` rows were outside the merged 24h slice, so the recording
+  did not contain up/down token semantics for them.
+- 2026-05-13: Verification passed:
+  `python3 -m unittest tests.test_extract_official_settlement_evidence
+  tests.test_enrich_recording_official_settlement
+  tests.test_extract_dryrun_settlement_evidence`, YAML parse for
+  `.github/workflows/recorded-replay-parity.yml`, and
+  `CARGO_TARGET_DIR=/tmp/ploy-official-settlement-fix /opt/homebrew/bin/timeout
+  300 rtk cargo test --locked -p ploy
+  recorded_replay_parity_supports_auto_window --test workflow_security -- --exact
+  --nocapture`.
+- 2026-05-13: PR replay run `25793423775` on branch
+  `fix/recorded-replay-official-settlement` completed successfully against the
+  same 24h merged recording. Artifacts showed
+  `official_settlement_event_count=218`, replay settlement enrichment `4/4`,
+  and replay event PnL sum `31.566722281344`. Parity remained blocked because
+  dry-run runtime rows for the historical window were empty after the clean
+  evidence reset, not because settlement enrichment was missing.
+
+# Settlement Probability 24h Replay And Clean Dry-Run Reset (2026-05-13)
+
+## Goal
+
+Produce a real 24h historical replay/backtest view for the current
+settlement-probability PM5D BTC/ETH strategy, and reset contaminated dry-run
+runtime evidence so future statistics start from a clean baseline.
+
+## Plan
+
+- [x] Confirm current deployed config, data coverage, and clean evidence stage.
+- [x] Run a 24h historical replay/backtest path using the current strategy
+      config from `main`.
+- [x] Preview backup/reset for
+      `pm5d.threelayer.settlement-probability-btc-eth.dryrun`.
+- [x] Pause the dry-run deployment, execute the reset, and verify the backup
+      artifact plus clean baseline gate.
+- [x] Resume/redeploy the dry-run config from `main` and verify it is running
+      with zero stale runtime evidence.
+
+## Review
+
+- 2026-05-13: Explicit 24h recorded replay request
+  `25789111238` showed the default current recording path was not enough for a
+  real one-day replay: replay produced only 4 events while the dry-run window
+  had 11 events, because older recording segments had been rotated away from
+  the active path.
+- 2026-05-13: Built a temporary merged recording on `tango-1-1` at
+  `/opt/ploy/tmp/pm5d-settlement-24h-20260512T090000Z-20260513T090000Z.ndjson`
+  from 6 rotated/current NDJSON files. The merged file contains 1,371,571
+  records / 507,010,320 bytes for `2026-05-12T09:00:00Z ->
+  2026-05-13T09:00:00Z`.
+- 2026-05-13: 24h replay run `25789692556` processed the merged feed and
+  generated 4 intents/fills with event-level cashflow PnL `-50.2783`, but all
+  replay events had `settlement=open` and `recording-enrichment.json` reported
+  `settlement_event_count=0`; treat this as executable-entry replay evidence,
+  not final settlement PnL.
+- 2026-05-13: Reset preview `25789111228` matched 26 orders / 11 fills for the
+  target dry-run deployment and touched only `strategy_runtime_orders` and
+  `strategy_runtime_fills`.
+- 2026-05-13: After pausing the deployment, destructive reset run
+  `25789303336` passed the running-deployment guard, backed up the matched
+  rows, deleted 26 orders, and left `after.orders=0`, `after.fills=0`; the
+  post-reset clean-baseline gate passed before the deployment was resumed.
+- 2026-05-13: Resumed and config-synced/restarted the dry-run via
+  `25789406430`. Remote config is on `main` score
+  `autofactor_formula:auto_settlement_conservative_settlement_edge`; deployment
+  is `desired=Running observed=Running`. New post-reset dry-run evidence began
+  immediately, so clean-baseline API checks now show fresh open positions rather
+  than stale pre-reset rows.
+
 # Recorded Replay Parity Read-Only Environment (2026-05-13)
 
 ## Goal

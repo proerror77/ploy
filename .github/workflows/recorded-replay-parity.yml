@@ -126,8 +126,8 @@ jobs:
             tango-1-1:"${REMOTE_DIR}/enrich_recording_official_settlement.py"
           scp scripts/enrich_replay_runtime_evidence.py \
             tango-1-1:"${REMOTE_DIR}/enrich_replay_runtime_evidence.py"
-          scp scripts/extract_dryrun_settlement_evidence.py \
-            tango-1-1:"${REMOTE_DIR}/extract_dryrun_settlement_evidence.py"
+          scp scripts/extract_official_settlement_evidence.py \
+            tango-1-1:"${REMOTE_DIR}/extract_official_settlement_evidence.py"
           scp scripts/replay_dryrun_parity.py \
             tango-1-1:"${REMOTE_DIR}/replay_dryrun_parity.py"
           scp scripts/resolve_recorded_replay_window.py \
@@ -155,7 +155,7 @@ jobs:
           test -r "${recording_path}"
           test -r "${remote_dir}/enrich_recording_official_settlement.py"
           test -r "${remote_dir}/enrich_replay_runtime_evidence.py"
-          test -r "${remote_dir}/extract_dryrun_settlement_evidence.py"
+          test -r "${remote_dir}/extract_official_settlement_evidence.py"
           test -r "${remote_dir}/replay_dryrun_parity.py"
           test -r "${remote_dir}/resolve_recorded_replay_window.py"
 
@@ -170,6 +170,9 @@ jobs:
           case "${until_ts}" in ""|auto|AUTO) auto_window=true ;; esac
 
           settlements_json="${remote_dir}/official-settlements.json"
+          official_token_ids_json="${remote_dir}/official-settlement-token-ids.json"
+          official_db_rows_json="${remote_dir}/official-settlement-db-rows.json"
+          official_settlement_report="${remote_dir}/official-settlement-report.json"
           dryrun_report="${remote_dir}/dryrun-report.json"
           enriched_recording="${remote_dir}/recording-official-settlement.ndjson"
           enrichment_report="${remote_dir}/recording-enrichment.json"
@@ -227,65 +230,42 @@ jobs:
           fi
           echo "Recorded replay parity window: ${since_ts} -> ${until_ts} (requested ${requested_since_ts} -> ${requested_until_ts})"
 
+          python3 "${remote_dir}/extract_official_settlement_evidence.py" \
+            --recording "${recording_path}" \
+            --output-token-ids "${official_token_ids_json}"
+          token_ids_json="$(cat "${official_token_ids_json}")"
+
           "${PSQL[@]}" \
-            -v deployment_id="${deployment_id}" \
-            -v since_ts="${since_ts}" \
-            -v until_ts="${until_ts}" \
-            > "${settlements_json}" <<'SQL'
-          WITH row_outcomes AS (
-            SELECT
-              event_id,
-              token_id,
-              avg_exit_price::text AS settlement,
-              CASE
-                WHEN market_side = 'UP' AND avg_exit_price >= 0.99 THEN 1
-                WHEN market_side = 'UP' AND avg_exit_price <= 0.01 THEN 0
-                WHEN market_side = 'DOWN' AND avg_exit_price >= 0.99 THEN 0
-                WHEN market_side = 'DOWN' AND avg_exit_price <= 0.01 THEN 1
-                ELSE NULL
-              END AS outcome_int
-            FROM strategy_runtime_event_track_record
-            WHERE runtime_mode IN ('dry_run', 'dryrun')
-              AND deployment_id = :'deployment_id'
-              AND is_closed
-              AND opened_at >= :'since_ts'::timestamptz - INTERVAL '10 minutes'
-              AND opened_at <= :'until_ts'::timestamptz + INTERVAL '10 minutes'
-          ),
-          unambiguous AS (
-            SELECT
-              event_id,
-              token_id,
-              MIN(outcome_int) AS outcome_int,
-              MIN(settlement) AS settlement
-            FROM row_outcomes
-            WHERE event_id IS NOT NULL
-              AND token_id IS NOT NULL
-              AND outcome_int IS NOT NULL
-              AND settlement IS NOT NULL
-            GROUP BY event_id, token_id
-            HAVING MIN(outcome_int) = MAX(outcome_int)
+            -v token_ids_json="${token_ids_json}" \
+            > "${official_db_rows_json}" <<'SQL'
+          WITH token_ids AS (
+            SELECT jsonb_array_elements_text(:'token_ids_json'::jsonb) AS token_id
           )
           SELECT COALESCE(
             jsonb_agg(
               jsonb_build_object(
-                'event_id', event_id,
-                'token_id', token_id,
-                'settlement', settlement,
-                'resolved_up_won', outcome_int = 1
+                'token_id', s.token_id,
+                'market_slug', s.market_slug,
+                'outcome', s.outcome,
+                'settlement', s.settled_price::text,
+                'resolved', s.resolved,
+                'resolved_at', s.resolved_at
               )
-              ORDER BY event_id, token_id
+              ORDER BY s.token_id
             ),
             '[]'::jsonb
           )::text
-          FROM unambiguous;
+          FROM pm_token_settlements s
+          JOIN token_ids t ON t.token_id = s.token_id
+          WHERE s.resolved = true
+            AND s.settled_price IS NOT NULL;
           SQL
 
-          python3 "${remote_dir}/extract_dryrun_settlement_evidence.py" \
-            --dryrun-json "${dryrun_report}" \
+          python3 "${remote_dir}/extract_official_settlement_evidence.py" \
+            --recording "${recording_path}" \
+            --db-settlements-json "${official_db_rows_json}" \
             --output-json "${settlements_json}" \
-            --deployment-id "${deployment_id}" \
-            --since "${since_ts}" \
-            --until "${until_ts}"
+            --report-json "${official_settlement_report}"
 
           python3 "${remote_dir}/enrich_recording_official_settlement.py" \
             --input "${recording_path}" \
@@ -341,6 +321,7 @@ jobs:
           scp tango-1-1:"${REMOTE_DIR}/replay-evaluation.json" artifacts/replay/evaluation.json
           scp tango-1-1:"${REMOTE_DIR}/recording-enrichment.json" artifacts/replay/recording-enrichment.json
           scp tango-1-1:"${REMOTE_DIR}/replay-evidence-enrichment.json" artifacts/replay/replay-evidence-enrichment.json
+          scp tango-1-1:"${REMOTE_DIR}/official-settlement-report.json" artifacts/replay/official-settlement-report.json
           scp tango-1-1:"${REMOTE_DIR}/dryrun-report.json" artifacts/dryrun/dryrun.json
           scp tango-1-1:"${REMOTE_DIR}/resolved-window.json" artifacts/parity/resolved-window.json
           scp tango-1-1:"${REMOTE_DIR}/resolved-window.env" artifacts/parity/resolved-window.env
