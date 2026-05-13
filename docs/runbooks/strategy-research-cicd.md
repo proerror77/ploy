@@ -201,6 +201,10 @@ different.
   `factor-walk-forward-v2-hosted-artifact.yml`, or
   `settlement-probability-prd-gate.yml` with `snapshot_run_id`, when a retained
   full research snapshot artifact already exists.
+- For settlement-probability searches using the `pm5d-execution` data profile,
+  Deribit IV/Greeks are not a required promotion surface. Set
+  `options_json.require_deribit=true` only for PRD or volatility hypotheses that
+  intentionally require `pm5d-vol` / Deribit evidence.
 - Event ML rolling evidence should also default to GitHub-hosted runners after
   the source event-root dataset is artifactized. Pass `source_dataset_run_id`
   to `event-ml-rolling-evidence.yml`; only the fresh DB export branch should

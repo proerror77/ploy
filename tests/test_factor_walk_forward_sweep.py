@@ -13,9 +13,10 @@ WORKFLOW = ROOT / ".github" / "workflows" / "factor-walk-forward-v2-hosted-artif
 
 FAKE_REPORT = r'''
 print("""=== Settlement Probability PRD Promotion Gate ===
-ready_for_dry_run_handoff=true stake_usd=15.00 min_entry_fill_rate=0.0500 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=true include_deribit=true data_quality_mode=event_complete event_complete_events=2488 event_complete_rows=51989 replay_parity_ready=true
+ready_for_dry_run_handoff=true stake_usd=15.00 min_entry_fill_rate=0.0500 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=2488 event_complete_rows=51989 replay_parity_ready=true
 gate,passed,evidence
 data_quality,true,mode=event_complete event_complete_events=2488 event_complete_rows=51989
+deribit_vol_surface,true,require_deribit=false include_deribit=false
 recorded_replay_parity,true,blocking_flags=<none>
 
 # AutoFactor target=full_depth_settlement_executable_pnl
@@ -186,6 +187,32 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertIn("--alpha-search-plan-json", captured)
         self.assertIn("--alpha-search-state-json", captured)
         self.assertIn("--alpha-search-llm-prior-json", captured)
+
+    def test_require_deribit_arg_passes_through_to_factor_binary(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = tmp / "capture_factor_args.py"
+            capture = tmp / "captured_args.json"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                f"open({str(capture)!r}, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+                f"{FAKE_REPORT}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+
+            subprocess.run(
+                [*self.base_args(tmp, binary), "--require-deribit"],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            captured = json.loads(capture.read_text(encoding="utf-8"))
+
+        self.assertIn("--require-deribit", captured)
 
 
 if __name__ == "__main__":

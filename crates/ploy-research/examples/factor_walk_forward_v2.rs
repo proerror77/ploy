@@ -330,6 +330,7 @@ async fn main() {
     let alpha_search_state_json = flag_value(&args, "--alpha-search-state-json");
     let allow_direct_db_debug = flag_present(&args, "--allow-direct-db-debug");
     let data_quality_mode = parse_data_quality_mode(flag_value(&args, "--data-quality-mode"));
+    let require_deribit = flag_present(&args, "--require-deribit");
     let min_event_complete_events = flag_value(&args, "--min-event-complete-events")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(20);
@@ -690,6 +691,7 @@ async fn main() {
         &conservative_execution_matrix,
         SettlementProbabilityPromotionGateOptions {
             stake_usd: options.review.stake_usd,
+            require_deribit,
             include_deribit,
             data_audit_status: snapshot_data_audit_status,
             data_quality_mode,
