@@ -171,6 +171,7 @@ jobs:
 
           settlements_json="${remote_dir}/official-settlements.json"
           official_token_ids_json="${remote_dir}/official-settlement-token-ids.json"
+          official_token_ids_tsv="${remote_dir}/official-settlement-token-ids.tsv"
           official_db_rows_json="${remote_dir}/official-settlement-db-rows.json"
           official_settlement_report="${remote_dir}/official-settlement-report.json"
           dryrun_report="${remote_dir}/dryrun-report.json"
@@ -233,14 +234,22 @@ jobs:
           python3 "${remote_dir}/extract_official_settlement_evidence.py" \
             --recording "${recording_path}" \
             --output-token-ids "${official_token_ids_json}"
-          token_ids_json="$(cat "${official_token_ids_json}")"
+          python3 - "${official_token_ids_json}" "${official_token_ids_tsv}" <<'PY'
+          import json
+          import sys
+
+          src, dst = sys.argv[1:]
+          token_ids = json.load(open(src, encoding="utf-8"))
+          with open(dst, "w", encoding="utf-8") as handle:
+              for token_id in token_ids:
+                  handle.write(str(token_id).replace("\t", "").replace("\n", ""))
+                  handle.write("\n")
+          PY
 
           "${PSQL[@]}" \
-            -v token_ids_json="${token_ids_json}" \
-            > "${official_db_rows_json}" <<'SQL'
-          WITH token_ids AS (
-            SELECT jsonb_array_elements_text(:'token_ids_json'::jsonb) AS token_id
-          )
+            > "${official_db_rows_json}" <<SQL
+          CREATE TEMP TABLE replay_token_ids(token_id TEXT) ON COMMIT DROP;
+          \\copy replay_token_ids(token_id) FROM '${official_token_ids_tsv}'
           SELECT COALESCE(
             jsonb_agg(
               jsonb_build_object(
@@ -256,7 +265,7 @@ jobs:
             '[]'::jsonb
           )::text
           FROM pm_token_settlements s
-          JOIN token_ids t ON t.token_id = s.token_id
+          JOIN replay_token_ids t ON t.token_id = s.token_id
           WHERE s.resolved = true
             AND s.settled_price IS NOT NULL;
           SQL
