@@ -1,3 +1,31 @@
+# Expired Event Entry Order Cancellation (2026-05-13)
+
+## Goal
+
+Fix replay/backtest risk accounting so partially filled entry orders do not keep
+reserving exposure after their event expires and settlement exits are processed.
+
+## Plan
+
+- [x] Add a trading-runtime method to cancel active entry/hedge orders by
+      market/event id.
+- [x] Call it when the strategy runtime receives `EventExpired`.
+- [x] Validate with focused Rust tests.
+- [ ] Rerun multi-day replay.
+
+## Review
+
+- 2026-05-13: Multi-day executable replay run `25796371589` generated 40 fills
+  but only 4 entry intents. The remaining 36 fills were settlement exits, while
+  the original partial entry orders stayed active and kept reserving risk; this
+  blocked later entries even though the underlying events had expired.
+- 2026-05-13: Verification passed: `git diff --check`,
+  `CARGO_TARGET_DIR=/tmp/ploy-expired-order-cancel /opt/homebrew/bin/timeout
+  300 rtk cargo test --locked -p ploy-trading
+  cancel_active_entry_orders_for_market --lib -- --nocapture`, and
+  `CARGO_TARGET_DIR=/tmp/ploy-expired-order-cancel /opt/homebrew/bin/timeout
+  300 rtk cargo check --locked -p ploy-strategy-bundles --lib`.
+
 # Recorded Replay Settlement Exit Option (2026-05-13)
 
 ## Goal
