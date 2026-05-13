@@ -20,7 +20,7 @@ rows prove the executed cashflow is identical.
 - [x] Add regression coverage for matching fills and missing-fill blockers.
 - [x] Recompute run `25805852207` locally against downloaded artifacts.
 - [x] Run focused parity tests and syntax checks.
-- [ ] Merge and rerun recorded replay parity from `main`.
+- [x] Merge and rerun recorded replay parity from `main`.
 
 ## Review
 
@@ -39,6 +39,24 @@ rows prove the executed cashflow is identical.
   `python3 -m unittest tests.test_replay_dryrun_parity`,
   `python3 -m py_compile scripts/replay_dryrun_parity.py tests/test_replay_dryrun_parity.py`,
   and `rtk git diff --check`.
+- 2026-05-13: PR #509 was squash-merged as
+  `bdf93ac453d76937a143cd31f89337f7ba1ba8ef`. Recorded replay parity rerun
+  `25806879211` on `main` returned `decision=continue`,
+  `blocking_risk_flags=[]`, `advisory_flags=[]`, and
+  `runtime_evidence_comparison.strict_parity_ready=true` with shared
+  events/orders/fills `4/4/4`. Official settlement enrichment remained healthy:
+  `official_settlement_event_count=20`, `official_settlement_count=40`, and
+  `conflicting_event_count=0`.
+- 2026-05-13: PR #510 was squash-merged as
+  `218f1cc9dfe74da78d5ebf91f6f270d32cab5a92` so the dry-run candidate gate
+  treats report `profit_factor="Infinity"` as a passing infinite profit factor
+  instead of converting it to `0`.
+- 2026-05-13: Post-fix candidate-quality gate run `25807734298` is still
+  correctly blocked: `closed_trades=4` versus required `50`, and
+  `buy_fill_rate_pct=94.22` versus required `95`. Current fresh post-reset
+  sample has `realized_pnl=26.74`, `profit_factor="Infinity"`, and
+  `max_drawdown=0.0`, but the sample is too small to call the strategy
+  profitable or promote it.
 
 # Recorded Replay Settlement Normalization (2026-05-13)
 
