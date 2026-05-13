@@ -283,9 +283,13 @@ fn recorded_replay_parity_supports_auto_window() {
         "skip_settlement_exits = true",
         "extract_official_settlement_evidence.py",
         "official-settlement-token-ids.json",
+        "official-settlement-token-ids.tsv",
         "official-settlement-db-rows.json",
         "official-settlement-report.json",
+        "CREATE TEMP TABLE replay_token_ids",
+        "\\copy replay_token_ids(token_id)",
         "FROM pm_token_settlements s",
+        "JOIN replay_token_ids t ON t.token_id = s.token_id",
         "--db-settlements-json \"${official_db_rows_json}\"",
         "RESOLVED_SINCE",
         "RESOLVED_UNTIL",
@@ -306,6 +310,12 @@ fn recorded_replay_parity_supports_auto_window() {
     if workflow.contains("FROM strategy_runtime_event_track_record") {
         offenders.push(
             "recorded-replay-parity.yml: official replay enrichment must not source settlement labels from track-record rows"
+                .to_string(),
+        );
+    }
+    if workflow.contains("-v token_ids_json=") || workflow.contains("jsonb_array_elements_text(:'token_ids_json'") {
+        offenders.push(
+            "recorded-replay-parity.yml: token ids must not be passed as one large psql argv value"
                 .to_string(),
         );
     }
