@@ -29,6 +29,14 @@ waiting on the protected `tango-1-1` deploy approval environment.
   `CARGO_TARGET_DIR=/tmp/ploy-recorded-parity-env /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy recorded_replay_parity_supports_auto_window --test workflow_security -- --exact --nocapture`,
   and
   `CARGO_TARGET_DIR=/tmp/ploy-recorded-parity-env /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy workflow_dispatch_inputs_stay_lintable --test workflow_security -- --exact --nocapture`.
+- 2026-05-13: First main run `25782758411` proved the approval wait was fixed
+  because the job started immediately, but `Configure SSH` failed:
+  `tango-1-1-build-only` had no `TANGO_1_1_KNOWN_HOSTS` and no
+  environment-scoped `TANGO_1_1_SSH_KEY`. Added the build-only
+  `TANGO_1_1_KNOWN_HOSTS` environment secret from the Aliyun instance's pinned
+  ED25519 host key (`SHA256:VlrhRpcFm+j+25LkYXVMHQ3Pw4xO37ECM30wE5bCBOI`) and
+  updated `recorded-replay-parity.yml` to reuse repository-level `TANGO_SSH_KEY`
+  or `ALIYUN_ECS_SSH_KEY` when the protected environment key is unavailable.
 
 # One-Day PM5D OOS Smoke Window (2026-05-13)
 
