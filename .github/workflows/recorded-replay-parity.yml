@@ -6,15 +6,15 @@ on:
       deployment_id:
         description: "Dry-run deployment id to replay and compare"
         required: true
-        default: "pm5d.threelayer.obi-soft.dryrun"
+        default: "pm5d.threelayer.settlement-probability-btc-eth.dryrun"
       config_path:
         description: "Remote deployed dry-run config path on tango-1-1"
         required: true
-        default: "/opt/ploy/config/strategies/02-pm5d-threelayer.obi-soft-dryrun.toml"
+        default: "/opt/ploy/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"
       recording_path:
         description: "Remote recorded MarketUpdate NDJSON path on tango-1-1"
         required: true
-        default: "/opt/ploy/data/recordings/pm5d-threelayer-canonical.ndjson"
+        default: "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson"
       since:
         description: "Inclusive ISO-8601 lower timestamp bound for parity rows, or auto"
         required: false

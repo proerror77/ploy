@@ -218,6 +218,45 @@ class ReplayDryrunParityTests(unittest.TestCase):
         self.assertEqual(runtime["orders"]["shared_count"], 0)
         self.assertEqual(runtime["fills"]["shared_count"], 0)
 
+    def test_runtime_evidence_ignores_zero_fill_take_profit_rejections(self):
+        replay = evidence_payload()
+        dryrun = evidence_payload()
+        rejected_exit = evidence_payload(
+            intent_id="tl_tp_token-up_1778614178726",
+            order_id="rejected-exit-order",
+            fill_id="unused-fill",
+            order_side="SELL",
+            fill_side="SELL",
+            limit_price="0.99",
+            fill_price="0",
+            event_side="SELL",
+            created_at="2026-05-02T01:03:00Z",
+        )
+        rejected_exit["runtime_evidence"]["events"][0]["fill_status"] = "REJECTED"
+        rejected_exit["runtime_evidence"]["events"][0]["entry_price"] = "0.99"
+        rejected_exit["runtime_evidence"]["events"][0]["pnl"] = "0"
+        rejected_exit["runtime_evidence"]["orders"][0]["status"] = "REJECTED"
+        rejected_exit["runtime_evidence"]["orders"][0]["filled_quantity"] = "0"
+        rejected_exit["runtime_evidence"]["orders"][0]["rejection_reason"] = "No full-depth liquidity"
+        rejected_exit["runtime_evidence"]["fills"] = []
+        dryrun["runtime_evidence"]["events"].extend(rejected_exit["runtime_evidence"]["events"])
+        dryrun["runtime_evidence"]["orders"].extend(rejected_exit["runtime_evidence"]["orders"])
+
+        result = self.run_script(replay, dryrun)
+
+        runtime = result["runtime_evidence_comparison"]
+        self.assertTrue(runtime["strict_parity_ready"])
+        self.assertEqual(result["blocking_risk_flags"], [])
+        self.assertEqual(runtime["events"]["dryrun_count"], 1)
+        self.assertEqual(runtime["orders"]["dryrun_count"], 1)
+        ignored = runtime["ignored_non_executed_exit_attempts"]
+        self.assertEqual(len(ignored["dryrun_events"]), 1)
+        self.assertEqual(len(ignored["dryrun_orders"]), 1)
+        self.assertEqual(
+            ignored["dryrun_orders"][0]["intent_id"],
+            "tl_tp_token-up_1778614178726",
+        )
+
     def test_empty_runtime_window_collects_more_instead_of_fixing_runtime(self):
         result = self.run_script({"runtime_evidence": {}}, {"runtime_evidence": {}})
 
