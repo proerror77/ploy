@@ -188,6 +188,19 @@ where
             updates_processed += 1;
             self.executor.observe_market_update(&update);
 
+            if let MarketUpdate::EventExpired { event_id, .. } = &update {
+                let canceled = self
+                    .trading
+                    .cancel_active_entry_orders_for_market(event_id.as_ref());
+                if canceled > 0 {
+                    debug!(
+                        event_id = %event_id,
+                        canceled,
+                        "Canceled active entry orders for expired event",
+                    );
+                }
+            }
+
             // Throttle: skip high-frequency evaluation updates if within the same time slot.
             // Lifecycle and quote updates always pass through because they mutate strategy state
             // that must stay aligned with the executor's order-book view.

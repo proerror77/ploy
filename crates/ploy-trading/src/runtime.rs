@@ -1,6 +1,6 @@
 use crate::fills::{FillLedger, FillRecord};
-use crate::intents::{TradeSide, TradingIntent};
-use crate::orders::OrderLedger;
+use crate::intents::{IntentPurpose, TradeSide, TradingIntent};
+use crate::orders::{OrderLedger, OrderState};
 use crate::pnl::PnlSnapshot;
 use crate::positions::{PositionLedger, PositionSnapshot};
 use crate::risk::{snapshot_from_state, RiskSnapshot};
@@ -157,6 +157,34 @@ impl TradingRuntime {
 
     pub fn cancel_order(&mut self, order_id: &str) -> Option<&crate::orders::OrderRecord> {
         self.orders.cancel(order_id)
+    }
+
+    pub fn cancel_active_entry_orders_for_market(&mut self, market_id: &str) -> usize {
+        let order_ids = self
+            .orders
+            .orders()
+            .filter(|order| {
+                matches!(
+                    order.state,
+                    OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
+                )
+            })
+            .filter(|order| {
+                self.intent(&order.intent_id).is_some_and(|intent| {
+                    intent.market_id == market_id
+                        && matches!(intent.purpose, IntentPurpose::Entry | IntentPurpose::Hedge)
+                })
+            })
+            .map(|order| order.order_id.clone())
+            .collect::<Vec<_>>();
+
+        for order_id in &order_ids {
+            self.orders.cancel(order_id);
+        }
+        if !order_ids.is_empty() {
+            self.prune_inactive_intents();
+        }
+        order_ids.len()
     }
 
     pub fn order(&self, order_id: &str) -> Option<&crate::orders::OrderRecord> {
@@ -357,6 +385,78 @@ mod tests {
         assert_eq!(restored.positions.len(), 1);
         assert_eq!(restored.positions[0].net_qty, dec!(1));
         assert_eq!(restored.risk.active_orders, 1);
+    }
+
+    #[test]
+    fn cancel_active_entry_orders_for_market_releases_expired_event_reserve() {
+        let mut runtime = TradingRuntime::default();
+        let opened_at = Utc::now();
+        runtime.submit_intent(
+            TradingIntent {
+                intent_id: "entry-expired".to_string(),
+                deployment_id: "example.replay".to_string(),
+                market_id: "expired-event".to_string(),
+                token_id: "token-expired".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(10),
+                limit_price: Some(dec!(0.60)),
+                purpose: IntentPurpose::Entry,
+                created_at: opened_at,
+            },
+            "order-expired",
+        );
+        runtime.acknowledge_order("order-expired", "venue-expired");
+        assert!(runtime.record_fill(FillRecord {
+            fill_id: "fill-expired-partial".to_string(),
+            order_id: "order-expired".to_string(),
+            token_id: "token-expired".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(4),
+            price: dec!(0.60),
+            fee: Decimal::ZERO,
+            timestamp: opened_at,
+        }));
+
+        runtime.submit_intent(
+            TradingIntent {
+                intent_id: "entry-live".to_string(),
+                deployment_id: "example.replay".to_string(),
+                market_id: "live-event".to_string(),
+                token_id: "token-live".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(2),
+                limit_price: Some(dec!(0.50)),
+                purpose: IntentPurpose::Entry,
+                created_at: opened_at,
+            },
+            "order-live",
+        );
+        runtime.acknowledge_order("order-live", "venue-live");
+
+        let before = runtime.snapshot(&BTreeMap::new()).risk;
+        assert_eq!(before.active_orders, 2);
+        assert_eq!(before.reserved_order_exposure, dec!(4.60));
+
+        assert_eq!(
+            runtime.cancel_active_entry_orders_for_market("expired-event"),
+            1
+        );
+        assert_eq!(
+            runtime
+                .order("order-expired")
+                .expect("expired order")
+                .state,
+            OrderState::Canceled
+        );
+        assert_eq!(
+            runtime.order("order-live").expect("live order").state,
+            OrderState::Acknowledged
+        );
+
+        let after = runtime.snapshot(&BTreeMap::new()).risk;
+        assert_eq!(after.active_orders, 1);
+        assert_eq!(after.reserved_order_exposure, dec!(1.00));
+        assert_eq!(after.gross_exposure, dec!(2.40));
     }
 
     #[test]
