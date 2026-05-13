@@ -53,18 +53,29 @@ permissions:
   issues: write
 
 env:
+  CARGO_TERM_COLOR: always
+  PLATFORM_TARGET: x86_64-unknown-linux-gnu
   DEPLOY_HOST: ${{ secrets.TANGO_1_1_HOST }}
 
 jobs:
   parity:
     name: Replay recorded feed and compare dry-run evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     environment: ${{ inputs.approval_environment }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Build replay runner from workflow ref
+        run: |
+          set -euo pipefail
+          cargo build --release --locked \
+            --target "${PLATFORM_TARGET}" \
+            --features new-ploy-runner/full \
+            -p new-ploy-runner
+          strip "target/${PLATFORM_TARGET}/release/new-ploy-runner" || true
 
       - name: Configure SSH
         env:
@@ -131,6 +142,8 @@ jobs:
           set -euo pipefail
           mkdir -p "$1"
           EOF
+          scp "target/${PLATFORM_TARGET}/release/new-ploy-runner" \
+            tango-1-1:"${REMOTE_DIR}/ploy-runner"
           scp scripts/enrich_recording_official_settlement.py \
             tango-1-1:"${REMOTE_DIR}/enrich_recording_official_settlement.py"
           scp scripts/enrich_replay_runtime_evidence.py \
@@ -165,7 +178,8 @@ jobs:
           esac
 
           mkdir -p "${remote_dir}"
-          test -x /opt/ploy/bin/ploy-runner
+          chmod +x "${remote_dir}/ploy-runner"
+          test -x "${remote_dir}/ploy-runner"
           test -r "${config_path}"
           test -r "${recording_path}"
           test -r "${remote_dir}/enrich_recording_official_settlement.py"
@@ -327,7 +341,7 @@ jobs:
               handle.write("\n".join(lines) + "\n")
           PY
 
-          timeout 600 /opt/ploy/bin/ploy-runner run \
+          timeout 600 "${remote_dir}/ploy-runner" run \
             --config "${replay_config}" \
             --deployment-id "${deployment_id}" \
             --output-json "${remote_dir}/replay-evaluation.json"

@@ -1,3 +1,32 @@
+# Recorded Replay CI-Built Runner (2026-05-13)
+
+## Goal
+
+Ensure recorded replay evidence actually runs the current `main` code by
+building the runner on GitHub Actions and copying a temporary binary to tango
+for replay, without replacing the deployed runner or building Rust on tango.
+
+## Plan
+
+- [x] Build `new-ploy-runner` from the workflow ref on the GitHub runner.
+- [x] Copy the temporary binary into the replay scratch directory on
+      `tango-1-1`.
+- [x] Run recorded replay with that temporary binary instead of
+      `/opt/ploy/bin/ploy-runner`.
+- [x] Validate workflow guard tests.
+- [ ] Rerun multi-day replay.
+
+## Review
+
+- 2026-05-13: Replay run `25797199561` still matched the prior run after the
+  expired-order fix because `recorded-replay-parity.yml` was executing the
+  already deployed `/opt/ploy/bin/ploy-runner`. That made replay evidence stale
+  relative to the just-merged `main` code.
+- 2026-05-13: Verification passed: YAML parse for
+  `.github/workflows/recorded-replay-parity.yml`, `git diff --check`,
+  `recorded_replay_parity_supports_auto_window`, and
+  `workflow_dispatch_inputs_stay_lintable`.
+
 # Expired Event Entry Order Cancellation (2026-05-13)
 
 ## Goal
