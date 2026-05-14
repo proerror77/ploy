@@ -183,6 +183,7 @@ impl SimulatedExecutor {
         limit: Decimal,
         visible_depth_haircut: Decimal,
         max_sweep_levels: usize,
+        allow_partial: bool,
     ) -> Result<(Decimal, Decimal), String> {
         let mut remaining = shares.max(Decimal::ZERO);
         let mut filled = Decimal::ZERO;
@@ -217,6 +218,11 @@ impl SimulatedExecutor {
         if filled <= Decimal::ZERO {
             return Err("No full-depth liquidity".into());
         }
+        if !allow_partial && filled < shares {
+            return Err(format!(
+                "Insufficient full-depth liquidity for full fill: requested {shares}, available {filled}"
+            ));
+        }
 
         Ok((notional / filled, filled))
     }
@@ -246,6 +252,7 @@ impl SimulatedExecutor {
                         limit,
                         self.config.visible_depth_haircut,
                         self.config.max_sweep_levels,
+                        self.config.enable_partial_fills,
                     )?;
                     let reference = Self::clamp_price(signal_price);
                     return Ok((
@@ -277,6 +284,11 @@ impl SimulatedExecutor {
                 if filled_qty <= Decimal::ZERO {
                     return Err("No liquidity".into());
                 }
+                if !self.config.enable_partial_fills && filled_qty < requested {
+                    return Err(format!(
+                        "Insufficient ask liquidity for full fill: requested {requested}, available {filled_qty}"
+                    ));
+                }
                 let reference = Self::clamp_price(signal_price);
                 Ok((
                     ask,
@@ -299,6 +311,7 @@ impl SimulatedExecutor {
                         limit,
                         self.config.visible_depth_haircut,
                         self.config.max_sweep_levels,
+                        self.config.enable_partial_fills,
                     )?;
                     let reference = Self::clamp_price(signal_price);
                     return Ok((
@@ -329,6 +342,11 @@ impl SimulatedExecutor {
                 let filled_qty = requested.min(bid_size);
                 if filled_qty <= Decimal::ZERO {
                     return Err("No liquidity".into());
+                }
+                if !self.config.enable_partial_fills && filled_qty < requested {
+                    return Err(format!(
+                        "Insufficient bid liquidity for full fill: requested {requested}, available {filled_qty}"
+                    ));
                 }
                 let reference = Self::clamp_price(signal_price);
                 Ok((
@@ -629,6 +647,7 @@ mod tests {
     async fn lob_buy_consumes_only_executable_ask_size() {
         let config = SimulatedExecutorConfig {
             require_lob_liquidity: true,
+            enable_partial_fills: true,
             ..Default::default()
         };
         let mut exec = SimulatedExecutor::new(config);
@@ -720,6 +739,7 @@ mod tests {
     async fn full_depth_buy_respects_haircut_and_max_levels() {
         let config = SimulatedExecutorConfig {
             require_lob_liquidity: true,
+            enable_partial_fills: true,
             visible_depth_haircut: dec!(0.5),
             max_sweep_levels: 1,
             ..Default::default()
@@ -743,6 +763,7 @@ mod tests {
     async fn price_only_quote_does_not_erase_last_observed_liquidity() {
         let config = SimulatedExecutorConfig {
             require_lob_liquidity: true,
+            enable_partial_fills: true,
             ..Default::default()
         };
         let mut exec = SimulatedExecutor::new(config);
@@ -771,6 +792,7 @@ mod tests {
     async fn lob_sell_consumes_only_executable_bid_size() {
         let config = SimulatedExecutorConfig {
             require_lob_liquidity: true,
+            enable_partial_fills: true,
             ..Default::default()
         };
         let mut exec = SimulatedExecutor::new(config);
@@ -787,6 +809,58 @@ mod tests {
         let fill = report.fill.expect("partial bid fill");
         assert_eq!(fill.price, dec!(0.54));
         assert_eq!(fill.quantity, dec!(6));
+    }
+
+    #[tokio::test]
+    async fn lob_buy_rejects_partial_when_partial_fills_disabled() {
+        let config = SimulatedExecutorConfig {
+            require_lob_liquidity: true,
+            enable_partial_fills: false,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        exec.observe_market_update(&quote_update(
+            Some(dec!(0.49)),
+            Some(dec!(0.50)),
+            Some(dec!(50)),
+            Some(dec!(7.5)),
+        ));
+        let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(25));
+
+        let report = exec.submit(&intent, "test-order-lob-buy-no-partial").await;
+        assert!(report.rejected);
+        assert!(report.fill.is_none());
+        assert_eq!(
+            report.rejection_reason.as_deref(),
+            Some("Insufficient ask liquidity for full fill: requested 25, available 7.5")
+        );
+    }
+
+    #[tokio::test]
+    async fn full_depth_buy_rejects_partial_when_partial_fills_disabled() {
+        let config = SimulatedExecutorConfig {
+            require_lob_liquidity: true,
+            enable_partial_fills: false,
+            visible_depth_haircut: dec!(0.5),
+            max_sweep_levels: 1,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        exec.observe_market_update(&quote_update_with_levels(
+            Vec::new(),
+            vec![level(dec!(0.50), dec!(10)), level(dec!(0.51), dec!(10))],
+        ));
+        let intent = test_intent(TradeSide::Buy, dec!(0.55), dec!(12));
+
+        let report = exec
+            .submit(&intent, "test-order-full-depth-no-partial")
+            .await;
+        assert!(report.rejected);
+        assert!(report.fill.is_none());
+        assert_eq!(
+            report.rejection_reason.as_deref(),
+            Some("Insufficient full-depth liquidity for full fill: requested 12, available 5.0")
+        );
     }
 
     #[tokio::test]
