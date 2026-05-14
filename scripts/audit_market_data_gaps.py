@@ -517,6 +517,7 @@ def classify_pm_quote_quality(row: dict[str, Any]) -> tuple[str, list[str]]:
     missing_quotes = int(row.get("missing_quotes") or 0)
     older_than_15s = int(row.get("older_than_15s") or 0)
     missing_ask_or_size = int(row.get("missing_ask_or_size") or 0)
+    missing_bid_or_size = int(row.get("missing_bid_or_size") or 0)
 
     if active_tokens == 0:
         status = "critical"
@@ -528,9 +529,20 @@ def classify_pm_quote_quality(row: dict[str, Any]) -> tuple[str, list[str]]:
         status = "critical"
         reasons.append(f"{older_than_15s}/{active_tokens} active token quotes older than 15s")
     if missing_ask_or_size > 0:
-        status = "critical"
+        if missing_ask_or_size == active_tokens:
+            status = "critical"
+        elif STATUS_ORDER[status] < STATUS_ORDER["warn"]:
+            status = "warn"
         reasons.append(
             f"{missing_ask_or_size}/{active_tokens} active token quotes missing ask/ask_size"
+        )
+    if missing_bid_or_size > 0:
+        if missing_bid_or_size == active_tokens:
+            status = "critical"
+        elif STATUS_ORDER[status] < STATUS_ORDER["warn"]:
+            status = "warn"
+        reasons.append(
+            f"{missing_bid_or_size}/{active_tokens} active token quotes missing bid/bid_size"
         )
 
     if not reasons:
