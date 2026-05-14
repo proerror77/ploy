@@ -70,6 +70,15 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
 1,amplitude_weighted_momentum_30s_sigma,full_depth_settlement_executable_pnl,candidate,passed,3167,0.083421,0.044219,8,1.102341,0.8750,2,1.0000,1.0000,634,1.471203,0.6120,0.9000,3
 """
 
+AUTOFACTOR_TRADEABLE_HARD_GATE_REPORT = """
+# AutoFactor target=tradeable_full_depth_settlement_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,complexity
+1,mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate,tradeable_full_depth_settlement_pnl,candidate,passed,3335,0.080512,0.076800,14,0.951390,0.9286,2,1.0000,0.7500,667,0.872484,0.5757,1.0000,6
+2,mut_spread_adjusted_external_move_full_depth_entry_gate,tradeable_full_depth_settlement_pnl,candidate,passed,3335,0.065967,0.092183,14,1.268732,0.9286,2,1.0000,0.5000,667,1.388814,0.6042,1.0000,7
+"""
+
 CORE_SUITE_REPORT = f"""
 # Snapshot
 snapshot_schema=1
@@ -205,6 +214,25 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "predictive_settlement_probability",
         )
         self.assertIn("amplitude_weighted_momentum_30s_sigma", handoff_md)
+
+    def test_qualifies_tradeable_hard_gate_predictive_formula_when_gate_is_ready(self):
+        _, payload, registry, handoff, handoff_md = self.run_script(
+            READY_GATE + AUTOFACTOR_TRADEABLE_HARD_GATE_REPORT
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(registry["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(len(handoff["strategies"]), 2)
+        self.assertEqual(
+            handoff["strategies"][0]["runtime_score"],
+            "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
+        )
+        self.assertEqual(
+            handoff["strategies"][0]["strategy_family"],
+            "predictive_settlement_probability",
+        )
+        self.assertIn("full_depth_entry_gate", handoff_md)
 
     def test_core_suite_report_is_sufficient_for_handoff_evaluation(self):
         self.assertNotIn("=== Fillability Review V1 Data Health ===", CORE_SUITE_REPORT)

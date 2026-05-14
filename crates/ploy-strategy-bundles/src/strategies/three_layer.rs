@@ -547,7 +547,14 @@ fn autofactor_formula_entry_score(
     let formula_name = runtime_score
         .strip_prefix("autofactor_formula:")
         .unwrap_or(runtime_score);
-    let (threshold, scale) = if formula_name == "amplitude_weighted_momentum_30s_sigma" {
+    let base_formula_name = formula_name
+        .strip_prefix("mut_")
+        .unwrap_or(formula_name)
+        .strip_suffix("_full_depth_entry_gate")
+        .unwrap_or_else(|| formula_name.strip_prefix("mut_").unwrap_or(formula_name));
+    let (threshold, scale) = if base_formula_name == "amplitude_weighted_momentum_30s_sigma"
+        || base_formula_name == "spread_adjusted_external_move"
+    {
         (0.0, 0.02)
     } else {
         (min_edge.max(0.0), 0.08)
@@ -3650,6 +3657,51 @@ mod tests {
         assert!(opposed_raw < 0.0);
         assert!(aligned_score > config.min_entry_score);
         assert!(opposed_score < aligned_score);
+    }
+
+    #[test]
+    fn predictive_autofactor_formula_supports_full_depth_entry_gate() {
+        let config = test_config();
+        let fillable = AutoSettlementFactorInputs {
+            settlement_edge: -0.01,
+            entry_price: 0.48,
+            distance_over_sigma: 0.20,
+            direction_sign: 1.0,
+            drift_30s: 0.006,
+            sigma_horizon: 4.0,
+            entry_capacity_ratio: 1.20,
+            side_spread: 0.03,
+            external_pressure: 0.0,
+            iv_change_1m: 0.0,
+        };
+        let unfillable = AutoSettlementFactorInputs {
+            entry_capacity_ratio: 0.80,
+            ..fillable
+        };
+
+        let (raw, score) = autofactor_formula_entry_score(
+            "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
+            fillable,
+            config.min_edge,
+        )
+        .expect("hard-gated predictive formula should score fillable rows");
+        assert!(raw > 0.0);
+        assert!(score > 0.0);
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
+            unfillable,
+            config.min_edge,
+        )
+        .is_none());
+
+        let (spread_raw, spread_score) = autofactor_formula_entry_score(
+            "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate",
+            fillable,
+            config.min_edge,
+        )
+        .expect("hard-gated spread-adjusted predictive formula should score fillable rows");
+        assert!(spread_raw > raw);
+        assert!(spread_score > score);
     }
 
     #[test]

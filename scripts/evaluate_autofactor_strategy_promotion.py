@@ -54,6 +54,16 @@ BUILTIN_RUNTIME_MAPPINGS: dict[str, dict[str, str]] = {
         "strategy_family": "predictive_settlement_probability",
         "runtime_score": "autofactor_formula:amplitude_weighted_momentum_30s_sigma",
     },
+    "mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate": {
+        "strategy_profile": "settlement_probability",
+        "strategy_family": "predictive_settlement_probability",
+        "runtime_score": "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
+    },
+    "mut_spread_adjusted_external_move_full_depth_entry_gate": {
+        "strategy_profile": "settlement_probability",
+        "strategy_family": "predictive_settlement_probability",
+        "runtime_score": "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate",
+    },
     "settlement_fair_edge": {
         "strategy_profile": "",
         "strategy_family": "settlement_probability",

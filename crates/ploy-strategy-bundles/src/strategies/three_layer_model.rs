@@ -129,6 +129,30 @@ pub fn auto_settlement_formula_score(
     let name = runtime_score
         .strip_prefix("autofactor_formula:")
         .unwrap_or(runtime_score);
+    if let Some(base_name) = name.strip_suffix("_full_depth_entry_gate") {
+        if !inputs.entry_capacity_ratio.is_finite() || inputs.entry_capacity_ratio < 1.0 {
+            return None;
+        }
+        let base_name = base_name.strip_prefix("mut_").unwrap_or(base_name);
+        if base_name == "amplitude_weighted_momentum_30s_sigma" {
+            if !inputs.drift_30s.is_finite()
+                || !inputs.direction_sign.is_finite()
+                || !inputs.sigma_horizon.is_finite()
+            {
+                return None;
+            }
+            let side_drift = inputs.drift_30s * inputs.direction_sign;
+            let score = side_drift * inputs.sigma_horizon.abs().ln_1p();
+            return score.is_finite().then_some(score);
+        }
+        if base_name == "spread_adjusted_external_move" {
+            let score = spread_adjusted_external_move_score(
+                inputs.drift_30s * inputs.direction_sign,
+                inputs.side_spread,
+            );
+            return score.is_finite().then_some(score);
+        }
+    }
     if name == "amplitude_weighted_momentum_30s_sigma" {
         if !inputs.drift_30s.is_finite()
             || !inputs.direction_sign.is_finite()
