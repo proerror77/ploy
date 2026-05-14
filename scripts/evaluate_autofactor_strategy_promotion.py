@@ -329,16 +329,24 @@ def is_autofactor_formula(mapping: dict[str, str] | None) -> bool:
     return mapping.get("runtime_score", "").startswith("autofactor_formula:")
 
 
-def global_gate_blockers(gate: PromotionGate, *, formula_specific: bool) -> list[str]:
+def global_gate_blockers(
+    gate: PromotionGate, *, formula_specific: bool, hard_entry_gated: bool
+) -> list[str]:
     if gate.ready:
         return []
-    if not formula_specific:
+    if not formula_specific and not hard_entry_gated:
         return ["promotion_gate_not_ready"]
     blockers = [
         item
         for item in gate.blocked_gates
         if not item.startswith(MODEL_SPECIFIC_PRD_GATE_PREFIXES)
     ]
+    if hard_entry_gated:
+        blockers = [
+            item
+            for item in blockers
+            if not item.startswith("global_full_depth_entry_fillability:")
+        ]
     if blockers:
         return [f"global_promotion_gate_not_ready:{item}" for item in blockers]
     return []
@@ -363,7 +371,14 @@ def evaluate(
         blockers: list[str] = []
         mapping = runtime_mappings.get(row.name)
         formula_specific = is_autofactor_formula(mapping)
-        blockers.extend(global_gate_blockers(gate, formula_specific=formula_specific))
+        hard_entry_gated = row.name.endswith("_full_depth_entry_gate")
+        blockers.extend(
+            global_gate_blockers(
+                gate,
+                formula_specific=formula_specific,
+                hard_entry_gated=hard_entry_gated,
+            )
+        )
         if row.target not in allowed_targets:
             blockers.append("target_not_allowed")
         if row.decision != "candidate" or row.reason != "passed":

@@ -36,6 +36,13 @@ symbol_holdout,false,no non-naive model passes all symbol holdouts
 walk_forward_oos,false,no non-naive model has non-empty OOS windows with positive_window_ratio >= 0.60
 """
 
+HARD_GATE_REPLAY_BLOCKED_GATE = """=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=false stake_usd=15.00 min_entry_fill_rate=0.3000 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=739 event_complete_rows=2846 replay_parity_ready=false
+gate,passed,evidence
+global_full_depth_entry_fillability,false,global_full_depth_entry_fill_rate=0.1458 min_required=0.3000
+recorded_replay_parity,false,replay_parity_json=artifacts/replay-parity/parity-evaluation.json runtime_ready=true event_ready=false blocking_flags=<none> advisory_flags=<none> decision=continue
+"""
+
 AUTOFACTOR_REPORT = """
 # AutoFactor target=full_depth_settlement_executable_pnl
 === AutoFactor Seed Candidate Report ===
@@ -233,6 +240,28 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "predictive_settlement_probability",
         )
         self.assertIn("full_depth_entry_gate", handoff_md)
+
+    def test_hard_gate_predictive_formula_waives_global_fillability_not_replay_parity(self):
+        _, payload, _, handoff, _ = self.run_script(
+            HARD_GATE_REPLAY_BLOCKED_GATE + AUTOFACTOR_TRADEABLE_HARD_GATE_REPORT
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        first = payload["evaluated_factors"][0]
+        self.assertFalse(first["qualified"])
+        self.assertNotIn(
+            "global_promotion_gate_not_ready:global_full_depth_entry_fillability: "
+            "global_full_depth_entry_fill_rate=0.1458 min_required=0.3000",
+            first["blockers"],
+        )
+        self.assertIn(
+            "global_promotion_gate_not_ready:recorded_replay_parity: "
+            "replay_parity_json=artifacts/replay-parity/parity-evaluation.json "
+            "runtime_ready=true event_ready=false blocking_flags=<none> "
+            "advisory_flags=<none> decision=continue",
+            first["blockers"],
+        )
 
     def test_core_suite_report_is_sufficient_for_handoff_evaluation(self):
         self.assertNotIn("=== Fillability Review V1 Data Health ===", CORE_SUITE_REPORT)
