@@ -276,6 +276,7 @@ pub enum AutoFactorV2Target {
     FullDepthRepricePnl30s,
     SettlementExecutablePnl,
     FullDepthSettlementExecutablePnl,
+    TradeableFullDepthSettlementPnl,
 }
 
 impl AutoFactorV2Target {
@@ -289,6 +290,9 @@ impl AutoFactorV2Target {
             AutoFactorV2Target::FullDepthSettlementExecutablePnl => {
                 "full_depth_settlement_executable_pnl"
             }
+            AutoFactorV2Target::TradeableFullDepthSettlementPnl => {
+                "tradeable_full_depth_settlement_pnl"
+            }
         }
     }
 
@@ -301,6 +305,15 @@ impl AutoFactorV2Target {
             AutoFactorV2Target::SettlementExecutablePnl => row.label_executable_pnl_15u,
             AutoFactorV2Target::FullDepthSettlementExecutablePnl => {
                 row.label_full_depth_executable_pnl_15u
+            }
+            AutoFactorV2Target::TradeableFullDepthSettlementPnl => {
+                if row.label_settlement_win.is_none() {
+                    None
+                } else if row.label_full_depth_entry_fillable {
+                    row.label_full_depth_executable_pnl_15u
+                } else {
+                    Some(0.0)
+                }
             }
         }
         .unwrap_or(f64::NAN)
@@ -865,7 +878,11 @@ fn domain_candidates_for_target_with_guidance(
     llm_prior: Option<&LlmPriorSpec>,
 ) -> Vec<NamedFactorExpr> {
     let mut out = domain_seed_candidates(input_names);
-    if target == AutoFactorV2Target::FullDepthSettlementExecutablePnl {
+    if matches!(
+        target,
+        AutoFactorV2Target::FullDepthSettlementExecutablePnl
+            | AutoFactorV2Target::TradeableFullDepthSettlementPnl
+    ) {
         out.extend(settlement_native_generated_candidates(input_names));
     }
     out.extend(deterministic_mutation_candidates(input_names, &out, target));
@@ -1084,6 +1101,7 @@ fn deterministic_mutation_layer(
         target,
         AutoFactorV2Target::SettlementExecutablePnl
             | AutoFactorV2Target::FullDepthSettlementExecutablePnl
+            | AutoFactorV2Target::TradeableFullDepthSettlementPnl
     );
 
     for seed in seeds {
@@ -2073,6 +2091,26 @@ mod tests {
         assert!(reports
             .iter()
             .any(|report| report.name.starts_with("mut2_")));
+    }
+
+    #[test]
+    fn tradeable_full_depth_target_penalizes_unfillable_settled_rows() {
+        let mut rows = (0..4).map(synthetic_v2_row).collect::<Vec<_>>();
+        rows[0].label_full_depth_entry_fillable = false;
+        rows[0].label_full_depth_executable_pnl_15u = None;
+
+        let labels = autofactor_labels_from_v2(
+            &rows,
+            AutoFactorV2Target::TradeableFullDepthSettlementPnl,
+        );
+        let legacy_labels = autofactor_labels_from_v2(
+            &rows,
+            AutoFactorV2Target::FullDepthSettlementExecutablePnl,
+        );
+
+        assert_eq!(labels[0], 0.0);
+        assert!(legacy_labels[0].is_nan());
+        assert!(labels[1].is_finite());
     }
 
     #[test]

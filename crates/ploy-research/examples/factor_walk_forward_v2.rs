@@ -766,6 +766,7 @@ async fn main() {
         AutoFactorV2Target::FullDepthRepricePnl10s,
         AutoFactorV2Target::FullDepthRepricePnl30s,
         AutoFactorV2Target::FullDepthSettlementExecutablePnl,
+        AutoFactorV2Target::TradeableFullDepthSettlementPnl,
     ] {
         match mine_domain_autofactors_from_v2_with_guidance(
             &autofactor_rows,

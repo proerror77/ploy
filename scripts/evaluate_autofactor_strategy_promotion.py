@@ -28,7 +28,10 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_ALLOWED_TARGETS = ("full_depth_settlement_executable_pnl",)
+DEFAULT_ALLOWED_TARGETS = (
+    "full_depth_settlement_executable_pnl",
+    "tradeable_full_depth_settlement_pnl",
+)
 
 SETTLEMENT_RUNTIME_MAPPING = {
     "strategy_profile": "settlement_probability",
