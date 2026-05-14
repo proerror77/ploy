@@ -84,19 +84,36 @@ class AuditMarketDataGapsTests(unittest.TestCase):
         self.assertEqual(coverage_status, "ok")
         self.assertIn("latest lag 1200s > 600s", reasons)
 
-    def test_pm_quote_quality_blocks_missing_ask_size(self):
+    def test_pm_quote_quality_warns_on_one_sided_quote_liquidity(self):
         row = {
             "active_tokens": 20,
             "missing_quotes": 0,
             "older_than_15s": 0,
             "missing_ask_or_size": 1,
+            "missing_bid_or_size": 1,
+            "max_age_seconds": 4,
+        }
+
+        status, reasons = audit.classify_pm_quote_quality(row)
+
+        self.assertEqual(status, "warn")
+        self.assertIn("1/20 active token quotes missing ask/ask_size", reasons)
+        self.assertIn("1/20 active token quotes missing bid/bid_size", reasons)
+
+    def test_pm_quote_quality_blocks_missing_asks_for_all_active_tokens(self):
+        row = {
+            "active_tokens": 20,
+            "missing_quotes": 0,
+            "older_than_15s": 0,
+            "missing_ask_or_size": 20,
+            "missing_bid_or_size": 0,
             "max_age_seconds": 4,
         }
 
         status, reasons = audit.classify_pm_quote_quality(row)
 
         self.assertEqual(status, "critical")
-        self.assertIn("1/20 active token quotes missing ask/ask_size", reasons)
+        self.assertIn("20/20 active token quotes missing ask/ask_size", reasons)
 
     def test_pm_quote_quality_query_excludes_expired_grace_tokens(self):
         query = audit.pm_quote_quality_query(["BTCUSDT"], 20)
@@ -116,6 +133,7 @@ class AuditMarketDataGapsTests(unittest.TestCase):
             "missing_quotes": 0,
             "older_than_15s": 0,
             "missing_ask_or_size": 0,
+            "missing_bid_or_size": 0,
             "max_age_seconds": 5,
         }
 
