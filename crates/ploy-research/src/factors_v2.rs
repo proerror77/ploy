@@ -578,6 +578,7 @@ pub struct SettlementProbabilityPromotionGateOptions {
     pub event_complete_rows: usize,
     pub min_event_complete_events: usize,
     pub min_event_complete_rows: usize,
+    pub global_full_depth_entry_fill_rate: Option<f64>,
     pub replay_parity_ready: bool,
     pub replay_parity_evidence: Option<String>,
 }
@@ -597,6 +598,7 @@ impl Default for SettlementProbabilityPromotionGateOptions {
             event_complete_rows: 0,
             min_event_complete_events: 20,
             min_event_complete_rows: 40,
+            global_full_depth_entry_fill_rate: None,
             replay_parity_ready: false,
             replay_parity_evidence: None,
         }
@@ -3022,6 +3024,30 @@ pub fn build_settlement_probability_promotion_gate_report(
         evidence: format!(
             "stake_usd={:.2} max_conservative_entry_fill_rate={:.4} min_required={:.4}",
             options.stake_usd, conservative_entry_fill, options.min_entry_fill_rate
+        ),
+    });
+
+    let global_full_depth_entry_fill = options
+        .global_full_depth_entry_fill_rate
+        .filter(|value| value.is_finite());
+    gates.push(SettlementProbabilityPromotionGateRow {
+        gate: "global_full_depth_entry_fillability".to_string(),
+        passed: global_full_depth_entry_fill
+            .map(|rate| rate >= options.min_entry_fill_rate)
+            .unwrap_or(true),
+        evidence: global_full_depth_entry_fill.map_or_else(
+            || {
+                format!(
+                    "global_full_depth_entry_fill_rate=<not-recorded> min_required={:.4}",
+                    options.min_entry_fill_rate
+                )
+            },
+            |rate| {
+                format!(
+                    "global_full_depth_entry_fill_rate={:.4} min_required={:.4}",
+                    rate, options.min_entry_fill_rate
+                )
+            },
         ),
     });
 
@@ -10353,6 +10379,28 @@ mod tests {
             .expect("deribit_vol_surface gate");
         assert!(deribit_gate.passed);
         assert!(deribit_gate.evidence.contains("require_deribit=false"));
+
+        let globally_unfillable = build_settlement_probability_promotion_gate_report(
+            &probability,
+            &walk_forward,
+            &execution,
+            &execution,
+            SettlementProbabilityPromotionGateOptions {
+                include_deribit: false,
+                data_audit_status: Some("ok".to_string()),
+                global_full_depth_entry_fill_rate: Some(0.1458),
+                replay_parity_ready: true,
+                ..Default::default()
+            },
+        );
+        assert!(!globally_unfillable.ready_for_dry_run_handoff);
+        assert!(globally_unfillable.gates.iter().any(|gate| {
+            gate.gate == "global_full_depth_entry_fillability"
+                && !gate.passed
+                && gate
+                    .evidence
+                    .contains("global_full_depth_entry_fill_rate=0.1458")
+        }));
 
         let deribit_required = build_settlement_probability_promotion_gate_report(
             &probability,

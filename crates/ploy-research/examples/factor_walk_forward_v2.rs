@@ -713,6 +713,7 @@ async fn main() {
             event_complete_rows: event_complete_rows.len(),
             min_event_complete_events,
             min_event_complete_rows,
+            global_full_depth_entry_fill_rate: Some(report.health.full_depth_entry_fill_rate()),
             replay_parity_ready: replay_parity_status
                 .as_ref()
                 .map(|(ready, _)| *ready)

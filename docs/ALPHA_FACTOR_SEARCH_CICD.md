@@ -296,9 +296,10 @@ dimension such as capacity, stability, or overfit risk.
   default. Use `options_json.require_deribit=true` only when the hypothesis
   explicitly depends on the `pm5d-vol`/Deribit surface.
 - Settlement-probability promotion defaults to
-  `min_promotion_entry_fill_rate=0.30`. Lower full-depth entry capacity is
-  research evidence only, because a signal that cannot be filled at the
-  configured stake is likely already reflected in the Polymarket book.
+  `min_promotion_entry_fill_rate=0.30`, including global full-depth entry
+  fillability. Lower capacity is research evidence only, because a signal that
+  cannot be filled at the configured stake is likely already reflected in the
+  Polymarket book.
 - One-day OOS smoke searches can use hourly windows, for example
   `train_window_hours=12`, `test_window_hours=12`, and `step_hours=12`, when
   only a clean 24h snapshot is available. Keep these marked as early
