@@ -28,7 +28,10 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_ALLOWED_TARGETS = ("full_depth_settlement_executable_pnl",)
+DEFAULT_ALLOWED_TARGETS = (
+    "full_depth_settlement_executable_pnl",
+    "tradeable_full_depth_settlement_pnl",
+)
 
 SETTLEMENT_RUNTIME_MAPPING = {
     "strategy_profile": "settlement_probability",
@@ -45,6 +48,21 @@ BUILTIN_RUNTIME_MAPPINGS: dict[str, dict[str, str]] = {
         "strategy_profile": "repricing_momentum",
         "strategy_family": "repricing",
         "runtime_score": "repricing_gap_side_10s",
+    },
+    "amplitude_weighted_momentum_30s_sigma": {
+        "strategy_profile": "settlement_probability",
+        "strategy_family": "predictive_settlement_probability",
+        "runtime_score": "autofactor_formula:amplitude_weighted_momentum_30s_sigma",
+    },
+    "mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate": {
+        "strategy_profile": "settlement_probability",
+        "strategy_family": "predictive_settlement_probability",
+        "runtime_score": "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
+    },
+    "mut_spread_adjusted_external_move_full_depth_entry_gate": {
+        "strategy_profile": "settlement_probability",
+        "strategy_family": "predictive_settlement_probability",
+        "runtime_score": "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate",
     },
     "settlement_fair_edge": {
         "strategy_profile": "",
@@ -149,8 +167,10 @@ class AutoFactorRow:
     symbol_count: int
     symbol_positive_ratio: float
     monotonicity: float
+    top_bucket_n: int
     top_bucket_avg_label: float
     top_bucket_positive_label_rate: float
+    top_bucket_full_depth_entry_fill_rate: float
     complexity: int
 
 
@@ -174,8 +194,10 @@ def factor_metrics(row: AutoFactorRow) -> dict[str, Any]:
         "symbol_count": row.symbol_count,
         "symbol_positive_ratio": row.symbol_positive_ratio,
         "monotonicity": row.monotonicity,
+        "top_bucket_n": row.top_bucket_n,
         "top_bucket_avg_label": row.top_bucket_avg_label,
         "top_bucket_positive_label_rate": row.top_bucket_positive_label_rate,
+        "top_bucket_full_depth_entry_fill_rate": row.top_bucket_full_depth_entry_fill_rate,
         "complexity": row.complexity,
     }
 
@@ -271,8 +293,12 @@ def parse_autofactor_rows(report_text: str) -> list[AutoFactorRow]:
                 symbol_count=parse_int(item.get("symbol_count", "0")),
                 symbol_positive_ratio=parse_float(item.get("symbol_positive_ratio", "nan")),
                 monotonicity=parse_float(item["monotonicity"]),
+                top_bucket_n=parse_int(item.get("top_bucket_n", "0")),
                 top_bucket_avg_label=parse_float(item["top_bucket_avg_label"]),
                 top_bucket_positive_label_rate=parse_float(item["top_bucket_positive_label_rate"]),
+                top_bucket_full_depth_entry_fill_rate=parse_float(
+                    item.get("top_bucket_full_depth_entry_fill_rate", "nan")
+                ),
                 complexity=parse_int(item["complexity"]),
             )
         )
@@ -303,16 +329,24 @@ def is_autofactor_formula(mapping: dict[str, str] | None) -> bool:
     return mapping.get("runtime_score", "").startswith("autofactor_formula:")
 
 
-def global_gate_blockers(gate: PromotionGate, *, formula_specific: bool) -> list[str]:
+def global_gate_blockers(
+    gate: PromotionGate, *, formula_specific: bool, hard_entry_gated: bool
+) -> list[str]:
     if gate.ready:
         return []
-    if not formula_specific:
+    if not formula_specific and not hard_entry_gated:
         return ["promotion_gate_not_ready"]
     blockers = [
         item
         for item in gate.blocked_gates
         if not item.startswith(MODEL_SPECIFIC_PRD_GATE_PREFIXES)
     ]
+    if hard_entry_gated:
+        blockers = [
+            item
+            for item in blockers
+            if not item.startswith("global_full_depth_entry_fillability:")
+        ]
     if blockers:
         return [f"global_promotion_gate_not_ready:{item}" for item in blockers]
     return []
@@ -324,6 +358,10 @@ def evaluate(
     allowed_targets: tuple[str, ...],
     required_strategy_profile: str,
     runtime_mappings: dict[str, dict[str, str]],
+    min_factor_n: int,
+    min_top_bucket_n: int,
+    min_top_bucket_entry_fill_rate: float,
+    min_window_count: int,
 ) -> dict[str, Any]:
     gate = parse_promotion_gate(report_text)
     rows = parse_autofactor_rows(report_text)
@@ -333,11 +371,35 @@ def evaluate(
         blockers: list[str] = []
         mapping = runtime_mappings.get(row.name)
         formula_specific = is_autofactor_formula(mapping)
-        blockers.extend(global_gate_blockers(gate, formula_specific=formula_specific))
+        hard_entry_gated = row.name.endswith("_full_depth_entry_gate")
+        blockers.extend(
+            global_gate_blockers(
+                gate,
+                formula_specific=formula_specific,
+                hard_entry_gated=hard_entry_gated,
+            )
+        )
         if row.target not in allowed_targets:
             blockers.append("target_not_allowed")
         if row.decision != "candidate" or row.reason != "passed":
             blockers.append(f"autofactor_not_candidate:{row.decision}:{row.reason}")
+        if row.n < min_factor_n:
+            blockers.append(f"factor_sample_too_small:{row.n}<{min_factor_n}")
+        if row.top_bucket_n < min_top_bucket_n:
+            blockers.append(
+                f"top_bucket_sample_too_small:{row.top_bucket_n}<{min_top_bucket_n}"
+            )
+        if (
+            row.top_bucket_full_depth_entry_fill_rate != row.top_bucket_full_depth_entry_fill_rate
+            or row.top_bucket_full_depth_entry_fill_rate < min_top_bucket_entry_fill_rate
+        ):
+            blockers.append(
+                "top_bucket_full_depth_entry_fill_rate_too_low:"
+                f"{row.top_bucket_full_depth_entry_fill_rate:.4f}<"
+                f"{min_top_bucket_entry_fill_rate:.4f}"
+            )
+        if row.window_count < min_window_count:
+            blockers.append(f"window_count_too_small:{row.window_count}<{min_window_count}")
         if not mapping:
             blockers.append("missing_runtime_strategy_mapping")
         else:
@@ -370,6 +432,12 @@ def evaluate(
         "decision": "qualified" if qualified else "blocked",
         "required_strategy_profile": required_strategy_profile,
         "allowed_targets": list(allowed_targets),
+        "minimums": {
+            "factor_n": min_factor_n,
+            "top_bucket_n": min_top_bucket_n,
+            "top_bucket_full_depth_entry_fill_rate": min_top_bucket_entry_fill_rate,
+            "window_count": min_window_count,
+        },
         "promotion_gate": asdict(gate),
         "qualified_strategies": [
             {
@@ -597,6 +665,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--required-strategy-profile", default="settlement_probability")
     parser.add_argument("--fail-if-blocked", action="store_true")
+    parser.add_argument("--min-factor-n", type=int, default=100)
+    parser.add_argument("--min-top-bucket-n", type=int, default=50)
+    parser.add_argument("--min-top-bucket-entry-fill-rate", type=float, default=0.30)
+    parser.add_argument("--min-window-count", type=int, default=4)
     return parser.parse_args()
 
 
@@ -609,6 +681,10 @@ def main() -> int:
         allowed_targets=allowed_targets,
         required_strategy_profile=args.required_strategy_profile,
         runtime_mappings=load_runtime_mappings(args.runtime_mapping_json or None),
+        min_factor_n=args.min_factor_n,
+        min_top_bucket_n=args.min_top_bucket_n,
+        min_top_bucket_entry_fill_rate=args.min_top_bucket_entry_fill_rate,
+        min_window_count=args.min_window_count,
     )
 
     if args.output_json:

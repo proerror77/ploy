@@ -822,8 +822,13 @@ venue = "sportsbook"
             .as_deref()
             .expect("settlement probability dry-run config should carry an AutoFactor handoff");
         assert!(
-            runtime_score.starts_with("autofactor_formula:auto_settlement_"),
-            "settlement probability dry-run config should use a settlement AutoFactor formula, got {runtime_score}"
+            runtime_score.starts_with("autofactor_formula:auto_settlement_")
+                || runtime_score == "autofactor_formula:amplitude_weighted_momentum_30s_sigma"
+                || runtime_score
+                    == "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate"
+                || runtime_score
+                    == "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate",
+            "settlement probability dry-run config should use a supported settlement AutoFactor formula, got {runtime_score}"
         );
         let raw = auto_settlement_formula_score(
             runtime_score,
@@ -832,6 +837,8 @@ venue = "sportsbook"
                 entry_price: 0.30,
                 distance_over_sigma: 0.20,
                 direction_sign: 1.0,
+                drift_30s: 0.004,
+                sigma_horizon: 3.0,
                 entry_capacity_ratio: 3.0,
                 side_spread: 0.03,
                 external_pressure: 1.0,

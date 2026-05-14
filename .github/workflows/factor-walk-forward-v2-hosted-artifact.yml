@@ -92,6 +92,7 @@ jobs:
               "data_quality_mode": "event_complete",
               "min_event_complete_events": "20",
               "min_event_complete_rows": "40",
+              "min_promotion_entry_fill_rate": "0.30",
               "require_deribit": "false",
               "replay_parity_json": "",
               "replay_parity_run_id": "",
@@ -355,6 +356,7 @@ jobs:
             --data-quality-mode "${WALK_DATA_QUALITY_MODE}"
             --min-event-complete-events "${WALK_MIN_EVENT_COMPLETE_EVENTS}"
             --min-event-complete-rows "${WALK_MIN_EVENT_COMPLETE_ROWS}"
+            --min-promotion-entry-fill-rate "${WALK_MIN_PROMOTION_ENTRY_FILL_RATE}"
             --required-strategy-profile "${WALK_REQUIRED_STRATEGY_PROFILE}"
             --allowed-target "${WALK_ALLOWED_TARGET}"
             --sweep-json "${SWEEP_JSON}"

@@ -22,8 +22,8 @@ recorded_replay_parity,true,blocking_flags=<none>
 # AutoFactor target=full_depth_settlement_executable_pnl
 === AutoFactor Seed Candidate Report ===
 target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
-rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_avg_label,top_bucket_positive_label_rate,complexity
-1,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,49831,0.110842,0.150273,43,1.064178,0.9535,6,0.8333,1.0000,2.666226,0.6836,1
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,complexity
+1,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,49831,0.110842,0.150273,43,1.064178,0.9535,6,0.8333,1.0000,9966,2.666226,0.6836,0.9000,1
 """)
 '''
 
@@ -38,9 +38,41 @@ recorded_replay_parity,false,shared_event_count=0
 # AutoFactor target=full_depth_settlement_executable_pnl
 === AutoFactor Seed Candidate Report ===
 target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
-rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_avg_label,top_bucket_positive_label_rate,complexity
-1,mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted,full_depth_settlement_executable_pnl,candidate,passed,3335,0.067525,0.081201,14,1.288053,0.9286,2,1.0000,1.0000,1.660059,0.6132,6
-2,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,2798,0.067534,0.091002,12,1.018091,0.7500,2,1.0000,1.0000,2.507843,0.6250,1
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,complexity
+1,mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted,full_depth_settlement_executable_pnl,candidate,passed,3335,0.067525,0.081201,14,1.288053,0.9286,2,1.0000,1.0000,667,1.660059,0.6132,0.9000,6
+2,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,2798,0.067534,0.091002,12,1.018091,0.7500,2,1.0000,1.0000,560,2.507843,0.6250,0.9000,1
+""")
+'''
+
+FAKE_TRADEABLE_HARD_GATE_BY_FILTER = r'''
+import sys
+filter_value = ""
+for idx, arg in enumerate(sys.argv):
+    if arg == "--factor-name-filter" and idx + 1 < len(sys.argv):
+        filter_value = sys.argv[idx + 1]
+if filter_value == "external_move":
+    print("""=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=true stake_usd=15.00 min_entry_fill_rate=0.3000 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=739 event_complete_rows=2846 replay_parity_ready=true
+gate,passed,evidence
+recorded_replay_parity,true,blocking_flags=<none>
+
+# AutoFactor target=tradeable_full_depth_settlement_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,complexity
+1,mut_spread_adjusted_external_move_full_depth_entry_gate,tradeable_full_depth_settlement_pnl,candidate,passed,3335,0.065967,0.092183,14,1.268732,0.9286,2,1.0000,0.5000,667,1.388814,0.6042,1.0000,7
+""")
+else:
+    print("""=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=true stake_usd=15.00 min_entry_fill_rate=0.3000 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=739 event_complete_rows=2846 replay_parity_ready=true
+gate,passed,evidence
+recorded_replay_parity,true,blocking_flags=<none>
+
+# AutoFactor target=tradeable_full_depth_settlement_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,complexity
+1,mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate,tradeable_full_depth_settlement_pnl,candidate,passed,3335,0.080512,0.076800,14,0.951390,0.9286,2,1.0000,0.7500,667,0.872484,0.5757,1.0000,6
 """)
 '''
 
@@ -92,6 +124,8 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             "20",
             "--min-event-complete-rows",
             "40",
+            "--min-promotion-entry-fill-rate",
+            "0.30",
             "--cwd",
             str(ROOT),
         ]
@@ -113,6 +147,16 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             "#!/usr/bin/env python3\n"
             "import sys\n"
             f"{report}\n",
+            encoding="utf-8",
+        )
+        binary.chmod(0o755)
+        return binary
+
+    def fake_binary_by_filter(self, tmp: Path) -> Path:
+        binary = tmp / "fake_factor_walk_forward.py"
+        binary.write_text(
+            "#!/usr/bin/env python3\n"
+            f"{FAKE_TRADEABLE_HARD_GATE_BY_FILTER}\n",
             encoding="utf-8",
         )
         binary.chmod(0o755)
@@ -171,6 +215,59 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertEqual(summary["variants"][0]["qualified_count"], 1)
         self.assertIn("auto_settlement_conservative_settlement_edge", summary_md)
 
+    def test_promotes_alpha_search_artifacts_from_best_variant(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = tmp / "fake_factor_walk_forward.py"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "if '--alpha-search-output-dir' in args:\n"
+                "    out = pathlib.Path(args[args.index('--alpha-search-output-dir') + 1])\n"
+                "    out.mkdir(parents=True, exist_ok=True)\n"
+                "    filt = args[args.index('--factor-name-filter') + 1] if '--factor-name-filter' in args else ''\n"
+                "    (out / 'marker.txt').write_text(filt or '<empty>', encoding='utf-8')\n"
+                f"{FAKE_REPORT}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+            sweep_json = json.dumps(
+                [
+                    {"label": "base"},
+                    {"label": "settlement-only", "factor_name_filter": "auto_settlement"},
+                ]
+            )
+
+            subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--sweep-json",
+                    sweep_json,
+                    "--alpha-search-output-dir",
+                    str(tmp / "out" / "alpha-search"),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            root_marker = (tmp / "out" / "alpha-search" / "marker.txt").read_text(
+                encoding="utf-8"
+            )
+            first_marker = (
+                tmp / "out" / "001-base" / "alpha-search" / "marker.txt"
+            ).read_text(encoding="utf-8")
+            second_marker = (
+                tmp / "out" / "002-settlement-only" / "alpha-search" / "marker.txt"
+            ).read_text(encoding="utf-8")
+
+        self.assertEqual(root_marker, "<empty>")
+        self.assertEqual(first_marker, "<empty>")
+        self.assertEqual(second_marker, "auto_settlement")
+
     def test_summary_separates_discovery_from_runtime_mappable_candidates(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -206,6 +303,42 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertEqual(variant["best_runtime_mappable_factor"]["complexity"], 1)
         self.assertIsNone(variant["best_qualified_strategy"])
         self.assertIn("best runtime-mappable factor", summary_md)
+
+    def test_best_variant_prefers_tradeable_profit_metrics_over_rank_ic(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = self.fake_binary_by_filter(tmp)
+            sweep_json = json.dumps(
+                [
+                    {"label": "amplitude", "factor_name_filter": "amplitude_weighted"},
+                    {"label": "external", "factor_name_filter": "external_move"},
+                ]
+            )
+            subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--allowed-target",
+                    "tradeable_full_depth_settlement_pnl",
+                    "--sweep-json",
+                    sweep_json,
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            summary = json.loads((tmp / "out" / "sweep-summary.json").read_text(encoding="utf-8"))
+            handoff = json.loads(
+                (tmp / "out" / "autofactor-strategy-handoff.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(summary["best_variant"], "external")
+        self.assertEqual(
+            handoff["strategies"][0]["name"],
+            "mut_spread_adjusted_external_move_full_depth_entry_gate",
+        )
+        self.assertEqual(handoff["strategies"][0]["metrics"]["top_bucket_avg_label"], 1.388814)
 
     def test_hosted_workflow_passes_empty_factor_filter_to_sweep_runner(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -249,6 +382,8 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             captured = json.loads(capture.read_text(encoding="utf-8"))
 
         self.assertIn("--alpha-search-output-dir", captured)
+        alpha_index = captured.index("--alpha-search-output-dir")
+        self.assertIn("001-base/alpha-search", captured[alpha_index + 1])
         self.assertIn("--alpha-search-plan-json", captured)
         self.assertIn("--alpha-search-state-json", captured)
         self.assertIn("--alpha-search-llm-prior-json", captured)
@@ -314,6 +449,34 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertIn("--train-window-hours", captured)
         self.assertIn("--test-window-hours", captured)
         self.assertIn("--step-hours", captured)
+
+    def test_promotion_entry_fill_rate_arg_passes_through_to_factor_binary(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = tmp / "capture_factor_args.py"
+            capture = tmp / "captured_args.json"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                f"open({str(capture)!r}, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+                f"{FAKE_REPORT}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+
+            subprocess.run(
+                [*self.base_args(tmp, binary)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            captured = json.loads(capture.read_text(encoding="utf-8"))
+
+        self.assertIn("--min-promotion-entry-fill-rate", captured)
+        index = captured.index("--min-promotion-entry-fill-rate")
+        self.assertEqual(captured[index + 1], "0.30")
 
 
 if __name__ == "__main__":

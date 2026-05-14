@@ -544,8 +544,23 @@ fn autofactor_formula_entry_score(
     min_edge: f64,
 ) -> Option<(f64, f64)> {
     let raw = three_layer_model::auto_settlement_formula_score(runtime_score, inputs)?;
+    let formula_name = runtime_score
+        .strip_prefix("autofactor_formula:")
+        .unwrap_or(runtime_score);
+    let base_formula_name = formula_name
+        .strip_prefix("mut_")
+        .unwrap_or(formula_name)
+        .strip_suffix("_full_depth_entry_gate")
+        .unwrap_or_else(|| formula_name.strip_prefix("mut_").unwrap_or(formula_name));
+    let (threshold, scale) = if base_formula_name == "amplitude_weighted_momentum_30s_sigma"
+        || base_formula_name == "spread_adjusted_external_move"
+    {
+        (0.0, 0.02)
+    } else {
+        (min_edge.max(0.0), 0.08)
+    };
     let normalized =
-        three_layer_model::threshold_score(raw, min_edge.max(0.0), 0.08, false).clamp(-0.50, 1.0);
+        three_layer_model::threshold_score(raw, threshold, scale, false).clamp(-0.50, 1.0);
     Some((raw, normalized))
 }
 
@@ -1433,6 +1448,8 @@ impl ThreeLayerStrategy {
                         entry_price: entry_price_f,
                         distance_over_sigma,
                         direction_sign,
+                        drift_30s,
+                        sigma_horizon: sigma_h,
                         entry_capacity_ratio,
                         side_spread,
                         external_pressure: confirmation_score,
@@ -3500,6 +3517,8 @@ mod tests {
             entry_price: 0.30,
             distance_over_sigma: 0.20,
             direction_sign: 1.0,
+            drift_30s: 0.0,
+            sigma_horizon: 0.0,
             entry_capacity_ratio: 3.0,
             side_spread: 0.03,
             external_pressure: 0.0,
@@ -3527,6 +3546,8 @@ mod tests {
             entry_price: 0.30,
             distance_over_sigma: 0.20,
             direction_sign: 1.0,
+            drift_30s: 0.0,
+            sigma_horizon: 0.0,
             entry_capacity_ratio: 3.0,
             side_spread: 0.03,
             external_pressure: 0.0,
@@ -3566,6 +3587,8 @@ mod tests {
             entry_price: 0.30,
             distance_over_sigma: 0.20,
             direction_sign: 1.0,
+            drift_30s: 0.0,
+            sigma_horizon: 0.0,
             entry_capacity_ratio: 3.0,
             side_spread: 0.03,
             external_pressure: 0.0,
@@ -3592,6 +3615,93 @@ mod tests {
         assert!((good_raw - 0.06).abs() < 1e-9);
         assert!((low_raw - 0.01).abs() < 1e-9);
         assert!(good_score > low_score);
+    }
+
+    #[test]
+    fn predictive_autofactor_formula_uses_external_drift_before_pm_edge() {
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::SettlementProbability;
+        config.min_entry_score = 0.25;
+
+        let aligned = AutoSettlementFactorInputs {
+            settlement_edge: -0.01,
+            entry_price: 0.48,
+            distance_over_sigma: 0.20,
+            direction_sign: 1.0,
+            drift_30s: 0.006,
+            sigma_horizon: 4.0,
+            entry_capacity_ratio: 3.0,
+            side_spread: 0.03,
+            external_pressure: 0.0,
+            iv_change_1m: 0.0,
+        };
+        let opposed = AutoSettlementFactorInputs {
+            drift_30s: -0.006,
+            ..aligned
+        };
+
+        let (aligned_raw, aligned_score) = autofactor_formula_entry_score(
+            "autofactor_formula:amplitude_weighted_momentum_30s_sigma",
+            aligned,
+            config.min_edge,
+        )
+        .expect("predictive external formula score");
+        let (opposed_raw, opposed_score) = autofactor_formula_entry_score(
+            "autofactor_formula:amplitude_weighted_momentum_30s_sigma",
+            opposed,
+            config.min_edge,
+        )
+        .expect("opposed predictive external formula score");
+
+        assert!(aligned_raw > 0.0);
+        assert!(opposed_raw < 0.0);
+        assert!(aligned_score > config.min_entry_score);
+        assert!(opposed_score < aligned_score);
+    }
+
+    #[test]
+    fn predictive_autofactor_formula_supports_full_depth_entry_gate() {
+        let config = test_config();
+        let fillable = AutoSettlementFactorInputs {
+            settlement_edge: -0.01,
+            entry_price: 0.48,
+            distance_over_sigma: 0.20,
+            direction_sign: 1.0,
+            drift_30s: 0.006,
+            sigma_horizon: 4.0,
+            entry_capacity_ratio: 1.20,
+            side_spread: 0.03,
+            external_pressure: 0.0,
+            iv_change_1m: 0.0,
+        };
+        let unfillable = AutoSettlementFactorInputs {
+            entry_capacity_ratio: 0.80,
+            ..fillable
+        };
+
+        let (raw, score) = autofactor_formula_entry_score(
+            "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
+            fillable,
+            config.min_edge,
+        )
+        .expect("hard-gated predictive formula should score fillable rows");
+        assert!(raw > 0.0);
+        assert!(score > 0.0);
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
+            unfillable,
+            config.min_edge,
+        )
+        .is_none());
+
+        let (spread_raw, spread_score) = autofactor_formula_entry_score(
+            "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate",
+            fillable,
+            config.min_edge,
+        )
+        .expect("hard-gated spread-adjusted predictive formula should score fillable rows");
+        assert!(spread_raw > raw);
+        assert!(spread_score > score);
     }
 
     #[test]

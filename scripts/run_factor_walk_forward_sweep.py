@@ -34,6 +34,7 @@ SWEEP_KEYS = {
     "data_quality_mode",
     "min_event_complete_events",
     "min_event_complete_rows",
+    "min_promotion_entry_fill_rate",
 }
 
 OPTIONAL_SWEEP_KEYS = {
@@ -84,7 +85,12 @@ def load_sweep(raw: str, base: dict[str, str]) -> list[Variant]:
     return parsed
 
 
-def factor_args(args: argparse.Namespace, variant: Variant, replay_parity_json: str) -> list[str]:
+def factor_args(
+    args: argparse.Namespace,
+    variant: Variant,
+    replay_parity_json: str,
+    alpha_search_output_dir: str = "",
+) -> list[str]:
     values = variant.values
     command = [
         args.binary,
@@ -124,6 +130,8 @@ def factor_args(args: argparse.Namespace, variant: Variant, replay_parity_json: 
         values["min_event_complete_events"],
         "--min-event-complete-rows",
         values["min_event_complete_rows"],
+        "--min-promotion-entry-fill-rate",
+        values["min_promotion_entry_fill_rate"],
     ]
     if values.get("train_window_hours"):
         command.extend(["--train-window-hours", values["train_window_hours"]])
@@ -137,8 +145,8 @@ def factor_args(args: argparse.Namespace, variant: Variant, replay_parity_json: 
         command.extend(["--replay-parity-json", replay_parity_json])
     if args.require_deribit:
         command.append("--require-deribit")
-    if args.alpha_search_output_dir:
-        command.extend(["--alpha-search-output-dir", args.alpha_search_output_dir])
+    if alpha_search_output_dir:
+        command.extend(["--alpha-search-output-dir", alpha_search_output_dir])
     if args.alpha_search_plan_json:
         command.extend(["--alpha-search-plan-json", args.alpha_search_plan_json])
     if args.alpha_search_state_json:
@@ -194,8 +202,14 @@ def ranked_factor_rows(promotion: dict[str, Any], allowed_targets: set[str]) -> 
                 "positive_window_ratio": factor.get("positive_window_ratio"),
                 "symbol_positive_ratio": factor.get("symbol_positive_ratio"),
                 "monotonicity": factor.get("monotonicity"),
+                "n": factor.get("n"),
+                "window_count": factor.get("window_count"),
+                "top_bucket_n": factor.get("top_bucket_n"),
                 "top_bucket_avg_label": factor.get("top_bucket_avg_label"),
                 "top_bucket_positive_label_rate": factor.get("top_bucket_positive_label_rate"),
+                "top_bucket_full_depth_entry_fill_rate": factor.get(
+                    "top_bucket_full_depth_entry_fill_rate"
+                ),
                 "complexity": factor.get("complexity"),
                 "qualified": bool(item.get("qualified")),
                 "runtime_mapping": mapping,
@@ -296,6 +310,12 @@ def promote_best_variant(best: dict[str, Any] | None, output_dir: Path) -> None:
         src = source / name
         if src.exists():
             shutil.copy2(src, output_dir / name)
+    alpha_src = source / "alpha-search"
+    alpha_dst = output_dir / "alpha-search"
+    if alpha_src.exists():
+        if alpha_dst.exists():
+            shutil.rmtree(alpha_dst)
+        shutil.copytree(alpha_src, alpha_dst)
     (output_dir / "source.txt").write_text(
         f"canonical_result=snapshot_artifact_sweep\nbest_variant={best['label']}\n",
         encoding="utf-8",
@@ -316,7 +336,15 @@ def run_variant(
         encoding="utf-8",
     )
     report_path = variant_dir / "report.txt"
-    command = factor_args(args, variant, replay_parity_json)
+    variant_alpha_search_output_dir = ""
+    if args.alpha_search_output_dir:
+        variant_alpha_search_output_dir = str(variant_dir / "alpha-search")
+    command = factor_args(
+        args,
+        variant,
+        replay_parity_json,
+        variant_alpha_search_output_dir,
+    )
     started = time.monotonic()
     with report_path.open("w", encoding="utf-8") as report:
         result = subprocess.run(
@@ -374,6 +402,25 @@ def run_variant(
         kind="qualified",
     )
     return item
+
+
+def variant_selection_score(item: dict[str, Any]) -> tuple[float, ...]:
+    factor = (
+        item.get("best_qualified_strategy")
+        or item.get("best_runtime_mappable_factor")
+        or item.get("best_factor")
+        or {}
+    )
+    return (
+        float(item.get("qualified_count", 0) or 0),
+        1.0 if item.get("best_qualified_strategy") else 0.0,
+        1.0 if item.get("best_runtime_mappable_factor") else 0.0,
+        float(factor.get("top_bucket_full_depth_entry_fill_rate") or 0.0),
+        float(factor.get("top_bucket_avg_label") or 0.0),
+        float(factor.get("icir") or 0.0),
+        float(factor.get("positive_window_ratio") or 0.0),
+        float(factor.get("spearman_ic") or 0.0),
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -437,22 +484,7 @@ def main() -> int:
     if completed:
         best = max(
             completed,
-            key=lambda item: (
-                item.get("qualified_count", 0),
-                1.0 if item.get("best_runtime_mappable_factor") else 0.0,
-                float(
-                    (item.get("best_runtime_mappable_factor") or item.get("best_factor") or {}).get(
-                        "positive_window_ratio"
-                    )
-                    or 0.0
-                ),
-                float(
-                    (item.get("best_runtime_mappable_factor") or item.get("best_factor") or {}).get(
-                        "spearman_ic"
-                    )
-                    or 0.0
-                ),
-            ),
+            key=variant_selection_score,
         )
     summary = {
         "schema_version": "factor_walk_forward_sweep_v1",

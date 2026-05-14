@@ -111,7 +111,8 @@ fn replay_parity_evidence(path: &str) -> (bool, String) {
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let event_ready = json
-        .pointer("/event_comparison/strict_parity_ready")
+        .pointer("/runtime_evidence_comparison/events/strict_parity_ready")
+        .or_else(|| json.pointer("/event_comparison/strict_parity_ready"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let risk_flags = json
@@ -214,6 +215,29 @@ mod tests {
         assert!(ready, "{evidence}");
         let _ = fs::remove_file(path);
     }
+
+    #[test]
+    fn replay_parity_prefers_runtime_event_comparison_over_legacy_event_summary() {
+        let path = write_parity_fixture(
+            "runtime-event-ready",
+            r#"{
+              "decision": "continue",
+              "blocking_risk_flags": [],
+              "runtime_evidence_comparison": {
+                "strict_parity_ready": true,
+                "events": {"strict_parity_ready": true}
+              },
+              "event_comparison": {"strict_parity_ready": false}
+            }"#,
+        );
+
+        let (ready, evidence) = replay_parity_evidence(&path);
+
+        assert!(ready, "{evidence}");
+        assert!(evidence.contains("runtime_ready=true"));
+        assert!(evidence.contains("event_ready=true"));
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn alpha_search_plan_factor_names(path: &str) -> Vec<String> {
@@ -239,6 +263,22 @@ fn read_llm_prior(path: &str) -> LlmPriorSpec {
         .unwrap_or_else(|err| panic!("read alpha search LLM prior JSON {path} failed: {err}"));
     serde_json::from_str(&raw)
         .unwrap_or_else(|err| panic!("parse alpha search LLM prior JSON {path} failed: {err}"))
+}
+
+fn filter_autofactor_reports(
+    reports: Vec<ploy_research::AutoFactorReport>,
+    factor_name_filter: Option<&str>,
+) -> Vec<ploy_research::AutoFactorReport> {
+    let Some(filter) = factor_name_filter
+        .map(str::trim)
+        .filter(|filter| !filter.is_empty())
+    else {
+        return reports;
+    };
+    reports
+        .into_iter()
+        .filter(|report| report.name.contains(filter))
+        .collect()
 }
 
 fn slice_by_time<T, F>(items: &[T], start: DateTime<Utc>, end: DateTime<Utc>, ts_fn: F) -> &[T]
@@ -347,6 +387,11 @@ async fn main() {
     let min_event_complete_rows = flag_value(&args, "--min-event-complete-rows")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(40);
+    let min_promotion_entry_fill_rate = flag_value(&args, "--min-promotion-entry-fill-rate")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or_else(|| {
+            SettlementProbabilityPromotionGateOptions::default().min_entry_fill_rate
+        });
     if snapshot_dir.is_some() && db_url.is_some() {
         eprintln!("ERROR: --snapshot-dir cannot be combined with --db-url");
         std::process::exit(2);
@@ -701,6 +746,7 @@ async fn main() {
         &conservative_execution_matrix,
         SettlementProbabilityPromotionGateOptions {
             stake_usd: options.review.stake_usd,
+            min_entry_fill_rate: min_promotion_entry_fill_rate,
             require_deribit,
             include_deribit,
             data_audit_status: snapshot_data_audit_status,
@@ -709,6 +755,7 @@ async fn main() {
             event_complete_rows: event_complete_rows.len(),
             min_event_complete_events,
             min_event_complete_rows,
+            global_full_depth_entry_fill_rate: Some(report.health.full_depth_entry_fill_rate()),
             replay_parity_ready: replay_parity_status
                 .as_ref()
                 .map(|(ready, _)| *ready)
@@ -724,6 +771,7 @@ async fn main() {
     let autofactor_options = AutoFactorOptions {
         min_observations: options.review.min_observations.max(50),
         min_window_observations: options.review.min_observations.max(20),
+        min_top_bucket_full_depth_entry_fill_rate: min_promotion_entry_fill_rate,
         ..Default::default()
     };
     let alpha_search_input_names = alpha_search_output_dir.as_ref().and_then(|_| {
@@ -761,6 +809,7 @@ async fn main() {
         AutoFactorV2Target::FullDepthRepricePnl10s,
         AutoFactorV2Target::FullDepthRepricePnl30s,
         AutoFactorV2Target::FullDepthSettlementExecutablePnl,
+        AutoFactorV2Target::TradeableFullDepthSettlementPnl,
     ] {
         match mine_domain_autofactors_from_v2_with_guidance(
             &autofactor_rows,
@@ -770,6 +819,8 @@ async fn main() {
             llm_prior.as_ref(),
         ) {
             Ok(reports) => {
+                let reports =
+                    filter_autofactor_reports(reports, options.factor_name_filter.as_deref());
                 println!("# AutoFactor target={}", target.as_str());
                 println!("{}", format_autofactor_reports(&reports, options.top_n));
                 if let (Some(output_dir), Some(input_names)) = (

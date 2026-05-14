@@ -166,6 +166,7 @@ struct NodeMetric {
     icir: f64,
     positive_window_ratio: f64,
     top_bucket_avg_label: f64,
+    top_bucket_full_depth_entry_fill_rate: f64,
     monotonicity_score: f64,
     complexity: usize,
 }
@@ -468,13 +469,11 @@ fn node_metric(idx: usize, report: &AutoFactorReport) -> NodeMetric {
         effectiveness: normalized_positive(report.top_bucket_avg_label),
         stability: report.positive_window_ratio.clamp(0.0, 1.0),
         diversity: 1.0 / report.complexity.max(1) as f64,
-        execution_cost: if report.name.contains("capacity") || report.name.contains("spread") {
-            1.0
-        } else {
-            0.5
-        },
+        execution_cost: execution_score(report),
         overfit_risk: 1.0 / report.complexity.max(1) as f64,
-        runtime_readiness: if report.name.starts_with("auto_settlement_") {
+        runtime_readiness: if report.name.starts_with("auto_settlement_")
+            || report.name == "amplitude_weighted_momentum_30s_sigma"
+        {
             1.0
         } else {
             0.5
@@ -484,6 +483,9 @@ fn node_metric(idx: usize, report: &AutoFactorReport) -> NodeMetric {
         icir: finite_or_zero(report.icir),
         positive_window_ratio: finite_or_zero(report.positive_window_ratio),
         top_bucket_avg_label: finite_or_zero(report.top_bucket_avg_label),
+        top_bucket_full_depth_entry_fill_rate: finite_or_zero(
+            report.top_bucket_full_depth_entry_fill_rate,
+        ),
         monotonicity_score: finite_or_zero(report.monotonicity_score),
         complexity: report.complexity,
     }
@@ -590,6 +592,7 @@ fn proposed_mutation(selected_dimension: &str) -> &'static str {
         "stability" => "add_feature_gate",
         "effectiveness" => "replace_denominator",
         "monotonicity" => "clip_or_squash",
+        "execution_quality" => "add_capacity_gate",
         "overfit_risk" => "remove_component",
         "exploit" => "add_capacity_gate",
         _ => "clip_or_squash",
@@ -607,8 +610,19 @@ fn reward(report: &AutoFactorReport) -> f64 {
         + finite_or_zero(report.spearman_ic).tanh()
         + finite_or_zero(report.positive_window_ratio)
         + normalized_positive(report.top_bucket_avg_label)
+        + execution_score(report)
         + finite_or_zero(report.monotonicity_score)
         - (report.complexity as f64 / 32.0)
+}
+
+fn execution_score(report: &AutoFactorReport) -> f64 {
+    let top_bucket_fillability = finite_or_zero(report.top_bucket_full_depth_entry_fill_rate);
+    let structure_bonus = if report.name.contains("capacity") || report.name.contains("spread") {
+        0.25
+    } else {
+        0.0
+    };
+    (top_bucket_fillability + structure_bonus).clamp(0.0, 1.0)
 }
 
 fn selected_dimension(report: &AutoFactorReport) -> String {
@@ -616,6 +630,7 @@ fn selected_dimension(report: &AutoFactorReport) -> String {
         "too_few_observations" | "no_powered_windows" => "sample_power",
         "low_icir" | "unstable_positive_windows" => "stability",
         "nonpositive_top_bucket_label" | "nonpositive_rank_ic" => "effectiveness",
+        "low_top_bucket_fillability" => "execution_quality",
         "nonmonotonic_buckets" => "monotonicity",
         "too_complex" => "overfit_risk",
         "passed" => "exploit",
@@ -659,6 +674,7 @@ fn root_gene(expr: &FactorExpr) -> String {
         FactorExpr::RollingMean { .. } => "RollingMean",
         FactorExpr::RollingStd { .. } => "RollingStd",
         FactorExpr::ZScore { .. } => "ZScore",
+        FactorExpr::Gate { .. } => "Gate",
     }
     .to_string()
 }
@@ -710,6 +726,7 @@ mod tests {
             top_bucket_n: 20,
             top_bucket_avg_label: 0.2,
             top_bucket_positive_label_rate: 0.7,
+            top_bucket_full_depth_entry_fill_rate: 0.8,
             monotonicity_score: 1.0,
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
@@ -767,6 +784,7 @@ mod tests {
             top_bucket_n: 20,
             top_bucket_avg_label: 0.2,
             top_bucket_positive_label_rate: 0.7,
+            top_bucket_full_depth_entry_fill_rate: 0.8,
             monotonicity_score: 1.0,
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
