@@ -173,6 +173,59 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertEqual(summary["variants"][0]["qualified_count"], 1)
         self.assertIn("auto_settlement_conservative_settlement_edge", summary_md)
 
+    def test_promotes_alpha_search_artifacts_from_best_variant(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = tmp / "fake_factor_walk_forward.py"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "if '--alpha-search-output-dir' in args:\n"
+                "    out = pathlib.Path(args[args.index('--alpha-search-output-dir') + 1])\n"
+                "    out.mkdir(parents=True, exist_ok=True)\n"
+                "    filt = args[args.index('--factor-name-filter') + 1] if '--factor-name-filter' in args else ''\n"
+                "    (out / 'marker.txt').write_text(filt or '<empty>', encoding='utf-8')\n"
+                f"{FAKE_REPORT}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+            sweep_json = json.dumps(
+                [
+                    {"label": "base"},
+                    {"label": "settlement-only", "factor_name_filter": "auto_settlement"},
+                ]
+            )
+
+            subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--sweep-json",
+                    sweep_json,
+                    "--alpha-search-output-dir",
+                    str(tmp / "out" / "alpha-search"),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            root_marker = (tmp / "out" / "alpha-search" / "marker.txt").read_text(
+                encoding="utf-8"
+            )
+            first_marker = (
+                tmp / "out" / "001-base" / "alpha-search" / "marker.txt"
+            ).read_text(encoding="utf-8")
+            second_marker = (
+                tmp / "out" / "002-settlement-only" / "alpha-search" / "marker.txt"
+            ).read_text(encoding="utf-8")
+
+        self.assertEqual(root_marker, "<empty>")
+        self.assertEqual(first_marker, "<empty>")
+        self.assertEqual(second_marker, "auto_settlement")
+
     def test_summary_separates_discovery_from_runtime_mappable_candidates(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -251,6 +304,8 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             captured = json.loads(capture.read_text(encoding="utf-8"))
 
         self.assertIn("--alpha-search-output-dir", captured)
+        alpha_index = captured.index("--alpha-search-output-dir")
+        self.assertIn("001-base/alpha-search", captured[alpha_index + 1])
         self.assertIn("--alpha-search-plan-json", captured)
         self.assertIn("--alpha-search-state-json", captured)
         self.assertIn("--alpha-search-llm-prior-json", captured)

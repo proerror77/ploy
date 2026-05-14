@@ -85,7 +85,12 @@ def load_sweep(raw: str, base: dict[str, str]) -> list[Variant]:
     return parsed
 
 
-def factor_args(args: argparse.Namespace, variant: Variant, replay_parity_json: str) -> list[str]:
+def factor_args(
+    args: argparse.Namespace,
+    variant: Variant,
+    replay_parity_json: str,
+    alpha_search_output_dir: str = "",
+) -> list[str]:
     values = variant.values
     command = [
         args.binary,
@@ -140,8 +145,8 @@ def factor_args(args: argparse.Namespace, variant: Variant, replay_parity_json: 
         command.extend(["--replay-parity-json", replay_parity_json])
     if args.require_deribit:
         command.append("--require-deribit")
-    if args.alpha_search_output_dir:
-        command.extend(["--alpha-search-output-dir", args.alpha_search_output_dir])
+    if alpha_search_output_dir:
+        command.extend(["--alpha-search-output-dir", alpha_search_output_dir])
     if args.alpha_search_plan_json:
         command.extend(["--alpha-search-plan-json", args.alpha_search_plan_json])
     if args.alpha_search_state_json:
@@ -305,6 +310,12 @@ def promote_best_variant(best: dict[str, Any] | None, output_dir: Path) -> None:
         src = source / name
         if src.exists():
             shutil.copy2(src, output_dir / name)
+    alpha_src = source / "alpha-search"
+    alpha_dst = output_dir / "alpha-search"
+    if alpha_src.exists():
+        if alpha_dst.exists():
+            shutil.rmtree(alpha_dst)
+        shutil.copytree(alpha_src, alpha_dst)
     (output_dir / "source.txt").write_text(
         f"canonical_result=snapshot_artifact_sweep\nbest_variant={best['label']}\n",
         encoding="utf-8",
@@ -325,7 +336,15 @@ def run_variant(
         encoding="utf-8",
     )
     report_path = variant_dir / "report.txt"
-    command = factor_args(args, variant, replay_parity_json)
+    variant_alpha_search_output_dir = ""
+    if args.alpha_search_output_dir:
+        variant_alpha_search_output_dir = str(variant_dir / "alpha-search")
+    command = factor_args(
+        args,
+        variant,
+        replay_parity_json,
+        variant_alpha_search_output_dir,
+    )
     started = time.monotonic()
     with report_path.open("w", encoding="utf-8") as report:
         result = subprocess.run(
