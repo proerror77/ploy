@@ -241,6 +241,20 @@ fn read_llm_prior(path: &str) -> LlmPriorSpec {
         .unwrap_or_else(|err| panic!("parse alpha search LLM prior JSON {path} failed: {err}"))
 }
 
+fn filter_autofactor_reports(
+    reports: Vec<ploy_research::AutoFactorReport>,
+    factor_name_filter: Option<&str>,
+) -> Vec<ploy_research::AutoFactorReport> {
+    let Some(filter) = factor_name_filter.map(str::trim).filter(|filter| !filter.is_empty())
+    else {
+        return reports;
+    };
+    reports
+        .into_iter()
+        .filter(|report| report.name.contains(filter))
+        .collect()
+}
+
 fn slice_by_time<T, F>(items: &[T], start: DateTime<Utc>, end: DateTime<Utc>, ts_fn: F) -> &[T]
 where
     F: Fn(&T) -> DateTime<Utc>,
@@ -776,6 +790,8 @@ async fn main() {
             llm_prior.as_ref(),
         ) {
             Ok(reports) => {
+                let reports =
+                    filter_autofactor_reports(reports, options.factor_name_filter.as_deref());
                 println!("# AutoFactor target={}", target.as_str());
                 println!("{}", format_autofactor_reports(&reports, options.top_n));
                 if let (Some(output_dir), Some(input_names)) = (
