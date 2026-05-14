@@ -111,7 +111,8 @@ fn replay_parity_evidence(path: &str) -> (bool, String) {
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let event_ready = json
-        .pointer("/event_comparison/strict_parity_ready")
+        .pointer("/runtime_evidence_comparison/events/strict_parity_ready")
+        .or_else(|| json.pointer("/event_comparison/strict_parity_ready"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let risk_flags = json
@@ -214,6 +215,29 @@ mod tests {
         assert!(ready, "{evidence}");
         let _ = fs::remove_file(path);
     }
+
+    #[test]
+    fn replay_parity_prefers_runtime_event_comparison_over_legacy_event_summary() {
+        let path = write_parity_fixture(
+            "runtime-event-ready",
+            r#"{
+              "decision": "continue",
+              "blocking_risk_flags": [],
+              "runtime_evidence_comparison": {
+                "strict_parity_ready": true,
+                "events": {"strict_parity_ready": true}
+              },
+              "event_comparison": {"strict_parity_ready": false}
+            }"#,
+        );
+
+        let (ready, evidence) = replay_parity_evidence(&path);
+
+        assert!(ready, "{evidence}");
+        assert!(evidence.contains("runtime_ready=true"));
+        assert!(evidence.contains("event_ready=true"));
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn alpha_search_plan_factor_names(path: &str) -> Vec<String> {
@@ -245,7 +269,9 @@ fn filter_autofactor_reports(
     reports: Vec<ploy_research::AutoFactorReport>,
     factor_name_filter: Option<&str>,
 ) -> Vec<ploy_research::AutoFactorReport> {
-    let Some(filter) = factor_name_filter.map(str::trim).filter(|filter| !filter.is_empty())
+    let Some(filter) = factor_name_filter
+        .map(str::trim)
+        .filter(|filter| !filter.is_empty())
     else {
         return reports;
     };
@@ -363,7 +389,9 @@ async fn main() {
         .unwrap_or(40);
     let min_promotion_entry_fill_rate = flag_value(&args, "--min-promotion-entry-fill-rate")
         .and_then(|raw| raw.parse().ok())
-        .unwrap_or_else(|| SettlementProbabilityPromotionGateOptions::default().min_entry_fill_rate);
+        .unwrap_or_else(|| {
+            SettlementProbabilityPromotionGateOptions::default().min_entry_fill_rate
+        });
     if snapshot_dir.is_some() && db_url.is_some() {
         eprintln!("ERROR: --snapshot-dir cannot be combined with --db-url");
         std::process::exit(2);
