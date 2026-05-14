@@ -55,6 +55,8 @@ pub struct AutoSettlementFactorInputs {
     pub entry_price: f64,
     pub distance_over_sigma: f64,
     pub direction_sign: f64,
+    pub drift_30s: f64,
+    pub sigma_horizon: f64,
     pub entry_capacity_ratio: f64,
     pub side_spread: f64,
     pub external_pressure: f64,
@@ -127,6 +129,18 @@ pub fn auto_settlement_formula_score(
     let name = runtime_score
         .strip_prefix("autofactor_formula:")
         .unwrap_or(runtime_score);
+    if name == "amplitude_weighted_momentum_30s_sigma" {
+        if !inputs.drift_30s.is_finite()
+            || !inputs.direction_sign.is_finite()
+            || !inputs.sigma_horizon.is_finite()
+        {
+            return None;
+        }
+        let side_drift = inputs.drift_30s * inputs.direction_sign;
+        let score = side_drift * inputs.sigma_horizon.abs().ln_1p();
+        return score.is_finite().then_some(score);
+    }
+
     let is_full_depth = name.starts_with("auto_settlement_full_depth_settlement_edge");
     let is_conservative = name.starts_with("auto_settlement_conservative_settlement_edge");
     if !is_full_depth && !is_conservative {

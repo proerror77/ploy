@@ -34,6 +34,7 @@ SWEEP_KEYS = {
     "data_quality_mode",
     "min_event_complete_events",
     "min_event_complete_rows",
+    "min_promotion_entry_fill_rate",
 }
 
 OPTIONAL_SWEEP_KEYS = {
@@ -124,6 +125,8 @@ def factor_args(args: argparse.Namespace, variant: Variant, replay_parity_json: 
         values["min_event_complete_events"],
         "--min-event-complete-rows",
         values["min_event_complete_rows"],
+        "--min-promotion-entry-fill-rate",
+        values["min_promotion_entry_fill_rate"],
     ]
     if values.get("train_window_hours"):
         command.extend(["--train-window-hours", values["train_window_hours"]])

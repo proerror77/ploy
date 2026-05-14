@@ -474,7 +474,9 @@ fn node_metric(idx: usize, report: &AutoFactorReport) -> NodeMetric {
             0.5
         },
         overfit_risk: 1.0 / report.complexity.max(1) as f64,
-        runtime_readiness: if report.name.starts_with("auto_settlement_") {
+        runtime_readiness: if report.name.starts_with("auto_settlement_")
+            || report.name == "amplitude_weighted_momentum_30s_sigma"
+        {
             1.0
         } else {
             0.5

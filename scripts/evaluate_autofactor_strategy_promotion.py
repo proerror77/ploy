@@ -46,6 +46,11 @@ BUILTIN_RUNTIME_MAPPINGS: dict[str, dict[str, str]] = {
         "strategy_family": "repricing",
         "runtime_score": "repricing_gap_side_10s",
     },
+    "amplitude_weighted_momentum_30s_sigma": {
+        "strategy_profile": "settlement_probability",
+        "strategy_family": "predictive_settlement_probability",
+        "runtime_score": "autofactor_formula:amplitude_weighted_momentum_30s_sigma",
+    },
     "settlement_fair_edge": {
         "strategy_profile": "",
         "strategy_family": "settlement_probability",

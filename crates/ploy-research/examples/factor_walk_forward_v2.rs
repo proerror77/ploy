@@ -347,6 +347,9 @@ async fn main() {
     let min_event_complete_rows = flag_value(&args, "--min-event-complete-rows")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(40);
+    let min_promotion_entry_fill_rate = flag_value(&args, "--min-promotion-entry-fill-rate")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or_else(|| SettlementProbabilityPromotionGateOptions::default().min_entry_fill_rate);
     if snapshot_dir.is_some() && db_url.is_some() {
         eprintln!("ERROR: --snapshot-dir cannot be combined with --db-url");
         std::process::exit(2);
@@ -701,6 +704,7 @@ async fn main() {
         &conservative_execution_matrix,
         SettlementProbabilityPromotionGateOptions {
             stake_usd: options.review.stake_usd,
+            min_entry_fill_rate: min_promotion_entry_fill_rate,
             require_deribit,
             include_deribit,
             data_audit_status: snapshot_data_audit_status,

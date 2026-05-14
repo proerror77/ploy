@@ -92,6 +92,8 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             "20",
             "--min-event-complete-rows",
             "40",
+            "--min-promotion-entry-fill-rate",
+            "0.30",
             "--cwd",
             str(ROOT),
         ]
@@ -314,6 +316,34 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertIn("--train-window-hours", captured)
         self.assertIn("--test-window-hours", captured)
         self.assertIn("--step-hours", captured)
+
+    def test_promotion_entry_fill_rate_arg_passes_through_to_factor_binary(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = tmp / "capture_factor_args.py"
+            capture = tmp / "captured_args.json"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                f"open({str(capture)!r}, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+                f"{FAKE_REPORT}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+
+            subprocess.run(
+                [*self.base_args(tmp, binary)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            captured = json.loads(capture.read_text(encoding="utf-8"))
+
+        self.assertIn("--min-promotion-entry-fill-rate", captured)
+        index = captured.index("--min-promotion-entry-fill-rate")
+        self.assertEqual(captured[index + 1], "0.30")
 
 
 if __name__ == "__main__":

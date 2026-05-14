@@ -586,7 +586,7 @@ impl Default for SettlementProbabilityPromotionGateOptions {
     fn default() -> Self {
         Self {
             stake_usd: DEFAULT_STAKE_USD,
-            min_entry_fill_rate: 0.05,
+            min_entry_fill_rate: 0.30,
             max_expected_calibration_error: 0.05,
             min_positive_window_ratio: 0.60,
             require_deribit: false,

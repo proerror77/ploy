@@ -62,6 +62,14 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
 4,auto_settlement_full_depth_settlement_edge_x_external_pressure,full_depth_settlement_executable_pnl,reject,nonpositive_rank_ic,57777,-0.021993,0.069182,45,0.217558,0.4667,6,0.5000,0.5000,11555,-0.301991,0.4785,3
 """
 
+AUTOFACTOR_PREDICTIVE_EXTERNAL_REPORT = """
+# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,complexity
+1,amplitude_weighted_momentum_30s_sigma,full_depth_settlement_executable_pnl,candidate,passed,3167,0.083421,0.044219,8,1.102341,0.8750,2,1.0000,1.0000,634,1.471203,0.6120,3
+"""
+
 CORE_SUITE_REPORT = f"""
 # Snapshot
 snapshot_schema=1
@@ -179,6 +187,24 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         )
         self.assertFalse(rejected["qualified"])
         self.assertIn("autofactor_not_candidate:reject:nonpositive_rank_ic", rejected["blockers"])
+
+    def test_qualifies_predictive_external_formula_when_gate_is_ready(self):
+        _, payload, registry, handoff, handoff_md = self.run_script(
+            READY_GATE + AUTOFACTOR_PREDICTIVE_EXTERNAL_REPORT
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(registry["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(
+            handoff["strategies"][0]["runtime_score"],
+            "autofactor_formula:amplitude_weighted_momentum_30s_sigma",
+        )
+        self.assertEqual(
+            handoff["strategies"][0]["strategy_family"],
+            "predictive_settlement_probability",
+        )
+        self.assertIn("amplitude_weighted_momentum_30s_sigma", handoff_md)
 
     def test_core_suite_report_is_sufficient_for_handoff_evaluation(self):
         self.assertNotIn("=== Fillability Review V1 Data Health ===", CORE_SUITE_REPORT)
