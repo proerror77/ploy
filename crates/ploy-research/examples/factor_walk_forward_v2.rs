@@ -743,6 +743,7 @@ async fn main() {
     let autofactor_options = AutoFactorOptions {
         min_observations: options.review.min_observations.max(50),
         min_window_observations: options.review.min_observations.max(20),
+        min_top_bucket_full_depth_entry_fill_rate: min_promotion_entry_fill_rate,
         ..Default::default()
     };
     let alpha_search_input_names = alpha_search_output_dir.as_ref().and_then(|_| {

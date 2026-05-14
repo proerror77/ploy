@@ -207,6 +207,7 @@ pub struct AutoFactorOptions {
     pub min_icir: f64,
     pub min_positive_window_ratio: f64,
     pub min_top_bucket_avg_label: f64,
+    pub min_top_bucket_full_depth_entry_fill_rate: f64,
     pub min_monotonicity_score: f64,
     pub max_complexity: usize,
 }
@@ -221,6 +222,7 @@ impl Default for AutoFactorOptions {
             min_icir: 0.5,
             min_positive_window_ratio: 0.60,
             min_top_bucket_avg_label: 0.0,
+            min_top_bucket_full_depth_entry_fill_rate: 0.0,
             min_monotonicity_score: 0.50,
             max_complexity: 16,
         }
@@ -454,6 +456,8 @@ pub fn evaluate_named_factor(
         factor_icir,
         positive_window_ratio,
         top.map(|bucket| bucket.avg_label).unwrap_or(f64::NAN),
+        top.map(|bucket| bucket.full_depth_entry_fill_rate)
+            .unwrap_or(f64::NAN),
         monotonicity_score,
         options,
     );
@@ -1515,6 +1519,7 @@ fn autofactor_decision(
     factor_icir: f64,
     positive_window_ratio: f64,
     top_bucket_avg_label: f64,
+    top_bucket_full_depth_entry_fill_rate: f64,
     monotonicity_score: f64,
     options: &AutoFactorOptions,
 ) -> (AutoFactorDecision, String) {
@@ -1553,6 +1558,16 @@ fn autofactor_decision(
         return (
             AutoFactorDecision::Watchlist,
             "nonpositive_top_bucket_label".to_string(),
+        );
+    }
+    if options.min_top_bucket_full_depth_entry_fill_rate > 0.0
+        && (!top_bucket_full_depth_entry_fill_rate.is_finite()
+            || top_bucket_full_depth_entry_fill_rate
+                < options.min_top_bucket_full_depth_entry_fill_rate)
+    {
+        return (
+            AutoFactorDecision::Watchlist,
+            "low_top_bucket_fillability".to_string(),
         );
     }
     if monotonicity_score < options.min_monotonicity_score {
@@ -2149,6 +2164,53 @@ mod tests {
         assert_eq!(labels[0], 0.0);
         assert!(legacy_labels[0].is_nan());
         assert!(labels[1].is_finite());
+    }
+
+    #[test]
+    fn autofactor_gate_marks_low_top_bucket_fillability_watchlist() {
+        let rows = 100;
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "score".to_string(),
+            (0..rows).map(|idx| idx as f64).collect::<Vec<_>>(),
+        );
+        columns.insert(
+            "__full_depth_entry_fillable".to_string(),
+            (0..rows)
+                .map(|idx| if idx < 50 { 1.0 } else { 0.0 })
+                .collect::<Vec<_>>(),
+        );
+        let matrix = AutoFactorMatrix::new(columns).expect("matrix");
+        let labels = (0..rows).map(|idx| idx as f64).collect::<Vec<_>>();
+        let windows = (0..rows)
+            .map(|idx| format!("w{}", idx / 20))
+            .collect::<Vec<_>>();
+        let symbols = vec!["BTCUSDT".to_string(); rows];
+        let options = AutoFactorOptions {
+            min_observations: 50,
+            min_window_observations: 20,
+            min_icir: 0.0,
+            min_top_bucket_full_depth_entry_fill_rate: 0.30,
+            ..Default::default()
+        };
+        let reports = mine_autofactors(
+            &[NamedFactorExpr {
+                name: "score".to_string(),
+                target: Some("tradeable_full_depth_settlement_pnl".to_string()),
+                expr: input("score"),
+                notes: vec![],
+            }],
+            &matrix,
+            &labels,
+            &windows,
+            &symbols,
+            &options,
+        )
+        .expect("reports");
+
+        assert_eq!(reports[0].decision, AutoFactorDecision::Watchlist);
+        assert_eq!(reports[0].reason, "low_top_bucket_fillability");
+        assert_eq!(reports[0].top_bucket_full_depth_entry_fill_rate, 0.0);
     }
 
     #[test]
