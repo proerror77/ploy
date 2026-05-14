@@ -404,6 +404,25 @@ def run_variant(
     return item
 
 
+def variant_selection_score(item: dict[str, Any]) -> tuple[float, ...]:
+    factor = (
+        item.get("best_qualified_strategy")
+        or item.get("best_runtime_mappable_factor")
+        or item.get("best_factor")
+        or {}
+    )
+    return (
+        float(item.get("qualified_count", 0) or 0),
+        1.0 if item.get("best_qualified_strategy") else 0.0,
+        1.0 if item.get("best_runtime_mappable_factor") else 0.0,
+        float(factor.get("top_bucket_full_depth_entry_fill_rate") or 0.0),
+        float(factor.get("top_bucket_avg_label") or 0.0),
+        float(factor.get("icir") or 0.0),
+        float(factor.get("positive_window_ratio") or 0.0),
+        float(factor.get("spearman_ic") or 0.0),
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True)
@@ -465,22 +484,7 @@ def main() -> int:
     if completed:
         best = max(
             completed,
-            key=lambda item: (
-                item.get("qualified_count", 0),
-                1.0 if item.get("best_runtime_mappable_factor") else 0.0,
-                float(
-                    (item.get("best_runtime_mappable_factor") or item.get("best_factor") or {}).get(
-                        "positive_window_ratio"
-                    )
-                    or 0.0
-                ),
-                float(
-                    (item.get("best_runtime_mappable_factor") or item.get("best_factor") or {}).get(
-                        "spearman_ic"
-                    )
-                    or 0.0
-                ),
-            ),
+            key=variant_selection_score,
         )
     summary = {
         "schema_version": "factor_walk_forward_sweep_v1",
