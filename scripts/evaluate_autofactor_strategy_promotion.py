@@ -160,6 +160,7 @@ class AutoFactorRow:
     top_bucket_n: int
     top_bucket_avg_label: float
     top_bucket_positive_label_rate: float
+    top_bucket_full_depth_entry_fill_rate: float
     complexity: int
 
 
@@ -186,6 +187,7 @@ def factor_metrics(row: AutoFactorRow) -> dict[str, Any]:
         "top_bucket_n": row.top_bucket_n,
         "top_bucket_avg_label": row.top_bucket_avg_label,
         "top_bucket_positive_label_rate": row.top_bucket_positive_label_rate,
+        "top_bucket_full_depth_entry_fill_rate": row.top_bucket_full_depth_entry_fill_rate,
         "complexity": row.complexity,
     }
 
@@ -284,6 +286,9 @@ def parse_autofactor_rows(report_text: str) -> list[AutoFactorRow]:
                 top_bucket_n=parse_int(item.get("top_bucket_n", "0")),
                 top_bucket_avg_label=parse_float(item["top_bucket_avg_label"]),
                 top_bucket_positive_label_rate=parse_float(item["top_bucket_positive_label_rate"]),
+                top_bucket_full_depth_entry_fill_rate=parse_float(
+                    item.get("top_bucket_full_depth_entry_fill_rate", "nan")
+                ),
                 complexity=parse_int(item["complexity"]),
             )
         )
@@ -337,6 +342,7 @@ def evaluate(
     runtime_mappings: dict[str, dict[str, str]],
     min_factor_n: int,
     min_top_bucket_n: int,
+    min_top_bucket_entry_fill_rate: float,
     min_window_count: int,
 ) -> dict[str, Any]:
     gate = parse_promotion_gate(report_text)
@@ -357,6 +363,15 @@ def evaluate(
         if row.top_bucket_n < min_top_bucket_n:
             blockers.append(
                 f"top_bucket_sample_too_small:{row.top_bucket_n}<{min_top_bucket_n}"
+            )
+        if (
+            row.top_bucket_full_depth_entry_fill_rate != row.top_bucket_full_depth_entry_fill_rate
+            or row.top_bucket_full_depth_entry_fill_rate < min_top_bucket_entry_fill_rate
+        ):
+            blockers.append(
+                "top_bucket_full_depth_entry_fill_rate_too_low:"
+                f"{row.top_bucket_full_depth_entry_fill_rate:.4f}<"
+                f"{min_top_bucket_entry_fill_rate:.4f}"
             )
         if row.window_count < min_window_count:
             blockers.append(f"window_count_too_small:{row.window_count}<{min_window_count}")
@@ -395,6 +410,7 @@ def evaluate(
         "minimums": {
             "factor_n": min_factor_n,
             "top_bucket_n": min_top_bucket_n,
+            "top_bucket_full_depth_entry_fill_rate": min_top_bucket_entry_fill_rate,
             "window_count": min_window_count,
         },
         "promotion_gate": asdict(gate),
@@ -626,6 +642,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fail-if-blocked", action="store_true")
     parser.add_argument("--min-factor-n", type=int, default=100)
     parser.add_argument("--min-top-bucket-n", type=int, default=50)
+    parser.add_argument("--min-top-bucket-entry-fill-rate", type=float, default=0.30)
     parser.add_argument("--min-window-count", type=int, default=4)
     return parser.parse_args()
 
@@ -641,6 +658,7 @@ def main() -> int:
         runtime_mappings=load_runtime_mappings(args.runtime_mapping_json or None),
         min_factor_n=args.min_factor_n,
         min_top_bucket_n=args.min_top_bucket_n,
+        min_top_bucket_entry_fill_rate=args.min_top_bucket_entry_fill_rate,
         min_window_count=args.min_window_count,
     )
 

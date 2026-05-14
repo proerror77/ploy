@@ -22,8 +22,8 @@ recorded_replay_parity,true,blocking_flags=<none>
 # AutoFactor target=full_depth_settlement_executable_pnl
 === AutoFactor Seed Candidate Report ===
 target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
-rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,complexity
-1,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,49831,0.110842,0.150273,43,1.064178,0.9535,6,0.8333,1.0000,9966,2.666226,0.6836,1
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,complexity
+1,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,49831,0.110842,0.150273,43,1.064178,0.9535,6,0.8333,1.0000,9966,2.666226,0.6836,0.9000,1
 """)
 '''
 
@@ -38,9 +38,9 @@ recorded_replay_parity,false,shared_event_count=0
 # AutoFactor target=full_depth_settlement_executable_pnl
 === AutoFactor Seed Candidate Report ===
 target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
-rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,complexity
-1,mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted,full_depth_settlement_executable_pnl,candidate,passed,3335,0.067525,0.081201,14,1.288053,0.9286,2,1.0000,1.0000,667,1.660059,0.6132,6
-2,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,2798,0.067534,0.091002,12,1.018091,0.7500,2,1.0000,1.0000,560,2.507843,0.6250,1
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,complexity
+1,mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted,full_depth_settlement_executable_pnl,candidate,passed,3335,0.067525,0.081201,14,1.288053,0.9286,2,1.0000,1.0000,667,1.660059,0.6132,0.9000,6
+2,auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl,candidate,passed,2798,0.067534,0.091002,12,1.018091,0.7500,2,1.0000,1.0000,560,2.507843,0.6250,0.9000,1
 """)
 '''
 

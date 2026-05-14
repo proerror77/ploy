@@ -202,6 +202,9 @@ def ranked_factor_rows(promotion: dict[str, Any], allowed_targets: set[str]) -> 
                 "top_bucket_n": factor.get("top_bucket_n"),
                 "top_bucket_avg_label": factor.get("top_bucket_avg_label"),
                 "top_bucket_positive_label_rate": factor.get("top_bucket_positive_label_rate"),
+                "top_bucket_full_depth_entry_fill_rate": factor.get(
+                    "top_bucket_full_depth_entry_fill_rate"
+                ),
                 "complexity": factor.get("complexity"),
                 "qualified": bool(item.get("qualified")),
                 "runtime_mapping": mapping,

@@ -190,7 +190,11 @@ impl AutoFactorMatrix {
     }
 
     pub fn input_names(&self) -> BTreeSet<String> {
-        self.columns.keys().cloned().collect()
+        self.columns
+            .keys()
+            .filter(|name| !name.starts_with("__"))
+            .cloned()
+            .collect()
     }
 }
 
@@ -262,6 +266,7 @@ pub struct AutoFactorReport {
     pub top_bucket_n: usize,
     pub top_bucket_avg_label: f64,
     pub top_bucket_positive_label_rate: f64,
+    pub top_bucket_full_depth_entry_fill_rate: f64,
     pub monotonicity_score: f64,
     pub complexity: usize,
     pub decision: AutoFactorDecision,
@@ -325,6 +330,7 @@ struct BucketSummary {
     n: usize,
     avg_label: f64,
     positive_label_rate: f64,
+    full_depth_entry_fill_rate: f64,
 }
 
 pub fn evaluate_named_factor(
@@ -427,7 +433,11 @@ pub fn evaluate_named_factor(
     let symbol_ic_mean = finite_mean(symbol_ics.iter().copied());
     let symbol_icir = icir(&symbol_ics);
 
-    let buckets = build_buckets(&scored, options.bucket_count);
+    let buckets = build_buckets(
+        &scored,
+        options.bucket_count,
+        matrix.column("__full_depth_entry_fillable"),
+    );
     let bucket_avg_labels = buckets
         .iter()
         .map(|bucket| bucket.avg_label)
@@ -471,6 +481,9 @@ pub fn evaluate_named_factor(
         top_bucket_positive_label_rate: top
             .map(|bucket| bucket.positive_label_rate)
             .unwrap_or(f64::NAN),
+        top_bucket_full_depth_entry_fill_rate: top
+            .map(|bucket| bucket.full_depth_entry_fill_rate)
+            .unwrap_or(f64::NAN),
         monotonicity_score,
         complexity,
         decision,
@@ -512,11 +525,11 @@ pub fn format_autofactor_reports(reports: &[AutoFactorReport], top_n: usize) -> 
         "target labels are side-aligned executable PnL for the requested target; reports are candidate discovery gates, not deploy decisions.\n",
     );
     out.push_str(
-        "rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,complexity\n",
+        "rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,complexity\n",
     );
     for (idx, report) in reports.iter().take(top_n).enumerate() {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{:.6},{:.6},{},{:.6},{:.4},{},{:.4},{:.4},{},{:.6},{:.4},{}\n",
+            "{},{},{},{},{},{},{:.6},{:.6},{},{:.6},{:.4},{},{:.4},{:.4},{},{:.6},{:.4},{:.4},{}\n",
             idx + 1,
             report.name,
             report.target.as_deref().unwrap_or("<unspecified>"),
@@ -534,6 +547,7 @@ pub fn format_autofactor_reports(reports: &[AutoFactorReport], top_n: usize) -> 
             report.top_bucket_n,
             report.top_bucket_avg_label,
             report.top_bucket_positive_label_rate,
+            report.top_bucket_full_depth_entry_fill_rate,
             report.complexity,
         ));
     }
@@ -621,6 +635,13 @@ pub fn autofactor_matrix_from_v2(
             (row.entry_capacity_ratio / 3.0).clamp(0.0, 1.0)
         } else {
             f64::NAN
+        }
+    });
+    insert_column(&mut columns, "__full_depth_entry_fillable", rows, |row| {
+        if row.label_full_depth_entry_fillable {
+            1.0
+        } else {
+            0.0
         }
     });
     insert_column(&mut columns, "entry_price_quality_score", rows, |row| {
@@ -1446,7 +1467,11 @@ fn rolling_stat(values: &[f64], window: usize, stat: fn(&[f64]) -> f64) -> Vec<f
         .collect()
 }
 
-fn build_buckets(scored: &[(usize, f64, f64)], bucket_count: usize) -> Vec<BucketSummary> {
+fn build_buckets(
+    scored: &[(usize, f64, f64)],
+    bucket_count: usize,
+    full_depth_entry_fillable: Option<&[f64]>,
+) -> Vec<BucketSummary> {
     let mut sorted = scored.to_vec();
     sorted.sort_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1));
     let bucket_count = bucket_count.clamp(2, sorted.len().max(2));
@@ -1463,6 +1488,19 @@ fn build_buckets(scored: &[(usize, f64, f64)], bucket_count: usize) -> Vec<Bucke
                         slice.iter().filter(|(_, _, label)| *label > 0.0).count(),
                         slice.len(),
                     ),
+                    full_depth_entry_fill_rate: full_depth_entry_fillable
+                        .map(|values| {
+                            ratio(
+                                slice
+                                    .iter()
+                                    .filter(|(idx, _, _)| {
+                                        values.get(*idx).copied().unwrap_or(0.0) > 0.5
+                                    })
+                                    .count(),
+                                slice.len(),
+                            )
+                        })
+                        .unwrap_or(f64::NAN),
                 }
             })
         })
