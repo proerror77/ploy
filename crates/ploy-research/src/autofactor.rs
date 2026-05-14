@@ -46,6 +46,11 @@ pub enum FactorExpr {
         expr: Box<FactorExpr>,
         window: usize,
     },
+    Gate {
+        expr: Box<FactorExpr>,
+        gate: Box<FactorExpr>,
+        min: f64,
+    },
 }
 
 impl FactorExpr {
@@ -66,6 +71,7 @@ impl FactorExpr {
             | FactorExpr::RollingStd { expr, .. }
             | FactorExpr::ZScore { expr, .. }
             | FactorExpr::Clip { expr, .. } => 1 + expr.complexity(),
+            FactorExpr::Gate { expr, gate, .. } => 1 + expr.complexity() + gate.complexity(),
         }
     }
 
@@ -100,6 +106,7 @@ impl FactorExpr {
                 Ok(rolling_std(&expr.evaluate(matrix)?, *window))
             }
             FactorExpr::ZScore { expr, window } => Ok(zscore(&expr.evaluate(matrix)?, *window)),
+            FactorExpr::Gate { expr, gate, min } => gate_eval(expr, gate, *min, matrix),
         }
     }
 }
@@ -438,7 +445,7 @@ pub fn evaluate_named_factor(
     let buckets = build_buckets(
         &scored,
         options.bucket_count,
-        matrix.column("__full_depth_entry_fillable"),
+        matrix.column("full_depth_entry_fillable_gate"),
     );
     let bucket_avg_labels = buckets
         .iter()
@@ -641,13 +648,18 @@ pub fn autofactor_matrix_from_v2(
             f64::NAN
         }
     });
-    insert_column(&mut columns, "__full_depth_entry_fillable", rows, |row| {
-        if row.label_full_depth_entry_fillable {
-            1.0
-        } else {
-            0.0
-        }
-    });
+    insert_column(
+        &mut columns,
+        "full_depth_entry_fillable_gate",
+        rows,
+        |row| {
+            if row.label_full_depth_entry_fillable {
+                1.0
+            } else {
+                0.0
+            }
+        },
+    );
     insert_column(&mut columns, "entry_price_quality_score", rows, |row| {
         entry_price_quality_score(row.entry_ask)
     });
@@ -986,15 +998,34 @@ fn compile_llm_mutation(
     match mutation.mutation_type.as_str() {
         "add_feature_gate" => {
             let feature = existing_feature(input_names, mutation.feature.as_deref())?;
-            Some(("feature_gate", mul(base.expr.clone(), input(feature))))
+            if feature == "full_depth_entry_fillable_gate" {
+                Some((
+                    "full_depth_entry_gate",
+                    gate(base.expr.clone(), input(feature), 0.5),
+                ))
+            } else {
+                Some(("feature_gate", mul(base.expr.clone(), input(feature))))
+            }
         }
         "add_capacity_gate" => {
-            let feature = mutation
-                .feature
-                .as_deref()
-                .unwrap_or("entry_capacity_score");
+            let feature = mutation.feature.as_deref().unwrap_or(
+                if base.target.as_deref() == Some("tradeable_full_depth_settlement_pnl")
+                    && input_names.contains("full_depth_entry_fillable_gate")
+                {
+                    "full_depth_entry_fillable_gate"
+                } else {
+                    "entry_capacity_score"
+                },
+            );
             let feature = existing_feature(input_names, Some(feature))?;
-            Some(("capacity_gate", mul(base.expr.clone(), input(feature))))
+            if feature == "full_depth_entry_fillable_gate" {
+                Some((
+                    "full_depth_entry_gate",
+                    gate(base.expr.clone(), input(feature), 0.5),
+                ))
+            } else {
+                Some(("capacity_gate", mul(base.expr.clone(), input(feature))))
+            }
         }
         "add_near_strike_interaction" => {
             let feature = existing_feature(input_names, Some("near_strike_score"))?;
@@ -1128,6 +1159,8 @@ fn deterministic_mutation_layer(
             | AutoFactorV2Target::FullDepthSettlementExecutablePnl
             | AutoFactorV2Target::TradeableFullDepthSettlementPnl
     );
+    let tradeable_settlement_target =
+        matches!(target, AutoFactorV2Target::TradeableFullDepthSettlementPnl);
 
     for seed in seeds {
         push_mutation(
@@ -1175,6 +1208,17 @@ fn deterministic_mutation_layer(
                 "capacity",
                 mul(seed.expr.clone(), input("entry_capacity_score")),
                 "add_capacity_gate: penalize alpha that cannot be executed at the configured stake.",
+            );
+        }
+
+        if tradeable_settlement_target && input_names.contains("full_depth_entry_fillable_gate") {
+            push_mutation(
+                &mut out,
+                seed,
+                depth,
+                "full_depth_entry_gate",
+                gate(seed.expr.clone(), input("full_depth_entry_fillable_gate"), 0.5),
+                "add_capacity_gate: hard-filter rows that are not full-depth entry-fillable at the configured stake; this is an execution gate, not predictive alpha.",
             );
         }
 
@@ -1268,6 +1312,14 @@ fn settlement_native_generated_candidates(input_names: &BTreeSet<String>) -> Vec
                 "Settlement edge gated by full-depth entry capacity.",
             );
         }
+        if input_names.contains("full_depth_entry_fillable_gate") {
+            push_generated(
+                &mut out,
+                format!("auto_settlement_{edge_name}_x_full_depth_entry_gate"),
+                gate(input(edge_name), input("full_depth_entry_fillable_gate"), 0.5),
+                "Settlement edge hard-filtered to rows that are full-depth entry-fillable at the configured stake; this is an execution gate, not predictive alpha.",
+            );
+        }
         if input_names.contains("entry_price_quality_score") {
             push_generated(
                 &mut out,
@@ -1329,6 +1381,18 @@ fn settlement_native_generated_candidates(input_names: &BTreeSet<String>) -> Vec
                 mul(input(edge_name), input("external_pressure")),
                 "Settlement edge interacted with side-aligned external pressure.",
             );
+            if input_names.contains("full_depth_entry_fillable_gate") {
+                push_generated(
+                    &mut out,
+                    format!("auto_settlement_{edge_name}_x_external_pressure_x_full_depth_entry_gate"),
+                    gate(
+                        mul(input(edge_name), input("external_pressure")),
+                        input("full_depth_entry_fillable_gate"),
+                        0.5,
+                    ),
+                    "Settlement edge and external pressure hard-filtered to full-depth entry-fillable rows; this tests predictive edge inside executable capacity.",
+                );
+            }
         }
         if input_names.contains("iv_change_1m") {
             push_generated(
@@ -1415,6 +1479,27 @@ fn unary_eval(
         .map(|value| {
             if value.is_finite() {
                 op(*value)
+            } else {
+                f64::NAN
+            }
+        })
+        .collect())
+}
+
+fn gate_eval(
+    expr: &FactorExpr,
+    gate: &FactorExpr,
+    min: f64,
+    matrix: &AutoFactorMatrix,
+) -> Result<Vec<f64>, AutoFactorError> {
+    let values = expr.evaluate(matrix)?;
+    let gates = gate.evaluate(matrix)?;
+    Ok(values
+        .iter()
+        .zip(gates.iter())
+        .map(|(value, gate)| {
+            if value.is_finite() && gate.is_finite() && *gate >= min {
+                *value
             } else {
                 f64::NAN
             }
@@ -1735,6 +1820,14 @@ fn mul(lhs: FactorExpr, rhs: FactorExpr) -> FactorExpr {
     FactorExpr::Mul(Box::new(lhs), Box::new(rhs))
 }
 
+fn gate(expr: FactorExpr, gate: FactorExpr, min: f64) -> FactorExpr {
+    FactorExpr::Gate {
+        expr: Box::new(expr),
+        gate: Box::new(gate),
+        min,
+    }
+}
+
 fn safe_div_expr(lhs: FactorExpr, rhs: FactorExpr) -> FactorExpr {
     FactorExpr::SafeDiv(Box::new(lhs), Box::new(rhs))
 }
@@ -1980,6 +2073,24 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_gate_expression_as_hard_sample_filter() {
+        let mut columns = BTreeMap::new();
+        columns.insert("score".to_string(), vec![1.0, 2.0, 3.0]);
+        columns.insert(
+            "full_depth_entry_fillable_gate".to_string(),
+            vec![1.0, 0.0, 1.0],
+        );
+        let matrix = AutoFactorMatrix::new(columns).expect("matrix");
+        let values = gate(input("score"), input("full_depth_entry_fillable_gate"), 0.5)
+            .evaluate(&matrix)
+            .expect("values");
+
+        assert_eq!(values[0], 1.0);
+        assert!(values[1].is_nan());
+        assert_eq!(values[2], 3.0);
+    }
+
+    #[test]
     fn evaluates_domain_candidate_with_icir_gate() {
         let (matrix, labels, windows) = synthetic_matrix(24);
         let candidates = domain_seed_candidates(&matrix.input_names());
@@ -2152,14 +2263,10 @@ mod tests {
         rows[0].label_full_depth_entry_fillable = false;
         rows[0].label_full_depth_executable_pnl_15u = None;
 
-        let labels = autofactor_labels_from_v2(
-            &rows,
-            AutoFactorV2Target::TradeableFullDepthSettlementPnl,
-        );
-        let legacy_labels = autofactor_labels_from_v2(
-            &rows,
-            AutoFactorV2Target::FullDepthSettlementExecutablePnl,
-        );
+        let labels =
+            autofactor_labels_from_v2(&rows, AutoFactorV2Target::TradeableFullDepthSettlementPnl);
+        let legacy_labels =
+            autofactor_labels_from_v2(&rows, AutoFactorV2Target::FullDepthSettlementExecutablePnl);
 
         assert_eq!(labels[0], 0.0);
         assert!(legacy_labels[0].is_nan());
@@ -2175,7 +2282,7 @@ mod tests {
             (0..rows).map(|idx| idx as f64).collect::<Vec<_>>(),
         );
         columns.insert(
-            "__full_depth_entry_fillable".to_string(),
+            "full_depth_entry_fillable_gate".to_string(),
             (0..rows)
                 .map(|idx| if idx < 50 { 1.0 } else { 0.0 })
                 .collect::<Vec<_>>(),
@@ -2211,6 +2318,35 @@ mod tests {
         assert_eq!(reports[0].decision, AutoFactorDecision::Watchlist);
         assert_eq!(reports[0].reason, "low_top_bucket_fillability");
         assert_eq!(reports[0].top_bucket_full_depth_entry_fill_rate, 0.0);
+    }
+
+    #[test]
+    fn tradeable_settlement_mutations_include_hard_full_depth_entry_gate() {
+        let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
+        let matrix = autofactor_matrix_from_v2(&rows).expect("matrix");
+        let seeds = vec![NamedFactorExpr {
+            name: "predictive_seed".to_string(),
+            target: Some("tradeable_full_depth_settlement_pnl".to_string()),
+            expr: input("external_move_since_poly_update"),
+            notes: vec![],
+        }];
+
+        let mutations = deterministic_mutation_layer(
+            &matrix.input_names(),
+            &seeds,
+            AutoFactorV2Target::TradeableFullDepthSettlementPnl,
+            1,
+        );
+        let hard_gate = mutations
+            .iter()
+            .find(|candidate| candidate.name == "mut_predictive_seed_full_depth_entry_gate")
+            .expect("hard full-depth entry gate mutation");
+
+        assert!(matches!(hard_gate.expr, FactorExpr::Gate { .. }));
+        assert!(
+            hard_gate.notes[0].contains("execution gate"),
+            "hard fillability should be documented as execution gating"
+        );
     }
 
     #[test]

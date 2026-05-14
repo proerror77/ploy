@@ -304,6 +304,13 @@ dimension such as capacity, stability, or overfit risk.
   `top_bucket_full_depth_entry_fill_rate >= 0.30` by default. This prevents a
   statistically strong factor from being promoted when its highest-score rows
   are mostly unfillable at the configured stake.
+- For `tradeable_full_depth_settlement_pnl`, the search space may generate
+  hard `full_depth_entry_fillable_gate` mutations that filter out rows where the
+  current entry book cannot fill the configured stake. Treat these as execution
+  gates, not alpha features: a gated predictive formula asks whether the
+  predictive signal still works inside tradable capacity, and runtime promotion
+  remains blocked unless the scorer can reproduce the same book-depth gate
+  before order placement.
 - One-day OOS smoke searches can use hourly windows, for example
   `train_window_hours=12`, `test_window_hours=12`, and `step_hours=12`, when
   only a clean 24h snapshot is available. Keep these marked as early

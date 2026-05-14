@@ -674,6 +674,7 @@ fn root_gene(expr: &FactorExpr) -> String {
         FactorExpr::RollingMean { .. } => "RollingMean",
         FactorExpr::RollingStd { .. } => "RollingStd",
         FactorExpr::ZScore { .. } => "ZScore",
+        FactorExpr::Gate { .. } => "Gate",
     }
     .to_string()
 }
