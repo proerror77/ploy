@@ -24,6 +24,7 @@ use super::three_layer_model::{
 use super::three_layer_profile::ThreeLayerProfile;
 use crate::strategies::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
+use ploy_market_contracts::BookLevel;
 use ploy_operator_contracts::Regime;
 
 /// Configuration for the three-layer directional strategy.
@@ -295,10 +296,12 @@ impl MpriceDriftAccumulator {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct QuoteDepth {
     bid_size: Option<Decimal>,
     ask_size: Option<Decimal>,
+    bid_levels: Vec<BookLevel>,
+    ask_levels: Vec<BookLevel>,
 }
 
 struct QuoteAskHistory {
@@ -843,6 +846,31 @@ impl ThreeLayerStrategy {
         (self.config.stake_usd / entry_price).round_dp(6)
     }
 
+    fn levels_can_fill(
+        levels: &[BookLevel],
+        quantity: Decimal,
+        limit_price: Decimal,
+        side: TradeSide,
+    ) -> bool {
+        if levels.is_empty() {
+            return true;
+        }
+
+        let mut available = Decimal::ZERO;
+        for level in levels {
+            match side {
+                TradeSide::Buy if level.price > limit_price => break,
+                TradeSide::Sell if level.price < limit_price => break,
+                _ => {}
+            }
+            available += level.size.max(Decimal::ZERO);
+            if available >= quantity {
+                return true;
+            }
+        }
+        false
+    }
+
     fn reject_cooldown_secs(&self) -> i64 {
         self.config.cooldown_secs.max(1) as i64
     }
@@ -1159,16 +1187,20 @@ impl ThreeLayerStrategy {
             self.bump("skip_zero_quantity");
             return None;
         }
-        let Some(ask_size) = self
-            .quote_depth
-            .get(token_id)
-            .and_then(|depth| depth.ask_size)
-        else {
+        let Some(depth) = self.quote_depth.get(token_id) else {
+            self.bump("skip_no_ask_size");
+            return None;
+        };
+        let Some(ask_size) = depth.ask_size else {
             self.bump("skip_no_ask_size");
             return None;
         };
         if ask_size < quantity {
             self.bump("skip_insufficient_ask_size");
+            return None;
+        }
+        if !Self::levels_can_fill(&depth.ask_levels, quantity, entry_price, TradeSide::Buy) {
+            self.bump("skip_insufficient_ask_depth");
             return None;
         }
 
@@ -1514,11 +1546,19 @@ impl ThreeLayerStrategy {
                 self.bump("skip_zero_quantity");
                 continue;
             }
-            let Some(ask_size) = self
-                .quote_depth
-                .get(token_id)
-                .and_then(|depth| depth.ask_size)
-            else {
+            let Some(depth) = self.quote_depth.get(token_id) else {
+                self.bump("skip_no_ask_size");
+                debug!(
+                    strategy = "three_layer",
+                    symbol = %symbol,
+                    direction,
+                    token_id = %token_id,
+                    quantity = %quantity,
+                    "PM quote has no ask size; skipping non-executable entry"
+                );
+                continue;
+            };
+            let Some(ask_size) = depth.ask_size else {
                 self.bump("skip_no_ask_size");
                 debug!(
                     strategy = "three_layer",
@@ -1540,6 +1580,19 @@ impl ThreeLayerStrategy {
                     quantity = %quantity,
                     ask_size = %ask_size,
                     "PM ask size cannot fill fixed stake; skipping entry"
+                );
+                continue;
+            }
+            if !Self::levels_can_fill(&depth.ask_levels, quantity, entry_price, TradeSide::Buy) {
+                self.bump("skip_insufficient_ask_depth");
+                debug!(
+                    strategy = "three_layer",
+                    symbol = %symbol,
+                    direction,
+                    token_id = %token_id,
+                    quantity = %quantity,
+                    entry_price = %entry_price,
+                    "PM ask depth cannot fill fixed stake; skipping entry"
                 );
                 continue;
             }
@@ -1608,7 +1661,7 @@ impl ThreeLayerStrategy {
     }
 
     fn exit_decisions_for_symbol(
-        &self,
+        &mut self,
         symbol: &str,
         now: DateTime<Utc>,
         spot: Option<f64>,
@@ -1617,7 +1670,8 @@ impl ThreeLayerStrategy {
     ) -> Vec<StrategyDecision> {
         let mut decisions = Vec::new();
 
-        for event in self.events.get(symbol).into_iter().flatten() {
+        let events = self.events.get(symbol).cloned().unwrap_or_default();
+        for event in events {
             for (token_id, is_up) in [(&event.up_token, true), (&event.down_token, false)] {
                 let qty = positions.net_qty(token_id);
                 if qty <= Decimal::ZERO {
@@ -1629,11 +1683,19 @@ impl ThreeLayerStrategy {
                 if self.token_reject_active(token_id, now) {
                     continue;
                 }
-                let Some(bid_size) = self
-                    .quote_depth
-                    .get(token_id)
-                    .and_then(|depth| depth.bid_size)
-                else {
+                let Some(exit_bid) = self.quotes.get(token_id).and_then(|q| q.bid) else {
+                    continue;
+                };
+                let Some(depth) = self.quote_depth.get(token_id) else {
+                    debug!(
+                        strategy = "three_layer",
+                        token_id = %token_id,
+                        quantity = %qty,
+                        "PM quote has no bid size; skipping non-executable exit"
+                    );
+                    continue;
+                };
+                let Some(bid_size) = depth.bid_size else {
                     debug!(
                         strategy = "three_layer",
                         token_id = %token_id,
@@ -1643,6 +1705,7 @@ impl ThreeLayerStrategy {
                     continue;
                 };
                 if bid_size < qty {
+                    self.bump("skip_insufficient_bid_size");
                     debug!(
                         strategy = "three_layer",
                         token_id = %token_id,
@@ -1652,10 +1715,17 @@ impl ThreeLayerStrategy {
                     );
                     continue;
                 }
-
-                let Some(exit_bid) = self.quotes.get(token_id).and_then(|q| q.bid) else {
+                if !Self::levels_can_fill(&depth.bid_levels, qty, exit_bid, TradeSide::Sell) {
+                    self.bump("skip_insufficient_bid_depth");
+                    debug!(
+                        strategy = "three_layer",
+                        token_id = %token_id,
+                        quantity = %qty,
+                        exit_bid = %exit_bid,
+                        "PM bid depth cannot fill current position; skipping exit"
+                    );
                     continue;
-                };
+                }
 
                 // Take profit must be executable: SELL can only hit the bid.
                 // The config field keeps its historical name for TOML compatibility.
@@ -1866,8 +1936,9 @@ impl StrategyLogic for ThreeLayerStrategy {
                 ask,
                 bid_size,
                 ask_size,
+                bid_levels,
+                ask_levels,
                 ts,
-                ..
             } => {
                 self.feed_time = Some(*ts);
                 self.quotes.insert(
@@ -1878,11 +1949,26 @@ impl StrategyLogic for ThreeLayerStrategy {
                         ts: *ts,
                     },
                 );
+                let previous = self
+                    .quote_depth
+                    .get(token_id.as_ref())
+                    .cloned()
+                    .unwrap_or_default();
                 self.quote_depth.insert(
                     token_id.clone(),
                     QuoteDepth {
-                        bid_size: *bid_size,
-                        ask_size: *ask_size,
+                        bid_size: (*bid_size).or(previous.bid_size),
+                        ask_size: (*ask_size).or(previous.ask_size),
+                        bid_levels: if bid_levels.is_empty() {
+                            previous.bid_levels
+                        } else {
+                            bid_levels.clone()
+                        },
+                        ask_levels: if ask_levels.is_empty() {
+                            previous.ask_levels
+                        } else {
+                            ask_levels.clone()
+                        },
                     },
                 );
                 self.record_quote_ask(token_id.clone(), *ask, *ts);
@@ -2082,6 +2168,8 @@ impl StrategyLogic for ThreeLayerStrategy {
             reason_lc.contains("invalid amount") || reason_lc.contains("below retry threshold");
         let no_liquidity = reason_lc.contains("no orders found")
             || reason_lc.contains("insufficient liquidity")
+            || reason_lc.contains("no full-depth liquidity")
+            || reason_lc.contains("insufficient full-depth liquidity")
             || reason_lc.contains("no match");
         let token_cooldown_secs = if balance_or_allowance || invalid_amount {
             HARD_TOKEN_REJECT_PAUSE_SECS
@@ -2428,6 +2516,27 @@ mod tests {
         }
     }
 
+    fn level(price: Decimal, size: Decimal) -> BookLevel {
+        BookLevel { price, size }
+    }
+
+    fn take_profit_quote_with_bid_levels(
+        token_id: &str,
+        ts: DateTime<Utc>,
+        bid_levels: Vec<BookLevel>,
+    ) -> MarketUpdate {
+        MarketUpdate::Quote {
+            token_id: Arc::from(token_id),
+            bid: Some(dec!(0.72)),
+            ask: Some(dec!(0.75)),
+            bid_size: Some(dec!(100)),
+            ask_size: Some(dec!(100)),
+            bid_levels,
+            ask_levels: Vec::new(),
+            ts,
+        }
+    }
+
     fn entry_quote(token_id: &str, ts: DateTime<Utc>, ask_size: Option<Decimal>) -> MarketUpdate {
         MarketUpdate::Quote {
             token_id: Arc::from(token_id),
@@ -2437,6 +2546,24 @@ mod tests {
             ask_size,
             bid_levels: Vec::new(),
             ask_levels: Vec::new(),
+            ts,
+        }
+    }
+
+    fn entry_quote_with_ask_levels(
+        token_id: &str,
+        ts: DateTime<Utc>,
+        ask_size: Option<Decimal>,
+        ask_levels: Vec<BookLevel>,
+    ) -> MarketUpdate {
+        MarketUpdate::Quote {
+            token_id: Arc::from(token_id),
+            bid: Some(dec!(0.19)),
+            ask: Some(dec!(0.20)),
+            bid_size: Some(dec!(100)),
+            ask_size,
+            bid_levels: Vec::new(),
+            ask_levels,
             ts,
         }
     }
@@ -2691,6 +2818,64 @@ mod tests {
     }
 
     #[test]
+    fn take_profit_requires_full_bid_depth_for_position_quantity() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+        discover_test_event(&mut strategy, now);
+        let positions = position_with_token("token-down", now);
+        let orders = OrderLedger::default();
+
+        let decisions = strategy.on_update(
+            &take_profit_quote_with_bid_levels("token-down", now, vec![level(dec!(0.72), dec!(5))]),
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "sell exits must not be emitted when full-depth bid cannot fill the position"
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("skip_insufficient_bid_depth"), Some(&1));
+    }
+
+    #[test]
+    fn take_profit_emits_when_full_bid_depth_covers_position_quantity() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+        discover_test_event(&mut strategy, now);
+        let positions = position_with_token("token-down", now);
+        let orders = OrderLedger::default();
+
+        let decisions = strategy.on_update(
+            &take_profit_quote_with_bid_levels(
+                "token-down",
+                now,
+                vec![level(dec!(0.72), dec!(6)), level(dec!(0.72), dec!(5))],
+            ),
+            &positions,
+            &orders,
+        );
+
+        match decisions.as_slice() {
+            [StrategyDecision::Exit(intent)] => {
+                assert_eq!(intent.token_id, "token-down");
+                assert_eq!(intent.side, TradeSide::Sell);
+                assert_eq!(intent.limit_price, Some(dec!(0.72)));
+                assert_eq!(intent.quantity, dec!(10));
+            }
+            other => panic!("expected one executable exit, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn entry_requires_ask_size_for_fixed_stake() {
         use chrono::TimeZone;
 
@@ -2727,6 +2912,50 @@ mod tests {
             .into_iter()
             .collect::<HashMap<_, _>>();
         assert_eq!(diagnostics.get("skip_insufficient_ask_size"), Some(&1));
+    }
+
+    #[test]
+    fn entry_requires_full_ask_depth_for_fixed_stake() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &entry_quote_with_ask_levels(
+                "token-up",
+                now,
+                Some(dec!(200)),
+                vec![level(dec!(0.20), dec!(25))],
+            ),
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "entry should not fire when full-depth ask cannot fill the fixed stake"
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("skip_insufficient_ask_depth"), Some(&1));
     }
 
     #[test]
