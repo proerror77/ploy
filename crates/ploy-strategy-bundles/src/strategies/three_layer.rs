@@ -60,6 +60,7 @@ pub struct ThreeLayerConfig {
     pub event_ml_model: Option<EventMlModelContract>,
     pub visible_depth_haircut: Decimal,
     pub max_sweep_levels: usize,
+    pub max_sweep_price_delta: Decimal,
 }
 
 impl From<DirectionalConfig> for ThreeLayerConfig {
@@ -95,6 +96,7 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             event_ml_model: None,
             visible_depth_haircut: Decimal::ONE,
             max_sweep_levels: 0,
+            max_sweep_price_delta: Decimal::ZERO,
         }
     }
 }
@@ -850,16 +852,29 @@ impl ThreeLayerStrategy {
         (self.config.stake_usd / entry_price).round_dp(6)
     }
 
-    fn levels_can_fill(
+    fn sweep_limit_price(
+        base_price: Decimal,
+        side: TradeSide,
+        max_price_delta: Decimal,
+    ) -> Decimal {
+        let delta = max_price_delta.max(Decimal::ZERO);
+        match side {
+            TradeSide::Buy => base_price + delta,
+            TradeSide::Sell => (base_price - delta).max(Decimal::ZERO),
+        }
+    }
+
+    fn sweep_fill_price(
         levels: &[BookLevel],
         quantity: Decimal,
+        fallback_price: Decimal,
         limit_price: Decimal,
         side: TradeSide,
         visible_depth_haircut: Decimal,
         max_sweep_levels: usize,
-    ) -> bool {
+    ) -> Option<Decimal> {
         if levels.is_empty() {
-            return true;
+            return Some(fallback_price);
         }
 
         let level_limit = if max_sweep_levels == 0 {
@@ -867,19 +882,27 @@ impl ThreeLayerStrategy {
         } else {
             max_sweep_levels
         };
-        let mut available = Decimal::ZERO;
+        let mut remaining = quantity;
+        let mut notional = Decimal::ZERO;
+        let haircut = visible_depth_haircut.max(Decimal::ZERO);
         for level in levels.iter().take(level_limit) {
             match side {
                 TradeSide::Buy if level.price > limit_price => break,
                 TradeSide::Sell if level.price < limit_price => break,
                 _ => {}
             }
-            available += (level.size * visible_depth_haircut).max(Decimal::ZERO);
-            if available >= quantity {
-                return true;
+            let usable_size = (level.size * haircut).max(Decimal::ZERO);
+            if usable_size <= Decimal::ZERO {
+                continue;
+            }
+            let take = usable_size.min(remaining);
+            notional += take * level.price;
+            remaining -= take;
+            if remaining <= Decimal::ZERO {
+                return Some((notional / quantity).round_dp(6));
             }
         }
-        false
+        None
     }
 
     fn reject_cooldown_secs(&self) -> i64 {
@@ -1193,7 +1216,12 @@ impl ThreeLayerStrategy {
             self.bump("skip_bad_entry_price");
             return None;
         };
-        let quantity = self.entry_quantity(entry_price);
+        let entry_limit_price = Self::sweep_limit_price(
+            entry_price,
+            TradeSide::Buy,
+            self.config.max_sweep_price_delta,
+        );
+        let quantity = self.entry_quantity(entry_limit_price);
         if quantity <= Decimal::ZERO {
             self.bump("skip_zero_quantity");
             return None;
@@ -1206,19 +1234,27 @@ impl ThreeLayerStrategy {
             self.bump("skip_no_ask_size");
             return None;
         };
-        if ask_size < quantity {
+        if depth.ask_levels.is_empty() && ask_size < quantity {
             self.bump("skip_insufficient_ask_size");
             return None;
         }
-        if !Self::levels_can_fill(
+        let Some(executable_entry_price) = Self::sweep_fill_price(
             &depth.ask_levels,
             quantity,
             entry_price,
+            entry_limit_price,
             TradeSide::Buy,
             self.config.visible_depth_haircut,
             self.config.max_sweep_levels,
-        ) {
+        ) else {
             self.bump("skip_insufficient_ask_depth");
+            return None;
+        };
+        let executable_entry_price_f = executable_entry_price.to_f64().unwrap_or(entry_price_f);
+        let executable_edge =
+            side_probability - executable_entry_price_f - crypto_fee_cost(executable_entry_price_f);
+        if executable_edge < self.config.min_edge {
+            self.bump("skip_event_ml_edge");
             return None;
         }
 
@@ -1236,7 +1272,7 @@ impl ThreeLayerStrategy {
             token_id: token_id.to_string(),
             side: TradeSide::Buy,
             quantity,
-            limit_price: Some(entry_price),
+            limit_price: Some(entry_limit_price),
             purpose: IntentPurpose::Entry,
             created_at: now,
         };
@@ -1248,8 +1284,8 @@ impl ThreeLayerStrategy {
             symbol: symbol.to_string(),
             direction: direction.to_string(),
             p_hat: side_probability,
-            edge,
-            entry_price,
+            edge: executable_edge,
+            entry_price: executable_entry_price,
             decision: "enter".to_string(),
             ts: now,
         };
@@ -1260,9 +1296,10 @@ impl ThreeLayerStrategy {
             direction,
             event_ml_runtime_score = self.config.autofactor_runtime_score.as_deref().unwrap_or(""),
             event_ml_probability_up = q_up,
-            edge,
+            edge = executable_edge,
             total_score,
-            entry_price = %entry_price,
+            entry_price = %executable_entry_price,
+            limit_price = %entry_limit_price,
             "Event ML entry signal"
         );
         self.bump("entry_signals");
@@ -1559,7 +1596,12 @@ impl ThreeLayerStrategy {
                 self.bump("skip_bad_entry_price");
                 continue;
             };
-            let quantity = self.entry_quantity(entry_price);
+            let entry_limit_price = Self::sweep_limit_price(
+                entry_price,
+                TradeSide::Buy,
+                self.config.max_sweep_price_delta,
+            );
+            let quantity = self.entry_quantity(entry_limit_price);
             if quantity <= Decimal::ZERO {
                 self.bump("skip_zero_quantity");
                 continue;
@@ -1588,7 +1630,7 @@ impl ThreeLayerStrategy {
                 );
                 continue;
             };
-            if ask_size < quantity {
+            if depth.ask_levels.is_empty() && ask_size < quantity {
                 self.bump("skip_insufficient_ask_size");
                 debug!(
                     strategy = "three_layer",
@@ -1601,14 +1643,15 @@ impl ThreeLayerStrategy {
                 );
                 continue;
             }
-            if !Self::levels_can_fill(
+            let Some(executable_entry_price) = Self::sweep_fill_price(
                 &depth.ask_levels,
                 quantity,
                 entry_price,
+                entry_limit_price,
                 TradeSide::Buy,
                 self.config.visible_depth_haircut,
                 self.config.max_sweep_levels,
-            ) {
+            ) else {
                 self.bump("skip_insufficient_ask_depth");
                 debug!(
                     strategy = "three_layer",
@@ -1617,8 +1660,16 @@ impl ThreeLayerStrategy {
                     token_id = %token_id,
                     quantity = %quantity,
                     entry_price = %entry_price,
+                    limit_price = %entry_limit_price,
                     "PM ask depth cannot fill fixed stake; skipping entry"
                 );
+                continue;
+            };
+            let executable_entry_price_f = executable_entry_price.to_f64().unwrap_or(entry_price_f);
+            let executable_edge =
+                effective_p - executable_entry_price_f - crypto_fee_cost(executable_entry_price_f);
+            if executable_edge < self.config.min_edge {
+                self.bump("skip_edge_score");
                 continue;
             }
 
@@ -1637,7 +1688,7 @@ impl ThreeLayerStrategy {
                 token_id: token_id.to_string(),
                 side: TradeSide::Buy,
                 quantity,
-                limit_price: Some(entry_price),
+                limit_price: Some(entry_limit_price),
                 purpose: IntentPurpose::Entry,
                 created_at: now,
             };
@@ -1650,8 +1701,8 @@ impl ThreeLayerStrategy {
                 symbol: symbol.to_string(),
                 direction: direction.to_string(),
                 p_hat: effective_p,
-                edge,
-                entry_price,
+                edge: executable_edge,
+                entry_price: executable_entry_price,
                 decision: "enter".to_string(),
                 ts: now,
             };
@@ -1669,8 +1720,9 @@ impl ThreeLayerStrategy {
                 autofactor_runtime_score = self.config.autofactor_runtime_score.as_deref().unwrap_or(""),
                 autofactor_raw_score = autofactor_raw_score.map(|score| format!("{score:.4}")).unwrap_or_default(),
                 p_hat = effective_p,
-                edge,
-                entry_price = %entry_price,
+                edge = executable_edge,
+                entry_price = %executable_entry_price,
+                limit_price = %entry_limit_price,
                 profile = %self.config.profile,
                 regime = regime.as_str(),
                 "entry signal"
@@ -1729,7 +1781,7 @@ impl ThreeLayerStrategy {
                     );
                     continue;
                 };
-                if bid_size < qty {
+                if depth.bid_levels.is_empty() && bid_size < qty {
                     self.bump("skip_insufficient_bid_size");
                     debug!(
                         strategy = "three_layer",
@@ -1740,28 +1792,35 @@ impl ThreeLayerStrategy {
                     );
                     continue;
                 }
-                if !Self::levels_can_fill(
+                let exit_limit_price = Self::sweep_limit_price(
+                    exit_bid,
+                    TradeSide::Sell,
+                    self.config.max_sweep_price_delta,
+                );
+                let Some(executable_exit_price) = Self::sweep_fill_price(
                     &depth.bid_levels,
                     qty,
                     exit_bid,
+                    exit_limit_price,
                     TradeSide::Sell,
                     self.config.visible_depth_haircut,
                     self.config.max_sweep_levels,
-                ) {
+                ) else {
                     self.bump("skip_insufficient_bid_depth");
                     debug!(
                         strategy = "three_layer",
                         token_id = %token_id,
                         quantity = %qty,
                         exit_bid = %exit_bid,
+                        limit_price = %exit_limit_price,
                         "PM bid depth cannot fill current position; skipping exit"
                     );
                     continue;
-                }
+                };
 
                 // Take profit must be executable: SELL can only hit the bid.
                 // The config field keeps its historical name for TOML compatibility.
-                if let Some(bid) = exit_bid.to_f64() {
+                if let Some(bid) = executable_exit_price.to_f64() {
                     if bid >= self.config.take_profit_ask {
                         decisions.push(StrategyDecision::Exit(TradingIntent {
                             intent_id: format!("tl_tp_{}_{}", token_id, now.timestamp_millis()),
@@ -1770,7 +1829,7 @@ impl ThreeLayerStrategy {
                             token_id: token_id.to_string(),
                             side: TradeSide::Sell,
                             quantity: qty,
-                            limit_price: Some(exit_bid),
+                            limit_price: Some(exit_limit_price),
                             purpose: IntentPurpose::Exit,
                             created_at: now,
                         }));
@@ -1796,7 +1855,7 @@ impl ThreeLayerStrategy {
                             token_id: token_id.to_string(),
                             side: TradeSide::Sell,
                             quantity: qty,
-                            limit_price: Some(exit_bid),
+                            limit_price: Some(exit_limit_price),
                             purpose: IntentPurpose::Exit,
                             created_at: now,
                         }));
@@ -2441,6 +2500,7 @@ mod tests {
             event_ml_model: None,
             visible_depth_haircut: Decimal::ONE,
             max_sweep_levels: 0,
+            max_sweep_price_delta: Decimal::ZERO,
         }
     }
 
@@ -2910,6 +2970,74 @@ mod tests {
     }
 
     #[test]
+    fn take_profit_allows_small_multi_level_sweep_delta() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.max_sweep_levels = 3;
+        config.max_sweep_price_delta = dec!(0.003);
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = position_with_token("token-down", now);
+        let orders = OrderLedger::default();
+
+        let decisions = strategy.on_update(
+            &take_profit_quote_with_bid_levels(
+                "token-down",
+                now,
+                vec![level(dec!(0.72), dec!(5)), level(dec!(0.718), dec!(5))],
+            ),
+            &positions,
+            &orders,
+        );
+
+        match decisions.as_slice() {
+            [StrategyDecision::Exit(intent)] => {
+                assert_eq!(intent.token_id, "token-down");
+                assert_eq!(intent.side, TradeSide::Sell);
+                assert_eq!(intent.limit_price, Some(dec!(0.717)));
+                assert_eq!(intent.quantity, dec!(10));
+            }
+            other => panic!("expected one executable swept exit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn take_profit_rejects_large_sweep_price_jump() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.max_sweep_levels = 3;
+        config.max_sweep_price_delta = dec!(0.003);
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = position_with_token("token-down", now);
+        let orders = OrderLedger::default();
+
+        let decisions = strategy.on_update(
+            &take_profit_quote_with_bid_levels(
+                "token-down",
+                now,
+                vec![level(dec!(0.72), dec!(5)), level(dec!(0.716), dec!(5))],
+            ),
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "exit must reject deeper bid levels outside the configured sweep delta"
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("skip_insufficient_bid_depth"), Some(&1));
+    }
+
+    #[test]
     fn take_profit_depth_gate_applies_haircut_and_sweep_level_limit() {
         use chrono::TimeZone;
 
@@ -3144,6 +3272,99 @@ mod tests {
             }
             other => panic!("expected one executable entry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn entry_allows_small_multi_level_sweep_delta() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        config.max_sweep_levels = 3;
+        config.max_sweep_price_delta = dec!(0.003);
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &entry_quote_with_ask_levels(
+                "token-up",
+                now,
+                Some(dec!(50)),
+                vec![level(dec!(0.20), dec!(50)), level(dec!(0.203), dec!(80))],
+            ),
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        match decisions.as_slice() {
+            [StrategyDecision::Enter { intent, signal }] => {
+                assert_eq!(intent.token_id, "token-up");
+                assert_eq!(intent.side, TradeSide::Buy);
+                assert_eq!(intent.limit_price, Some(dec!(0.203)));
+                assert_eq!(intent.quantity, dec!(123.152709));
+                assert!(signal.as_ref().expect("signal").entry_price > dec!(0.20));
+            }
+            other => panic!("expected one executable swept entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entry_rejects_large_sweep_price_jump() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        config.max_sweep_levels = 3;
+        config.max_sweep_price_delta = dec!(0.003);
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &entry_quote_with_ask_levels(
+                "token-up",
+                now,
+                Some(dec!(50)),
+                vec![level(dec!(0.20), dec!(50)), level(dec!(0.204), dec!(80))],
+            ),
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "entry must reject deeper ask levels outside the configured sweep delta"
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("skip_insufficient_ask_depth"), Some(&1));
     }
 
     #[test]

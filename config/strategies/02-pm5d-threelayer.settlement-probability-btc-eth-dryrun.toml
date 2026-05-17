@@ -67,6 +67,10 @@ default_depth_shares = 500
 require_lob_liquidity = true
 visible_depth_haircut = 0.5
 max_sweep_levels = 3
+# Allow sweeping nearby CLOB levels only when the deeper level price is within
+# 0.3 cent of the top executable quote. The strategy emits the same limit to
+# the simulated executor, so gate and fills remain aligned.
+max_sweep_price_delta = 0.003
 
 [reference_data]
 capture_sports_state = false

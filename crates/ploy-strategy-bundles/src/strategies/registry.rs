@@ -165,6 +165,8 @@ pub fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
             three_layer_config.visible_depth_haircut =
                 Decimal::try_from(config.execution.visible_depth_haircut).unwrap_or(Decimal::ONE);
             three_layer_config.max_sweep_levels = config.execution.max_sweep_levels;
+            three_layer_config.max_sweep_price_delta =
+                Decimal::try_from(config.execution.max_sweep_price_delta).unwrap_or_default();
             Box::new(ThreeLayerStrategy::new(three_layer_config))
         }
         "diff_enhanced" => {
