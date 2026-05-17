@@ -15,6 +15,9 @@ symbol/window stability from the AutoFactor row. Data quality, Deribit,
 execution-depth, calibration, and replay-parity gates remain global blockers.
 Hard entry gates are still execution filters, not permission to waive failed
 configured-stake capacity at the global promotion gate.
+Full-depth fillability is also insufficient by itself: if the average entry
+sweep slippage is too high, the candidate is executable only by accepting a
+materially worse price and must stay blocked.
 
 The current PM5D/PM15D settlement PRD should not silently promote a good
 repricing factor into the settlement strategy lane.
@@ -154,6 +157,11 @@ class PromotionGate:
 
 
 @dataclass
+class ExecutionQuality:
+    avg_entry_sweep_slip_bps: float | None = None
+
+
+@dataclass
 class AutoFactorRow:
     rank: int
     name: str
@@ -249,6 +257,20 @@ def parse_promotion_gate(report_text: str) -> PromotionGate:
             blocked_gates=["missing_promotion_gate"],
         )
     return PromotionGate(ready=ready, evidence=evidence, blocked_gates=blocked)
+
+
+def parse_execution_quality(report_text: str) -> ExecutionQuality:
+    prefix = "full_depth_entry_fill_rate="
+    marker = "avg_entry_sweep_slip_bps="
+    for line in report_text.splitlines():
+        if not line.startswith(prefix) or marker not in line:
+            continue
+        tail = line.split(marker, 1)[1]
+        raw = tail.split(maxsplit=1)[0]
+        value = parse_float(raw)
+        if value == value:
+            return ExecutionQuality(avg_entry_sweep_slip_bps=value)
+    return ExecutionQuality()
 
 
 def parse_autofactor_rows(report_text: str) -> list[AutoFactorRow]:
@@ -348,6 +370,20 @@ def global_gate_blockers(
     return []
 
 
+def execution_quality_blockers(
+    quality: ExecutionQuality, *, max_avg_entry_sweep_slip_bps: float
+) -> list[str]:
+    value = quality.avg_entry_sweep_slip_bps
+    if value is None:
+        return []
+    if value > max_avg_entry_sweep_slip_bps:
+        return [
+            "global_entry_sweep_slippage_too_high:"
+            f"{value:.2f}>{max_avg_entry_sweep_slip_bps:.2f}"
+        ]
+    return []
+
+
 def evaluate(
     report_text: str,
     *,
@@ -357,9 +393,15 @@ def evaluate(
     min_factor_n: int,
     min_top_bucket_n: int,
     min_top_bucket_entry_fill_rate: float,
+    max_avg_entry_sweep_slip_bps: float,
     min_window_count: int,
 ) -> dict[str, Any]:
     gate = parse_promotion_gate(report_text)
+    quality = parse_execution_quality(report_text)
+    quality_blockers = execution_quality_blockers(
+        quality,
+        max_avg_entry_sweep_slip_bps=max_avg_entry_sweep_slip_bps,
+    )
     rows = parse_autofactor_rows(report_text)
     evaluated: list[EvaluatedFactor] = []
 
@@ -375,6 +417,7 @@ def evaluate(
                 hard_entry_gated=hard_entry_gated,
             )
         )
+        blockers.extend(quality_blockers)
         if row.target not in allowed_targets:
             blockers.append("target_not_allowed")
         if row.decision != "candidate" or row.reason != "passed":
@@ -432,9 +475,11 @@ def evaluate(
             "factor_n": min_factor_n,
             "top_bucket_n": min_top_bucket_n,
             "top_bucket_full_depth_entry_fill_rate": min_top_bucket_entry_fill_rate,
+            "max_avg_entry_sweep_slip_bps": max_avg_entry_sweep_slip_bps,
             "window_count": min_window_count,
         },
         "promotion_gate": asdict(gate),
+        "execution_quality": asdict(quality),
         "qualified_strategies": [
             {
                 "factor": asdict(item.factor),
@@ -478,6 +523,7 @@ def build_factor_registry(result: dict[str, Any]) -> dict[str, Any]:
         "required_strategy_profile": result["required_strategy_profile"],
         "allowed_targets": result["allowed_targets"],
         "promotion_gate": result["promotion_gate"],
+        "execution_quality": result["execution_quality"],
         "entries": entries,
     }
 
@@ -507,6 +553,7 @@ def build_strategy_handoff(result: dict[str, Any]) -> dict[str, Any]:
         "required_strategy_profile": result["required_strategy_profile"],
         "allowed_targets": result["allowed_targets"],
         "promotion_gate": result["promotion_gate"],
+        "execution_quality": result["execution_quality"],
         "strategies": strategies,
         "blocked_factor_count": sum(
             1 for item in result["evaluated_factors"] if not item["qualified"]
@@ -522,6 +569,7 @@ def render_handoff_markdown(handoff: dict[str, Any]) -> str:
         f"Recommended action: `{handoff['recommended_action']}`",
         f"Required strategy profile: `{handoff['required_strategy_profile']}`",
         f"Allowed targets: `{', '.join(handoff['allowed_targets'])}`",
+        f"Avg entry sweep slip bps: `{handoff['execution_quality'].get('avg_entry_sweep_slip_bps')}`",
         "",
     ]
     if handoff["status"] != "ready":
@@ -609,6 +657,7 @@ def render_markdown(result: dict[str, Any]) -> str:
         "",
         f"- Ready: `{str(result['promotion_gate']['ready']).lower()}`",
         f"- Evidence: `{result['promotion_gate']['evidence']}`",
+        f"- Avg entry sweep slip bps: `{result['execution_quality'].get('avg_entry_sweep_slip_bps')}`",
         "",
         "## Qualified Strategies",
         "",
@@ -664,6 +713,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-factor-n", type=int, default=100)
     parser.add_argument("--min-top-bucket-n", type=int, default=50)
     parser.add_argument("--min-top-bucket-entry-fill-rate", type=float, default=0.30)
+    parser.add_argument("--max-avg-entry-sweep-slip-bps", type=float, default=200.0)
     parser.add_argument("--min-window-count", type=int, default=4)
     return parser.parse_args()
 
@@ -680,6 +730,7 @@ def main() -> int:
         min_factor_n=args.min_factor_n,
         min_top_bucket_n=args.min_top_bucket_n,
         min_top_bucket_entry_fill_rate=args.min_top_bucket_entry_fill_rate,
+        max_avg_entry_sweep_slip_bps=args.max_avg_entry_sweep_slip_bps,
         min_window_count=args.min_window_count,
     )
 
