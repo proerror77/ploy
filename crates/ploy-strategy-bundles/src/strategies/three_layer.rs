@@ -58,6 +58,8 @@ pub struct ThreeLayerConfig {
     pub min_entry_score: f64,
     pub autofactor_runtime_score: Option<String>,
     pub event_ml_model: Option<EventMlModelContract>,
+    pub visible_depth_haircut: Decimal,
+    pub max_sweep_levels: usize,
 }
 
 impl From<DirectionalConfig> for ThreeLayerConfig {
@@ -91,6 +93,8 @@ impl From<DirectionalConfig> for ThreeLayerConfig {
             min_entry_score: c.three_layer_min_entry_score,
             autofactor_runtime_score: c.three_layer_autofactor_runtime_score,
             event_ml_model: None,
+            visible_depth_haircut: Decimal::ONE,
+            max_sweep_levels: 0,
         }
     }
 }
@@ -851,19 +855,26 @@ impl ThreeLayerStrategy {
         quantity: Decimal,
         limit_price: Decimal,
         side: TradeSide,
+        visible_depth_haircut: Decimal,
+        max_sweep_levels: usize,
     ) -> bool {
         if levels.is_empty() {
             return true;
         }
 
+        let level_limit = if max_sweep_levels == 0 {
+            usize::MAX
+        } else {
+            max_sweep_levels
+        };
         let mut available = Decimal::ZERO;
-        for level in levels {
+        for level in levels.iter().take(level_limit) {
             match side {
                 TradeSide::Buy if level.price > limit_price => break,
                 TradeSide::Sell if level.price < limit_price => break,
                 _ => {}
             }
-            available += level.size.max(Decimal::ZERO);
+            available += (level.size * visible_depth_haircut).max(Decimal::ZERO);
             if available >= quantity {
                 return true;
             }
@@ -1199,7 +1210,14 @@ impl ThreeLayerStrategy {
             self.bump("skip_insufficient_ask_size");
             return None;
         }
-        if !Self::levels_can_fill(&depth.ask_levels, quantity, entry_price, TradeSide::Buy) {
+        if !Self::levels_can_fill(
+            &depth.ask_levels,
+            quantity,
+            entry_price,
+            TradeSide::Buy,
+            self.config.visible_depth_haircut,
+            self.config.max_sweep_levels,
+        ) {
             self.bump("skip_insufficient_ask_depth");
             return None;
         }
@@ -1583,7 +1601,14 @@ impl ThreeLayerStrategy {
                 );
                 continue;
             }
-            if !Self::levels_can_fill(&depth.ask_levels, quantity, entry_price, TradeSide::Buy) {
+            if !Self::levels_can_fill(
+                &depth.ask_levels,
+                quantity,
+                entry_price,
+                TradeSide::Buy,
+                self.config.visible_depth_haircut,
+                self.config.max_sweep_levels,
+            ) {
                 self.bump("skip_insufficient_ask_depth");
                 debug!(
                     strategy = "three_layer",
@@ -1715,7 +1740,14 @@ impl ThreeLayerStrategy {
                     );
                     continue;
                 }
-                if !Self::levels_can_fill(&depth.bid_levels, qty, exit_bid, TradeSide::Sell) {
+                if !Self::levels_can_fill(
+                    &depth.bid_levels,
+                    qty,
+                    exit_bid,
+                    TradeSide::Sell,
+                    self.config.visible_depth_haircut,
+                    self.config.max_sweep_levels,
+                ) {
                     self.bump("skip_insufficient_bid_depth");
                     debug!(
                         strategy = "three_layer",
@@ -2407,6 +2439,8 @@ mod tests {
             min_entry_score: 0.30,
             autofactor_runtime_score: None,
             event_ml_model: None,
+            visible_depth_haircut: Decimal::ONE,
+            max_sweep_levels: 0,
         }
     }
 
@@ -2876,6 +2910,40 @@ mod tests {
     }
 
     #[test]
+    fn take_profit_depth_gate_applies_haircut_and_sweep_level_limit() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.visible_depth_haircut = dec!(0.5);
+        config.max_sweep_levels = 1;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = position_with_token("token-down", now);
+        let orders = OrderLedger::default();
+
+        let decisions = strategy.on_update(
+            &take_profit_quote_with_bid_levels(
+                "token-down",
+                now,
+                vec![level(dec!(0.72), dec!(10)), level(dec!(0.72), dec!(20))],
+            ),
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "exit depth gate must match executor haircut and max sweep levels"
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("skip_insufficient_bid_depth"), Some(&1));
+    }
+
+    #[test]
     fn entry_requires_ask_size_for_fixed_stake() {
         use chrono::TimeZone;
 
@@ -2950,6 +3018,52 @@ mod tests {
         assert!(
             decisions.is_empty(),
             "entry should not fire when full-depth ask cannot fill the fixed stake"
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("skip_insufficient_ask_depth"), Some(&1));
+    }
+
+    #[test]
+    fn entry_depth_gate_applies_haircut_and_sweep_level_limit() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        config.visible_depth_haircut = dec!(0.5);
+        config.max_sweep_levels = 1;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &entry_quote_with_ask_levels(
+                "token-up",
+                now,
+                Some(dec!(200)),
+                vec![level(dec!(0.20), dec!(125)), level(dec!(0.20), dec!(200))],
+            ),
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "entry depth gate must match executor haircut and max sweep levels"
         );
         let diagnostics = strategy
             .diagnostics()
