@@ -18,6 +18,18 @@ deribit_vol_surface,true,require_deribit=false include_deribit=false
 recorded_replay_parity,true,blocking_flags=<none>
 """
 
+LOW_SLIPPAGE_HEALTH = """=== Factor Walk-Forward V2 Data Health ===
+source_obs=1000 v2_rows=2000 settlement_labels=2000 executable_pnl_rows=1500 deribit_rows=0
+entry_fill_rate=80.00% rejection_rate=20.00% exit_fill_rate=75.00% avg_pm_lag_secs=1.20
+full_depth_entry_fill_rate=95.00% full_depth_exit_fill_rate=90.00% full_depth_pnl_rows=1900 avg_entry_sweep_slip_bps=80.00 avg_exit_sweep_slip_bps=40.00
+"""
+
+HIGH_SLIPPAGE_HEALTH = """=== Factor Walk-Forward V2 Data Health ===
+source_obs=1000 v2_rows=2000 settlement_labels=2000 executable_pnl_rows=1500 deribit_rows=0
+entry_fill_rate=80.00% rejection_rate=20.00% exit_fill_rate=75.00% avg_pm_lag_secs=1.20
+full_depth_entry_fill_rate=95.00% full_depth_exit_fill_rate=90.00% full_depth_pnl_rows=1900 avg_entry_sweep_slip_bps=1912.92 avg_exit_sweep_slip_bps=40.00
+"""
+
 BLOCKED_GATE = """=== Settlement Probability PRD Promotion Gate ===
 ready_for_dry_run_handoff=false stake_usd=15.00 min_entry_fill_rate=0.0500 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=0 event_complete_rows=0 replay_parity_ready=false
 gate,passed,evidence
@@ -203,6 +215,33 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         )
         self.assertFalse(rejected["qualified"])
         self.assertIn("autofactor_not_candidate:reject:nonpositive_rank_ic", rejected["blockers"])
+
+    def test_blocks_when_global_entry_sweep_slippage_is_too_high(self):
+        _, payload, registry, handoff, handoff_md = self.run_script(
+            HIGH_SLIPPAGE_HEALTH + READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(registry["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        first = payload["evaluated_factors"][0]
+        self.assertFalse(first["qualified"])
+        self.assertIn(
+            "global_entry_sweep_slippage_too_high:1912.92>200.00",
+            first["blockers"],
+        )
+        self.assertEqual(handoff["execution_quality"]["avg_entry_sweep_slip_bps"], 1912.92)
+        self.assertIn("Avg entry sweep slip bps: `1912.92`", handoff_md)
+
+    def test_allows_low_global_entry_sweep_slippage(self):
+        _, payload, registry, handoff, _ = self.run_script(
+            LOW_SLIPPAGE_HEALTH + READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(registry["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(payload["execution_quality"]["avg_entry_sweep_slip_bps"], 80.0)
 
     def test_qualifies_predictive_external_formula_when_gate_is_ready(self):
         _, payload, registry, handoff, handoff_md = self.run_script(

@@ -1,3 +1,49 @@
+# AutoFactor Promotion Gate Slippage Repair (2026-05-17)
+
+## Goal
+
+Prevent AutoFactor strategy handoff from treating 15U fillability as sufficient
+when the same report shows excessive average entry sweep slippage. A strategy
+that can only be filled by accepting materially worse prices remains research
+evidence, not a dry-run config candidate.
+
+Evidence stage: `factor_attribution / promotion-gate repair`.
+
+## Files / Ownership
+
+- `scripts/evaluate_autofactor_strategy_promotion.py`
+  - Owner: parse global entry sweep slippage from walk-forward data health and
+    fail handoff when it exceeds the conservative cap.
+- `tests/test_autofactor_strategy_promotion.py`
+  - Owner: regression coverage for high-slippage and low-slippage promotion
+    reports.
+
+## Tasks
+
+- [x] Add a global average entry sweep slippage blocker.
+- [x] Add high/low slippage regression tests.
+- [x] Run focused promotion-gate tests and syntax/diff checks.
+- [x] Re-evaluate run `25982142342` and confirm the ready handoff becomes
+      blocked.
+- [x] Commit, push, and open a PR.
+
+## Review
+
+- 2026-05-17: Added a fail-closed global entry sweep slippage blocker to the
+  AutoFactor promotion evaluator. The default cap is
+  `max_avg_entry_sweep_slip_bps=200.0`; reports without the data-health metric
+  retain existing behavior, but reports with excessive average entry sweep
+  slippage cannot produce a ready handoff.
+- 2026-05-17: Re-evaluated fresh walk-forward run `25982142342`. Before this
+  patch the artifact produced handoff `status=ready` despite
+  `avg_entry_sweep_slip_bps=1912.92`; with this patch it evaluates to
+  `decision=blocked`, handoff `status=blocked`,
+  `recommended_action=do_not_promote`, and zero qualified strategies.
+- 2026-05-17: Verification passed:
+  `python3 -m unittest tests.test_autofactor_strategy_promotion tests.test_factor_walk_forward_sweep`,
+  `python3 -m py_compile scripts/evaluate_autofactor_strategy_promotion.py tests/test_autofactor_strategy_promotion.py tests/test_factor_walk_forward_sweep.py`,
+  and `rtk git diff --check`.
+
 # AutoFactor Promotion Gate Fillability Repair (2026-05-17)
 
 ## Goal
