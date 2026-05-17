@@ -1,3 +1,44 @@
+# AutoFactor Runtime Settlement Edge Semantics (2026-05-17)
+
+## Goal
+
+Make the deployed PM5D settlement AutoFactor runtime scorer use the same
+settlement-probability semantics as the research/search-tree evidence: PM side
+fair probability minus executable entry sweep price and fee.
+
+Evidence stage: `runtime_parity / dry_run_candidate repair`.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: map settlement AutoFactor runtime scores to PM side fair probability,
+    executable depth-aware entry price, signal edge, and `p_hat`.
+
+## Tasks
+
+- [x] Detect settlement-native AutoFactor runtime scores.
+- [x] Use PM UP/DOWN quote-implied side fair probability for settlement
+      AutoFactor edge scoring.
+- [x] Use executable sweep price and depth capacity in AutoFactor inputs.
+- [x] Record emitted entry `p_hat` / `edge` from settlement probability rather
+      than CEX effective probability.
+- [x] Add focused regression coverage and run local validation.
+- [ ] Push PR, wait for CI, merge, deploy dry-run from `main`, reset target
+      runtime evidence, and observe fresh dry-run scores.
+
+## Review
+
+- 2026-05-17: Diagnosed the post-reset no-trade dry-run as a runtime scorer
+  parity bug: research AutoFactor `full_depth_settlement_edge` is PM side fair
+  probability minus executable price and fee, while runtime was still feeding
+  CEX effective probability and top ask into the formula path.
+- 2026-05-17: Local validation passed:
+  `rtk cargo test -p ploy-strategy-bundles runtime_settlement_autofactor --lib`,
+  `rtk cargo test -p ploy-strategy-bundles autofactor --lib`,
+  `rtk cargo test -p ploy-strategy-bundles --lib`,
+  `rustfmt --check crates/ploy-strategy-bundles/src/strategies/three_layer.rs`,
+  and `rtk git diff --check`.
+
 # AutoFactor Promotion Gate Slippage Repair (2026-05-17)
 
 ## Goal
