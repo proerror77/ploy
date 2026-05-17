@@ -1,3 +1,36 @@
+# PM5D Crypto Discovery Pagination Repair (2026-05-17)
+
+## Goal
+
+Restore `dry_run_candidate` sample accumulation by making the central
+Polymarket market-discovery collector continuously find BTC/ETH crypto
+Up/Down markets even when sports markets crowd the first Gamma markets page.
+
+Evidence stage: `dry_run_candidate / runtime data-supply repair`.
+
+## Files / Ownership
+
+- `crates/ploy-market-data/src/scanner.rs`
+  - Owner: add bounded paginated Gamma market discovery for crypto catalog
+    refresh.
+- `vendor/polymarket-client-sdk/src/gamma/types/request.rs`
+  - Owner: expose Gamma `category` query serialization for compatibility with
+    the public API, while not relying on it as the only crypto filter.
+- `vendor/polymarket-client-sdk/tests/gamma.rs`
+  - Owner: cover `category` query serialization.
+
+## Tasks
+
+- [x] Verify zero dry-run samples are caused by missing future BTC/ETH catalog
+      rows, not by strategy threshold or search-tree conservatism.
+- [x] Confirm Gamma still has future crypto markets, but they can appear on
+      later pages such as `offset=500`.
+- [x] Implement bounded paginated crypto discovery.
+- [x] Add focused request serialization tests.
+- [x] Run focused local validation.
+- [ ] Push PR, wait for CI, merge, deploy from `main`, then verify future
+      BTC/ETH rows resume before resetting dry-run evidence.
+
 # AutoFactor Runtime Settlement Edge Semantics (2026-05-17)
 
 ## Goal

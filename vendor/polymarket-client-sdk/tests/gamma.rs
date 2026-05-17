@@ -1267,6 +1267,7 @@ mod query_string {
             .start_date_max(end_date)
             .end_date_min(start_date)
             .end_date_max(end_date)
+            .category("Crypto")
             .tag_id("42")
             .related_tags(true)
             .cyom(false)
@@ -1307,6 +1308,7 @@ mod query_string {
         assert!(qs.contains("start_date_max="));
         assert!(qs.contains("end_date_min="));
         assert!(qs.contains("end_date_max="));
+        assert!(qs.contains("category=Crypto"));
         assert!(qs.contains("tag_id=42"));
         assert!(qs.contains("related_tags=true"));
         assert!(qs.contains("cyom=false"));

@@ -189,6 +189,8 @@ pub struct MarketsRequest {
     pub end_date_min: Option<DateTime<Utc>>,
     pub end_date_max: Option<DateTime<Utc>>,
     #[builder(into)]
+    pub category: Option<String>,
+    #[builder(into)]
     pub tag_id: Option<String>,
     pub related_tags: Option<bool>,
     pub cyom: Option<bool>,
