@@ -1,3 +1,52 @@
+# PM5D Sweep Slippage Execution Gate (2026-05-17)
+
+## Goal
+
+Allow the PM5D dry-run to sweep two or three nearby Polymarket book levels when
+the total quantity is executable and the price jump is small, while rejecting
+thin books whose deeper levels are too far from the top quote.
+
+Evidence stage: `dry_run_candidate`.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/config.rs`
+  - Owner: expose a strategy/executor-visible max sweep price delta.
+- `crates/ploy-strategy-bundles/src/strategies/registry.rs`
+  - Owner: pass execution sweep controls into three-layer config.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: gate entries/exits with haircut, max levels, and max sweep price
+    delta, then emit matching intent limits.
+- `config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml`
+  - Owner: use a conservative dry-run sweep delta for the active PM5D profile.
+
+## Tasks
+
+- [x] Add max sweep price delta config with default-preserving behavior.
+- [x] Make three-layer entry/exit depth gates use the same sweep limit that the
+      executor receives through intent `limit_price`.
+- [x] Add regression tests for small acceptable multi-level sweeps and large
+      rejected jumps.
+- [x] Run focused Rust tests and diff hygiene checks.
+- [ ] Push PR, wait for CI, merge, deploy from `main`, and reset dry-run
+      evidence.
+
+## Review
+
+- 2026-05-17: Added execution `max_sweep_price_delta` with a default of `0.0`,
+  preserving existing behavior unless a profile opts in. The BTC/ETH PM5D
+  settlement-probability dry-run opts into `0.003`, allowing up to 0.3 cent of
+  price movement while still respecting `visible_depth_haircut = 0.5` and
+  `max_sweep_levels = 3`.
+- 2026-05-17: Three-layer entry and exit gates now compute an executable sweep
+  price from full-depth levels and emit the matching intent limit. When depth
+  levels are present, top-level size no longer blocks a valid two/three-level
+  sweep; large deeper-level jumps still reject before intent emission.
+- 2026-05-17: Local verification passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-three-layer-slippage rtk cargo test -p ploy-strategy-bundles three_layer --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-three-layer-slippage rtk cargo test -p ploy-strategy-bundles config --lib`,
+  and `rtk git diff --check`.
+
 # Recorded Replay Partial-Fill Cancel Parity (2026-05-13)
 
 ## Goal

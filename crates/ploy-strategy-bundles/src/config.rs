@@ -210,6 +210,8 @@ pub struct SimExecutionSection {
     pub visible_depth_haircut: f64,
     #[serde(default)]
     pub max_sweep_levels: usize,
+    #[serde(default)]
+    pub max_sweep_price_delta: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -275,6 +277,7 @@ impl Default for SimExecutionSection {
             require_lob_liquidity: false,
             visible_depth_haircut: 1.0,
             max_sweep_levels: 0,
+            max_sweep_price_delta: 0.0,
         }
     }
 }
@@ -438,6 +441,7 @@ include_sports_state = true
 spread_pct = 0.02
 enable_partial_fills = true
 enable_market_impact = true
+max_sweep_price_delta = 0.003
 "#;
 
     #[test]
@@ -475,6 +479,7 @@ enable_market_impact = true
         assert!((config.strategy.min_edge - 0.02).abs() < 1e-10);
         assert_eq!(config.strategy.stake_usd, Decimal::new(25, 0));
         assert_eq!(config.strategy.max_positions, 1000);
+        assert_eq!(config.execution.max_sweep_price_delta, 0.003);
     }
 
     #[test]
@@ -575,6 +580,7 @@ mode = "dryrun"
         assert_eq!(config.live_execution.reconcile_cycles_before_retry, 2);
         assert!((config.strategy.min_edge - 0.02).abs() < 1e-10);
         assert!(!config.execution.use_spread);
+        assert_eq!(config.execution.max_sweep_price_delta, 0.0);
     }
 
     #[test]
