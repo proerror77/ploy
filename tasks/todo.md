@@ -1,3 +1,49 @@
+# AutoFactor Promotion Gate Fillability Repair (2026-05-17)
+
+## Goal
+
+Prevent hard-entry-gated AutoFactor rows from bypassing failed global
+full-depth fillability. A candidate that cannot show configured-stake capacity
+at the promotion gate remains research evidence, not a dry-run handoff.
+
+Evidence stage: `factor_attribution / promotion-gate repair`.
+
+## Files / Ownership
+
+- `scripts/evaluate_autofactor_strategy_promotion.py`
+  - Owner: keep global execution-depth blockers fail-closed for strategy
+    handoff.
+- `tests/test_autofactor_strategy_promotion.py`
+  - Owner: regression coverage for hard-entry-gated formulas when global
+    full-depth fillability fails.
+
+## Tasks
+
+- [x] Remove the hard-entry-gate waiver for global full-depth fillability.
+- [x] Update regression tests to require the global fillability blocker.
+- [x] Run focused promotion-gate tests and syntax/diff checks.
+- [x] Re-evaluate the previously downloaded run artifact and confirm handoff
+      is blocked.
+- [x] Commit, push, and open a PR.
+
+## Review
+
+- 2026-05-17: Removed the hard-entry-gated special case that stripped
+  `global_full_depth_entry_fillability` from AutoFactor promotion blockers.
+  Hard entry gates remain useful search/runtime filters, but they no longer
+  turn a globally unfillable 15U promotion gate into a dry-run handoff.
+- 2026-05-17: Replayed downloaded walk-forward artifact `25853644079`. The old
+  artifact had `promotion_gate.ready=false` and
+  `global_full_depth_entry_fill_rate=0.1458 min_required=0.9500`, yet its saved
+  handoff was `status=ready` for
+  `mut_spread_adjusted_external_move_full_depth_entry_gate`. With this patch,
+  the same report evaluates to `decision=blocked`,
+  handoff `status=blocked`, and `recommended_action=do_not_promote`.
+- 2026-05-17: Verification passed:
+  `python3 -m unittest tests.test_autofactor_strategy_promotion tests.test_factor_walk_forward_sweep`,
+  `python3 -m py_compile scripts/evaluate_autofactor_strategy_promotion.py tests/test_autofactor_strategy_promotion.py tests/test_factor_walk_forward_sweep.py`,
+  and `rtk git diff --check`.
+
 # PM5D Sweep Slippage Execution Gate (2026-05-17)
 
 ## Goal

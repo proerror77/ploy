@@ -13,6 +13,8 @@ For `autofactor_formula:*` runtime scores, the PRD model-specific
 `symbol_holdout` and `walk_forward_oos` gates are replaced by formula-level
 symbol/window stability from the AutoFactor row. Data quality, Deribit,
 execution-depth, calibration, and replay-parity gates remain global blockers.
+Hard entry gates are still execution filters, not permission to waive failed
+configured-stake capacity at the global promotion gate.
 
 The current PM5D/PM15D settlement PRD should not silently promote a good
 repricing factor into the settlement strategy lane.
@@ -341,12 +343,6 @@ def global_gate_blockers(
         for item in gate.blocked_gates
         if not item.startswith(MODEL_SPECIFIC_PRD_GATE_PREFIXES)
     ]
-    if hard_entry_gated:
-        blockers = [
-            item
-            for item in blockers
-            if not item.startswith("global_full_depth_entry_fillability:")
-        ]
     if blockers:
         return [f"global_promotion_gate_not_ready:{item}" for item in blockers]
     return []
