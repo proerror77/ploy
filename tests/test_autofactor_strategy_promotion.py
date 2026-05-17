@@ -241,7 +241,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         )
         self.assertIn("full_depth_entry_gate", handoff_md)
 
-    def test_hard_gate_predictive_formula_waives_global_fillability_not_replay_parity(self):
+    def test_hard_gate_predictive_formula_keeps_global_fillability_blocker(self):
         _, payload, _, handoff, _ = self.run_script(
             HARD_GATE_REPLAY_BLOCKED_GATE + AUTOFACTOR_TRADEABLE_HARD_GATE_REPORT
         )
@@ -250,7 +250,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertEqual(handoff["status"], "blocked")
         first = payload["evaluated_factors"][0]
         self.assertFalse(first["qualified"])
-        self.assertNotIn(
+        self.assertIn(
             "global_promotion_gate_not_ready:global_full_depth_entry_fillability: "
             "global_full_depth_entry_fill_rate=0.1458 min_required=0.3000",
             first["blockers"],
