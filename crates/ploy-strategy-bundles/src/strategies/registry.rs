@@ -9,6 +9,7 @@ use crate::{
     MeanReversionStrategy, ProbChaseStrategy, ProbReversalStrategy, ReversalStrategy,
     SweepStrategy, ThreeLayerStrategy,
 };
+use rust_decimal::Decimal;
 use tracing::info;
 
 #[must_use]
@@ -153,7 +154,7 @@ pub fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
                 canonical_variant = canonical_variant.as_str(),
                 "Using three-layer directional strategy variant",
             );
-            let three_layer_config =
+            let mut three_layer_config =
                 crate::strategies::three_layer::ThreeLayerConfig::from_directional_runtime(
                     config.strategy.clone(),
                 )
@@ -161,6 +162,9 @@ pub fn build_strategy(config: &FullConfig) -> Box<dyn StrategyLogic> {
                     eprintln!("Invalid three-layer strategy config: {err}");
                     std::process::exit(2);
                 });
+            three_layer_config.visible_depth_haircut =
+                Decimal::try_from(config.execution.visible_depth_haircut).unwrap_or(Decimal::ONE);
+            three_layer_config.max_sweep_levels = config.execution.max_sweep_levels;
             Box::new(ThreeLayerStrategy::new(three_layer_config))
         }
         "diff_enhanced" => {
