@@ -55,6 +55,14 @@ global_full_depth_entry_fillability,false,global_full_depth_entry_fill_rate=0.14
 recorded_replay_parity,false,replay_parity_json=artifacts/replay-parity/parity-evaluation.json runtime_ready=true event_ready=false blocking_flags=<none> advisory_flags=<none> decision=continue
 """
 
+GLOBAL_FILLABILITY_BLOCKED_GATE = """=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=false stake_usd=15.00 min_entry_fill_rate=0.3000 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=511 event_complete_rows=1702 replay_parity_ready=true
+gate,passed,evidence
+data_quality,true,mode=event_complete event_complete_events=511 event_complete_rows=1702
+recorded_replay_parity,true,blocking_flags=<none>
+global_full_depth_entry_fillability,false,global_full_depth_entry_fill_rate=0.1311 min_required=0.3000
+"""
+
 AUTOFACTOR_REPORT = """
 # AutoFactor target=full_depth_settlement_executable_pnl
 === AutoFactor Seed Candidate Report ===
@@ -280,6 +288,18 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         blockers = payload["evaluated_factors"][0]["blockers"]
         self.assertIn("top_bucket_entry_sweep_slippage_too_high:450.00>200.00", blockers)
         self.assertIn("top_bucket_entry_sweep_levels_too_high:3.40>3.00", blockers)
+
+    def test_top_bucket_execution_can_override_global_fillability_blocker(self):
+        _, payload, _, handoff, _ = self.run_script(
+            LOW_SLIPPAGE_HEALTH
+            + GLOBAL_FILLABILITY_BLOCKED_GATE
+            + AUTOFACTOR_TOP_BUCKET_EXECUTION_REPORT
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        blockers = payload["qualified_strategies"][0].get("blockers", [])
+        self.assertNotIn("global_full_depth_entry_fillability", ",".join(blockers))
 
     def test_qualifies_predictive_external_formula_when_gate_is_ready(self):
         _, payload, registry, handoff, handoff_md = self.run_script(

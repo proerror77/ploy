@@ -368,17 +368,25 @@ def is_autofactor_formula(mapping: dict[str, str] | None) -> bool:
 
 
 def global_gate_blockers(
-    gate: PromotionGate, *, formula_specific: bool, hard_entry_gated: bool
+    gate: PromotionGate, *, formula_specific: bool, suppress_global_fillability: bool
 ) -> list[str]:
     if gate.ready:
         return []
-    if not formula_specific and not hard_entry_gated:
+    if not formula_specific and not suppress_global_fillability:
         return ["promotion_gate_not_ready"]
     blockers = [
         item
         for item in gate.blocked_gates
         if not item.startswith(MODEL_SPECIFIC_PRD_GATE_PREFIXES)
     ]
+    if suppress_global_fillability:
+        blockers = [
+            item
+            for item in blockers
+            if not item.startswith("global_full_depth_entry_fillability:")
+        ]
+    if not formula_specific and suppress_global_fillability and blockers:
+        return ["promotion_gate_not_ready"]
     if blockers:
         return [f"global_promotion_gate_not_ready:{item}" for item in blockers]
     return []
@@ -438,12 +446,18 @@ def evaluate(
         blockers: list[str] = []
         mapping = runtime_mappings.get(row.name)
         formula_specific = is_autofactor_formula(mapping)
-        hard_entry_gated = row.name.endswith("_full_depth_entry_gate")
+        suppress_global_fillability = (
+            formula_specific
+            and row.top_bucket_full_depth_entry_fill_rate == row.top_bucket_full_depth_entry_fill_rate
+            and row.top_bucket_full_depth_entry_fill_rate >= min_top_bucket_entry_fill_rate
+            and row.top_bucket_avg_entry_sweep_slip_bps is not None
+            and row.top_bucket_avg_entry_sweep_levels is not None
+        )
         blockers.extend(
             global_gate_blockers(
                 gate,
                 formula_specific=formula_specific,
-                hard_entry_gated=hard_entry_gated,
+                suppress_global_fillability=suppress_global_fillability,
             )
         )
         blockers.extend(
