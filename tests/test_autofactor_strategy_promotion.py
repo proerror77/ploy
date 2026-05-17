@@ -98,6 +98,22 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
 2,mut_spread_adjusted_external_move_full_depth_entry_gate,tradeable_full_depth_settlement_pnl,candidate,passed,3335,0.065967,0.092183,14,1.268732,0.9286,2,1.0000,0.5000,667,1.388814,0.6042,1.0000,7
 """
 
+AUTOFACTOR_TOP_BUCKET_EXECUTION_REPORT = """
+# AutoFactor target=tradeable_full_depth_settlement_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,complexity
+1,auto_settlement_conservative_settlement_edge,tradeable_full_depth_settlement_pnl,candidate,passed,3335,0.080512,0.076800,14,0.951390,0.9286,2,1.0000,0.7500,667,0.872484,0.5757,1.0000,80.00,2.20,1
+"""
+
+AUTOFACTOR_TOP_BUCKET_BAD_EXECUTION_REPORT = """
+# AutoFactor target=tradeable_full_depth_settlement_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,complexity
+1,auto_settlement_conservative_settlement_edge,tradeable_full_depth_settlement_pnl,candidate,passed,3335,0.080512,0.076800,14,0.951390,0.9286,2,1.0000,0.7500,667,0.872484,0.5757,1.0000,450.00,3.40,1
+"""
+
 CORE_SUITE_REPORT = f"""
 # Snapshot
 snapshot_schema=1
@@ -242,6 +258,28 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertEqual(registry["decision"], "qualified")
         self.assertEqual(handoff["status"], "ready")
         self.assertEqual(payload["execution_quality"]["avg_entry_sweep_slip_bps"], 80.0)
+
+    def test_uses_top_bucket_execution_quality_before_global_slippage(self):
+        _, payload, _, handoff, _ = self.run_script(
+            HIGH_SLIPPAGE_HEALTH + READY_GATE + AUTOFACTOR_TOP_BUCKET_EXECUTION_REPORT
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        first = payload["qualified_strategies"][0]["factor"]
+        self.assertEqual(first["top_bucket_avg_entry_sweep_slip_bps"], 80.0)
+        self.assertEqual(first["top_bucket_avg_entry_sweep_levels"], 2.2)
+
+    def test_blocks_top_bucket_slippage_and_level_count(self):
+        _, payload, _, handoff, _ = self.run_script(
+            LOW_SLIPPAGE_HEALTH + READY_GATE + AUTOFACTOR_TOP_BUCKET_BAD_EXECUTION_REPORT
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        blockers = payload["evaluated_factors"][0]["blockers"]
+        self.assertIn("top_bucket_entry_sweep_slippage_too_high:450.00>200.00", blockers)
+        self.assertIn("top_bucket_entry_sweep_levels_too_high:3.40>3.00", blockers)
 
     def test_qualifies_predictive_external_formula_when_gate_is_ready(self):
         _, payload, registry, handoff, handoff_md = self.run_script(

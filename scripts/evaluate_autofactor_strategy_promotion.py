@@ -181,6 +181,8 @@ class AutoFactorRow:
     top_bucket_avg_label: float
     top_bucket_positive_label_rate: float
     top_bucket_full_depth_entry_fill_rate: float
+    top_bucket_avg_entry_sweep_slip_bps: float | None
+    top_bucket_avg_entry_sweep_levels: float | None
     complexity: int
 
 
@@ -208,6 +210,8 @@ def factor_metrics(row: AutoFactorRow) -> dict[str, Any]:
         "top_bucket_avg_label": row.top_bucket_avg_label,
         "top_bucket_positive_label_rate": row.top_bucket_positive_label_rate,
         "top_bucket_full_depth_entry_fill_rate": row.top_bucket_full_depth_entry_fill_rate,
+        "top_bucket_avg_entry_sweep_slip_bps": row.top_bucket_avg_entry_sweep_slip_bps,
+        "top_bucket_avg_entry_sweep_levels": row.top_bucket_avg_entry_sweep_levels,
         "complexity": row.complexity,
     }
 
@@ -224,6 +228,10 @@ def parse_int(raw: str) -> int:
         return int(raw)
     except ValueError:
         return 0
+
+
+def finite_or_none(value: float) -> float | None:
+    return value if value == value else None
 
 
 def parse_promotion_gate(report_text: str) -> PromotionGate:
@@ -323,6 +331,12 @@ def parse_autofactor_rows(report_text: str) -> list[AutoFactorRow]:
                 top_bucket_full_depth_entry_fill_rate=parse_float(
                     item.get("top_bucket_full_depth_entry_fill_rate", "nan")
                 ),
+                top_bucket_avg_entry_sweep_slip_bps=finite_or_none(
+                    parse_float(item.get("top_bucket_avg_entry_sweep_slip_bps", "nan"))
+                ),
+                top_bucket_avg_entry_sweep_levels=finite_or_none(
+                    parse_float(item.get("top_bucket_avg_entry_sweep_levels", "nan"))
+                ),
                 complexity=parse_int(item["complexity"]),
             )
         )
@@ -371,17 +385,35 @@ def global_gate_blockers(
 
 
 def execution_quality_blockers(
-    quality: ExecutionQuality, *, max_avg_entry_sweep_slip_bps: float
+    row: AutoFactorRow,
+    quality: ExecutionQuality,
+    *,
+    max_avg_entry_sweep_slip_bps: float,
+    max_top_bucket_entry_sweep_levels: float,
 ) -> list[str]:
-    value = quality.avg_entry_sweep_slip_bps
-    if value is None:
-        return []
-    if value > max_avg_entry_sweep_slip_bps:
-        return [
-            "global_entry_sweep_slippage_too_high:"
-            f"{value:.2f}>{max_avg_entry_sweep_slip_bps:.2f}"
-        ]
-    return []
+    blockers: list[str] = []
+    slip = row.top_bucket_avg_entry_sweep_slip_bps
+    if slip is not None:
+        if slip > max_avg_entry_sweep_slip_bps:
+            blockers.append(
+                "top_bucket_entry_sweep_slippage_too_high:"
+                f"{slip:.2f}>{max_avg_entry_sweep_slip_bps:.2f}"
+            )
+    else:
+        global_slip = quality.avg_entry_sweep_slip_bps
+        if global_slip is not None and global_slip > max_avg_entry_sweep_slip_bps:
+            blockers.append(
+                "global_entry_sweep_slippage_too_high:"
+                f"{global_slip:.2f}>{max_avg_entry_sweep_slip_bps:.2f}"
+            )
+
+    levels = row.top_bucket_avg_entry_sweep_levels
+    if levels is not None and levels > max_top_bucket_entry_sweep_levels:
+        blockers.append(
+            "top_bucket_entry_sweep_levels_too_high:"
+            f"{levels:.2f}>{max_top_bucket_entry_sweep_levels:.2f}"
+        )
+    return blockers
 
 
 def evaluate(
@@ -394,14 +426,11 @@ def evaluate(
     min_top_bucket_n: int,
     min_top_bucket_entry_fill_rate: float,
     max_avg_entry_sweep_slip_bps: float,
+    max_top_bucket_entry_sweep_levels: float,
     min_window_count: int,
 ) -> dict[str, Any]:
     gate = parse_promotion_gate(report_text)
     quality = parse_execution_quality(report_text)
-    quality_blockers = execution_quality_blockers(
-        quality,
-        max_avg_entry_sweep_slip_bps=max_avg_entry_sweep_slip_bps,
-    )
     rows = parse_autofactor_rows(report_text)
     evaluated: list[EvaluatedFactor] = []
 
@@ -417,7 +446,14 @@ def evaluate(
                 hard_entry_gated=hard_entry_gated,
             )
         )
-        blockers.extend(quality_blockers)
+        blockers.extend(
+            execution_quality_blockers(
+                row,
+                quality,
+                max_avg_entry_sweep_slip_bps=max_avg_entry_sweep_slip_bps,
+                max_top_bucket_entry_sweep_levels=max_top_bucket_entry_sweep_levels,
+            )
+        )
         if row.target not in allowed_targets:
             blockers.append("target_not_allowed")
         if row.decision != "candidate" or row.reason != "passed":
@@ -476,6 +512,7 @@ def evaluate(
             "top_bucket_n": min_top_bucket_n,
             "top_bucket_full_depth_entry_fill_rate": min_top_bucket_entry_fill_rate,
             "max_avg_entry_sweep_slip_bps": max_avg_entry_sweep_slip_bps,
+            "max_top_bucket_entry_sweep_levels": max_top_bucket_entry_sweep_levels,
             "window_count": min_window_count,
         },
         "promotion_gate": asdict(gate),
@@ -714,6 +751,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-top-bucket-n", type=int, default=50)
     parser.add_argument("--min-top-bucket-entry-fill-rate", type=float, default=0.30)
     parser.add_argument("--max-avg-entry-sweep-slip-bps", type=float, default=200.0)
+    parser.add_argument("--max-top-bucket-entry-sweep-levels", type=float, default=3.0)
     parser.add_argument("--min-window-count", type=int, default=4)
     return parser.parse_args()
 
@@ -731,6 +769,7 @@ def main() -> int:
         min_top_bucket_n=args.min_top_bucket_n,
         min_top_bucket_entry_fill_rate=args.min_top_bucket_entry_fill_rate,
         max_avg_entry_sweep_slip_bps=args.max_avg_entry_sweep_slip_bps,
+        max_top_bucket_entry_sweep_levels=args.max_top_bucket_entry_sweep_levels,
         min_window_count=args.min_window_count,
     )
 

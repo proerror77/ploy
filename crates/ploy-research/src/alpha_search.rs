@@ -617,12 +617,24 @@ fn reward(report: &AutoFactorReport) -> f64 {
 
 fn execution_score(report: &AutoFactorReport) -> f64 {
     let top_bucket_fillability = finite_or_zero(report.top_bucket_full_depth_entry_fill_rate);
+    let slippage_bps = finite_or_zero(report.top_bucket_avg_entry_sweep_slippage_bps);
+    let levels = finite_or_zero(report.top_bucket_avg_entry_sweep_levels);
+    let slippage_score = if slippage_bps <= 0.0 {
+        1.0
+    } else {
+        (1.0 - (slippage_bps / 200.0)).clamp(0.0, 1.0)
+    };
+    let levels_score = if levels <= 0.0 {
+        1.0
+    } else {
+        (1.0 - ((levels - 1.0) / 2.0)).clamp(0.0, 1.0)
+    };
     let structure_bonus = if report.name.contains("capacity") || report.name.contains("spread") {
         0.25
     } else {
         0.0
     };
-    (top_bucket_fillability + structure_bonus).clamp(0.0, 1.0)
+    (top_bucket_fillability * slippage_score * levels_score + structure_bonus).clamp(0.0, 1.0)
 }
 
 fn selected_dimension(report: &AutoFactorReport) -> String {
@@ -727,6 +739,8 @@ mod tests {
             top_bucket_avg_label: 0.2,
             top_bucket_positive_label_rate: 0.7,
             top_bucket_full_depth_entry_fill_rate: 0.8,
+            top_bucket_avg_entry_sweep_slippage_bps: 20.0,
+            top_bucket_avg_entry_sweep_levels: 1.5,
             monotonicity_score: 1.0,
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
@@ -785,6 +799,8 @@ mod tests {
             top_bucket_avg_label: 0.2,
             top_bucket_positive_label_rate: 0.7,
             top_bucket_full_depth_entry_fill_rate: 0.8,
+            top_bucket_avg_entry_sweep_slippage_bps: 20.0,
+            top_bucket_avg_entry_sweep_levels: 1.5,
             monotonicity_score: 1.0,
             complexity: 1,
             decision: AutoFactorDecision::Candidate,

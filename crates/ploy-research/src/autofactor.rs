@@ -276,6 +276,8 @@ pub struct AutoFactorReport {
     pub top_bucket_avg_label: f64,
     pub top_bucket_positive_label_rate: f64,
     pub top_bucket_full_depth_entry_fill_rate: f64,
+    pub top_bucket_avg_entry_sweep_slippage_bps: f64,
+    pub top_bucket_avg_entry_sweep_levels: f64,
     pub monotonicity_score: f64,
     pub complexity: usize,
     pub decision: AutoFactorDecision,
@@ -340,6 +342,8 @@ struct BucketSummary {
     avg_label: f64,
     positive_label_rate: f64,
     full_depth_entry_fill_rate: f64,
+    avg_entry_sweep_slippage_bps: f64,
+    avg_entry_sweep_levels: f64,
 }
 
 pub fn evaluate_named_factor(
@@ -446,6 +450,8 @@ pub fn evaluate_named_factor(
         &scored,
         options.bucket_count,
         matrix.column("full_depth_entry_fillable_gate"),
+        matrix.column("entry_sweep_slippage_bps"),
+        matrix.column("entry_sweep_levels_15u"),
     );
     let bucket_avg_labels = buckets
         .iter()
@@ -495,6 +501,12 @@ pub fn evaluate_named_factor(
         top_bucket_full_depth_entry_fill_rate: top
             .map(|bucket| bucket.full_depth_entry_fill_rate)
             .unwrap_or(f64::NAN),
+        top_bucket_avg_entry_sweep_slippage_bps: top
+            .map(|bucket| bucket.avg_entry_sweep_slippage_bps)
+            .unwrap_or(f64::NAN),
+        top_bucket_avg_entry_sweep_levels: top
+            .map(|bucket| bucket.avg_entry_sweep_levels)
+            .unwrap_or(f64::NAN),
         monotonicity_score,
         complexity,
         decision,
@@ -536,11 +548,11 @@ pub fn format_autofactor_reports(reports: &[AutoFactorReport], top_n: usize) -> 
         "target labels are side-aligned executable PnL for the requested target; reports are candidate discovery gates, not deploy decisions.\n",
     );
     out.push_str(
-        "rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,complexity\n",
+        "rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,complexity\n",
     );
     for (idx, report) in reports.iter().take(top_n).enumerate() {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{:.6},{:.6},{},{:.6},{:.4},{},{:.4},{:.4},{},{:.6},{:.4},{:.4},{}\n",
+            "{},{},{},{},{},{},{:.6},{:.6},{},{:.6},{:.4},{},{:.4},{:.4},{},{:.6},{:.4},{:.4},{:.2},{:.2},{}\n",
             idx + 1,
             report.name,
             report.target.as_deref().unwrap_or("<unspecified>"),
@@ -559,6 +571,8 @@ pub fn format_autofactor_reports(reports: &[AutoFactorReport], top_n: usize) -> 
             report.top_bucket_avg_label,
             report.top_bucket_positive_label_rate,
             report.top_bucket_full_depth_entry_fill_rate,
+            report.top_bucket_avg_entry_sweep_slippage_bps,
+            report.top_bucket_avg_entry_sweep_levels,
             report.complexity,
         ));
     }
@@ -660,6 +674,12 @@ pub fn autofactor_matrix_from_v2(
             }
         },
     );
+    insert_column(&mut columns, "entry_sweep_slippage_bps", rows, |row| {
+        row.entry_sweep_slippage_bps
+    });
+    insert_column(&mut columns, "entry_sweep_levels_15u", rows, |row| {
+        row.entry_sweep_levels_15u
+    });
     insert_column(&mut columns, "entry_price_quality_score", rows, |row| {
         entry_price_quality_score(row.entry_ask)
     });
@@ -1560,6 +1580,8 @@ fn build_buckets(
     scored: &[(usize, f64, f64)],
     bucket_count: usize,
     full_depth_entry_fillable: Option<&[f64]>,
+    entry_sweep_slippage_bps: Option<&[f64]>,
+    entry_sweep_levels: Option<&[f64]>,
 ) -> Vec<BucketSummary> {
     let mut sorted = scored.to_vec();
     sorted.sort_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1));
@@ -1588,6 +1610,20 @@ fn build_buckets(
                                     .count(),
                                 slice.len(),
                             )
+                        })
+                        .unwrap_or(f64::NAN),
+                    avg_entry_sweep_slippage_bps: entry_sweep_slippage_bps
+                        .map(|values| {
+                            finite_mean(slice.iter().filter_map(|(idx, _, _)| {
+                                values.get(*idx).copied().filter(|value| value.is_finite())
+                            }))
+                        })
+                        .unwrap_or(f64::NAN),
+                    avg_entry_sweep_levels: entry_sweep_levels
+                        .map(|values| {
+                            finite_mean(slice.iter().filter_map(|(idx, _, _)| {
+                                values.get(*idx).copied().filter(|value| value.is_finite())
+                            }))
                         })
                         .unwrap_or(f64::NAN),
                 }
