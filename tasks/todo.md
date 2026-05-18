@@ -1,3 +1,47 @@
+# AutoFactor Runtime Replay Gate Repair (2026-05-18)
+
+## Goal
+
+Prevent top-bucket aggregate AutoFactor evidence from being promoted as if it
+were a true runtime replay of the deployed scorer.
+
+Evidence stage: `runtime_parity / promotion gate repair`.
+
+## Files / Ownership
+
+- `scripts/build_autofactor_candidate_strategy_replay.py`
+  - Owner: generated top-bucket aggregate artifacts must stay blocked.
+- `scripts/evaluate_autofactor_strategy_promotion.py`
+  - Owner: reject aggregate-basis artifacts as candidate strategy replay.
+- `docs/runbooks/event-ml-automl-workflow.md`
+  - Owner: document aggregate evidence vs runtime replay evidence.
+- `tests/test_build_autofactor_candidate_strategy_replay.py`,
+  `tests/test_autofactor_strategy_promotion.py`
+  - Owner: regression coverage for fail-closed promotion.
+
+## Tasks
+
+- [x] Verify post-#536 recorded replay still emits zero intents.
+- [x] Run threshold/formula replay variants and confirm zero-intent behavior is
+      not fixed by loosening `three_layer_min_edge` or removing
+      `_x_near_strike`.
+- [x] Make aggregate top-bucket artifacts fail closed.
+- [x] Run focused Python tests and diff check.
+- [ ] Open/merge PR and continue with a true runtime replay/search workflow.
+
+## Review
+
+- 2026-05-18: The post-side-selection replay processed `172,368` updates with
+  `candidate_events=260`, `entry_evaluations=383`, and zero intents. Loosening
+  `three_layer_min_edge` to zero and changing the runtime score to the base
+  formula did not change diagnostics, proving the promoted aggregate candidate
+  is not equivalent to deployed runtime replay behavior.
+- 2026-05-18: Validation passed with
+  `python3 -m unittest tests.test_build_autofactor_candidate_strategy_replay
+  tests.test_autofactor_strategy_promotion` and `rtk git diff --check`.
+- 2026-05-18: After CI exposed stale sweep expectations, full Python
+  validation passed with `python3 -m unittest discover -s tests -p 'test_*.py'`.
+
 # PM5D Settlement AutoFactor Side Selection (2026-05-18)
 
 ## Goal
@@ -21,8 +65,8 @@ Evidence stage: `dry_run_candidate / runtime_parity repair`.
       before applying formula/depth gates.
 - [x] Add regression coverage for bypassing the legacy direction gate.
 - [x] Run focused Rust validation.
-- [ ] Open/merge PR and deploy from `main`.
-- [ ] Re-run recording replay diagnostics and then recorded replay parity.
+- [x] Open/merge PR and deploy from `main`.
+- [x] Re-run recording replay diagnostics and then recorded replay parity.
 
 ## Review
 
@@ -36,6 +80,10 @@ Evidence stage: `dry_run_candidate / runtime_parity repair`.
   `rtk cargo test --locked -p ploy-strategy-bundles settlement_autofactor --lib`,
   `rtk cargo check --locked -p ploy-strategy-bundles`, and
   `rtk git diff --check`.
+- 2026-05-18: PR #536 merged and deployed through
+  `deploy-tango-1-1.yml` run `26020853175`. Replay after deployment moved the
+  blocker from legacy direction gate to settlement side/edge gates, so the next
+  fix is promotion-gate correctness rather than another threshold tweak.
 
 # PM5D Runtime Diagnostics Output (2026-05-18)
 

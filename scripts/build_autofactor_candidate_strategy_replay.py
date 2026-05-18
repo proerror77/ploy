@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Build the AutoFactor candidate-strategy executable replay artifact.
+"""Build the AutoFactor candidate top-bucket diagnostic artifact.
 
 The source report must come from factor_walk_forward_v2. For settlement targets,
-that report already scores one decision per event against historical
-full-depth executable settlement labels. This script converts the selected
-runtime-mappable candidate row into the explicit replay artifact required by
-the dry-run promotion gate.
+that report scores one decision per event against historical full-depth
+executable settlement labels. This script converts the selected
+runtime-mappable candidate row into an explicit aggregate diagnostic artifact.
+
+This is not the same as replaying the deployed runtime scorer over an ordered
+MarketUpdate stream, so it must not by itself unlock a dry-run handoff.
 """
 
 from __future__ import annotations
@@ -182,6 +184,7 @@ def build_artifact(
     runtime_score = row["runtime_mapping"]["runtime_score"]
 
     artifact_blockers = list(blockers)
+    artifact_blockers.append("requires_runtime_replay_not_top_bucket_aggregate")
     if top_bucket_n < min_trade_count:
         artifact_blockers.append(f"trade_count_too_small:{top_bucket_n}<{min_trade_count}")
     if unique_events < min(top_bucket_n, min_trade_count):
@@ -202,7 +205,7 @@ def build_artifact(
         "basis": "factor_walk_forward_top_bucket_aggregate",
         "strategy_profile": row["runtime_mapping"]["strategy_profile"],
         "runtime_score": runtime_score,
-        "promotion_ready": not artifact_blockers,
+        "promotion_ready": False,
         "evidence": evidence,
         "source_factor": {
             "name": row.get("name", ""),
