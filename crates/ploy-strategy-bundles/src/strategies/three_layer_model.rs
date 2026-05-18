@@ -165,21 +165,19 @@ pub fn auto_settlement_formula_score(
         return score.is_finite().then_some(score);
     }
 
-    let is_full_depth = name.starts_with("auto_settlement_full_depth_settlement_edge");
-    let is_conservative = name.starts_with("auto_settlement_conservative_settlement_edge");
-    if !is_full_depth && !is_conservative {
-        return None;
-    }
-
+    let settlement_prefix = [
+        "auto_settlement_full_depth_settlement_edge",
+        "auto_settlement_conservative_settlement_edge",
+        "auto_settlement_model_full_depth_settlement_edge",
+        "auto_settlement_model_conservative_settlement_edge",
+    ]
+    .into_iter()
+    .find(|prefix| name.starts_with(prefix))?;
     if !inputs.settlement_edge.is_finite() {
         return None;
     }
     let mut score = inputs.settlement_edge;
-    let suffix = if is_full_depth {
-        name.strip_prefix("auto_settlement_full_depth_settlement_edge")
-    } else {
-        name.strip_prefix("auto_settlement_conservative_settlement_edge")
-    }?;
+    let suffix = name.strip_prefix(settlement_prefix)?;
 
     match suffix {
         "" => {}

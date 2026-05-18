@@ -1,3 +1,63 @@
+# Model-Based Settlement AutoFactor Runtime Path (2026-05-18)
+
+## Goal
+
+Fix the search/runtime semantic mismatch exposed by replay run `26030858802`:
+quote-implied `side_fair_prob - executable_ask` is a market residual, not a
+predictive settlement probability edge. Add a model-probability settlement edge
+family that can be searched and replayed with the same runtime scorer.
+
+Evidence stage: `runtime_parity / executable_replay repair`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: expose model-probability full-depth settlement edge columns and
+    generated candidates.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: make runtime model-settlement AutoFactor scores use external
+    spot/strike/sigma model probability for side selection and entry edge.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer_model.rs`
+  - Owner: parse model-settlement formula names.
+- `scripts/evaluate_autofactor_strategy_promotion.py`
+  - Owner: map only runtime-supported model-settlement formulas to handoff.
+
+## Tasks
+
+- [x] Use runtime replay diagnostics to isolate the mismatch.
+- [x] Add model-based settlement edge search candidates.
+- [x] Add runtime scorer support for model-settlement formulas.
+- [x] Update promotion mapping/tests so model-settlement candidates can hand off.
+- [x] Run focused Rust/Python validation.
+- [ ] Push PR, merge, rerun factor search and runtime candidate replay.
+
+## Review
+
+- 2026-05-18: Replay run `26030858802` proved the previous selected
+  `auto_settlement_full_depth_settlement_edge` candidate is a market-implied
+  fair-edge residual: `settlement_autofactor_raw_score_pass_min_edge=0`,
+  `settlement_autofactor_executable_edge_fail_min_edge=629`, and `0` runtime
+  intents. This blocks promotion and explains the zero-trade replay.
+- 2026-05-18: Added model-probability settlement edge columns and generated
+  `auto_settlement_model_*` candidates so search can evaluate an independent
+  predictive settlement probability against executable full-depth prices.
+- 2026-05-18: Runtime now routes `auto_settlement_model_*` formulas through the
+  spot/strike/sigma model probability path for side selection and edge
+  evaluation, while PM quote-implied settlement formulas keep the existing fair
+  probability behavior for diagnostics.
+- 2026-05-18: Focused validation passed:
+  `rtk cargo test --locked -p ploy-strategy-bundles settlement_autofactor --lib`
+  (`7 passed, 180 filtered out`),
+  `rtk cargo test --locked -p ploy-research mines_generated_settlement_native_candidates_from_v2_rows --lib`
+  (`1 passed, 99 filtered out`),
+  `rtk cargo check --locked -p ploy-strategy-bundles`,
+  `rtk cargo check --locked -p ploy-research`,
+  `python3 -m py_compile scripts/evaluate_autofactor_strategy_promotion.py scripts/alpha_search_closed_loop_agent.py`,
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent tests.test_autofactor_strategy_promotion`
+  (`36 tests`),
+  a direct runtime-mapping import assertion, and `rtk git diff --check`.
+  Local `pytest` is unavailable in this worktree environment.
+
 # Settlement AutoFactor Runtime Replay Diagnostics (2026-05-18)
 
 ## Goal

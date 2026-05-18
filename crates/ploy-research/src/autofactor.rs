@@ -697,6 +697,23 @@ pub fn autofactor_matrix_from_v2(
             row.conservative_entry_sweep_avg_price_15u,
         )
     });
+    insert_column(
+        &mut columns,
+        "model_full_depth_settlement_edge",
+        rows,
+        |row| settlement_edge(row.side_model_prob, row.entry_sweep_avg_price_15u),
+    );
+    insert_column(
+        &mut columns,
+        "model_conservative_settlement_edge",
+        rows,
+        |row| {
+            settlement_edge(
+                row.side_model_prob,
+                row.conservative_entry_sweep_avg_price_15u,
+            )
+        },
+    );
     insert_column(&mut columns, "entry_capacity_score", rows, |row| {
         if row.entry_capacity_ratio.is_finite() {
             (row.entry_capacity_ratio / 3.0).clamp(0.0, 1.0)
@@ -1344,12 +1361,12 @@ fn settlement_native_generated_candidates(input_names: &BTreeSet<String>) -> Vec
     let mut out = Vec::new();
     let edge_inputs = [
         (
-            "full_depth_settlement_edge",
-            "Full-depth q minus entry sweep price and fee.",
+            "model_full_depth_settlement_edge",
+            "Full-depth external model q minus entry sweep price and fee.",
         ),
         (
-            "conservative_settlement_edge",
-            "Conservative q minus entry sweep price and fee.",
+            "model_conservative_settlement_edge",
+            "Conservative external model q minus entry sweep price and fee.",
         ),
     ];
     for (edge_name, note) in edge_inputs {
@@ -2066,7 +2083,7 @@ mod tests {
             time_remaining_secs: 120,
             regime: Regime::Middle,
             side: ReviewSide::Up,
-            side_model_prob: 0.5,
+            side_model_prob: (0.50 + score * 0.01).clamp(0.01, 0.99),
             side_fair_prob: (0.50 + score * 0.01).clamp(0.01, 0.99),
             side_model_edge: score * 0.01,
             side_distance_over_sigma: 0.25,
@@ -2397,8 +2414,8 @@ mod tests {
 
         let full_depth_edge = reports
             .iter()
-            .find(|report| report.name == "auto_settlement_full_depth_settlement_edge")
-            .expect("generated full-depth settlement edge report");
+            .find(|report| report.name == "auto_settlement_model_full_depth_settlement_edge")
+            .expect("generated model full-depth settlement edge report");
         assert_eq!(full_depth_edge.decision, AutoFactorDecision::Candidate);
         assert_eq!(
             full_depth_edge.target.as_deref(),
@@ -2412,20 +2429,21 @@ mod tests {
         );
         assert_eq!(full_depth_edge.top_bucket_max_event_decisions, 1);
         assert!(reports.iter().any(|report| {
-            report.name == "auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity"
+            report.name
+                == "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity"
         }));
         assert!(reports.iter().any(|report| {
-            report.name == "auto_settlement_full_depth_settlement_edge_x_entry_price_quality"
+            report.name == "auto_settlement_model_full_depth_settlement_edge_x_entry_price_quality"
         }));
         assert!(reports.iter().any(|report| {
             report.name
-                == "auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality"
+                == "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality"
         }));
         assert!(
             reports
                 .iter()
                 .any(|report| report.name
-                    == "mut_auto_settlement_full_depth_settlement_edge_capacity")
+                    == "mut_auto_settlement_model_full_depth_settlement_edge_capacity")
         );
         assert!(reports
             .iter()

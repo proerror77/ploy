@@ -186,7 +186,7 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             self.assertTrue(decision["prior_revision_required"])
             self.assertEqual(
                 prior["mutations"][0]["base_factor"],
-                "auto_settlement_full_depth_settlement_edge",
+                "auto_settlement_model_full_depth_settlement_edge",
             )
 
     def test_runtime_blocker_routes_to_fix_runtime(self) -> None:
