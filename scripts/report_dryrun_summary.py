@@ -8,6 +8,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from statistics import mean, stdev
 
 
@@ -19,6 +20,11 @@ DB_URL = (
 
 SIMULATED_RUNTIME_MODES = ("dry_run", "dryrun", "paper")
 MODE_FILTER = ",".join(f"'{mode}'" for mode in SIMULATED_RUNTIME_MODES)
+DEPLOYMENTS_FILE = Path(os.environ.get("PLOY_DEPLOYMENTS_FILE") or "data/state/deployments.json")
+DEPLOYMENT_STATUS_FILE = Path(
+    os.environ.get("PLOY_DEPLOYMENT_STATUS_FILE") or "run/platform/deployments.json"
+)
+DEPLOYMENT_CONFIG_DIR = Path(os.environ.get("PLOY_DEPLOYMENT_CONFIG_DIR") or "config/deployments")
 
 EXPERIMENT_LABELS = {
     "pm5d.threelayer.dryrun": "TL v1 Base EVCal",
@@ -332,6 +338,77 @@ def run_json_query(query: str, timeout: int = 30):
     if not payload:
         return None
     return json.loads(payload)
+
+
+def load_json_file(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def normalize_state(value) -> str:
+    if isinstance(value, str):
+        return value.lower()
+    return ""
+
+
+def get_deployment_id(record: dict) -> str:
+    return str(record.get("deployment_id") or record.get("id") or "")
+
+
+def is_simulated_deployment(record: dict) -> bool:
+    runtime_mode = normalize_state(record.get("runtime_mode"))
+    dep_id = get_deployment_id(record).lower()
+    return runtime_mode in SIMULATED_RUNTIME_MODES or dep_id.endswith(".dryrun") or dep_id.endswith(".paper")
+
+
+def deployment_is_running(record: dict) -> bool:
+    desired = normalize_state(record.get("desired_state"))
+    observed = normalize_state(record.get("observed_state"))
+    return desired == "running" or observed == "running"
+
+
+def merge_deployment_record(base: dict, update: dict) -> dict:
+    merged = dict(base)
+    for key, value in update.items():
+        if value is not None and value != "":
+            merged[key] = value
+    return merged
+
+
+def records_from_json_payload(payload) -> list[dict]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("deployments", "items", "records"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        if get_deployment_id(payload):
+            return [payload]
+    return []
+
+
+def load_deployments() -> list[dict]:
+    by_id: dict[str, dict] = {}
+
+    for path in sorted(DEPLOYMENT_CONFIG_DIR.glob("*.json")) if DEPLOYMENT_CONFIG_DIR.exists() else []:
+        for record in records_from_json_payload(load_json_file(path)):
+            dep_id = get_deployment_id(record)
+            if dep_id:
+                by_id[dep_id] = merge_deployment_record(by_id.get(dep_id, {}), record)
+
+    for path in (DEPLOYMENTS_FILE, DEPLOYMENT_STATUS_FILE):
+        for record in records_from_json_payload(load_json_file(path)):
+            dep_id = get_deployment_id(record)
+            if dep_id:
+                by_id[dep_id] = merge_deployment_record(by_id.get(dep_id, {}), record)
+
+    return sorted(
+        (record for record in by_id.values() if is_simulated_deployment(record)),
+        key=lambda record: get_deployment_id(record),
+    )
 
 
 def number(value, default=0.0) -> float:
@@ -831,6 +908,31 @@ def build_execution_diagnostics(rows):
     }
 
 
+def deployment_report_row(record: dict, strategy_diagnostics: dict | None = None):
+    dep_id = get_deployment_id(record)
+    runtime_mode = record.get("runtime_mode") or ("dryrun" if dep_id.endswith(".dryrun") else "paper")
+    strategy_id = record.get("strategy_id") or record.get("bundle_id") or record.get("strategy") or ""
+    strategy_payload = build_report_slice([], [])
+    strategy_payload.update(
+        {
+            "runtime_mode": runtime_mode,
+            "strategy_id": strategy_id,
+            "deployment_id": dep_id,
+            "label": strategy_label(runtime_mode, strategy_id, dep_id),
+            "experiment_label": experiment_label(runtime_mode, strategy_id, dep_id),
+            "activity_status": "running_no_recent_trades",
+            "deployment_desired_state": normalize_state(record.get("desired_state")),
+            "deployment_observed_state": normalize_state(record.get("observed_state")),
+            "bundle_id": record.get("bundle_id"),
+            "account_id": record.get("account_id"),
+            "execution_diagnostics": build_execution_diagnostics(
+                [strategy_diagnostics] if strategy_diagnostics else []
+            ),
+        }
+    )
+    return strategy_payload
+
+
 def empty_payload():
     now = datetime.now(timezone.utc).isoformat()
     return {
@@ -849,6 +951,7 @@ def empty_payload():
         "recent_closed": [],
         "open_positions": [],
         "strategies": [],
+        "deployments": [],
         "pairing": {
             "pair_key": "runtime_mode,strategy_id,deployment_id,event_id",
             "mixed_event_groups": 0,
@@ -873,6 +976,7 @@ def main() -> int:
     pairing = run_json_query(PAIRING_QUERY) or empty_payload()["pairing"]
     order_diagnostics = run_json_query(ORDER_DIAGNOSTICS_QUERY) or []
     runtime_evidence = run_json_query(RUNTIME_EVIDENCE_QUERY) or empty_payload()["runtime_evidence"]
+    deployments = load_deployments()
 
     payload = empty_payload()
     payload["generated_at"] = datetime.now(timezone.utc).isoformat()
@@ -880,6 +984,7 @@ def main() -> int:
     payload["pairing"] = pairing
     payload["execution_diagnostics"] = build_execution_diagnostics(order_diagnostics)
     payload["runtime_evidence"] = runtime_evidence
+    payload["deployments"] = deployments
 
     events_by_strategy = defaultdict(list)
     for event in events:
@@ -890,12 +995,14 @@ def main() -> int:
         daily_by_strategy[strategy_key(row)].append(row)
 
     diagnostics_by_strategy = {strategy_key(row): row for row in order_diagnostics}
+    deployments_by_id = {get_deployment_id(record): record for record in deployments}
 
     strategies = []
     for runtime_mode, strategy_id, deployment_id in sorted(events_by_strategy.keys()):
         strategy_events = events_by_strategy[(runtime_mode, strategy_id, deployment_id)]
         strategy_daily_rows = daily_by_strategy.get((runtime_mode, strategy_id, deployment_id), [])
         strategy_diagnostics = diagnostics_by_strategy.get((runtime_mode, strategy_id, deployment_id))
+        deployment_record = deployments_by_id.get(deployment_id, {})
         strategy_payload = build_report_slice(strategy_events, strategy_daily_rows)
         strategy_payload.update(
             {
@@ -904,6 +1011,11 @@ def main() -> int:
                 "deployment_id": deployment_id,
                 "label": strategy_label(runtime_mode, strategy_id, deployment_id),
                 "experiment_label": experiment_label(runtime_mode, strategy_id, deployment_id),
+                "activity_status": "has_track_record",
+                "deployment_desired_state": normalize_state(deployment_record.get("desired_state")),
+                "deployment_observed_state": normalize_state(deployment_record.get("observed_state")),
+                "bundle_id": deployment_record.get("bundle_id"),
+                "account_id": deployment_record.get("account_id"),
                 "execution_diagnostics": build_execution_diagnostics(
                     [strategy_diagnostics] if strategy_diagnostics else []
                 ),
@@ -911,7 +1023,45 @@ def main() -> int:
         )
         strategies.append(strategy_payload)
 
-    payload["strategies"] = strategies
+    strategy_keys = {strategy_key(strategy) for strategy in strategies}
+    for key, strategy_diagnostics in sorted(diagnostics_by_strategy.items()):
+        if key in strategy_keys:
+            continue
+        runtime_mode, strategy_id, dep_id = key
+        deployment_record = deployments_by_id.get(dep_id, {})
+        strategy_payload = deployment_report_row(deployment_record, strategy_diagnostics)
+        strategy_payload.update(
+            {
+                "runtime_mode": runtime_mode,
+                "strategy_id": strategy_id,
+                "deployment_id": dep_id,
+                "activity_status": "orders_without_event_track_record",
+                "deployment_desired_state": normalize_state(deployment_record.get("desired_state")),
+                "deployment_observed_state": normalize_state(deployment_record.get("observed_state")),
+            }
+        )
+        strategies.append(strategy_payload)
+        strategy_keys.add(key)
+
+    for record in deployments:
+        if not deployment_is_running(record):
+            continue
+        dep_id = get_deployment_id(record)
+        runtime_mode = record.get("runtime_mode") or ("dryrun" if dep_id.endswith(".dryrun") else "paper")
+        strategy_id = record.get("strategy_id") or record.get("bundle_id") or record.get("strategy") or ""
+        key = (runtime_mode, strategy_id, dep_id)
+        if key in strategy_keys or any(strategy.get("deployment_id") == dep_id for strategy in strategies):
+            continue
+        strategies.append(deployment_report_row(record))
+
+    payload["strategies"] = sorted(
+        strategies,
+        key=lambda strategy: (
+            strategy.get("activity_status") != "has_track_record",
+            strategy.get("deployment_id") or "",
+            strategy.get("strategy_id") or "",
+        ),
+    )
     print(json.dumps(payload, separators=(",", ":")))
     return 0
 

@@ -1,3 +1,51 @@
+# FactorEvolve Research OS Task 5 - Running Dry-Run Candidate Report Rows (2026-05-18)
+
+## Goal
+
+Make dry-run reports explicitly show simulated deployments that are running but
+have no recent event track-record rows, so a current candidate is not hidden
+behind stale legacy strategy summaries.
+
+Evidence stage: `dry_run_candidate / observability_foundation`.
+
+## Files / Ownership
+
+- `scripts/report_dryrun_summary.py`
+  - Owner: merge deployment config/status records into dry-run report strategy
+    rows.
+- `scripts/check_dryrun_report_contract.py`
+  - Owner: fail the report contract when running simulated deployments are not
+    represented as strategy rows.
+- `tests/test_dryrun_report_running_candidate.py`
+  - Owner: regression coverage for running no-trade candidate visibility.
+
+## Tasks
+
+- [x] Add deployment config/status loading to dry-run report generation.
+- [x] Add explicit zero-activity strategy rows for running simulated
+      deployments with no event track record.
+- [x] Add diagnostics-only rows when orders exist but event-track rows are
+      missing.
+- [x] Harden the report contract checker for running deployment visibility.
+- [x] Run Python unit, compile, and diff validation.
+
+## Review
+
+- 2026-05-18: `report_dryrun_summary.py` now reads deployment records from
+  `config/deployments/*.json`, `PLOY_DEPLOYMENTS_FILE`, and
+  `PLOY_DEPLOYMENT_STATUS_FILE`. It includes these records under
+  top-level `deployments` and creates `activity_status=running_no_recent_trades`
+  strategy rows when a simulated deployment is running but has no track-record
+  events.
+- 2026-05-18: The report also creates
+  `activity_status=orders_without_event_track_record` rows when order
+  diagnostics exist without event-track rows, making accounting gaps visible
+  instead of silently dropping the deployment from `strategies`.
+- 2026-05-18: Validation passed:
+  `python3 -m unittest tests.test_dryrun_report_running_candidate tests.test_dryrun_report_contracts`,
+  `python3 -m py_compile scripts/report_dryrun_summary.py scripts/check_dryrun_report_contract.py tests/test_dryrun_report_running_candidate.py tests/test_dryrun_report_contracts.py`,
+  and `rtk git diff --check`.
+
 # FactorEvolve Research OS Task 4 - Typed Research Manager Plan Surface (2026-05-18)
 
 ## Goal
