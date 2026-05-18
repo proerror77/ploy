@@ -159,6 +159,7 @@ struct NodeMetric {
     stability: f64,
     diversity: f64,
     execution_cost: f64,
+    event_uniqueness: f64,
     overfit_risk: f64,
     runtime_readiness: f64,
     reward: f64,
@@ -167,6 +168,10 @@ struct NodeMetric {
     positive_window_ratio: f64,
     top_bucket_avg_label: f64,
     top_bucket_full_depth_entry_fill_rate: f64,
+    top_bucket_avg_entry_sweep_slippage_bps: f64,
+    top_bucket_avg_entry_sweep_levels: f64,
+    top_bucket_unique_event_count: usize,
+    top_bucket_max_event_decisions: usize,
     monotonicity_score: f64,
     complexity: usize,
 }
@@ -470,6 +475,7 @@ fn node_metric(idx: usize, report: &AutoFactorReport) -> NodeMetric {
         stability: report.positive_window_ratio.clamp(0.0, 1.0),
         diversity: 1.0 / report.complexity.max(1) as f64,
         execution_cost: execution_score(report),
+        event_uniqueness: event_uniqueness_score(report),
         overfit_risk: 1.0 / report.complexity.max(1) as f64,
         runtime_readiness: if report.name.starts_with("auto_settlement_")
             || report.name == "amplitude_weighted_momentum_30s_sigma"
@@ -486,6 +492,12 @@ fn node_metric(idx: usize, report: &AutoFactorReport) -> NodeMetric {
         top_bucket_full_depth_entry_fill_rate: finite_or_zero(
             report.top_bucket_full_depth_entry_fill_rate,
         ),
+        top_bucket_avg_entry_sweep_slippage_bps: finite_or_zero(
+            report.top_bucket_avg_entry_sweep_slippage_bps,
+        ),
+        top_bucket_avg_entry_sweep_levels: finite_or_zero(report.top_bucket_avg_entry_sweep_levels),
+        top_bucket_unique_event_count: report.top_bucket_unique_event_count,
+        top_bucket_max_event_decisions: report.top_bucket_max_event_decisions,
         monotonicity_score: finite_or_zero(report.monotonicity_score),
         complexity: report.complexity,
     }
@@ -593,6 +605,7 @@ fn proposed_mutation(selected_dimension: &str) -> &'static str {
         "effectiveness" => "replace_denominator",
         "monotonicity" => "clip_or_squash",
         "execution_quality" => "add_capacity_gate",
+        "event_uniqueness" => "add_capacity_gate",
         "overfit_risk" => "remove_component",
         "exploit" => "add_capacity_gate",
         _ => "clip_or_squash",
@@ -611,7 +624,10 @@ fn reward(report: &AutoFactorReport) -> f64 {
         + finite_or_zero(report.positive_window_ratio)
         + normalized_positive(report.top_bucket_avg_label)
         + execution_score(report)
+        + event_uniqueness_score(report)
         + finite_or_zero(report.monotonicity_score)
+        - event_decision_penalty(report)
+        - execution_penalty(report)
         - (report.complexity as f64 / 32.0)
 }
 
@@ -637,7 +653,66 @@ fn execution_score(report: &AutoFactorReport) -> f64 {
     (top_bucket_fillability * slippage_score * levels_score + structure_bonus).clamp(0.0, 1.0)
 }
 
+fn execution_penalty(report: &AutoFactorReport) -> f64 {
+    let fillability = finite_or_zero(report.top_bucket_full_depth_entry_fill_rate);
+    let slippage_bps = finite_or_zero(report.top_bucket_avg_entry_sweep_slippage_bps);
+    let levels = finite_or_zero(report.top_bucket_avg_entry_sweep_levels);
+    let fillability_penalty = if report.top_bucket_n > 0 && fillability < 0.30 {
+        (0.30 - fillability) * 2.0
+    } else {
+        0.0
+    };
+    let slippage_penalty = if slippage_bps > 200.0 {
+        ((slippage_bps - 200.0) / 200.0).min(4.0)
+    } else {
+        0.0
+    };
+    let levels_penalty = if levels > 3.0 {
+        ((levels - 3.0) * 0.5).min(2.0)
+    } else {
+        0.0
+    };
+    fillability_penalty + slippage_penalty + levels_penalty
+}
+
+fn event_uniqueness_score(report: &AutoFactorReport) -> f64 {
+    if report.top_bucket_n == 0 {
+        return 0.0;
+    }
+    let unique_ratio =
+        (report.top_bucket_unique_event_count as f64 / report.top_bucket_n as f64).clamp(0.0, 1.0);
+    let decision_ratio = if report.top_bucket_max_event_decisions <= 1 {
+        1.0
+    } else {
+        1.0 / report.top_bucket_max_event_decisions as f64
+    };
+    unique_ratio * decision_ratio
+}
+
+fn event_decision_penalty(report: &AutoFactorReport) -> f64 {
+    if report.top_bucket_n > 0 && report.top_bucket_unique_event_count == 0 {
+        return 1.0;
+    }
+    if report.top_bucket_max_event_decisions <= 1 {
+        0.0
+    } else {
+        ((report.top_bucket_max_event_decisions - 1) as f64 * 1.5).min(6.0)
+    }
+}
+
 fn selected_dimension(report: &AutoFactorReport) -> String {
+    if report.top_bucket_n > 0
+        && (report.top_bucket_unique_event_count == 0 || report.top_bucket_max_event_decisions > 1)
+    {
+        return "event_uniqueness".to_string();
+    }
+    if report.top_bucket_n > 0
+        && (report.top_bucket_full_depth_entry_fill_rate < 0.30
+            || report.top_bucket_avg_entry_sweep_slippage_bps > 200.0
+            || report.top_bucket_avg_entry_sweep_levels > 3.0)
+    {
+        return "execution_quality".to_string();
+    }
     match report.reason.as_str() {
         "too_few_observations" | "no_powered_windows" => "sample_power",
         "low_icir" | "unstable_positive_windows" => "stability",
@@ -712,6 +787,40 @@ mod tests {
     use super::*;
     use crate::autofactor::{AutoFactorDecision, FactorExpr};
 
+    fn sample_report(name: &str) -> AutoFactorReport {
+        AutoFactorReport {
+            name: name.to_string(),
+            target: Some("full_depth_settlement_executable_pnl".to_string()),
+            expr: FactorExpr::Input("conservative_settlement_edge".to_string()),
+            n: 100,
+            pearson_ic: 0.2,
+            spearman_ic: 0.25,
+            window_count: 3,
+            window_ic_mean: 0.2,
+            icir: 1.2,
+            positive_window_ratio: 1.0,
+            symbol_count: 2,
+            symbol_ic_mean: 0.18,
+            symbol_icir: 1.0,
+            symbol_positive_ratio: 1.0,
+            bucket_avg_labels: vec![-0.1, 0.0, 0.2],
+            bottom_bucket_n: 20,
+            bottom_bucket_avg_label: -0.1,
+            top_bucket_n: 20,
+            top_bucket_avg_label: 0.2,
+            top_bucket_positive_label_rate: 0.7,
+            top_bucket_full_depth_entry_fill_rate: 0.8,
+            top_bucket_avg_entry_sweep_slippage_bps: 20.0,
+            top_bucket_avg_entry_sweep_levels: 1.5,
+            top_bucket_unique_event_count: 20,
+            top_bucket_max_event_decisions: 1,
+            monotonicity_score: 1.0,
+            complexity: 1,
+            decision: AutoFactorDecision::Candidate,
+            reason: "passed".to_string(),
+        }
+    }
+
     #[test]
     fn writes_search_artifact_bundle() {
         let tmp =
@@ -741,6 +850,8 @@ mod tests {
             top_bucket_full_depth_entry_fill_rate: 0.8,
             top_bucket_avg_entry_sweep_slippage_bps: 20.0,
             top_bucket_avg_entry_sweep_levels: 1.5,
+            top_bucket_unique_event_count: 20,
+            top_bucket_max_event_decisions: 1,
             monotonicity_score: 1.0,
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
@@ -801,6 +912,8 @@ mod tests {
             top_bucket_full_depth_entry_fill_rate: 0.8,
             top_bucket_avg_entry_sweep_slippage_bps: 20.0,
             top_bucket_avg_entry_sweep_levels: 1.5,
+            top_bucket_unique_event_count: 20,
+            top_bucket_max_event_decisions: 1,
             monotonicity_score: 1.0,
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
@@ -844,5 +957,67 @@ mod tests {
         assert_eq!(node.visits, 4);
         assert!(node.total_reward > 6.0);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn repeated_event_candidate_ranks_below_one_event_candidate() {
+        let mut repeated = sample_report("auto_settlement_high_raw_score_repeated_event");
+        repeated.spearman_ic = 0.95;
+        repeated.icir = 3.0;
+        repeated.top_bucket_avg_label = 0.7;
+        repeated.top_bucket_unique_event_count = 4;
+        repeated.top_bucket_max_event_decisions = 5;
+
+        let mut one_event = sample_report("auto_settlement_lower_raw_score_one_event");
+        one_event.spearman_ic = 0.35;
+        one_event.icir = 0.9;
+        one_event.top_bucket_avg_label = 0.25;
+        one_event.top_bucket_unique_event_count = one_event.top_bucket_n;
+        one_event.top_bucket_max_event_decisions = 1;
+
+        let reports = vec![repeated, one_event];
+        let metrics = reports
+            .iter()
+            .enumerate()
+            .map(|(idx, report)| node_metric(idx, report))
+            .collect::<Vec<_>>();
+        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
+
+        assert_eq!(
+            plan.selected_nodes
+                .first()
+                .map(|node| node.factor_name.as_str()),
+            Some("auto_settlement_lower_raw_score_one_event")
+        );
+        assert!(
+            reward(&reports[0]) < reward(&reports[1]),
+            "repeated-event penalty should dominate raw IC/top-bucket strength"
+        );
+    }
+
+    #[test]
+    fn repeated_event_candidate_selects_event_uniqueness_mutation() {
+        let mut report = sample_report("auto_settlement_repeated_event_branch");
+        report.top_bucket_unique_event_count = 6;
+        report.top_bucket_max_event_decisions = 3;
+        report.reason = "passed".to_string();
+
+        assert_eq!(selected_dimension(&report), "event_uniqueness");
+        assert_eq!(
+            proposed_mutation(&selected_dimension(&report)),
+            "add_capacity_gate"
+        );
+    }
+
+    #[test]
+    fn high_sweep_slippage_selects_execution_quality() {
+        let mut report = sample_report("auto_settlement_high_sweep_slippage");
+        report.top_bucket_avg_entry_sweep_slippage_bps = 450.0;
+        report.top_bucket_avg_entry_sweep_levels = 3.4;
+        report.reason = "passed".to_string();
+
+        assert_eq!(selected_dimension(&report), "execution_quality");
+        assert!(execution_penalty(&report) > 0.0);
     }
 }

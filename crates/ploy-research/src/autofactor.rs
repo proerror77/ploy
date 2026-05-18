@@ -278,6 +278,8 @@ pub struct AutoFactorReport {
     pub top_bucket_full_depth_entry_fill_rate: f64,
     pub top_bucket_avg_entry_sweep_slippage_bps: f64,
     pub top_bucket_avg_entry_sweep_levels: f64,
+    pub top_bucket_unique_event_count: usize,
+    pub top_bucket_max_event_decisions: usize,
     pub monotonicity_score: f64,
     pub complexity: usize,
     pub decision: AutoFactorDecision,
@@ -344,6 +346,7 @@ struct BucketSummary {
     full_depth_entry_fill_rate: f64,
     avg_entry_sweep_slippage_bps: f64,
     avg_entry_sweep_levels: f64,
+    indexes: Vec<usize>,
 }
 
 pub fn evaluate_named_factor(
@@ -352,6 +355,7 @@ pub fn evaluate_named_factor(
     labels: &[f64],
     windows: &[String],
     symbols: &[String],
+    event_ids: &[String],
     options: &AutoFactorOptions,
 ) -> Result<AutoFactorReport, AutoFactorError> {
     if labels.len() != matrix.len() {
@@ -370,6 +374,12 @@ pub fn evaluate_named_factor(
         return Err(AutoFactorError::WindowLengthMismatch {
             expected: matrix.len(),
             actual: symbols.len(),
+        });
+    }
+    if !event_ids.is_empty() && event_ids.len() != matrix.len() {
+        return Err(AutoFactorError::WindowLengthMismatch {
+            expected: matrix.len(),
+            actual: event_ids.len(),
         });
     }
 
@@ -460,6 +470,8 @@ pub fn evaluate_named_factor(
     let monotonicity_score = monotonicity_score(&bucket_avg_labels);
     let bottom = buckets.first();
     let top = buckets.last();
+    let (top_bucket_unique_event_count, top_bucket_max_event_decisions) =
+        top_bucket_event_decision_stats(top, event_ids);
     let complexity = factor.expr.complexity();
     let (decision, reason) = autofactor_decision(
         scored.len(),
@@ -507,6 +519,8 @@ pub fn evaluate_named_factor(
         top_bucket_avg_entry_sweep_levels: top
             .map(|bucket| bucket.avg_entry_sweep_levels)
             .unwrap_or(f64::NAN),
+        top_bucket_unique_event_count,
+        top_bucket_max_event_decisions,
         monotonicity_score,
         complexity,
         decision,
@@ -522,10 +536,22 @@ pub fn mine_autofactors(
     symbols: &[String],
     options: &AutoFactorOptions,
 ) -> Result<Vec<AutoFactorReport>, AutoFactorError> {
+    mine_autofactors_with_event_ids(factors, matrix, labels, windows, symbols, &[], options)
+}
+
+pub fn mine_autofactors_with_event_ids(
+    factors: &[NamedFactorExpr],
+    matrix: &AutoFactorMatrix,
+    labels: &[f64],
+    windows: &[String],
+    symbols: &[String],
+    event_ids: &[String],
+    options: &AutoFactorOptions,
+) -> Result<Vec<AutoFactorReport>, AutoFactorError> {
     let mut reports = Vec::with_capacity(factors.len());
     for factor in factors {
         reports.push(evaluate_named_factor(
-            factor, matrix, labels, windows, symbols, options,
+            factor, matrix, labels, windows, symbols, event_ids, options,
         )?);
     }
     reports.sort_by(|lhs, rhs| {
@@ -548,11 +574,11 @@ pub fn format_autofactor_reports(reports: &[AutoFactorReport], top_n: usize) -> 
         "target labels are side-aligned executable PnL for the requested target; reports are candidate discovery gates, not deploy decisions.\n",
     );
     out.push_str(
-        "rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,complexity\n",
+        "rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,top_bucket_unique_event_count,top_bucket_max_event_decisions,complexity\n",
     );
     for (idx, report) in reports.iter().take(top_n).enumerate() {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{:.6},{:.6},{},{:.6},{:.4},{},{:.4},{:.4},{},{:.6},{:.4},{:.4},{:.2},{:.2},{}\n",
+            "{},{},{},{},{},{},{:.6},{:.6},{},{:.6},{:.4},{},{:.4},{:.4},{},{:.6},{:.4},{:.4},{:.2},{:.2},{},{},{}\n",
             idx + 1,
             report.name,
             report.target.as_deref().unwrap_or("<unspecified>"),
@@ -573,6 +599,8 @@ pub fn format_autofactor_reports(reports: &[AutoFactorReport], top_n: usize) -> 
             report.top_bucket_full_depth_entry_fill_rate,
             report.top_bucket_avg_entry_sweep_slippage_bps,
             report.top_bucket_avg_entry_sweep_levels,
+            report.top_bucket_unique_event_count,
+            report.top_bucket_max_event_decisions,
             report.complexity,
         ));
     }
@@ -613,6 +641,7 @@ pub fn mine_domain_autofactors_from_v2_with_guidance(
     let labels = autofactor_labels_from_v2(rows, target);
     let windows = autofactor_windows_from_v2(rows);
     let symbols = autofactor_symbols_from_v2(rows);
+    let event_ids = autofactor_event_ids_from_v2(rows);
     let target_name = target.as_str().to_string();
     let candidates = domain_candidates_for_target_with_guidance(
         &matrix.input_names(),
@@ -626,7 +655,15 @@ pub fn mine_domain_autofactors_from_v2_with_guidance(
         factor
     })
     .collect::<Vec<_>>();
-    mine_autofactors(&candidates, &matrix, &labels, &windows, &symbols, options)
+    mine_autofactors_with_event_ids(
+        &candidates,
+        &matrix,
+        &labels,
+        &windows,
+        &symbols,
+        &event_ids,
+        options,
+    )
 }
 
 pub fn autofactor_matrix_from_v2(
@@ -765,6 +802,10 @@ pub fn autofactor_windows_from_v2(rows: &[FactorObservationV2]) -> Vec<String> {
 
 pub fn autofactor_symbols_from_v2(rows: &[FactorObservationV2]) -> Vec<String> {
     rows.iter().map(|row| row.symbol.clone()).collect()
+}
+
+pub fn autofactor_event_ids_from_v2(rows: &[FactorObservationV2]) -> Vec<String> {
+    rows.iter().map(|row| row.event_id.clone()).collect()
 }
 
 fn valid_pm_price(value: f64) -> bool {
@@ -1626,10 +1667,30 @@ fn build_buckets(
                             }))
                         })
                         .unwrap_or(f64::NAN),
+                    indexes: slice.iter().map(|(idx, _, _)| *idx).collect(),
                 }
             })
         })
         .collect()
+}
+
+fn top_bucket_event_decision_stats(
+    bucket: Option<&BucketSummary>,
+    event_ids: &[String],
+) -> (usize, usize) {
+    let Some(bucket) = bucket else {
+        return (0, 0);
+    };
+    if event_ids.is_empty() {
+        return (0, 0);
+    }
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for idx in &bucket.indexes {
+        if let Some(event_id) = event_ids.get(*idx) {
+            *counts.entry(event_id.as_str()).or_default() += 1;
+        }
+    }
+    (counts.len(), counts.values().copied().max().unwrap_or(0))
 }
 
 fn autofactor_decision(
@@ -2175,8 +2236,9 @@ mod tests {
             ..Default::default()
         };
         let symbols = Vec::new();
-        let report = evaluate_named_factor(&factor, &matrix, &labels, &windows, &symbols, &options)
-            .expect("report");
+        let report =
+            evaluate_named_factor(&factor, &matrix, &labels, &windows, &symbols, &[], &options)
+                .expect("report");
         assert_eq!(report.decision, AutoFactorDecision::Reject);
         assert_eq!(report.reason, "too_complex");
     }
