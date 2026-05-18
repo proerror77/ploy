@@ -359,6 +359,57 @@ factor, handoff status, recommended action, and chain stop reason per run. It
 is a review aid only; it does not replace the promotion evaluator or replay
 parity gate.
 
+## Closed-Loop Agent Review
+
+After a hosted alpha-search run or chain stops, run the closed-loop classifier
+before deciding what to do next:
+
+```bash
+python3 scripts/alpha_search_closed_loop_agent.py \
+  /tmp/ploy-alpha-run-25683730944 \
+  --output-json /tmp/alpha-closed-loop-decision.json \
+  --output-md /tmp/alpha-closed-loop-decision.md \
+  --output-prior-json /tmp/alpha-next-llm-prior.json
+```
+
+The classifier reads existing CI artifacts only. It does not call an LLM, does
+not edit runtime config, and does not promote a strategy. Its output action is
+one of:
+
+- `ready_handoff`: use the existing ready-only AutoFactor handoff/config PR
+  path.
+- `continue_search`: dispatch the next bounded hosted MCTS iteration.
+- `revise_prior`: review and pass the generated typed prior JSON into the next
+  run through `options_json.alpha_search_llm_prior_json`.
+- `fix_data`: repair missing/weak data surfaces before more search.
+- `fix_runtime`: repair runtime scorer, mapping, or parity before promotion.
+- `reward_stagnation`: stop repeating the same search path until reward deltas
+  and weak dimensions have been inspected.
+- `no_selected_nodes`: stop automatic chaining because the current MCTS
+  expansion plan has no selected branches.
+
+This is the current closed-loop boundary: a failed or stagnant search now
+produces a machine-readable next action and, when appropriate, a bounded typed
+prior draft using only the existing allowed mutation types. It still cannot
+guarantee profitability, does not call an external LLM, and cannot bypass
+walk-forward, promotion, replay parity, dry-run, or live approval gates.
+
+## Event-Level Promotion Gate
+
+PM5D settlement strategies are event-rooted binary options. A deployable
+candidate must prove the top deployable bucket behaves like one event, one
+decision, one trade lifecycle. The AutoFactor report therefore exposes:
+
+- `top_bucket_unique_event_count`
+- `top_bucket_max_event_decisions`
+
+`scripts/evaluate_autofactor_strategy_promotion.py` treats missing event
+decision fields as `missing_one_event_decision_gate` and blocks promotion when
+`top_bucket_max_event_decisions > 1`. This keeps repeated observation rows or
+same-event UP/DOWN rows from being counted as independent deployable trades.
+Diagnostic rows can still be useful for research, but a dry-run handoff must
+pass this event-level gate.
+
 ## Completion Criteria
 
 The method is fully defined only when CI exposes all of the following:
@@ -370,6 +421,7 @@ The method is fully defined only when CI exposes all of the following:
 - multi-dimensional node scoring from CI backtest feedback
 - frequent-subtree/root-gene avoidance
 - full search artifact bundle
+- event-level one-decision promotion gate
 - existing walk-forward and promotion gates
 - ready-only issue/config PR creation
 
@@ -418,6 +470,12 @@ Current implementation status:
   `search-feedback.json.best_reward` with the prior plan artifact's
   `search-feedback.json.best_reward` and stops with `reward_stagnation` when
   the configured `alpha_search_min_reward_improvement` threshold is not met.
+- Implemented: `scripts/alpha_search_closed_loop_agent.py` classifies stopped
+  or blocked chains into a next action and emits a bounded typed prior draft
+  when the correct action is `revise_prior`.
+- Implemented: AutoFactor promotion now fail-closes on missing or repeated
+  top-bucket event decisions, so dry-run handoff cannot count repeated rows
+  from the same event as independent deployable trades.
 - Implemented as artifact and input contract: `llm-priors.json` records the
   typed prior schema, and an operator- or LLM-produced prior file can now enter
   CI through `--alpha-search-llm-prior-json` / `options_json.alpha_search_llm_prior_json`.

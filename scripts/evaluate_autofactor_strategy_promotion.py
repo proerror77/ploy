@@ -171,6 +171,8 @@ class AutoFactorRow:
     top_bucket_avg_label: float
     top_bucket_positive_label_rate: float
     top_bucket_full_depth_entry_fill_rate: float
+    top_bucket_unique_event_count: int
+    top_bucket_max_event_decisions: int
     complexity: int
 
 
@@ -198,6 +200,8 @@ def factor_metrics(row: AutoFactorRow) -> dict[str, Any]:
         "top_bucket_avg_label": row.top_bucket_avg_label,
         "top_bucket_positive_label_rate": row.top_bucket_positive_label_rate,
         "top_bucket_full_depth_entry_fill_rate": row.top_bucket_full_depth_entry_fill_rate,
+        "top_bucket_unique_event_count": row.top_bucket_unique_event_count,
+        "top_bucket_max_event_decisions": row.top_bucket_max_event_decisions,
         "complexity": row.complexity,
     }
 
@@ -298,6 +302,12 @@ def parse_autofactor_rows(report_text: str) -> list[AutoFactorRow]:
                 top_bucket_positive_label_rate=parse_float(item["top_bucket_positive_label_rate"]),
                 top_bucket_full_depth_entry_fill_rate=parse_float(
                     item.get("top_bucket_full_depth_entry_fill_rate", "nan")
+                ),
+                top_bucket_unique_event_count=parse_int(
+                    item.get("top_bucket_unique_event_count", "0")
+                ),
+                top_bucket_max_event_decisions=parse_int(
+                    item.get("top_bucket_max_event_decisions", "0")
                 ),
                 complexity=parse_int(item["complexity"]),
             )
@@ -400,6 +410,13 @@ def evaluate(
             )
         if row.window_count < min_window_count:
             blockers.append(f"window_count_too_small:{row.window_count}<{min_window_count}")
+        if row.top_bucket_unique_event_count <= 0 or row.top_bucket_max_event_decisions <= 0:
+            blockers.append("missing_one_event_decision_gate")
+        elif row.top_bucket_max_event_decisions > 1:
+            blockers.append(
+                "one_event_decision_violation:"
+                f"max_event_decisions={row.top_bucket_max_event_decisions}"
+            )
         if not mapping:
             blockers.append("missing_runtime_strategy_mapping")
         else:
