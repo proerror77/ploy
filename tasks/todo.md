@@ -1,3 +1,40 @@
+# FactorEvolve Research OS Task 1 - Registry And Trace Contracts (2026-05-18)
+
+## Goal
+
+Implement the first FactorEvolve Crypto re-architecture slice: durable factor
+registry, factor evaluation, and append-only experiment trace contracts.
+
+Evidence stage: `diagnostic / research_os_foundation`.
+
+## Files / Ownership
+
+- `migrations/042_factor_research_os_registry.sql`
+  - Owner: durable SQL schema for registry, evaluations, and append-only trace.
+- `crates/ploy-research/src/research_os/`
+  - Owner: Rust serialization/hash-chain contracts.
+- `tests/test_factor_research_os_registry.py`
+  - Owner: static migration contract tests.
+
+## Tasks
+
+- [x] Add failing migration contract test.
+- [x] Add migration `042_factor_research_os_registry.sql`.
+- [x] Add Rust `research_os::{registry, trace}` contracts.
+- [x] Add direct `sha2` dependency for `trace_hash`.
+- [x] Run Python/Rust/diff validation.
+
+## Review
+
+- 2026-05-18: Added `factor_registry`, `factor_evaluations`, and
+  `experiment_trace` schema contracts. `experiment_trace` is protected by
+  update/delete triggers that raise `experiment_trace is append-only`.
+- 2026-05-18: Added `FactorLifecycleStatus`, `FactorRegistryEntry`, and
+  deterministic `trace_hash` helper. Validation passed:
+  `python3 -m unittest tests.test_factor_research_os_registry`,
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-registry /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research research_os --lib`,
+  and `rtk git diff --check`.
+
 # Runtime Candidate Replay Entry Accounting Repair (2026-05-18)
 
 ## Goal
