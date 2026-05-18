@@ -56,6 +56,7 @@ jobs:
     name: Build and deploy to tango-1-1
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # deploy=true protected environment: tango-1-1
     environment: ${{ inputs.deploy && 'tango-1-1' || 'tango-1-1-build-only' }}
 
     steps:

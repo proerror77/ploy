@@ -20,6 +20,16 @@ on:
         type: boolean
         required: true
         default: false
+      force_restart:
+        description: "Restart the target dry-run worker even when the remote config already matches"
+        type: boolean
+        required: false
+        default: false
+      rotate_recording:
+        description: "Archive the strategy recording file from the candidate config before restart"
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: sync-dryrun-strategy-config-${{ github.event.inputs.deployment_id }}
@@ -50,6 +60,8 @@ jobs:
           DEPLOYMENT_ID: ${{ github.event.inputs.deployment_id }}
           STRATEGY_CONFIG_PATH: ${{ github.event.inputs.strategy_config_path }}
           EXECUTE: ${{ github.event.inputs.execute }}
+          FORCE_RESTART: ${{ github.event.inputs.force_restart }}
+          ROTATE_RECORDING: ${{ github.event.inputs.rotate_recording }}
           INPUT_GIT_REF: ${{ github.event.inputs.git_ref }}
         run: |
           set -euo pipefail
@@ -70,6 +82,15 @@ jobs:
               ;;
           esac
           test -f "${STRATEGY_CONFIG_PATH}"
+
+          if [ "${ROTATE_RECORDING}" = "true" ] && [ "${EXECUTE}" != "true" ]; then
+            echo "rotate_recording=true requires execute=true" >&2
+            exit 2
+          fi
+          if [ "${FORCE_RESTART}" = "true" ] && [ "${EXECUTE}" != "true" ]; then
+            echo "force_restart=true requires execute=true" >&2
+            exit 2
+          fi
 
           if [ "${EXECUTE}" = "true" ]; then
             if [ "${GITHUB_REF_NAME}" != "main" ]; then
@@ -122,6 +143,8 @@ jobs:
           DEPLOYMENT_ID: ${{ github.event.inputs.deployment_id }}
           STRATEGY_CONFIG_PATH: ${{ github.event.inputs.strategy_config_path }}
           EXECUTE: ${{ github.event.inputs.execute }}
+          FORCE_RESTART: ${{ github.event.inputs.force_restart }}
+          ROTATE_RECORDING: ${{ github.event.inputs.rotate_recording }}
           REMOTE_DIR: /opt/ploy/tmp/sync-dryrun-strategy-config-${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -142,7 +165,9 @@ jobs:
             "${REMOTE_DIR}/${target_name}.candidate" \
             "${REMOTE_DIR}" \
             "${EXECUTE}" \
-            "${DEPLOY_ROOT}" <<'EOF'
+            "${DEPLOY_ROOT}" \
+            "${FORCE_RESTART}" \
+            "${ROTATE_RECORDING}" <<'EOF'
           set -euo pipefail
           deployment_id="$1"
           remote_config="$2"
@@ -150,9 +175,12 @@ jobs:
           remote_dir="$4"
           execute="$5"
           deploy_root="$6"
+          force_restart="$7"
+          rotate_recording="$8"
 
           status_json="${remote_dir}/sync-status.json"
           diff_path="${remote_dir}/config-diff.txt"
+          recording_archive_path=""
 
           require_live_paused() {
             local live_status
@@ -207,6 +235,54 @@ jobs:
           PY
           }
 
+          candidate_recording_path() {
+            python3 - "${candidate_config}" <<'PY'
+          import re
+          import sys
+          path = sys.argv[1]
+          in_runtime = False
+          for raw in open(path, encoding="utf-8"):
+              line = raw.strip()
+              if line.startswith("[") and line.endswith("]"):
+                  in_runtime = line == "[runtime]"
+                  continue
+              if not in_runtime:
+                  continue
+              match = re.match(r'^record_market_updates_to\s*=\s*"([^"]+)"\s*$', line)
+              if match:
+                  print(match.group(1))
+                  raise SystemExit(0)
+          raise SystemExit(0)
+          PY
+          }
+
+          rotate_candidate_recording() {
+            local recording_path
+            local archive_path
+            local stamp
+            recording_path="$(candidate_recording_path)"
+            if [ -z "${recording_path}" ]; then
+              echo "candidate config has no record_market_updates_to; nothing to rotate"
+              return 0
+            fi
+            case "${recording_path}" in
+              "${deploy_root}/data/recordings/"*.ndjson) ;;
+              *)
+                echo "refusing to rotate unexpected recording path: ${recording_path}" >&2
+                exit 2
+                ;;
+            esac
+            if [ ! -e "${recording_path}" ]; then
+              echo "recording path does not exist yet: ${recording_path}"
+              return 0
+            fi
+            stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+            archive_path="${recording_path%.ndjson}.${stamp}.ndjson"
+            mv "${recording_path}" "${archive_path}"
+            recording_archive_path="${archive_path}"
+            echo "archived recording ${recording_path} -> ${archive_path}"
+          }
+
           test -x "${deploy_root}/bin/ployctl"
           test -r "${candidate_config}"
           test -r "${remote_config}"
@@ -221,8 +297,14 @@ jobs:
             diff -u "${remote_config}" "${candidate_config}" > "${diff_path}" || true
           fi
 
-          if [ "${execute}" = "true" ] && [ "${changed}" = "true" ]; then
-            install -m 0644 "${candidate_config}" "${remote_config}"
+          restarted=false
+          if [ "${execute}" = "true" ] && { [ "${changed}" = "true" ] || [ "${force_restart}" = "true" ] || [ "${rotate_recording}" = "true" ]; }; then
+            if [ "${changed}" = "true" ]; then
+              install -m 0644 "${candidate_config}" "${remote_config}"
+            fi
+            if [ "${rotate_recording}" = "true" ]; then
+              rotate_candidate_recording
+            fi
             "${deploy_root}/bin/ployctl" deployments pause "${deployment_id}"
             wait_for_state Paused
             "${deploy_root}/bin/ployctl" deployments resume "${deployment_id}"
@@ -230,18 +312,33 @@ jobs:
             curl -fsS http://127.0.0.1:8081/health
             curl -fsS http://127.0.0.1:8081/api/reports/dry-run \
               | "${deploy_root}/scripts/check_dryrun_report_contract.py"
+            restarted=true
           fi
 
-          python3 - "${status_json}" "${deployment_id}" "${remote_config}" "${execute}" "${changed}" <<'PY'
+          python3 - "${status_json}" "${deployment_id}" "${remote_config}" "${execute}" "${changed}" "${force_restart}" "${rotate_recording}" "${restarted}" "${recording_archive_path}" <<'PY'
           import json
           import sys
-          path, deployment_id, remote_config, execute, changed = sys.argv[1:6]
+          (
+              path,
+              deployment_id,
+              remote_config,
+              execute,
+              changed,
+              force_restart,
+              rotate_recording,
+              restarted,
+              recording_archive_path,
+          ) = sys.argv[1:10]
           payload = {
               "deployment_id": deployment_id,
               "remote_config": remote_config,
               "execute": execute == "true",
               "changed": changed == "true",
-              "status": "synced" if execute == "true" and changed == "true" else "preview",
+              "force_restart": force_restart == "true",
+              "rotate_recording": rotate_recording == "true",
+              "restarted": restarted == "true",
+              "recording_archive_path": recording_archive_path or None,
+              "status": "synced" if restarted == "true" else "preview",
           }
           with open(path, "w", encoding="utf-8") as handle:
               json.dump(payload, handle, indent=2, sort_keys=True)
@@ -272,6 +369,8 @@ jobs:
             echo "- Deployment: \`${{ github.event.inputs.deployment_id }}\`"
             echo "- Strategy config: \`${{ github.event.inputs.strategy_config_path }}\`"
             echo "- Execute: \`${{ github.event.inputs.execute }}\`"
+            echo "- Force restart: \`${{ github.event.inputs.force_restart }}\`"
+            echo "- Rotate recording: \`${{ github.event.inputs.rotate_recording }}\`"
             if [ -f artifacts/sync-dryrun-strategy-config/sync-status.json ]; then
               echo ""
               echo "Status:"

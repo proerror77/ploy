@@ -747,5 +747,5 @@ jobs:
               context,
               core,
               issue_number,
-              labels: [...evidence.labels, ...labelsForDecision(evidence.decision)]
+              labels: ["evidence:walk-forward", ...evidence.labels, ...labelsForDecision(evidence.decision)]
             });
