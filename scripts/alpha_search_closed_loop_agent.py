@@ -135,6 +135,29 @@ def blocker_strings(payload: Any) -> list[str]:
     return out
 
 
+def target_blocker_strings(payload: Any, target: str) -> list[str]:
+    out: list[str] = []
+    if isinstance(payload, dict):
+        evaluated = payload.get("evaluated_factors")
+        if isinstance(evaluated, list):
+            for item in evaluated:
+                if not isinstance(item, dict):
+                    continue
+                factor = item.get("factor")
+                factor_target = factor.get("target") if isinstance(factor, dict) else None
+                if factor_target in {None, target}:
+                    blockers = item.get("blockers", [])
+                    if isinstance(blockers, list):
+                        out.extend(str(blocker) for blocker in blockers)
+                    else:
+                        out.extend(blocker_strings(blockers))
+            payload = {key: value for key, value in payload.items() if key != "evaluated_factors"}
+        out.extend(blocker_strings(payload))
+    else:
+        out.extend(blocker_strings(payload))
+    return out
+
+
 def classify_blockers(blockers: list[str]) -> str | None:
     text = " ".join(blockers).lower()
     if not text:
@@ -193,7 +216,7 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
     chain = current["chain"]
     feedback = current["feedback"]
     plan = current["plan"]
-    blockers = blocker_strings(current["promotion"]) + blocker_strings(handoff)
+    blockers = target_blocker_strings(current["promotion"], current["target"]) + blocker_strings(handoff)
     blocker_action = classify_blockers(blockers)
 
     candidate_count = int(feedback.get("candidate_count") or 0)

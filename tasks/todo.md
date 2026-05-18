@@ -299,6 +299,41 @@ Evidence stage: `factor_attribution / executable_replay semantics repair`.
   `rustfmt --check crates/ploy-research/src/autofactor.rs`, and
   `rtk git diff --check`.
 
+# Closed-Loop Target Blocker Filtering (2026-05-18)
+
+## Goal
+
+Prevent the closed-loop classifier for
+`full_depth_settlement_executable_pnl` from treating blockers on non-target
+repricing diagnostic rows as the next action for the settlement search loop.
+
+Evidence stage: `walk_forward / alpha-search CI repair`.
+
+## Files / Ownership
+
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: filter `evaluated_factors` blockers by requested target before
+    classifying the next closed-loop action.
+- `tests/test_alpha_search_closed_loop_agent.py`
+  - Owner: cover non-target blocker filtering.
+
+## Tasks
+
+- [x] Filter promotion blockers by factor target for closed-loop action
+      classification.
+- [x] Preserve handoff/global blockers as target-relevant blockers.
+- [x] Add regression coverage and run focused Python validation.
+
+## Review
+
+- 2026-05-18: Closed-loop blocker classification now ignores blockers from
+  `evaluated_factors` whose `factor.target` differs from the requested
+  alpha-search target, while still keeping handoff/global blockers.
+- 2026-05-18: Validation passed:
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent tests.test_autofactor_strategy_promotion tests.test_factor_walk_forward_sweep`,
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
+  and `rtk git diff --check`.
+
 # Recorded Replay Partial-Fill Cancel Parity (2026-05-13)
 
 ## Goal

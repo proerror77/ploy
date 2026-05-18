@@ -193,6 +193,8 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = artifact(
                 Path(tmp),
+                chain_reason="continue",
+                should_dispatch=True,
                 promotion={
                     "decision": "blocked",
                     "evaluated_factors": [
@@ -209,6 +211,8 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = artifact(
                 Path(tmp),
+                chain_reason="continue",
+                should_dispatch=True,
                 promotion={
                     "decision": "blocked",
                     "evaluated_factors": [
@@ -227,6 +231,30 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             self.assertEqual(decision["decision"], "revise_prior")
             self.assertFalse(decision["allow_dispatch"])
             self.assertTrue(decision["prior_revision_required"])
+
+    def test_non_target_factor_blockers_do_not_drive_target_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = artifact(
+                Path(tmp),
+                chain_reason="continue",
+                should_dispatch=True,
+                promotion={
+                    "decision": "blocked",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "target_not_allowed",
+                                "one_event_decision_violation:max_event_decisions=4",
+                            ],
+                            "factor": {"target": "full_depth_reprice_pnl_10s"},
+                        }
+                    ],
+                },
+            )
+            decision = agent.closed_loop_decision(
+                [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            )
+            self.assertEqual(decision["decision"], "continue_search")
 
     def test_missing_recorded_replay_artifact_routes_to_fix_workflow(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
