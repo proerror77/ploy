@@ -147,6 +147,11 @@ fn write_strategy_evaluation(
     snapshot: &ploy_trading::TradingRuntimeSnapshot,
 ) {
     let cashflow = snapshot.fill_cashflow_summary();
+    let strategy_diagnostics: BTreeMap<&str, u64> = result
+        .strategy_diagnostics
+        .iter()
+        .map(|(key, value)| (key.as_str(), *value))
+        .collect();
     let artifact = json!({
         "schema_version": 1,
         "artifact_type": "strategy_runtime_evaluation",
@@ -165,7 +170,9 @@ fn write_strategy_evaluation(
             "net_pnl": result.pnl.net_pnl(),
             "risk": &result.risk,
             "elapsed_secs": result.elapsed_secs,
+            "strategy_diagnostics": strategy_diagnostics,
         },
+        "strategy_diagnostics": strategy_diagnostics,
         "cashflow": {
             "buy_shares": cashflow.buy_shares,
             "sell_shares": cashflow.sell_shares,

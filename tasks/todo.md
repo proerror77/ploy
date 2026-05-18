@@ -1,3 +1,43 @@
+# PM5D Runtime Diagnostics Output (2026-05-18)
+
+## Goal
+
+Make dry-run/replay zero-trade failures actionable by surfacing strategy gate
+diagnostics in runner logs and `--output-json` artifacts.
+
+Evidence stage: `dry_run_candidate / runtime_parity diagnostic`.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/engine.rs`
+  - Owner: runtime checkpoint/final logs include strategy diagnostic counters.
+- `crates/ploy-strategy-runtime/src/lib.rs`
+  - Owner: `strategy_runtime_evaluation` JSON includes strategy diagnostics.
+
+## Tasks
+
+- [x] Verify current Tango dry-run has market updates but no signal/order rows.
+- [x] Reproduce zero-intent behavior by replaying the active recording.
+- [x] Add diagnostics to logs and output JSON.
+- [x] Run focused Rust validation.
+- [ ] Open/merge PR and deploy from `main`.
+- [ ] Re-run recorded replay diagnostic and decide whether config gates or
+      feed ordering need the next fix.
+
+## Review
+
+- 2026-05-18: Remote DB showed zero `signal_history`,
+  `strategy_runtime_orders`, and `strategy_runtime_fills` rows for the active
+  settlement-probability dry-run window despite a healthy runner and growing
+  recording. A read-only replay of the copied recording processed 172,368
+  updates with zero intents/fills, so the current blocker is before order
+  execution.
+- 2026-05-18: Focused validation passed:
+  `rtk cargo check --locked -p ploy-strategy-bundles -p ploy-strategy-runtime`
+  and `rtk cargo test --locked -p ploy-strategy-bundles
+  diagnostics_count_entry_gate_reasons --lib`. `cargo fmt --check` remains
+  blocked by pre-existing formatting drift outside this slice.
+
 # Candidate Replay Runtime Mapping Alignment (2026-05-18)
 
 ## Goal

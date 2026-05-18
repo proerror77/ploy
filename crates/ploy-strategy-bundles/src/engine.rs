@@ -22,6 +22,7 @@ use crate::traits::{Executor, Feed, MarketUpdate, Recorder, StrategyDecision, St
 
 const MIN_LIVE_RETRY_SHARES: Decimal = dec!(1.00);
 const MIN_LIVE_RETRY_NOTIONAL: Decimal = dec!(1.00);
+const DIAGNOSTIC_LOG_INTERVAL_UPDATES: u64 = 50_000;
 
 /// Operating mode for the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -409,6 +410,18 @@ where
                 .await;
             }
 
+            if updates_processed % DIAGNOSTIC_LOG_INTERVAL_UPDATES == 0 {
+                info!(
+                    mode = ?self.config.mode,
+                    strategy = self.strategy.name(),
+                    updates = updates_processed,
+                    intents = intents_submitted,
+                    fills = fills_recorded,
+                    diagnostics = ?self.strategy.diagnostics(),
+                    "StrategyRuntime diagnostic checkpoint",
+                );
+            }
+
             // 3. Check update limit (backtest bound).
             if let Some(max) = self.config.max_updates {
                 if updates_processed >= max {
@@ -442,6 +455,7 @@ where
             fills = result.fills_recorded,
             elapsed = format!("{:.1}s", result.elapsed_secs),
             net_pnl = %result.pnl.net_pnl(),
+            diagnostics = ?result.strategy_diagnostics,
             "StrategyRuntime finished",
         );
 
