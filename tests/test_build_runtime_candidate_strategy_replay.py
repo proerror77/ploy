@@ -191,6 +191,131 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         self.assertIn("official_settlement_missing:0<2", payload["blocking_risk_flags"])
         self.assertIn("full_depth_entry_not_confirmed", payload["blocking_risk_flags"])
 
+    def test_resolves_missing_order_event_ids_and_ignores_settlement_exits(self):
+        payload = runtime_eval_payload()
+        evidence = payload["runtime_evidence"]
+        evidence["intents"] = []
+        evidence["orders"] = [
+            {
+                "intent_id": "tl_btcusdt_up_100_123",
+                "order_id": "entry-order-1",
+                "event_id": None,
+                "market_id": None,
+                "purpose": None,
+                "order_side": "UNKNOWN",
+                "quantity": "10",
+                "filled_quantity": "10",
+                "status": "FILLED",
+                "token_id": "token-up-100",
+            },
+            {
+                "intent_id": "tl_settle_100_up",
+                "order_id": "settle-order-1",
+                "event_id": None,
+                "market_id": None,
+                "purpose": None,
+                "order_side": "UNKNOWN",
+                "quantity": "10",
+                "filled_quantity": "10",
+                "status": "FILLED",
+                "token_id": "token-up-100",
+            },
+            {
+                "intent_id": "tl_ethusdt_down_101_456",
+                "order_id": "entry-order-2",
+                "event_id": None,
+                "market_id": None,
+                "purpose": None,
+                "order_side": "UNKNOWN",
+                "quantity": "10",
+                "filled_quantity": "10",
+                "status": "FILLED",
+                "token_id": "token-down-101",
+            },
+        ]
+        evidence["fills"] = [
+            {
+                "intent_id": "tl_btcusdt_up_100_123",
+                "order_id": "entry-order-1",
+                "event_id": None,
+                "market_id": None,
+                "fill_side": "BUY",
+                "purpose": None,
+                "quantity": "10",
+                "price": "0.42",
+                "token_id": "token-up-100",
+            },
+            {
+                "intent_id": "tl_settle_100_up",
+                "order_id": "settle-order-1",
+                "event_id": None,
+                "market_id": None,
+                "fill_side": "SELL",
+                "purpose": None,
+                "quantity": "10",
+                "price": "1",
+                "token_id": "token-up-100",
+            },
+            {
+                "intent_id": "tl_ethusdt_down_101_456",
+                "order_id": "entry-order-2",
+                "event_id": None,
+                "market_id": None,
+                "fill_side": "BUY",
+                "purpose": None,
+                "quantity": "10",
+                "price": "0.43",
+                "token_id": "token-down-101",
+            },
+        ]
+        evidence["events"] = [
+            {
+                "intent_id": "tl_btcusdt_up_100_123",
+                "order_id": "entry-order-1",
+                "event_id": "100",
+                "market_id": "100",
+                "side": "BUY",
+                "signal_inputs": {"purpose": "ENTRY"},
+                "fill_status": "FILLED",
+                "settlement": "1",
+                "pnl": "5",
+                "token_id": "token-up-100",
+            },
+            {
+                "intent_id": "tl_settle_100_up",
+                "order_id": "settle-order-1",
+                "event_id": "100",
+                "market_id": "100",
+                "side": "SELL",
+                "signal_inputs": {"purpose": "ENTRY"},
+                "fill_status": "FILLED",
+                "settlement": "open",
+                "pnl": "10",
+                "token_id": "token-up-100",
+            },
+            {
+                "intent_id": "tl_ethusdt_down_101_456",
+                "order_id": "entry-order-2",
+                "event_id": "101",
+                "market_id": "101",
+                "side": "BUY",
+                "signal_inputs": {"purpose": "ENTRY"},
+                "fill_status": "FILLED",
+                "settlement": "1",
+                "pnl": "7",
+                "token_id": "token-down-101",
+            },
+        ]
+
+        artifact, _ = self.run_script(payload, "--full-depth-entry", "--min-trade-count", "2")
+
+        self.assertTrue(artifact["promotion_ready"])
+        self.assertEqual(artifact["metrics"]["trade_count"], 2)
+        self.assertEqual(artifact["metrics"]["unique_event_count"], 2)
+        self.assertEqual(artifact["metrics"]["settlement_event_count"], 2)
+        self.assertEqual(artifact["metrics"]["total_pnl"], 12.0)
+        self.assertEqual(artifact["metrics"]["entry_fill_rate"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
