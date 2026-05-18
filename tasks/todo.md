@@ -1,3 +1,52 @@
+# Runtime Candidate Replay Artifact Gate (2026-05-18)
+
+## Goal
+
+Create the true runtime replay artifact required before AutoFactor search
+candidates can become dry-run handoffs.
+
+Evidence stage: `runtime_parity / executable_replay gate`.
+
+## Files / Ownership
+
+- `scripts/build_runtime_candidate_strategy_replay.py`
+  - Owner: convert `ploy-runner run --output-json` runtime evaluations into
+    fail-closed `candidate-strategy-replay.json` artifacts.
+- `scripts/evaluate_autofactor_strategy_promotion.py`
+  - Owner: accept only `basis=runtime_market_update_replay` for dry-run
+    handoff.
+- `docs/runbooks/event-ml-automl-workflow.md`,
+  `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document aggregate candidate context vs true runtime replay proof.
+- `tests/test_build_runtime_candidate_strategy_replay.py`,
+  `tests/test_autofactor_strategy_promotion.py`
+  - Owner: regression coverage for the runtime replay basis.
+
+## Tasks
+
+- [x] Inspect runner `strategy_runtime_evaluation` JSON and runtime evidence
+      fields.
+- [x] Add runtime replay artifact builder with zero-intent, settlement,
+      one-event-one-decision, fill-rate, full-depth, and ROI blockers.
+- [x] Make promotion evaluator require `basis=runtime_market_update_replay`.
+- [x] Run full Python validation and diff check.
+- [ ] Open/merge PR and then wire the hosted search workflow to produce this
+      artifact before config PR creation.
+
+## Review
+
+- 2026-05-18: Runtime evaluation JSON already exposes `result`,
+  `runtime_evidence`, `snapshot_counts`, and `strategy_diagnostics`, so the
+  first implementation can be a Python artifact builder without changing the
+  runner binary.
+- 2026-05-18: Validation passed with
+  `python3 -m unittest discover -s tests -p 'test_*.py'` and
+  `rtk git diff --check`. Running the new builder on the post-#536
+  zero-intent replay produced `basis=runtime_market_update_replay`,
+  `promotion_ready=false`, `trade_count=0`, and blockers
+  `trade_count_too_small`, `entry_fill_rate_too_low`, and
+  `zero_runtime_orders_and_fills`.
+
 # AutoFactor Runtime Replay Gate Repair (2026-05-18)
 
 ## Goal

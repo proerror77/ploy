@@ -364,8 +364,11 @@ def candidate_strategy_replay_blockers(
     blockers = list(replay.blockers)
     if not replay.ready:
         blockers.append("candidate_strategy_replay_not_ready")
-    if replay.basis == "factor_walk_forward_top_bucket_aggregate":
-        blockers.append("candidate_strategy_replay_not_runtime_replay")
+    if replay.basis != "runtime_market_update_replay":
+        blockers.append(
+            "candidate_strategy_replay_not_runtime_replay:"
+            f"{replay.basis or '<missing>'}!=runtime_market_update_replay"
+        )
 
     if replay.strategy_profile != required_strategy_profile:
         blockers.append(

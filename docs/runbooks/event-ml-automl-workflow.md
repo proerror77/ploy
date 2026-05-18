@@ -220,6 +220,24 @@ artifact for the exact same runtime score is supplied. The sweep still copies
 the aggregate JSON and markdown to the artifact root so the next runtime-replay
 job can use it as candidate context.
 
+A true pre-dry-run runtime replay artifact must be built from the JSON emitted
+by `ploy-runner run --output-json` after replaying the exact candidate config on
+an ordered MarketUpdate stream:
+
+```bash
+python3 scripts/build_runtime_candidate_strategy_replay.py \
+  --runtime-evaluation-json /tmp/runtime-eval.json \
+  --runtime-score autofactor_formula:<candidate> \
+  --full-depth-entry \
+  --output-json /tmp/candidate-strategy-replay.json \
+  --output-md /tmp/candidate-strategy-replay.md
+```
+
+This artifact declares `basis=runtime_market_update_replay`. It stays blocked
+when the runtime produced zero orders/fills, lacks official settlement rows,
+lacks one-event-one-decision evidence, lacks confirmed full-depth entry
+accounting, or fails trade-count/fill-rate/PnL thresholds.
+
 For an existing Factor Walk-Forward V2 artifact, use the hosted GitHub workflow
 instead of waiting for the self-hosted research runner:
 

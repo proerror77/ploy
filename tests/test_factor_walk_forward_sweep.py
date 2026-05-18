@@ -90,6 +90,7 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
                     "schema_version": 1,
                     "kind": "autofactor_candidate_strategy_replay",
                     "evidence_stage": "executable_replay",
+                    "basis": "runtime_market_update_replay",
                     "strategy_profile": "settlement_probability",
                     "runtime_score": runtime_score,
                     "promotion_ready": True,
