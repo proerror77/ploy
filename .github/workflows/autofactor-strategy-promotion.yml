@@ -78,8 +78,12 @@ jobs:
             find artifacts/source -maxdepth 4 -type f -print >&2
             exit 2
           fi
-          echo "REPORT_PATH=${report_path}" >> "$GITHUB_ENV"
-          echo "ARTIFACT_NAME=${artifact_name}" >> "$GITHUB_ENV"
+          replay_path="$(find artifacts/source \( -name 'candidate-strategy-replay.json' -o -name 'autofactor-candidate-strategy-replay.json' \) -print -quit)"
+          {
+            echo "REPORT_PATH=${report_path}"
+            echo "CANDIDATE_STRATEGY_REPLAY_PATH=${replay_path}"
+            echo "ARTIFACT_NAME=${artifact_name}"
+          } >> "$GITHUB_ENV"
 
       - name: Evaluate AutoFactor strategy promotion
         run: |
@@ -95,6 +99,9 @@ jobs:
             --required-strategy-profile "${{ github.event.inputs.required_strategy_profile }}"
             --allowed-target "${{ github.event.inputs.allowed_target }}"
           )
+          if [ -n "${CANDIDATE_STRATEGY_REPLAY_PATH:-}" ]; then
+            args+=(--candidate-strategy-replay-json "${CANDIDATE_STRATEGY_REPLAY_PATH}")
+          fi
           if [ "${{ github.event.inputs.fail_if_blocked }}" = "true" ]; then
             args+=(--fail-if-blocked)
           fi
@@ -109,6 +116,7 @@ jobs:
             echo ""
             echo "- Source run: \`${{ github.event.inputs.factor_walk_forward_run_id }}\`"
             echo "- Source artifact: \`${ARTIFACT_NAME:-unknown}\`"
+            echo "- Candidate strategy replay artifact: \`${CANDIDATE_STRATEGY_REPLAY_PATH:-missing}\`"
             echo "- Required strategy profile: \`${{ github.event.inputs.required_strategy_profile }}\`"
             echo "- Allowed target: \`${{ github.event.inputs.allowed_target }}\`"
             echo ""

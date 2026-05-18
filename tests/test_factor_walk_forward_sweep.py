@@ -78,6 +78,43 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
 
 
 class FactorWalkForwardSweepTests(unittest.TestCase):
+    def replay_file(
+        self,
+        tmp: Path,
+        runtime_score: str = "autofactor_formula:auto_settlement_conservative_settlement_edge",
+    ) -> Path:
+        replay = tmp / f"candidate-strategy-replay-{runtime_score.replace(':', '_')}.json"
+        replay.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "autofactor_candidate_strategy_replay",
+                    "evidence_stage": "executable_replay",
+                    "strategy_profile": "settlement_probability",
+                    "runtime_score": runtime_score,
+                    "promotion_ready": True,
+                    "decision_contract": {
+                        "event_level": True,
+                        "one_decision_per_event": True,
+                        "official_settlement": True,
+                        "full_depth_entry": True,
+                    },
+                    "metrics": {
+                        "trade_count": 100,
+                        "unique_event_count": 100,
+                        "total_pnl": 12.5,
+                        "roi": 0.03,
+                        "entry_fill_rate": 0.95,
+                    },
+                    "blocking_risk_flags": [],
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return replay
+
     def base_args(self, tmp: Path, binary: Path) -> list[str]:
         return [
             sys.executable,
@@ -199,7 +236,13 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
                 ]
             )
             result = subprocess.run(
-                [*self.base_args(tmp, binary), "--sweep-json", sweep_json],
+                [
+                    *self.base_args(tmp, binary),
+                    "--candidate-strategy-replay-json",
+                    str(self.replay_file(tmp)),
+                    "--sweep-json",
+                    sweep_json,
+                ],
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
@@ -243,6 +286,8 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             subprocess.run(
                 [
                     *self.base_args(tmp, binary),
+                    "--candidate-strategy-replay-json",
+                    str(self.replay_file(tmp)),
                     "--sweep-json",
                     sweep_json,
                     "--alpha-search-output-dir",
@@ -318,6 +363,13 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             subprocess.run(
                 [
                     *self.base_args(tmp, binary),
+                    "--candidate-strategy-replay-json",
+                    str(
+                        self.replay_file(
+                            tmp,
+                            "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate",
+                        )
+                    ),
                     "--allowed-target",
                     "tradeable_full_depth_settlement_pnl",
                     "--sweep-json",
@@ -346,6 +398,7 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertIn("--sweep-json \"${SWEEP_JSON}\"", workflow)
         self.assertIn("--factor-name-filter \"${WALK_FACTOR_NAME_FILTER}\"", workflow)
         self.assertIn("--train-window-hours \"${WALK_TRAIN_WINDOW_HOURS}\"", workflow)
+        self.assertIn("--candidate-strategy-replay-json", workflow)
 
     def test_alpha_search_prior_and_state_args_pass_through_to_factor_binary(self):
         with tempfile.TemporaryDirectory() as raw_tmp:

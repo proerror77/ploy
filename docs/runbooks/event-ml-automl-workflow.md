@@ -149,6 +149,7 @@ evaluator before creating any dry-run handoff:
 ```bash
 python3 scripts/evaluate_autofactor_strategy_promotion.py \
   --report /tmp/factor-walk-forward-v2/report.txt \
+  --candidate-strategy-replay-json /tmp/candidate-strategy-replay.json \
   --output-json /tmp/autofactor-strategy-promotion.json \
   --output-md /tmp/autofactor-strategy-promotion.md \
   --output-registry-json /tmp/autofactor-factor-registry.json \
@@ -164,7 +165,11 @@ The evaluator requires all of the following:
   `full_depth_settlement_executable_pnl`;
 - the factor has an explicit runtime strategy-profile mapping; and
 - the runtime profile matches the requested promotion lane, defaulting to
-  `settlement_probability`.
+  `settlement_probability`; and
+- a candidate strategy executable replay artifact is ready for the exact same
+  runtime score, with event-level decisions, full-depth executable accounting,
+  official settlement, enough trades, positive ROI/PnL, and no blocking risk
+  flags.
 
 This deliberately blocks cases where a factor is statistically good in the
 wrong lane. For example, `spread_adjusted_external_move` can be a valid
@@ -195,8 +200,10 @@ The built-in promotion evaluator maps the generated `auto_settlement_*`
 formula family to the `settlement_probability` strategy profile with
 `autofactor_formula:<factor_name>` runtime score identifiers. That mapping only
 removes the profile/mapping blocker; it does not override the PRD promotion
-gate. Recorded replay parity and the other settlement gates must still be
-ready before a handoff issue/config is created.
+gate. It also does not replace the strategy replay gate: the same runtime score
+must pass historical executable replay before any dry-run handoff issue/config
+is created. Recorded replay parity remains the later dry-run/runtime parity gate
+after dry-run evidence exists.
 
 For an existing Factor Walk-Forward V2 artifact, use the hosted GitHub workflow
 instead of waiting for the self-hosted research runner:
@@ -210,8 +217,11 @@ gh workflow run autofactor-strategy-promotion.yml \
 ```
 
 This downloads `factor-walk-forward-v2-<run-id>`, runs the same evaluator on
-`report.txt`, uploads `autofactor-strategy-promotion-<run-id>` artifacts, and
-can optionally comment on a research issue.
+`report.txt`, automatically uses `candidate-strategy-replay.json` or
+`autofactor-candidate-strategy-replay.json` when the source artifact contains
+one, uploads `autofactor-strategy-promotion-<run-id>` artifacts, and can
+optionally comment on a research issue. If no candidate strategy replay artifact
+is present, the handoff stays blocked by design.
 
 The hosted workflow also has a fail-closed `create_handoff_issue` input. Leave
 it `false` for diagnostics. When set to `true`, the workflow creates a dry-run
@@ -297,7 +307,9 @@ gh workflow run factor-walk-forward-v2-hosted-artifact.yml \
 
 This keeps the full chain on GitHub-hosted runners after snapshot creation:
 snapshot artifact -> hosted walk-forward -> promotion evaluator -> ready
-handoff -> CI-gated config PR. The generated PR updates only
+handoff -> CI-gated config PR. The promotion evaluator still requires a
+candidate strategy replay artifact inside the source artifact before the
+handoff can be ready. The generated PR updates only
 `three_layer_autofactor_runtime_score`; deployment remains a separate explicit
 dry-run step from `main`.
 

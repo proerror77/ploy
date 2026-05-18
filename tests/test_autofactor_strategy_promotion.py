@@ -138,16 +138,49 @@ candidate,bucket,count
 {AUTOFACTOR_SETTLEMENT_AUTO_REPORT}
 """
 
+DEFAULT_REPLAY_PAYLOAD = {
+    "schema_version": 1,
+    "kind": "autofactor_candidate_strategy_replay",
+    "evidence_stage": "executable_replay",
+    "strategy_profile": "settlement_probability",
+    "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge",
+    "promotion_ready": True,
+    "decision_contract": {
+        "event_level": True,
+        "one_decision_per_event": True,
+        "official_settlement": True,
+        "full_depth_entry": True,
+        "max_sweep_levels": 3,
+        "stake_usd": 15,
+    },
+    "metrics": {
+        "trade_count": 100,
+        "unique_event_count": 100,
+        "total_pnl": 12.5,
+        "roi": 0.03,
+        "entry_fill_rate": 0.95,
+    },
+    "blocking_risk_flags": [],
+}
+
 
 class AutoFactorStrategyPromotionTests(unittest.TestCase):
-    def run_script(self, report, *extra_args, check=True):
+    def run_script(self, report, *extra_args, check=True, replay_payload=DEFAULT_REPLAY_PAYLOAD):
         with tempfile.TemporaryDirectory() as tmp:
             report_path = Path(tmp) / "report.txt"
+            replay_path = Path(tmp) / "candidate-strategy-replay.json"
             output_json = Path(tmp) / "promotion.json"
             output_registry = Path(tmp) / "registry.json"
             output_handoff = Path(tmp) / "handoff.json"
             output_handoff_md = Path(tmp) / "handoff.md"
             report_path.write_text(report, encoding="utf-8")
+            replay_args = []
+            if replay_payload is not None:
+                replay_path.write_text(
+                    json.dumps(replay_payload, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                replay_args = ["--candidate-strategy-replay-json", str(replay_path)]
             result = subprocess.run(
                 [
                     sys.executable,
@@ -162,6 +195,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                     str(output_handoff),
                     "--output-handoff-md",
                     str(output_handoff_md),
+                    *replay_args,
                     *extra_args,
                 ],
                 cwd=ROOT,
@@ -212,8 +246,8 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertEqual(payload["decision"], "qualified")
         self.assertEqual(registry["decision"], "qualified")
         self.assertEqual(handoff["status"], "ready")
-        self.assertEqual(handoff["blocked_factor_count"], 1)
-        self.assertEqual(len(handoff["strategies"]), 3)
+        self.assertEqual(handoff["blocked_factor_count"], 3)
+        self.assertEqual(len(handoff["strategies"]), 1)
         self.assertEqual(
             handoff["strategies"][0]["runtime_score"],
             "autofactor_formula:auto_settlement_conservative_settlement_edge",
@@ -222,16 +256,20 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             handoff["strategies"][0]["strategy_profile"],
             "settlement_probability",
         )
-        self.assertIn(
-            "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike",
-            handoff_md,
-        )
-        self.assertIn(
-            "autofactor_formula:auto_settlement_conservative_settlement_edge_x_entry_price_quality",
-            handoff_md,
-        )
+        self.assertIn("Candidate strategy replay ready: `true`", handoff_md)
         self.assertIn("top bucket avg label", handoff_md)
         self.assertNotIn("top bucket pnl", handoff_md.lower())
+        near_strike = next(
+            item
+            for item in payload["evaluated_factors"]
+            if item["factor"]["name"] == "auto_settlement_conservative_settlement_edge_x_near_strike"
+        )
+        self.assertIn(
+            "candidate_strategy_replay_runtime_score_mismatch:"
+            "autofactor_formula:auto_settlement_conservative_settlement_edge!="
+            "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike",
+            near_strike["blockers"],
+        )
         rejected = next(
             item
             for item in payload["evaluated_factors"]
@@ -302,8 +340,13 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertNotIn("global_full_depth_entry_fillability", ",".join(blockers))
 
     def test_qualifies_predictive_external_formula_when_gate_is_ready(self):
+        replay = {
+            **DEFAULT_REPLAY_PAYLOAD,
+            "runtime_score": "autofactor_formula:amplitude_weighted_momentum_30s_sigma",
+        }
         _, payload, registry, handoff, handoff_md = self.run_script(
-            READY_GATE + AUTOFACTOR_PREDICTIVE_EXTERNAL_REPORT
+            READY_GATE + AUTOFACTOR_PREDICTIVE_EXTERNAL_REPORT,
+            replay_payload=replay,
         )
 
         self.assertEqual(payload["decision"], "qualified")
@@ -320,14 +363,19 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertIn("amplitude_weighted_momentum_30s_sigma", handoff_md)
 
     def test_qualifies_tradeable_hard_gate_predictive_formula_when_gate_is_ready(self):
+        replay = {
+            **DEFAULT_REPLAY_PAYLOAD,
+            "runtime_score": "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
+        }
         _, payload, registry, handoff, handoff_md = self.run_script(
-            READY_GATE + AUTOFACTOR_TRADEABLE_HARD_GATE_REPORT
+            READY_GATE + AUTOFACTOR_TRADEABLE_HARD_GATE_REPORT,
+            replay_payload=replay,
         )
 
         self.assertEqual(payload["decision"], "qualified")
         self.assertEqual(registry["decision"], "qualified")
         self.assertEqual(handoff["status"], "ready")
-        self.assertEqual(len(handoff["strategies"]), 2)
+        self.assertEqual(len(handoff["strategies"]), 1)
         self.assertEqual(
             handoff["strategies"][0]["runtime_score"],
             "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
@@ -377,12 +425,18 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertIn("Promote AutoFactor strategy handoff to dry-run", handoff_md)
 
     def test_qualifies_when_allowed_target_and_runtime_profile_match(self):
+        replay = {
+            **DEFAULT_REPLAY_PAYLOAD,
+            "strategy_profile": "repricing_momentum",
+            "runtime_score": "spread_adjusted_external_move_score",
+        }
         _, payload, registry, handoff, handoff_md = self.run_script(
             READY_GATE + AUTOFACTOR_REPORT,
             "--allowed-target",
             "full_depth_reprice_pnl_10s",
             "--required-strategy-profile",
             "repricing_momentum",
+            replay_payload=replay,
         )
 
         self.assertEqual(payload["decision"], "qualified")
@@ -423,7 +477,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
 
         self.assertEqual(payload["decision"], "qualified")
         self.assertEqual(handoff["status"], "ready")
-        self.assertEqual(len(handoff["strategies"]), 3)
+        self.assertEqual(len(handoff["strategies"]), 1)
         first = payload["qualified_strategies"][0]["factor"]
         self.assertEqual(first["symbol_count"], 6)
         self.assertEqual(first["symbol_positive_ratio"], 0.8333)
@@ -452,8 +506,8 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
 
         _, payload, _, handoff, _ = self.run_script(READY_GATE + sparse_report)
 
-        self.assertEqual(payload["decision"], "qualified")
-        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
         sparse = next(
             item
             for item in payload["evaluated_factors"]
@@ -471,8 +525,8 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
 
         _, payload, _, handoff, _ = self.run_script(READY_GATE + thin_report)
 
-        self.assertEqual(payload["decision"], "qualified")
-        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
         thin = next(
             item
             for item in payload["evaluated_factors"]
@@ -507,8 +561,8 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
 
         _, payload, _, handoff, _ = self.run_script(READY_GATE + duplicate_event_report)
 
-        self.assertEqual(payload["decision"], "qualified")
-        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
         first = next(
             item
             for item in payload["evaluated_factors"]
@@ -519,6 +573,51 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "one_event_decision_violation:max_event_decisions=3",
             first["blockers"],
         )
+
+    def test_blocks_ready_factor_when_candidate_strategy_replay_is_missing(self):
+        _, payload, _, handoff, handoff_md = self.run_script(
+            READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            replay_payload=None,
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        first = payload["evaluated_factors"][0]
+        self.assertIn("missing_candidate_strategy_replay", first["blockers"])
+        self.assertIn("candidate_strategy_replay_not_ready", first["blockers"])
+        self.assertIn("Candidate strategy replay ready: `false`", handoff_md)
+
+    def test_blocks_replay_without_executable_strategy_contract(self):
+        replay = {
+            **DEFAULT_REPLAY_PAYLOAD,
+            "promotion_ready": True,
+            "decision_contract": {
+                "event_level": True,
+                "one_decision_per_event": True,
+                "official_settlement": False,
+                "full_depth_entry": False,
+            },
+            "metrics": {
+                "trade_count": 8,
+                "unique_event_count": 8,
+                "roi": -0.01,
+                "entry_fill_rate": 0.20,
+            },
+        }
+
+        _, payload, _, handoff, _ = self.run_script(
+            READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            replay_payload=replay,
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        blockers = payload["evaluated_factors"][0]["blockers"]
+        self.assertIn("candidate_strategy_replay_missing_contract:official_settlement", blockers)
+        self.assertIn("candidate_strategy_replay_missing_contract:full_depth_entry", blockers)
+        self.assertIn("candidate_strategy_replay_trade_count_too_small:8<50", blockers)
+        self.assertIn("candidate_strategy_replay_entry_fill_rate_too_low:0.2000<0.3000", blockers)
+        self.assertIn("candidate_strategy_replay_roi_too_low:-0.010000<0.000000", blockers)
 
 
 if __name__ == "__main__":

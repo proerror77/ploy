@@ -175,6 +175,8 @@ def promotion_args(args: argparse.Namespace, report: Path, variant_dir: Path) ->
         "--required-strategy-profile",
         args.required_strategy_profile,
     ]
+    if args.candidate_strategy_replay_json:
+        command.extend(["--candidate-strategy-replay-json", args.candidate_strategy_replay_json])
     for target in args.allowed_target:
         command.extend(["--allowed-target", target])
     return command
@@ -434,6 +436,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-ts", required=True)
     parser.add_argument("--stake-usd", required=True)
     parser.add_argument("--replay-parity-json", default="")
+    parser.add_argument("--candidate-strategy-replay-json", default="")
     parser.add_argument("--alpha-search-output-dir", default="")
     parser.add_argument("--alpha-search-plan-json", default="")
     parser.add_argument("--alpha-search-state-json", default="")
