@@ -360,6 +360,31 @@ Evidence stage: `walk_forward / alpha-search CI repair`.
 - [x] Keep handoff/global blockers as fallback when no target blocker exists.
 - [x] Add focused regression coverage.
 
+# Closed-Loop Eligible Target Candidate Priority (2026-05-18)
+
+## Goal
+
+When multiple target rows exist, classify the next action from runtime-mappable
+`candidate/passed` target rows before using weaker target diagnostics. This
+keeps a replay-parity blocker on the best deployable candidate from being
+masked by execution blockers on non-mappable exploratory rows.
+
+Evidence stage: `walk_forward / alpha-search CI repair`.
+
+## Files / Ownership
+
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: prefer eligible target candidate blockers when classifying actions.
+- `tests/test_alpha_search_closed_loop_agent.py`
+  - Owner: cover runtime-mappable target candidates taking priority over weaker
+    target rows.
+
+## Tasks
+
+- [x] Prefer runtime-mappable `candidate/passed` target blockers.
+- [x] Fall back to all target blockers when no eligible target candidate exists.
+- [x] Add focused regression coverage.
+
 # Recorded Replay Partial-Fill Cancel Parity (2026-05-13)
 
 ## Goal
