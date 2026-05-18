@@ -157,7 +157,7 @@ python3 scripts/evaluate_autofactor_strategy_promotion.py \
   --output-handoff-md /tmp/autofactor-strategy-handoff.md
 ```
 
-The evaluator requires all of the following:
+The evaluator requires all of the following before a dry-run handoff:
 
 - the surrounding PRD promotion gate reports `ready_for_dry_run_handoff=true`;
 - the AutoFactor row has `decision=candidate` and `reason=passed`;
@@ -170,6 +170,10 @@ The evaluator requires all of the following:
   runtime score, with event-level decisions, full-depth executable accounting,
   official settlement, enough trades, positive ROI/PnL, and no blocking risk
   flags.
+
+Recorded replay/dry-run parity is not a pre-dry-run blocker because it needs
+dry-run runtime orders/fills to compare against. It remains a required later
+gate before live promotion or risk scaling.
 
 This deliberately blocks cases where a factor is statistically good in the
 wrong lane. For example, `spread_adjusted_external_move` can be a valid

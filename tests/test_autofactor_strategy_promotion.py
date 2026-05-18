@@ -400,13 +400,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "global_full_depth_entry_fill_rate=0.1458 min_required=0.3000",
             first["blockers"],
         )
-        self.assertIn(
-            "global_promotion_gate_not_ready:recorded_replay_parity: "
-            "replay_parity_json=artifacts/replay-parity/parity-evaluation.json "
-            "runtime_ready=true event_ready=false blocking_flags=<none> "
-            "advisory_flags=<none> decision=continue",
-            first["blockers"],
-        )
+        self.assertNotIn("recorded_replay_parity", ",".join(first["blockers"]))
 
     def test_core_suite_report_is_sufficient_for_handoff_evaluation(self):
         self.assertNotIn("=== Fillability Review V1 Data Health ===", CORE_SUITE_REPORT)

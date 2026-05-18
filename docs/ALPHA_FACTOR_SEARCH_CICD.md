@@ -211,6 +211,10 @@ uses event-level, official-settlement, full-depth executable labels. It does not
 replace recorded replay/dry-run parity after a dry-run runtime has produced
 orders and fills.
 
+Recorded replay/dry-run parity is intentionally after dry-run in the promotion
+sequence. It should be reported as pending during pre-dry-run research, not as a
+blocker that prevents a historically replayed candidate from entering dry-run.
+
 Minimum contract:
 
 - `evidence_stage=executable_replay`

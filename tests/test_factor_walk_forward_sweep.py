@@ -379,7 +379,11 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             2.507843,
         )
         self.assertEqual(variant["best_runtime_mappable_factor"]["complexity"], 1)
-        self.assertIsNone(variant["best_qualified_strategy"])
+        self.assertEqual(variant["qualified_count"], 1)
+        self.assertEqual(
+            variant["best_qualified_strategy"]["name"],
+            "auto_settlement_conservative_settlement_edge",
+        )
         self.assertIn("best runtime-mappable factor", summary_md)
 
     def test_best_variant_prefers_tradeable_profit_metrics_over_rank_ic(self):
