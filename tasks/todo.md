@@ -213,6 +213,51 @@ Evidence stage: `dry_run_candidate`.
   `CARGO_TARGET_DIR=/tmp/ploy-three-layer-slippage rtk cargo test -p ploy-strategy-bundles config --lib`,
   and `rtk git diff --check`.
 
+# Closed-Loop Alpha Search Reward Hardening (2026-05-18)
+
+## Goal
+
+Move event-level uniqueness and execution capacity from promotion-only
+blockers into the MCTS/search reward itself, so the next CI search expands
+tradeable one-event-one-decision candidates instead of repeatedly selecting
+high raw-score but non-deployable branches.
+
+Evidence stage: `factor_attribution / alpha-search CI repair`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: expose event-decision and top-bucket sweep metrics in node metrics,
+    penalize repeated-event and poor-execution branches in reward/UCB, and
+    steer selected dimensions toward bounded capacity/event filters.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document that search reward includes event-level uniqueness and
+    execution-capacity penalties before promotion.
+
+## Tasks
+
+- [x] Add event uniqueness / repeated-decision metrics to MCTS node metrics.
+- [x] Penalize `top_bucket_max_event_decisions > 1`, low event diversity, high
+      sweep slippage, and excessive sweep levels in `reward`.
+- [x] Route repeated-event candidates to `event_uniqueness` /
+      `add_capacity_gate` style mutations before generic exploit.
+- [x] Add focused Rust regression tests for ranking and selected mutation.
+- [x] Run focused validation and push the PR update after green checks.
+
+## Review
+
+- 2026-05-18: Added event-level uniqueness and top-bucket sweep fields to
+  alpha-search node metrics. Repeated top-bucket event decisions now select
+  `event_uniqueness`, propose `add_capacity_gate`, and receive a direct reward
+  penalty before the promotion gate. High sweep slippage, excessive sweep
+  levels, and low top-bucket fillability select `execution_quality` and also
+  reduce reward.
+- 2026-05-18: Focused local validation passed:
+  `rtk cargo test --locked -p ploy-research alpha_search --lib`,
+  `rtk cargo test --locked -p ploy-research autofactor --lib`,
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent tests.test_autofactor_strategy_promotion tests.test_factor_walk_forward_sweep`,
+  workflow YAML load, `rustfmt --check`, and `rtk git diff --check`.
+
 # Recorded Replay Partial-Fill Cancel Parity (2026-05-13)
 
 ## Goal

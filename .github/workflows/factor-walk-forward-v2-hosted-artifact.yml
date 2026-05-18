@@ -385,6 +385,8 @@ jobs:
           fi
           if [ -n "${WALK_ALPHA_SEARCH_LLM_PRIOR_JSON}" ]; then
             args+=(--alpha-search-llm-prior-json "${WALK_ALPHA_SEARCH_LLM_PRIOR_JSON}")
+          elif [ -f artifacts/alpha-search-plan/next-llm-prior.json ]; then
+            args+=(--alpha-search-llm-prior-json artifacts/alpha-search-plan/next-llm-prior.json)
           fi
           if [ "${WALK_FAIL_IF_BLOCKED}" = "true" ]; then
             args+=(--fail-if-blocked)
@@ -680,6 +682,26 @@ jobs:
               raise SystemExit(2)
           PY
 
+      - name: Classify alpha search closed-loop action
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -d artifacts/factor-walk-forward-v2-upload/factor-walk-forward-v2 ]; then
+            echo "No factor-walk-forward-v2 artifact directory found; skipping closed-loop classifier."
+            exit 0
+          fi
+          target="${WALK_ALPHA_SEARCH_PLAN_TARGET}"
+          prior_path="artifacts/factor-walk-forward-v2-upload/factor-walk-forward-v2/alpha-search/${target}/next-llm-prior.json"
+          python3 scripts/alpha_search_closed_loop_agent.py \
+            artifacts/factor-walk-forward-v2-upload \
+            --target "${target}" \
+            --output-json artifacts/factor-walk-forward-v2-upload/alpha-search-chain/closed-loop-decision.json \
+            --output-md artifacts/factor-walk-forward-v2-upload/alpha-search-chain/closed-loop-decision.md \
+            --output-prior-json "${prior_path}"
+          if [ -f "${prior_path}" ]; then
+            echo "Generated closed-loop typed prior at ${prior_path}."
+          fi
+
       - name: Summarize alpha search chain evidence
         if: always()
         run: |
@@ -714,12 +736,17 @@ jobs:
             echo "Missing alpha search chain decision artifact; skipping chained dispatch."
             exit 0
           fi
+          closed_loop_path="artifacts/factor-walk-forward-v2-upload/alpha-search-chain/closed-loop-decision.json"
+          if [ ! -f "${closed_loop_path}" ]; then
+            echo "Missing closed-loop classifier decision artifact; skipping chained dispatch."
+            exit 0
+          fi
           should_dispatch="$(python3 - <<'PY'
           import json
           from pathlib import Path
 
-          payload = json.loads(Path("artifacts/factor-walk-forward-v2-upload/alpha-search-chain/chain-decision.json").read_text(encoding="utf-8"))
-          print("true" if payload.get("should_dispatch") else "false")
+          closed_loop = json.loads(Path("artifacts/factor-walk-forward-v2-upload/alpha-search-chain/closed-loop-decision.json").read_text(encoding="utf-8"))
+          print("true" if closed_loop.get("allow_dispatch") is True else "false")
           PY
           )"
           if [ "${should_dispatch}" != "true" ]; then
@@ -727,8 +754,8 @@ jobs:
           import json
           from pathlib import Path
 
-          payload = json.loads(Path("artifacts/factor-walk-forward-v2-upload/alpha-search-chain/chain-decision.json").read_text(encoding="utf-8"))
-          print(payload.get("reason", "unknown"))
+          closed_loop = json.loads(Path("artifacts/factor-walk-forward-v2-upload/alpha-search-chain/closed-loop-decision.json").read_text(encoding="utf-8"))
+          print(closed_loop.get("reason", "unknown"))
           PY
           )"
             echo "Alpha search chain decision is ${reason}; skipping chained dispatch."
@@ -745,6 +772,7 @@ jobs:
           data["alpha_search_plan_run_id"] = os.environ["GITHUB_RUN_ID"]
           data["alpha_search_plan_artifact_name"] = f"factor-walk-forward-v2-{os.environ['GITHUB_RUN_ID']}"
           data["alpha_search_plan_target"] = os.environ["WALK_ALPHA_SEARCH_PLAN_TARGET"]
+          data["alpha_search_llm_prior_json"] = ""
           remaining = max(0, int(os.environ["WALK_CHAIN_REMAINING"]) - 1)
           data["chain_remaining"] = remaining
           data["chain_next_run"] = remaining > 0
