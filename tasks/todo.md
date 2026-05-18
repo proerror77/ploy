@@ -1,3 +1,55 @@
+# Recorded Replay Recording Rollover (2026-05-18)
+
+## Goal
+
+Recover PM5D recorded replay parity for the current settlement-probability
+AutoFactor candidate by making the dry-run recording window refreshable from
+CI/CD when the NDJSON capture reaches its cap.
+
+Evidence stage: `runtime_parity / workflow repair`.
+
+## Files / Ownership
+
+- `.github/workflows/sync-dryrun-strategy-config-tango-1-1.yml`
+  - Owner: add guarded force restart and recording rotation for dry-run-only
+    parity recovery.
+- `config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml`
+  - Owner: increase settlement dry-run MarketUpdate recording capacity.
+- `docs/runbooks/strategy-research-cicd.md`
+  - Owner: document the no-overlap/capped-recording recovery path.
+
+## Tasks
+
+- [x] Confirm stale PR #254 is closed and no open PRs remain.
+- [x] Confirm main AutoFactor candidate is
+      `autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike`.
+- [x] Run recorded replay parity and diagnose the failure as recording/dry-run
+      window non-overlap.
+- [x] Verify the remote recording is capped at sequence `299999` with
+      `record_market_updates_max_records = 300000`.
+- [x] Add CI controls to rotate the target recording and restart the dry-run
+      worker even when the config already matches.
+- [x] Run workflow/security validation.
+- [ ] Push PR, wait for CI, merge, run the guarded rollover from main, then
+      rerun recorded replay parity on the fresh recording window.
+
+## Review
+
+- 2026-05-18: Hosted walk-forward run `26012897726` produced
+  `action=fix_workflow`: the runtime-mappable target candidate passes event
+  decision and fillability checks but remains blocked by missing recorded replay
+  parity.
+- 2026-05-18: Recorded replay run `26012961916` failed before comparison:
+  `no dry-run runtime evidence rows overlap recording coverage
+  2026-05-17T13:58:31Z -> 2026-05-17T15:31:00Z`.
+- 2026-05-18: Tango inspection showed the settlement dry-run is running, but
+  `/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson`
+  is capped at `sequence=299999`, size `118375645`, last timestamp
+  `2026-05-17T15:23:13Z`.
+- 2026-05-18: Validation passed: YAML parse for touched workflows,
+  `rtk cargo test --test workflow_security -- --nocapture`, and
+  `rtk git diff --check`.
+
 # PM5D Crypto Discovery Pagination Repair (2026-05-17)
 
 ## Goal

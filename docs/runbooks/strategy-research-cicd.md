@@ -87,6 +87,14 @@ recording path
 `/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson`;
 the older `pm5d-threelayer-canonical.ndjson` recording is historical and can
 fail auto-window resolution because it does not overlap current dry-run rows.
+If auto-window resolution reports that dry-run rows do not overlap recording
+coverage, first check whether the recording has reached its configured
+`record_market_updates_max_records` or `record_market_updates_max_bytes` cap.
+Use `sync-dryrun-strategy-config-tango-1-1.yml` with `execute=true`,
+`force_restart=true`, and `rotate_recording=true` to archive the capped
+recording and restart only the target dry-run worker before collecting a fresh
+parity window. This keeps the old recording as an archive instead of deleting
+raw evidence.
 
 ## Research Issue Contract
 
