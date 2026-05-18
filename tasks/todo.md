@@ -1,3 +1,48 @@
+# FactorEvolve Research OS Task 6 - Portfolio Builder V0 (2026-05-18)
+
+## Goal
+
+Add a first-class portfolio builder contract for FactorEvolve so selected alpha
+factors can be composed with de-correlation, fillability, turnover, and capacity
+penalties before any dry-run promotion discussion.
+
+Evidence stage: `walk_forward / portfolio_foundation`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/research_os/portfolio.rs`
+  - Owner: portfolio input/output contracts and greedy selection logic.
+- `crates/ploy-research/examples/factor_portfolio_builder.rs`
+  - Owner: CLI surface for portfolio artifact generation.
+- `crates/ploy-research/src/research_os/mod.rs`
+  - Owner: public module export.
+
+## Tasks
+
+- [x] Define input contract for factor metrics and pairwise correlations.
+- [x] Implement greedy de-correlation selection by reward.
+- [x] Reject high-correlation, low-fill-rate, and non-positive marginal-score
+      factors.
+- [x] Emit selected factors, rejected factors, aggregate reward, max pairwise
+      correlation, and promotion decision.
+- [x] Run Rust, CLI smoke, and diff validation.
+
+## Review
+
+- 2026-05-18: Added `FactorPortfolioInput`, `FactorPortfolioCandidate`,
+  `PairwiseCorrelation`, and `FactorPortfolioOutput`. The v0 selector sorts by
+  reward and rejects candidates with `max_corr_existing >= 0.70`,
+  `top_bucket_full_depth_entry_fill_rate < 0.30`, or non-positive marginal
+  score after `turnover_proxy * 0.10 + capacity_penalty`.
+- 2026-05-18: Promotion decisions are deliberately conservative:
+  `portfolio_candidate` requires at least two selected factors; high-correlation
+  rejection produces `revise`; otherwise the loop remains `continue`.
+- 2026-05-18: Validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-portfolio /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research portfolio --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-portfolio /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research --example factor_portfolio_builder`,
+  a CLI smoke run that emitted two selected factors and
+  `promotion_decision=portfolio_candidate`, and `rtk git diff --check`.
+
 # FactorEvolve Research OS Task 5 - Running Dry-Run Candidate Report Rows (2026-05-18)
 
 ## Goal
