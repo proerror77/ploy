@@ -330,6 +330,7 @@ jobs:
           if [ -z "${replay_parity_json}" ] && [ -f artifacts/replay-parity/parity-evaluation.json ]; then
             replay_parity_json="artifacts/replay-parity/parity-evaluation.json"
           fi
+          candidate_strategy_replay_json="$(find artifacts/source artifacts/research-snapshot artifacts/alpha-search-plan artifacts/factor-walk-forward-v2 -name 'candidate-strategy-replay.json' -o -name 'autofactor-candidate-strategy-replay.json' 2>/dev/null | head -1 || true)"
           args=(
             --binary ./target/fast/examples/factor_walk_forward_v2
             --evaluator scripts/evaluate_autofactor_strategy_promotion.py
@@ -365,6 +366,9 @@ jobs:
           )
           if [ -n "${replay_parity_json}" ]; then
             args+=(--replay-parity-json "${replay_parity_json}")
+          fi
+          if [ -n "${candidate_strategy_replay_json}" ]; then
+            args+=(--candidate-strategy-replay-json "${candidate_strategy_replay_json}")
           fi
           if [ "${WALK_REQUIRE_DERIBIT}" = "true" ]; then
             args+=(--require-deribit)

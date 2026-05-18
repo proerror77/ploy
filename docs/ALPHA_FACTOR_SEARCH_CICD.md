@@ -7,6 +7,7 @@ two-layer search architecture:
 LLM semantic prior layer
   -> MCTS/systematic search layer
   -> CI backtest feedback layer
+  -> candidate strategy executable replay layer
   -> promotion/handoff gate
 ```
 
@@ -63,6 +64,7 @@ research snapshot
   -> alpha-search artifact bundle
   -> MCTS expansion plan
   -> optional chained hosted search iteration
+  -> candidate strategy executable replay artifact
   -> AutoFactor promotion evaluation
   -> blocked/ready handoff artifact
   -> optional dry-run config PR
@@ -83,10 +85,12 @@ semantic hypothesis + formula prior
 
 The main unresolved blocker is no longer "can the system generate/explore alpha
 candidates?" It can. The current blocker is promotion quality evidence:
-recorded replay/dry-run parity must be ready for the target dry-run lane, the
-handoff artifact must be `status=ready`, and any resulting config PR must still
-pass normal CI before deployment. Search reward, MCTS rank, or a ready-looking
-candidate row is not enough to claim a profitable strategy.
+the selected runtime score must first pass a strategy-level historical
+`executable_replay` using event-level decisions, full-depth executable prices
+and depth, conservative fills, and official settlement. After dry-run starts,
+recorded replay/dry-run parity must also be ready for the target dry-run lane.
+Search reward, MCTS rank, or a ready-looking candidate row is not enough to
+claim a profitable strategy.
 
 ## Architecture
 
@@ -187,7 +191,28 @@ Required artifact:
 - `search-feedback.json`
 - `search-feedback.md`
 
-### 4. Promotion/Handoff Layer
+### 4. Candidate Strategy Executable Replay Layer
+
+This layer turns the selected factor/runtime score into a historical strategy
+replay before any dry-run handoff. It is separate from factor IC/ICIR scoring
+and separate from recorded replay parity.
+
+Required artifact:
+
+- `candidate-strategy-replay.json` or
+  `autofactor-candidate-strategy-replay.json`
+
+Minimum contract:
+
+- `evidence_stage=executable_replay`
+- exact `strategy_profile` and `runtime_score`
+- event-level, one-decision-per-event accounting
+- official settlement labels
+- full-depth executable entry/depth/fill assumptions
+- trade count, unique event count, entry fill rate, PnL or ROI, and drawdown
+- `promotion_ready=true` and no blocking risk flags
+
+### 5. Promotion/Handoff Layer
 
 Only this layer can produce a dry-run handoff or config PR. The LLM and MCTS
 layers can generate candidates, but they cannot promote them.
@@ -196,6 +221,7 @@ The existing fail-closed path remains:
 
 ```text
 factor-walk-forward-v2/report.txt
+  + candidate-strategy-replay.json
   -> scripts/evaluate_autofactor_strategy_promotion.py
   -> autofactor-factor-registry.json
   -> autofactor-strategy-handoff.json
@@ -340,6 +366,8 @@ Every complete CI/CD alpha-search run should upload:
   decision, including whether the next run was dispatched and why the chain
   stopped when it did not continue
 - `factor-walk-forward-v2/report.txt`: existing walk-forward report
+- `candidate-strategy-replay.json`: selected runtime-score historical
+  executable replay proof required before dry-run handoff
 - `autofactor-factor-registry.json`: evaluated factor rows and blockers
 - `autofactor-strategy-handoff.json`: ready/blocked handoff manifest
 

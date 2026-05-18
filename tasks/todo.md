@@ -1,3 +1,50 @@
+# Replay-First AutoFactor Promotion Gate (2026-05-18)
+
+## Goal
+
+Fix the PM5D alpha-research CI/CD order so factor/search evidence cannot create
+a dry-run handoff until the selected runtime score has passed historical
+strategy-level executable replay.
+
+Evidence stage: `workflow repair / executable_replay gate`.
+
+## Files / Ownership
+
+- `scripts/evaluate_autofactor_strategy_promotion.py`
+  - Owner: require candidate strategy replay JSON before handoff readiness.
+- `.github/workflows/autofactor-strategy-promotion.yml`
+  - Owner: auto-discover replay artifact in the source walk-forward artifact.
+- `docs/runbooks/strategy-research-cicd.md`,
+  `docs/runbooks/event-ml-automl-workflow.md`,
+  `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document replay-first ordering before dry-run.
+- `tests/test_autofactor_strategy_promotion.py`
+  - Owner: cover missing replay, bad replay contract, and runtime-score match.
+
+## Tasks
+
+- [x] Confirm the existing docs/gates could be read as factor/search -> dry-run
+      without a separate strategy-level replay artifact.
+- [x] Add fail-closed candidate strategy replay validation to the promotion
+      evaluator.
+- [x] Wire the hosted promotion workflow to find replay artifacts without
+      adding a new workflow input.
+- [x] Update docs/runbooks to make the correct order explicit:
+      factor/search -> executable replay -> dry-run -> recorded replay parity
+      -> live.
+- [x] Run focused validation.
+- [ ] Open PR, wait for CI, and merge.
+
+## Review
+
+- 2026-05-18: Root cause is process/gate ordering, not just stale dry-run data:
+  AutoFactor rows measured factor quality and execution labels, but the
+  promotion evaluator did not require a selected strategy replay artifact with
+  the same runtime scorer before a dry-run handoff/config PR.
+- 2026-05-18: Validation passed: promotion/sweep Python unittests, Python
+  compile checks, workflow YAML parsing, workflow security test, and diff
+  hygiene.
+
 # Recorded Replay Recording Rollover (2026-05-18)
 
 ## Goal

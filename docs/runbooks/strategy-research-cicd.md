@@ -26,18 +26,25 @@ Idea / hypothesis
   -> declare strategy_family, profile, data window, assumptions, and success criteria
   -> run the smallest research workflow that can falsify the hypothesis
   -> attach artifact-backed evidence and labels to the issue
-  -> if evidence supports runtime work, create an implementation issue / PR
+  -> if factor/search evidence is positive, run candidate strategy executable replay
+  -> if replay proves the same scorer, event-level decisions, full-depth executable prices, fills, and official settlement, create an implementation issue / PR
   -> PR validation through Platform CI
   -> merge to protected main
   -> deploy dry-run from main through protected Runtime CD
   -> verify remote service, config, persistence, and data freshness
-  -> compare replay/backtest evidence with dry-run evidence
+  -> compare recorded dry-run behavior with replayed recorded MarketUpdate evidence
   -> decide: promote, collect-more, revise, fix-data, fix-runtime, fix-workflow, or reject
 ```
 
-The loop is not complete after a profitable backtest. It is complete only when
-the dry-run behavior is reconciled against replay expectations, or when the
-mismatch is understood and tracked as a follow-up issue.
+The loop is not allowed to enter dry-run after a factor/search result alone.
+The replay gate before dry-run is a strategy-level `executable_replay` artifact,
+not an IC/ICIR row and not recorded replay parity. It must use the same scorer
+that would be configured at runtime, one event-level decision per market event,
+full-depth executable entry/depth/fill assumptions, and official settlement.
+
+The loop is not complete after a profitable replay. It is complete only when
+the dry-run behavior is reconciled against recorded replay expectations, or
+when the mismatch is understood and tracked as a follow-up issue.
 
 ## Workflow Map
 
@@ -50,6 +57,7 @@ mismatch is understood and tracked as a follow-up issue.
 | Walk-forward diagnostics | `.github/workflows/factor-walk-forward-v2.yml` | Rolling factor validation across train/test windows |
 | Parameter optimization | `.github/workflows/optimize.yml` | Bounded train/validation optimization from a snapshot or explicit debug data source |
 | Replay/backtest accounting | `.github/workflows/backtest.yml` | Build and run replay/backtest accounting in one job on `ploy-ci-1` |
+| Candidate strategy replay | `autofactor-strategy-promotion.yml` consumer contract, then a replay-producing workflow/artifact | Required pre-dry-run proof that the selected runtime score is profitable under historical executable replay |
 | Replay/dry-run parity | `.github/workflows/replay-dryrun-parity.yml` | Compare replay/backtest evidence against a dry-run JSON report |
 | Recorded replay/dry-run parity | `.github/workflows/recorded-replay-parity.yml` | Replay a canonical MarketUpdate recording on `tango-1-1` with the deployed binary, then compare against the matching dry-run report slice |
 | Runtime evidence reset | `.github/workflows/reset-strategy-runtime-evidence.yml` | Backup-first cleanup for contaminated dry-run/paper `strategy_runtime_orders` and `strategy_runtime_fills`; follow `docs/runbooks/strategy-runtime-evidence-reset.md` |
@@ -180,16 +188,20 @@ Parity labels:
 
 Do not promote a strategy from research directly to live. Promotion is staged:
 
-1. `decision:promote` on the research issue means it can become an
-   implementation issue or PR.
-2. Runtime code/config changes must pass Platform CI and merge to `main`.
-3. Dry-run deployment must be triggered from `main` through a protected
+1. `decision:continue` or a positive factor/search artifact means run
+   candidate strategy executable replay next; it does not mean dry-run.
+2. `decision:promote` on the research issue requires a ready candidate
+   strategy replay artifact for the exact runtime score, profile, event-level
+   decision contract, full-depth executable accounting, and official settlement.
+   Only then can it become an implementation issue or PR.
+3. Runtime code/config changes must pass Platform CI and merge to `main`.
+4. Dry-run deployment must be triggered from `main` through a protected
    environment.
-4. Remote verification must prove service health, expected config, persistence,
+5. Remote verification must prove service health, expected config, persistence,
    data freshness, and no on-host Rust build.
-5. Replay/dry-run parity must either report `strict_parity_ready=true` or create
-   a follow-up issue explaining the mismatch.
-6. Live promotion requires a separate approval with explicit stake, loss, and
+6. Recorded replay/dry-run parity must either report `strict_parity_ready=true`
+   or create a follow-up issue explaining the mismatch.
+7. Live promotion requires a separate approval with explicit stake, loss, and
    rollback limits.
 
 ## Current Strategy Profiles

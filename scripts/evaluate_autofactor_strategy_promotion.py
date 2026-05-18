@@ -7,7 +7,9 @@ An AutoFactor row is only a qualified strategy when:
 1. all global settlement PRD promotion gates are ready;
 2. the row is a `candidate` with reason `passed`;
 3. the target is one of the allowed executable targets; and
-4. the factor has an explicit runtime strategy-profile mapping.
+4. the factor has an explicit runtime strategy-profile mapping; and
+5. a strategy-level historical executable replay artifact proves the same
+   runtime score under event-level, full-depth, official-settlement accounting.
 
 For `autofactor_formula:*` runtime scores, the PRD model-specific
 `symbol_holdout` and `walk_forward_oos` gates are replaced by formula-level
@@ -162,6 +164,17 @@ class ExecutionQuality:
 
 
 @dataclass
+class CandidateStrategyReplay:
+    ready: bool
+    evidence: str
+    runtime_score: str = ""
+    strategy_profile: str = ""
+    blockers: list[str] = field(default_factory=list)
+    metrics: dict[str, Any] = field(default_factory=dict)
+    decision_contract: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class AutoFactorRow:
     rank: int
     name: str
@@ -283,6 +296,133 @@ def parse_execution_quality(report_text: str) -> ExecutionQuality:
         if value == value:
             return ExecutionQuality(avg_entry_sweep_slip_bps=value)
     return ExecutionQuality()
+
+
+def load_candidate_strategy_replay(path: str | None) -> CandidateStrategyReplay:
+    if not path:
+        return CandidateStrategyReplay(
+            ready=False,
+            evidence="missing candidate strategy executable replay artifact",
+            blockers=["missing_candidate_strategy_replay"],
+        )
+    replay_path = Path(path)
+    if not replay_path.is_file():
+        return CandidateStrategyReplay(
+            ready=False,
+            evidence=f"candidate strategy executable replay artifact not found: {path}",
+            blockers=["missing_candidate_strategy_replay"],
+        )
+    payload = json.loads(replay_path.read_text(encoding="utf-8"))
+    metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
+    contract = (
+        payload.get("decision_contract")
+        if isinstance(payload.get("decision_contract"), dict)
+        else {}
+    )
+    blockers = payload.get("blocking_risk_flags") or payload.get("blockers") or []
+    if not isinstance(blockers, list):
+        blockers = [str(blockers)]
+    ready = bool(payload.get("promotion_ready") is True or payload.get("status") == "ready")
+    evidence = payload.get("evidence") or payload.get("run_url") or str(replay_path)
+    return CandidateStrategyReplay(
+        ready=ready,
+        evidence=str(evidence),
+        runtime_score=str(payload.get("runtime_score", "")),
+        strategy_profile=str(payload.get("strategy_profile", "")),
+        blockers=[str(item) for item in blockers],
+        metrics=metrics,
+        decision_contract=contract,
+    )
+
+
+def numeric_metric(metrics: dict[str, Any], *names: str) -> float | None:
+    for name in names:
+        if name not in metrics:
+            continue
+        try:
+            value = float(metrics[name])
+        except (TypeError, ValueError):
+            continue
+        if value == value:
+            return value
+    return None
+
+
+def candidate_strategy_replay_blockers(
+    replay: CandidateStrategyReplay,
+    *,
+    mapping: dict[str, str] | None,
+    required_strategy_profile: str,
+    min_replay_trade_count: int,
+    min_replay_fill_rate: float,
+    min_replay_roi: float,
+) -> list[str]:
+    blockers = list(replay.blockers)
+    if not replay.ready:
+        blockers.append("candidate_strategy_replay_not_ready")
+
+    if replay.strategy_profile != required_strategy_profile:
+        blockers.append(
+            "candidate_strategy_replay_profile_mismatch:"
+            f"{replay.strategy_profile or '<missing>'}!={required_strategy_profile}"
+        )
+
+    runtime_score = (mapping or {}).get("runtime_score", "")
+    if not runtime_score:
+        blockers.append("candidate_strategy_replay_missing_expected_runtime_score")
+    elif replay.runtime_score != runtime_score:
+        blockers.append(
+            "candidate_strategy_replay_runtime_score_mismatch:"
+            f"{replay.runtime_score or '<missing>'}!={runtime_score}"
+        )
+
+    required_contract_flags = (
+        "event_level",
+        "one_decision_per_event",
+        "official_settlement",
+        "full_depth_entry",
+    )
+    for flag in required_contract_flags:
+        if replay.decision_contract.get(flag) is not True:
+            blockers.append(f"candidate_strategy_replay_missing_contract:{flag}")
+
+    trades = numeric_metric(replay.metrics, "trade_count", "closed_trades")
+    if trades is None:
+        blockers.append("candidate_strategy_replay_missing_metric:trade_count")
+    elif trades < min_replay_trade_count:
+        blockers.append(
+            "candidate_strategy_replay_trade_count_too_small:"
+            f"{trades:.0f}<{min_replay_trade_count}"
+        )
+
+    unique_events = numeric_metric(replay.metrics, "unique_event_count")
+    if unique_events is None:
+        blockers.append("candidate_strategy_replay_missing_metric:unique_event_count")
+    elif trades is not None and unique_events < min(trades, min_replay_trade_count):
+        blockers.append(
+            "candidate_strategy_replay_unique_event_count_too_small:"
+            f"{unique_events:.0f}<{min(trades, min_replay_trade_count):.0f}"
+        )
+
+    fill_rate = numeric_metric(replay.metrics, "entry_fill_rate", "buy_fill_rate")
+    if fill_rate is None:
+        blockers.append("candidate_strategy_replay_missing_metric:entry_fill_rate")
+    elif fill_rate < min_replay_fill_rate:
+        blockers.append(
+            "candidate_strategy_replay_entry_fill_rate_too_low:"
+            f"{fill_rate:.4f}<{min_replay_fill_rate:.4f}"
+        )
+
+    roi = numeric_metric(replay.metrics, "roi", "return_on_notional")
+    total_pnl = numeric_metric(replay.metrics, "total_pnl", "realized_pnl")
+    if roi is None and total_pnl is None:
+        blockers.append("candidate_strategy_replay_missing_profit_metric")
+    elif roi is not None and roi < min_replay_roi:
+        blockers.append(f"candidate_strategy_replay_roi_too_low:{roi:.6f}<{min_replay_roi:.6f}")
+    elif roi is None and total_pnl is not None and total_pnl <= 0.0:
+        blockers.append(f"candidate_strategy_replay_total_pnl_nonpositive:{total_pnl:.6f}")
+
+    return blockers
 
 
 def parse_autofactor_rows(report_text: str) -> list[AutoFactorRow]:
@@ -437,6 +577,7 @@ def execution_quality_blockers(
 def evaluate(
     report_text: str,
     *,
+    candidate_strategy_replay: CandidateStrategyReplay,
     allowed_targets: tuple[str, ...],
     required_strategy_profile: str,
     runtime_mappings: dict[str, dict[str, str]],
@@ -446,6 +587,9 @@ def evaluate(
     max_avg_entry_sweep_slip_bps: float,
     max_top_bucket_entry_sweep_levels: float,
     min_window_count: int,
+    min_replay_trade_count: int,
+    min_replay_fill_rate: float,
+    min_replay_roi: float,
 ) -> dict[str, Any]:
     gate = parse_promotion_gate(report_text)
     quality = parse_execution_quality(report_text)
@@ -516,6 +660,16 @@ def evaluate(
                 blockers.append(
                     f"runtime_profile_mismatch:{mapped_profile}!={required_strategy_profile}"
                 )
+        blockers.extend(
+            candidate_strategy_replay_blockers(
+                candidate_strategy_replay,
+                mapping=mapping,
+                required_strategy_profile=required_strategy_profile,
+                min_replay_trade_count=min_replay_trade_count,
+                min_replay_fill_rate=min_replay_fill_rate,
+                min_replay_roi=min_replay_roi,
+            )
+        )
         if formula_specific:
             if row.symbol_count < 2:
                 blockers.append("formula_symbol_holdout_too_few_symbols")
@@ -545,9 +699,13 @@ def evaluate(
             "max_avg_entry_sweep_slip_bps": max_avg_entry_sweep_slip_bps,
             "max_top_bucket_entry_sweep_levels": max_top_bucket_entry_sweep_levels,
             "window_count": min_window_count,
+            "candidate_strategy_replay_trade_count": min_replay_trade_count,
+            "candidate_strategy_replay_entry_fill_rate": min_replay_fill_rate,
+            "candidate_strategy_replay_roi": min_replay_roi,
         },
         "promotion_gate": asdict(gate),
         "execution_quality": asdict(quality),
+        "candidate_strategy_replay": asdict(candidate_strategy_replay),
         "qualified_strategies": [
             {
                 "factor": asdict(item.factor),
@@ -592,6 +750,7 @@ def build_factor_registry(result: dict[str, Any]) -> dict[str, Any]:
         "allowed_targets": result["allowed_targets"],
         "promotion_gate": result["promotion_gate"],
         "execution_quality": result["execution_quality"],
+        "candidate_strategy_replay": result["candidate_strategy_replay"],
         "entries": entries,
     }
 
@@ -622,6 +781,7 @@ def build_strategy_handoff(result: dict[str, Any]) -> dict[str, Any]:
         "allowed_targets": result["allowed_targets"],
         "promotion_gate": result["promotion_gate"],
         "execution_quality": result["execution_quality"],
+        "candidate_strategy_replay": result["candidate_strategy_replay"],
         "strategies": strategies,
         "blocked_factor_count": sum(
             1 for item in result["evaluated_factors"] if not item["qualified"]
@@ -638,6 +798,8 @@ def render_handoff_markdown(handoff: dict[str, Any]) -> str:
         f"Required strategy profile: `{handoff['required_strategy_profile']}`",
         f"Allowed targets: `{', '.join(handoff['allowed_targets'])}`",
         f"Avg entry sweep slip bps: `{handoff['execution_quality'].get('avg_entry_sweep_slip_bps')}`",
+        f"Candidate strategy replay ready: `{str(handoff['candidate_strategy_replay'].get('ready')).lower()}`",
+        f"Candidate strategy replay runtime score: `{handoff['candidate_strategy_replay'].get('runtime_score')}`",
         "",
     ]
     if handoff["status"] != "ready":
@@ -706,6 +868,7 @@ def render_handoff_markdown(handoff: dict[str, Any]) -> str:
             "- Confirm the runtime score is implemented in the shared scorer.",
             "- Confirm the dry-run config uses the same full-depth execution gates as research.",
             "- Confirm replay parity remains ready for the source report.",
+            "- Confirm the candidate strategy executable replay artifact remains attached and ready.",
             "- Start with small fixed stake and the existing kill switch.",
             "",
         ]
@@ -726,6 +889,12 @@ def render_markdown(result: dict[str, Any]) -> str:
         f"- Ready: `{str(result['promotion_gate']['ready']).lower()}`",
         f"- Evidence: `{result['promotion_gate']['evidence']}`",
         f"- Avg entry sweep slip bps: `{result['execution_quality'].get('avg_entry_sweep_slip_bps')}`",
+        "",
+        "## Candidate Strategy Replay",
+        "",
+        f"- Ready: `{str(result['candidate_strategy_replay']['ready']).lower()}`",
+        f"- Evidence: `{result['candidate_strategy_replay']['evidence']}`",
+        f"- Runtime score: `{result['candidate_strategy_replay']['runtime_score']}`",
         "",
         "## Qualified Strategies",
         "",
@@ -771,6 +940,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-handoff-md", default="")
     parser.add_argument("--runtime-mapping-json", default="")
     parser.add_argument(
+        "--candidate-strategy-replay-json",
+        default="",
+        help="Strategy-level historical executable replay artifact for the selected runtime score.",
+    )
+    parser.add_argument(
         "--allowed-target",
         action="append",
         default=[],
@@ -784,6 +958,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-avg-entry-sweep-slip-bps", type=float, default=200.0)
     parser.add_argument("--max-top-bucket-entry-sweep-levels", type=float, default=3.0)
     parser.add_argument("--min-window-count", type=int, default=4)
+    parser.add_argument("--min-replay-trade-count", type=int, default=50)
+    parser.add_argument("--min-replay-fill-rate", type=float, default=0.30)
+    parser.add_argument("--min-replay-roi", type=float, default=0.0)
     return parser.parse_args()
 
 
@@ -793,6 +970,9 @@ def main() -> int:
     allowed_targets = tuple(args.allowed_target or DEFAULT_ALLOWED_TARGETS)
     result = evaluate(
         report_text,
+        candidate_strategy_replay=load_candidate_strategy_replay(
+            args.candidate_strategy_replay_json or None
+        ),
         allowed_targets=allowed_targets,
         required_strategy_profile=args.required_strategy_profile,
         runtime_mappings=load_runtime_mappings(args.runtime_mapping_json or None),
@@ -802,6 +982,9 @@ def main() -> int:
         max_avg_entry_sweep_slip_bps=args.max_avg_entry_sweep_slip_bps,
         max_top_bucket_entry_sweep_levels=args.max_top_bucket_entry_sweep_levels,
         min_window_count=args.min_window_count,
+        min_replay_trade_count=args.min_replay_trade_count,
+        min_replay_fill_rate=args.min_replay_fill_rate,
+        min_replay_roi=args.min_replay_roi,
     )
 
     if args.output_json:
