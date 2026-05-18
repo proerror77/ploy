@@ -1,3 +1,47 @@
+# FactorEvolve Research OS Task 4 - Typed Research Manager Plan Surface (2026-05-18)
+
+## Goal
+
+Add the first deterministic FactorEvolve Research Manager boundary so CI can
+choose the next research action from typed evidence without letting LLM output
+mutate evaluator thresholds, splits, costs, promotion gates, or deployments.
+
+Evidence stage: `diagnostic / research_os_foundation`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/research_os/manager.rs`
+  - Owner: typed input/output contracts and fail-closed planning rules.
+- `crates/ploy-research/examples/factor_evolve_daily_plan.rs`
+  - Owner: CLI surface for plan-only research evidence.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document the deterministic v0 manager boundary.
+
+## Tasks
+
+- [x] Add typed Research Manager input/output contracts.
+- [x] Implement deterministic planning themes for data repair, runtime repair,
+      prior revision, and continued MCTS search.
+- [x] Add evidence-stage validation and focused tests.
+- [x] Add a plan-only CLI example and documentation.
+- [x] Run Rust, CLI smoke, and diff validation.
+
+## Review
+
+- 2026-05-18: Added `ResearchManagerInput`, `ResearchBudget`, and
+  `ResearchManagerPlan`. The v0 planner is deterministic: unhealthy market data
+  wins first, ready handoffs without replay parity become `fix_runtime`,
+  stagnation/rejections become `revise_prior`, and selected MCTS nodes become
+  `continue_search`.
+- 2026-05-18: The planner treats numeric `stale_source_count > 0` as unhealthy
+  data, so health summaries from `ployd` cannot slip through because they are
+  not booleans.
+- 2026-05-18: Validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-manager /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research research_os --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-manager /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research --example factor_evolve_daily_plan`,
+  a CLI smoke run that emitted `theme=continue_search`, `candidate_count=12`,
+  `evidence_stage=walk_forward`, and `rtk git diff --check`.
+
 # FactorEvolve Research OS Task 3 - Registry-Compatible Alpha Search Artifacts (2026-05-18)
 
 ## Goal

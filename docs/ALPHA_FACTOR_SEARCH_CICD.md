@@ -454,6 +454,29 @@ prior draft using only the existing allowed mutation types. It still cannot
 guarantee profitability, does not call an external LLM, and cannot bypass
 walk-forward, promotion, replay parity, dry-run, or live approval gates.
 
+## FactorEvolve Research Manager V0
+
+The FactorEvolve Research Manager starts as a deterministic typed planning
+surface, not an LLM service. Its input contract includes latest run evidence,
+factor registry summary, rejected factor patterns, market-data health, and a
+daily research budget. Its output is a `ResearchManagerPlan` with a theme such
+as `fix_data`, `fix_runtime`, `revise_prior`, or `continue_search`.
+
+The v0 manager cannot mutate evaluator thresholds, train/test split policy,
+target labels, cost/slippage assumptions, promotion gates, or deployment
+configs. LLM participation is allowed only outside this boundary by producing a
+typed prior JSON that the Rust DSL compiler validates before CI evaluates it.
+
+The first CLI surface is:
+
+```bash
+rtk cargo run -p ploy-research --example factor_evolve_daily_plan -- \
+  <input-json> <output-json>
+```
+
+This command is plan-only evidence. It does not run searches, create PRs,
+deploy services, or resume dry-run/live strategies.
+
 ## Event-Level Promotion Gate
 
 PM5D settlement strategies are event-rooted binary options. A deployable
