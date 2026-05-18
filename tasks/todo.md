@@ -258,6 +258,47 @@ Evidence stage: `factor_attribution / alpha-search CI repair`.
   `python3 -m unittest tests.test_alpha_search_closed_loop_agent tests.test_autofactor_strategy_promotion tests.test_factor_walk_forward_sweep`,
   workflow YAML load, `rustfmt --check`, and `rtk git diff --check`.
 
+# AutoFactor Event-Level Settlement Decisions (2026-05-18)
+
+## Goal
+
+Stop settlement-probability AutoFactor searches from treating multiple rows in
+the same 5-minute event as independent deployable decisions. Settlement targets
+should evaluate one candidate decision per event before bucket, IC, and
+promotion metrics are computed.
+
+Evidence stage: `factor_attribution / executable_replay semantics repair`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: collapse settlement targets to one scored decision per event while
+    preserving row-level diagnostics for repricing targets.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: clarify that settlement target scoring is event-level, while
+    repricing diagnostics may remain row-level.
+
+## Tasks
+
+- [x] Apply one-decision-per-event scoring to settlement AutoFactor targets.
+- [x] Preserve row-level scoring for repricing targets.
+- [x] Add regression coverage for settlement dedup and repricing row-level
+      diagnostics.
+- [x] Run focused validation, open PR, merge after green CI, then rerun hosted
+      alpha search from `main`.
+
+## Review
+
+- 2026-05-18: Settlement AutoFactor targets now collapse scored rows to one
+  highest-score candidate decision per event before IC, bucket, and promotion
+  metrics. Repricing targets keep row-level diagnostics.
+- 2026-05-18: Focused validation passed:
+  `rtk cargo test --locked -p ploy-research autofactor --lib`,
+  `rtk cargo test --locked -p ploy-research alpha_search --lib`,
+  `python3 -m unittest tests.test_autofactor_strategy_promotion tests.test_factor_walk_forward_sweep tests.test_alpha_search_closed_loop_agent`,
+  `rustfmt --check crates/ploy-research/src/autofactor.rs`, and
+  `rtk git diff --check`.
+
 # Recorded Replay Partial-Fill Cancel Parity (2026-05-13)
 
 ## Goal

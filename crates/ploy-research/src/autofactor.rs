@@ -384,7 +384,7 @@ pub fn evaluate_named_factor(
     }
 
     let signal = factor.expr.evaluate(matrix)?;
-    let scored: Vec<(usize, f64, f64)> = signal
+    let scored_rows: Vec<(usize, f64, f64)> = signal
         .iter()
         .zip(labels.iter())
         .enumerate()
@@ -392,6 +392,11 @@ pub fn evaluate_named_factor(
             (score.is_finite() && label.is_finite()).then_some((idx, *score, *label))
         })
         .collect();
+    let scored = if uses_event_level_decisions(factor.target.as_deref()) {
+        one_decision_per_event(&scored_rows, event_ids)
+    } else {
+        scored_rows
+    };
 
     let pairs: Vec<(f64, f64)> = scored
         .iter()
@@ -1674,6 +1679,45 @@ fn build_buckets(
         .collect()
 }
 
+fn uses_event_level_decisions(target: Option<&str>) -> bool {
+    matches!(
+        target,
+        Some(
+            "settlement_executable_pnl"
+                | "full_depth_settlement_executable_pnl"
+                | "tradeable_full_depth_settlement_pnl"
+        )
+    )
+}
+
+fn one_decision_per_event(
+    scored: &[(usize, f64, f64)],
+    event_ids: &[String],
+) -> Vec<(usize, f64, f64)> {
+    if event_ids.is_empty() {
+        return scored.to_vec();
+    }
+
+    let mut best_by_event: BTreeMap<&str, (usize, f64, f64)> = BTreeMap::new();
+    for (idx, score, label) in scored {
+        let Some(event_id) = event_ids.get(*idx) else {
+            continue;
+        };
+        best_by_event
+            .entry(event_id.as_str())
+            .and_modify(|current| {
+                if *score > current.1 || (*score == current.1 && *idx < current.0) {
+                    *current = (*idx, *score, *label);
+                }
+            })
+            .or_insert((*idx, *score, *label));
+    }
+
+    let mut selected = best_by_event.into_values().collect::<Vec<_>>();
+    selected.sort_by_key(|(idx, _, _)| *idx);
+    selected
+}
+
 fn top_bucket_event_decision_stats(
     bucket: Option<&BucketSummary>,
     event_ids: &[String],
@@ -2305,6 +2349,33 @@ mod tests {
             Some("settlement_executable_pnl")
         );
         assert!(fair_edge.spearman_ic > 0.95);
+        assert_eq!(fair_edge.n, 40);
+        assert_eq!(
+            fair_edge.top_bucket_unique_event_count,
+            fair_edge.top_bucket_n
+        );
+        assert_eq!(fair_edge.top_bucket_max_event_decisions, 1);
+    }
+
+    #[test]
+    fn repricing_targets_keep_row_level_diagnostics() {
+        let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
+        let options = AutoFactorOptions {
+            min_observations: 40,
+            min_window_observations: 10,
+            min_icir: 0.1,
+            ..Default::default()
+        };
+        let reports =
+            mine_domain_autofactors_from_v2(&rows, AutoFactorV2Target::RepricePnl10s, &options)
+                .expect("reports");
+        let repricing_gap = reports
+            .iter()
+            .find(|report| report.name == "repricing_gap_side_10s")
+            .expect("repricing gap report");
+
+        assert_eq!(repricing_gap.n, 80);
+        assert!(repricing_gap.top_bucket_max_event_decisions > 1);
     }
 
     #[test]
@@ -2334,6 +2405,12 @@ mod tests {
             Some("full_depth_settlement_executable_pnl")
         );
         assert!(full_depth_edge.spearman_ic > 0.95);
+        assert_eq!(full_depth_edge.n, 40);
+        assert_eq!(
+            full_depth_edge.top_bucket_unique_event_count,
+            full_depth_edge.top_bucket_n
+        );
+        assert_eq!(full_depth_edge.top_bucket_max_event_decisions, 1);
         assert!(reports.iter().any(|report| {
             report.name == "auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity"
         }));
