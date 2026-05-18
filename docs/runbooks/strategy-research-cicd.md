@@ -57,7 +57,7 @@ when the mismatch is understood and tracked as a follow-up issue.
 | Walk-forward diagnostics | `.github/workflows/factor-walk-forward-v2.yml` | Rolling factor validation across train/test windows |
 | Parameter optimization | `.github/workflows/optimize.yml` | Bounded train/validation optimization from a snapshot or explicit debug data source |
 | Replay/backtest accounting | `.github/workflows/backtest.yml` | Build and run replay/backtest accounting in one job on `ploy-ci-1` |
-| Candidate strategy replay | `autofactor-strategy-promotion.yml` consumer contract, then a replay-producing workflow/artifact | Required pre-dry-run proof that the selected runtime score is profitable under historical executable replay |
+| Candidate strategy replay | `.github/workflows/runtime-candidate-replay.yml` | Required pre-dry-run proof that the selected runtime score emits executable runtime decisions on a Tango MarketUpdate recording |
 | Replay/dry-run parity | `.github/workflows/replay-dryrun-parity.yml` | Compare replay/backtest evidence against a dry-run JSON report |
 | Recorded replay/dry-run parity | `.github/workflows/recorded-replay-parity.yml` | Replay a canonical MarketUpdate recording on `tango-1-1` with the deployed binary, then compare against the matching dry-run report slice |
 | Runtime evidence reset | `.github/workflows/reset-strategy-runtime-evidence.yml` | Backup-first cleanup for contaminated dry-run/paper `strategy_runtime_orders` and `strategy_runtime_fills`; follow `docs/runbooks/strategy-runtime-evidence-reset.md` |
