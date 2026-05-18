@@ -1,3 +1,45 @@
+# FactorEvolve Research OS Task 3 - Registry-Compatible Alpha Search Artifacts (2026-05-18)
+
+## Goal
+
+Emit factor identity and metric previews from alpha-search artifacts so later
+Research Manager, registry, and trace layers can consume stable hashes instead
+of parsing report text.
+
+Evidence stage: `factor_attribution / research_os_foundation`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: stable `FactorExpr` hash helper and regression coverage.
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: `factor-registry-preview.json` artifact writer.
+
+## Tasks
+
+- [x] Add stable factor expression hash helper and tests.
+- [x] Emit `factor-registry-preview.json` from alpha-search artifact bundles.
+- [x] Verify hosted artifact workflow already uploads the full alpha-search
+      directory, so no YAML change is required.
+- [x] Run focused Rust/YAML/diff validation.
+
+## Review
+
+- 2026-05-18: Added `factor_expr_hash` using SHA-256 over serialized
+  `FactorExpr`, plus tests proving identical expressions hash the same and
+  changed constants/inputs change the hash.
+- 2026-05-18: Alpha-search now writes `factor-registry-preview.json` with
+  `factor_name`, `target`, `dsl_hash`, `ast_json`, registry status, metrics,
+  and blockers. Existing workflow artifact upload already copies the whole
+  `alpha-search/` directory.
+- 2026-05-18: Updated a drifted typed LLM-prior test from the old quote-implied
+  settlement edge to the current model-based settlement edge family. Validation
+  passed with split Cargo filters:
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-alpha /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research autofactor --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-alpha /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research alpha_search --lib`,
+  workflow YAML parse for `factor-walk-forward-v2-hosted-artifact.yml`, and
+  `rtk git diff --check`.
+
 # FactorEvolve Research OS Task 2 - Binance Futures Local Orderbook Contract (2026-05-18)
 
 ## Goal
