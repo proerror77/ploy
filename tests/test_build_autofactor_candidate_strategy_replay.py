@@ -81,6 +81,31 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
         self.assertIn("runtime_profile_mismatch", ",".join(payload["blocking_risk_flags"]))
         self.assertIn("Promotion ready: `false`", markdown)
 
+    def test_ignores_unmapped_mutation_even_when_aggregate_pnl_is_higher(self):
+        report = """=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=true stake_usd=15.00 min_entry_fill_rate=0.3000 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=100 event_complete_rows=200 replay_parity_ready=false
+gate,passed,evidence
+recorded_replay_parity,false,post-dry-run gate pending
+
+# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,top_bucket_unique_event_count,top_bucket_max_event_decisions,complexity
+1,mut_auto_settlement_full_depth_settlement_edge_x_near_strike_near_strike,full_depth_settlement_executable_pnl,candidate,passed,528,0.300000,0.250000,4,6.400000,1.0000,2,1.0000,1.0000,106,6.313282,0.7075,1.0000,0.00,1.40,106,1,5
+2,auto_settlement_full_depth_settlement_edge_x_near_strike,full_depth_settlement_executable_pnl,candidate,passed,528,0.288889,0.254860,4,5.260247,1.0000,2,1.0000,1.0000,106,6.012908,0.6981,1.0000,0.00,1.42,106,1,3
+"""
+        payload, _ = self.run_script(report)
+
+        self.assertTrue(payload["promotion_ready"])
+        self.assertEqual(
+            payload["runtime_score"],
+            "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike",
+        )
+        self.assertEqual(
+            payload["source_factor"]["name"],
+            "auto_settlement_full_depth_settlement_edge_x_near_strike",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

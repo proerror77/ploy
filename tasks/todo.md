@@ -1,3 +1,38 @@
+# Candidate Replay Runtime Mapping Alignment (2026-05-18)
+
+## Goal
+
+Prevent candidate replay generation from selecting factor formulas that the
+promotion evaluator cannot map to an executable runtime score.
+
+Evidence stage: `executable_replay / runtime mapping repair`.
+
+## Files / Ownership
+
+- `scripts/build_autofactor_candidate_strategy_replay.py`
+  - Owner: match candidate replay runtime mapping to the explicit evaluator
+    runtime mapping surface.
+- `tests/test_build_autofactor_candidate_strategy_replay.py`
+  - Owner: cover unmapped `mut_*` formulas that have higher aggregate PnL but
+    cannot be promoted to the runtime.
+
+## Tasks
+
+- [x] Diagnose run `26016682552` as candidate replay/evaluator runtime-score
+      mismatch.
+- [x] Restrict generic `mut_*` replay selection to explicit runtime-mapped
+      formula names.
+- [x] Add regression coverage.
+- [ ] Run validation, open PR, wait for CI, merge, and rerun hosted search.
+
+## Review
+
+- 2026-05-18: The sweep produced a profitable candidate replay, but for
+  `mut_auto_settlement_full_depth_settlement_edge_x_near_strike_near_strike`,
+  which the evaluator correctly reported as missing runtime mapping. The replay
+  builder must select only runtime-mappable formulas so replay evidence and
+  handoff evaluation refer to the same executable scorer.
+
 # Pre-Dry-Run Recorded Parity Gate Repair (2026-05-18)
 
 ## Goal
