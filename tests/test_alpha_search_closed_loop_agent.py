@@ -277,6 +277,36 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             self.assertEqual(decision["decision"], "fix_workflow")
             self.assertFalse(decision["allow_dispatch"])
 
+    def test_target_factor_blockers_take_priority_over_handoff_global_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = artifact(
+                Path(tmp),
+                promotion={
+                    "decision": "blocked",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "global_promotion_gate_not_ready:recorded_replay_parity: blocked: no recorded replay parity artifact was supplied to this report"
+                            ],
+                            "factor": {"target": agent.DEFAULT_TARGET},
+                        }
+                    ],
+                },
+            )
+            handoff = path / "factor-walk-forward-v2" / "autofactor-strategy-handoff.json"
+            payload = json.loads(handoff.read_text(encoding="utf-8"))
+            payload["promotion_gate"] = {
+                "blocked_gates": [
+                    "global_full_depth_entry_fillability: global_full_depth_entry_fill_rate=0.1311 min_required=0.3000"
+                ]
+            }
+            write_json(handoff, payload)
+
+            decision = agent.closed_loop_decision(
+                [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            )
+            self.assertEqual(decision["decision"], "fix_workflow")
+
     def test_missing_feedback_routes_to_fix_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = artifact(Path(tmp), write_feedback=False)

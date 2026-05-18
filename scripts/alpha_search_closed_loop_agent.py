@@ -216,7 +216,9 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
     chain = current["chain"]
     feedback = current["feedback"]
     plan = current["plan"]
-    blockers = target_blocker_strings(current["promotion"], current["target"]) + blocker_strings(handoff)
+    target_blockers = target_blocker_strings(current["promotion"], current["target"])
+    handoff_blockers = blocker_strings(handoff)
+    blockers = target_blockers or handoff_blockers
     blocker_action = classify_blockers(blockers)
 
     candidate_count = int(feedback.get("candidate_count") or 0)
