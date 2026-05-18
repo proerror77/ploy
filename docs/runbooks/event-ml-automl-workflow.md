@@ -224,6 +224,12 @@ A true pre-dry-run runtime replay artifact must be built from the JSON emitted
 by `ploy-runner run --output-json` after replaying the exact candidate config on
 an ordered MarketUpdate stream:
 
+For AutoFactor candidates that are not yet deployed, use
+`runtime-candidate-replay.yml` from `main`. The workflow treats the deployed
+Tango config as a template, writes a temporary replay config, and overrides
+`three_layer_autofactor_runtime_score` with the supplied `runtime_score` before
+replaying. It does not edit the deployed config or restart a service.
+
 ```bash
 python3 scripts/build_runtime_candidate_strategy_replay.py \
   --runtime-evaluation-json /tmp/runtime-eval.json \

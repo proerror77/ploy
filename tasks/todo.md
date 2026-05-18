@@ -1,3 +1,44 @@
+# Runtime Candidate Replay Score Override (2026-05-18)
+
+## Goal
+
+Make the runtime replay workflow validate newly discovered AutoFactor
+candidates before they are deployed, not only the score already present in the
+remote dry-run config.
+
+Evidence stage: `runtime_parity / executable_replay gate`.
+
+## Files / Ownership
+
+- `.github/workflows/runtime-candidate-replay.yml`
+  - Owner: build a temporary replay config from the Tango dry-run template and
+    override `three_layer_autofactor_runtime_score` with the requested
+    candidate score.
+- `docs/runbooks/event-ml-automl-workflow.md`,
+  `docs/runbooks/strategy-research-cicd.md`
+  - Owner: document candidate replay as the pre-dry-run runtime proof.
+
+## Tasks
+
+- [x] Confirm merged runtime replay workflow successfully produced a
+      `basis=runtime_market_update_replay` artifact on `main`.
+- [x] Verify the current candidate remains blocked with zero runtime
+      orders/fills on `406,706` replayed MarketUpdate records.
+- [x] Fix the workflow so `runtime_score` is applied to the temporary replay
+      config before the runner executes.
+
+## Review
+
+- 2026-05-18: `runtime-candidate-replay.yml` run `26026585456` succeeded and
+  uploaded `candidate-strategy-replay.json`, but the current candidate produced
+  `intents_submitted=0`, `fills=0`, `trade_count=0`,
+  `entry_fill_rate=0.0`, and blockers `trade_count_too_small`,
+  `entry_fill_rate_too_low`, and `zero_runtime_orders_and_fills`.
+- 2026-05-18: The first workflow version used the remote config score as-is,
+  which made it suitable for validating the current dry-run candidate but not a
+  newly mined search-tree candidate. The repair keeps the remote config as a
+  template and overrides only the temporary replay TOML.
+
 # Runtime Candidate Replay Artifact Gate (2026-05-18)
 
 ## Goal
