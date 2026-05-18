@@ -202,6 +202,15 @@ Required artifact:
 - `candidate-strategy-replay.json` or
   `autofactor-candidate-strategy-replay.json`
 
+In the hosted factor walk-forward sweep, this artifact is generated per variant
+when an external replay artifact is not supplied. The generated artifact is
+based on the selected runtime-mappable `factor_walk_forward_v2` top bucket and
+declares `basis=factor_walk_forward_top_bucket_aggregate`. It is sufficient for
+the pre-dry-run executable strategy gate only when the report target already
+uses event-level, official-settlement, full-depth executable labels. It does not
+replace recorded replay/dry-run parity after a dry-run runtime has produced
+orders and fills.
+
 Minimum contract:
 
 - `evidence_stage=executable_replay`

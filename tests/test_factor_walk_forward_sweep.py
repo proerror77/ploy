@@ -258,6 +258,39 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertEqual(summary["variants"][0]["qualified_count"], 1)
         self.assertIn("auto_settlement_conservative_settlement_edge", summary_md)
 
+    def test_builds_and_promotes_candidate_strategy_replay_when_missing(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = self.fake_binary(tmp)
+            subprocess.run(
+                self.base_args(tmp, binary),
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            summary = json.loads((tmp / "out" / "sweep-summary.json").read_text(encoding="utf-8"))
+            root_replay = json.loads(
+                (tmp / "out" / "candidate-strategy-replay.json").read_text(encoding="utf-8")
+            )
+            variant_replay = json.loads(
+                (tmp / "out" / "001-base" / "candidate-strategy-replay.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(summary["best_variant"], "base")
+        self.assertEqual(summary["variants"][0]["candidate_replay_exit_code"], 0)
+        self.assertTrue(root_replay["promotion_ready"])
+        self.assertEqual(root_replay["basis"], "factor_walk_forward_top_bucket_aggregate")
+        self.assertEqual(
+            root_replay["runtime_score"],
+            "autofactor_formula:auto_settlement_conservative_settlement_edge",
+        )
+        self.assertEqual(root_replay, variant_replay)
+
     def test_promotes_alpha_search_artifacts_from_best_variant(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
