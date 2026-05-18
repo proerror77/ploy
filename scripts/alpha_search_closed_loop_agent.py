@@ -137,6 +137,7 @@ def blocker_strings(payload: Any) -> list[str]:
 
 def target_blocker_strings(payload: Any, target: str) -> list[str]:
     out: list[str] = []
+    eligible: list[str] = []
     if isinstance(payload, dict):
         evaluated = payload.get("evaluated_factors")
         if isinstance(evaluated, list):
@@ -146,12 +147,25 @@ def target_blocker_strings(payload: Any, target: str) -> list[str]:
                 factor = item.get("factor")
                 factor_target = factor.get("target") if isinstance(factor, dict) else None
                 if factor_target in {None, target}:
+                    row_blockers: list[str] = []
                     blockers = item.get("blockers", [])
                     if isinstance(blockers, list):
-                        out.extend(str(blocker) for blocker in blockers)
+                        row_blockers.extend(str(blocker) for blocker in blockers)
                     else:
-                        out.extend(blocker_strings(blockers))
+                        row_blockers.extend(blocker_strings(blockers))
+                    out.extend(row_blockers)
+                    runtime_mapping = item.get("runtime_mapping")
+                    if (
+                        isinstance(factor, dict)
+                        and factor.get("decision") == "candidate"
+                        and factor.get("reason") == "passed"
+                        and isinstance(runtime_mapping, dict)
+                        and runtime_mapping.get("runtime_score")
+                    ):
+                        eligible.extend(row_blockers)
             payload = {key: value for key, value in payload.items() if key != "evaluated_factors"}
+        if eligible:
+            return eligible
         out.extend(blocker_strings(payload))
     else:
         out.extend(blocker_strings(payload))

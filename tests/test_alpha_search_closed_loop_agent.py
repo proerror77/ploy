@@ -307,6 +307,48 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             )
             self.assertEqual(decision["decision"], "fix_workflow")
 
+    def test_runtime_mappable_target_candidate_blockers_take_priority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = artifact(
+                Path(tmp),
+                promotion={
+                    "decision": "blocked",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "top_bucket_entry_sweep_slippage_too_high:450.00>200.00",
+                                "missing_runtime_strategy_mapping",
+                            ],
+                            "factor": {
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                            },
+                            "runtime_mapping": None,
+                        },
+                        {
+                            "blockers": [
+                                "global_promotion_gate_not_ready:recorded_replay_parity: blocked: no recorded replay parity artifact was supplied to this report"
+                            ],
+                            "factor": {
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": "autofactor_formula:edge",
+                                "strategy_profile": "settlement_probability",
+                            },
+                        },
+                    ],
+                },
+            )
+
+            decision = agent.closed_loop_decision(
+                [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            )
+            self.assertEqual(decision["decision"], "fix_workflow")
+
     def test_missing_feedback_routes_to_fix_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = artifact(Path(tmp), write_feedback=False)
