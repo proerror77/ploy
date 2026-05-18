@@ -205,10 +205,15 @@ Required artifact:
 In the hosted factor walk-forward sweep, this artifact is generated per variant
 when an external replay artifact is not supplied. The generated artifact is
 based on the selected runtime-mappable `factor_walk_forward_v2` top bucket and
-declares `basis=factor_walk_forward_top_bucket_aggregate`. It is sufficient for
-the pre-dry-run executable strategy gate only when the report target already
-uses event-level, official-settlement, full-depth executable labels. It does not
-replace recorded replay/dry-run parity after a dry-run runtime has produced
+declares `basis=factor_walk_forward_top_bucket_aggregate`. It is only candidate
+context. It is not sufficient for the pre-dry-run executable strategy gate,
+because it does not prove the deployed runtime scorer emits the same decisions
+on an ordered MarketUpdate stream.
+
+The dry-run handoff gate requires a true runtime replay artifact with
+`basis=runtime_market_update_replay`, produced from `ploy-runner run
+--output-json` by `scripts/build_runtime_candidate_strategy_replay.py`. It does
+not replace recorded replay/dry-run parity after a dry-run runtime has produced
 orders and fills.
 
 Recorded replay/dry-run parity is intentionally after dry-run in the promotion
@@ -379,8 +384,9 @@ Every complete CI/CD alpha-search run should upload:
   decision, including whether the next run was dispatched and why the chain
   stopped when it did not continue
 - `factor-walk-forward-v2/report.txt`: existing walk-forward report
-- `candidate-strategy-replay.json`: selected runtime-score historical
-  executable replay proof required before dry-run handoff
+- `candidate-strategy-replay.json`: selected runtime-score historical runtime
+  replay proof with `basis=runtime_market_update_replay`, required before
+  dry-run handoff
 - `autofactor-factor-registry.json`: evaluated factor rows and blockers
 - `autofactor-strategy-handoff.json`: ready/blocked handoff manifest
 

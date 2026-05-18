@@ -142,6 +142,7 @@ DEFAULT_REPLAY_PAYLOAD = {
     "schema_version": 1,
     "kind": "autofactor_candidate_strategy_replay",
     "evidence_stage": "executable_replay",
+    "basis": "runtime_market_update_replay",
     "strategy_profile": "settlement_probability",
     "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge",
     "promotion_ready": True,
@@ -595,7 +596,11 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertEqual(payload["decision"], "blocked")
         self.assertEqual(handoff["status"], "blocked")
         first = payload["evaluated_factors"][0]
-        self.assertIn("candidate_strategy_replay_not_runtime_replay", first["blockers"])
+        self.assertIn(
+            "candidate_strategy_replay_not_runtime_replay:"
+            "factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
+            first["blockers"],
+        )
 
     def test_blocks_replay_without_executable_strategy_contract(self):
         replay = {
