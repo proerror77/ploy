@@ -11,6 +11,10 @@ on:
         description: "Research snapshot run id for search mode"
         required: false
         default: ""
+      symbols:
+        description: "Comma-separated symbols present in the snapshot"
+        required: false
+        default: "BTCUSDT,ETHUSDT"
       research_budget_json:
         description: "Research budget JSON"
         required: false
@@ -113,6 +117,7 @@ jobs:
           GIT_REF: ${{ github.event.inputs.git_ref }}
           RUN_MODE: ${{ github.event.inputs.run_mode }}
           SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
+          SYMBOLS: ${{ github.event.inputs.symbols }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -127,6 +132,7 @@ jobs:
               f"- Git ref: `{os.environ['GIT_REF']}`",
               f"- Run mode: `{os.environ['RUN_MODE']}`",
               f"- Snapshot run: `{os.environ.get('SNAPSHOT_RUN_ID') or 'none'}`",
+              f"- Symbols: `{os.environ.get('SYMBOLS') or 'BTCUSDT,ETHUSDT'}`",
               f"- Plan theme: `{plan['theme']}`",
               f"- Evidence stage: `{plan['evidence_stage']}`",
               f"- Candidate count: `{plan['candidate_count']}`",
@@ -146,6 +152,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GIT_REF: ${{ github.event.inputs.git_ref }}
           SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
+          SYMBOLS: ${{ github.event.inputs.symbols }}
         run: |
           set -euo pipefail
           python3 - <<'PY' > artifacts/factor-evolve-daily/hosted-options.json
@@ -167,8 +174,9 @@ jobs:
             -f snapshot_run_id="${SNAPSHOT_RUN_ID}" \
             -f start_date=auto \
             -f end_date=auto \
+            -f symbols="${SYMBOLS:-BTCUSDT,ETHUSDT}" \
             -f options_json="$(cat artifacts/factor-evolve-daily/hosted-options.json)"
-          echo "Dispatched hosted FactorEvolve search from snapshot ${SNAPSHOT_RUN_ID}." \
+          echo "Dispatched hosted FactorEvolve search from snapshot ${SNAPSHOT_RUN_ID} for ${SYMBOLS:-BTCUSDT,ETHUSDT}." \
             | tee artifacts/factor-evolve-daily/search-dispatch.txt
 
       - name: Record handoff review boundary
