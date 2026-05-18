@@ -1,3 +1,37 @@
+# FactorEvolve Research OS Task 2 - Binance Futures Local Orderbook Contract (2026-05-18)
+
+## Goal
+
+Add a sequence-correct Binance futures local orderbook research contract so
+FactorEvolve can distinguish partial-depth snapshot diagnostics from
+promotion-grade local book evidence.
+
+Evidence stage: `diagnostic / data_surface_contract`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/orderbook/binance_futures.rs`
+  - Owner: in-memory book and snapshot/diff sequence validation.
+- `docs/runbooks/binance-futures-local-orderbook.md`
+  - Owner: research semantics for partial LOB vs sequence-correct local book.
+
+## Tasks
+
+- [x] Add local book module boundary.
+- [x] Implement snapshot + diff-depth validator.
+- [x] Add tests for first diff bridge, continuous diff, and out-of-order gap.
+- [x] Document that current partial depth is not queue/passive-fill proof.
+- [x] Run focused Rust and diff validation.
+
+## Review
+
+- 2026-05-18: Added `LocalBook`, `BookSnapshot`, `DepthDiff`, and typed
+  `LocalBookError` contracts. Validation rejects first-diff mismatch and later
+  sequence gaps, applies level replacement/removal, and keeps bids/asks sorted.
+- 2026-05-18: Validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-book /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research orderbook --lib`
+  and `rtk git diff --check`.
+
 # FactorEvolve Research OS Task 1 - Registry And Trace Contracts (2026-05-18)
 
 ## Goal

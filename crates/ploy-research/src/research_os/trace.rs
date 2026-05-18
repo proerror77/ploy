@@ -32,8 +32,22 @@ mod tests {
         let input = serde_json::json!({"a": 1});
         let out_a = serde_json::json!({"candidate": "a"});
         let out_b = serde_json::json!({"candidate": "b"});
-        let hash_a = trace_hash(None, "run-1", "generate", "research_manager", &input, &out_a);
-        let hash_b = trace_hash(None, "run-1", "generate", "research_manager", &input, &out_b);
+        let hash_a = trace_hash(
+            None,
+            "run-1",
+            "generate",
+            "research_manager",
+            &input,
+            &out_a,
+        );
+        let hash_b = trace_hash(
+            None,
+            "run-1",
+            "generate",
+            "research_manager",
+            &input,
+            &out_b,
+        );
         assert_ne!(hash_a, hash_b);
     }
 }
