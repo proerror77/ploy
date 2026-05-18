@@ -1,3 +1,44 @@
+# Runtime Candidate Replay Entry Accounting Repair (2026-05-18)
+
+## Goal
+
+Fix the candidate replay artifact builder so executable replay metrics count
+only real entry BUY decisions and recover event identity from runtime evidence
+rows whose order/fill records do not carry `event_id`.
+
+Evidence stage: `runtime_parity / executable_replay repair`.
+
+## Files / Ownership
+
+- `scripts/build_runtime_candidate_strategy_replay.py`
+  - Owner: event identity resolution and entry-only metric aggregation.
+- `tests/test_build_runtime_candidate_strategy_replay.py`
+  - Owner: regression coverage for missing order event IDs and settlement SELL
+    rows that must not inflate entry trade counts or PnL.
+
+## Tasks
+
+- [x] Inspect run `26034972055` replay artifact and identify the metric anomaly.
+- [x] Repair entry filtering and event-id resolution.
+- [x] Add regression tests for missing order/fill event IDs plus settlement
+      SELL rows.
+- [x] Validate locally, then rerun the artifact builder on run `26034972055`.
+- [ ] Push PR/CI/merge and rerun `runtime-candidate-replay.yml` on `main`.
+
+## Review
+
+- 2026-05-18: Run `26034972055` reported `91` fills and only `1` unique event,
+  but raw runtime evidence has `46` BUY decision events with `46` unique
+  event IDs and `45` SELL settlement/exit rows. The old artifact builder
+  treated missing `purpose` as `ENTRY` and therefore mixed settlement SELL rows
+  into entry metrics, while orders/fills lacked `event_id` and needed lookup
+  through events/intents/order IDs.
+- 2026-05-18: After fixing the builder, the same runtime replay artifact
+  re-evaluates as `46` entry trades, `46` unique events, entry fill rate
+  `1.0`, total PnL `-68.063927`, and ROI `-0.098643`. The candidate remains
+  blocked by low trade count, one missing official settlement row, and negative
+  ROI; it is not a profitable strategy candidate.
+
 # Model-Based Settlement AutoFactor Runtime Path (2026-05-18)
 
 ## Goal

@@ -47,8 +47,46 @@ def result_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def purpose_is_entry(row: dict[str, Any]) -> bool:
-    purpose = str(row.get("purpose") or row.get("signal_inputs", {}).get("purpose") or "ENTRY")
-    return purpose.upper() == "ENTRY"
+    intent_id = str(row.get("intent_id") or "")
+    side = str(row.get("side") or row.get("fill_side") or row.get("order_side") or "").upper()
+    if intent_id.startswith("tl_settle_") or side == "SELL":
+        return False
+    purpose = row.get("purpose") or row.get("signal_inputs", {}).get("purpose")
+    if purpose is not None:
+        return str(purpose).upper() == "ENTRY"
+    return side == "BUY"
+
+
+def row_key(row: dict[str, Any], key: str) -> str | None:
+    raw = row.get(key)
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+def build_event_id_lookup(rows: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
+    lookup: dict[tuple[str, str], str] = {}
+    for row in rows:
+        event_id = row_key(row, "event_id") or row_key(row, "market_id")
+        if not event_id:
+            continue
+        for key in ("intent_id", "order_id", "token_id"):
+            value = row_key(row, key)
+            if value:
+                lookup[(key, value)] = event_id
+    return lookup
+
+
+def resolved_event_id(row: dict[str, Any], lookup: dict[tuple[str, str], str]) -> str | None:
+    event_id = row_key(row, "event_id") or row_key(row, "market_id")
+    if event_id:
+        return event_id
+    for key in ("intent_id", "order_id", "token_id"):
+        value = row_key(row, key)
+        if value and (key, value) in lookup:
+            return lookup[(key, value)]
+    return None
 
 
 def build_artifact(
@@ -74,10 +112,12 @@ def build_artifact(
     entry_fills = [row for row in fills if purpose_is_entry(row)]
     entry_events = [row for row in events if purpose_is_entry(row)]
 
+    event_lookup = build_event_id_lookup(events + intents + orders + fills)
+    decision_rows = entry_events or entry_orders
     event_ids = [
-        str(row.get("event_id") or row.get("market_id"))
-        for row in entry_orders
-        if row.get("event_id") or row.get("market_id")
+        event_id
+        for row in decision_rows
+        if (event_id := resolved_event_id(row, event_lookup))
     ]
     unique_event_count = len(set(event_ids))
     event_decision_counts = Counter(event_ids)
@@ -89,8 +129,26 @@ def build_artifact(
         if row.get("order_id") and decimal_value(row.get("quantity")) > 0
     }
     trade_count = len(filled_order_ids)
-    order_count = len(entry_orders)
-    intent_count = len(intents) or int(result.get("intents_submitted") or 0)
+    if entry_events:
+        filled_entry_event_ids = {
+            event_id
+            for row in entry_events
+            if (
+                str(row.get("fill_status") or "").upper() == "FILLED"
+                or (row_key(row, "order_id") in filled_order_ids)
+            )
+            and (event_id := resolved_event_id(row, event_lookup))
+        }
+        trade_count = len(filled_entry_event_ids)
+    entry_order_ids = {order_id for row in entry_orders if (order_id := row_key(row, "order_id"))}
+    entry_order_ids.update(
+        order_id for row in entry_events if (order_id := row_key(row, "order_id"))
+    )
+    order_count = len(entry_order_ids)
+    entry_intents = [row for row in intents if purpose_is_entry(row)]
+    intent_count = max(len(entry_intents), len(entry_events))
+    if intent_count == 0:
+        intent_count = int(result.get("intents_submitted") or 0)
     denominator = max(order_count, intent_count, 1)
     entry_fill_rate = Decimal(trade_count) / Decimal(denominator)
 
@@ -143,7 +201,8 @@ def build_artifact(
         },
         "metrics": {
             "updates_processed": int(result.get("updates_processed") or 0),
-            "intents_submitted": int(result.get("intents_submitted") or intent_count),
+            "intents_submitted": intent_count,
+            "runtime_intents_submitted": int(result.get("intents_submitted") or intent_count),
             "orders": order_count,
             "fills": len(entry_fills),
             "trade_count": trade_count,
