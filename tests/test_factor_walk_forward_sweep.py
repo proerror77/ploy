@@ -258,7 +258,7 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertEqual(summary["variants"][0]["qualified_count"], 1)
         self.assertIn("auto_settlement_conservative_settlement_edge", summary_md)
 
-    def test_builds_and_promotes_candidate_strategy_replay_when_missing(self):
+    def test_builds_blocked_aggregate_candidate_replay_when_missing(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             (tmp / "snapshot").mkdir()
@@ -283,11 +283,17 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
 
         self.assertEqual(summary["best_variant"], "base")
         self.assertEqual(summary["variants"][0]["candidate_replay_exit_code"], 0)
-        self.assertTrue(root_replay["promotion_ready"])
+        self.assertEqual(summary["variants"][0]["decision"], "blocked")
+        self.assertEqual(summary["variants"][0]["qualified_count"], 0)
+        self.assertFalse(root_replay["promotion_ready"])
         self.assertEqual(root_replay["basis"], "factor_walk_forward_top_bucket_aggregate")
         self.assertEqual(
             root_replay["runtime_score"],
             "autofactor_formula:auto_settlement_conservative_settlement_edge",
+        )
+        self.assertIn(
+            "requires_runtime_replay_not_top_bucket_aggregate",
+            root_replay["blocking_risk_flags"],
         )
         self.assertEqual(root_replay, variant_replay)
 
@@ -379,11 +385,9 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             2.507843,
         )
         self.assertEqual(variant["best_runtime_mappable_factor"]["complexity"], 1)
-        self.assertEqual(variant["qualified_count"], 1)
-        self.assertEqual(
-            variant["best_qualified_strategy"]["name"],
-            "auto_settlement_conservative_settlement_edge",
-        )
+        self.assertEqual(variant["qualified_count"], 0)
+        self.assertEqual(variant["decision"], "blocked")
+        self.assertIsNone(variant["best_qualified_strategy"])
         self.assertIn("best runtime-mappable factor", summary_md)
 
     def test_best_variant_prefers_tradeable_profit_metrics_over_rank_ic(self):

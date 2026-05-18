@@ -581,6 +581,22 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertIn("candidate_strategy_replay_not_ready", first["blockers"])
         self.assertIn("Candidate strategy replay ready: `false`", handoff_md)
 
+    def test_blocks_top_bucket_aggregate_as_candidate_strategy_replay(self):
+        replay = {
+            **DEFAULT_REPLAY_PAYLOAD,
+            "basis": "factor_walk_forward_top_bucket_aggregate",
+        }
+
+        _, payload, _, handoff, _ = self.run_script(
+            READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            replay_payload=replay,
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        first = payload["evaluated_factors"][0]
+        self.assertIn("candidate_strategy_replay_not_runtime_replay", first["blockers"])
+
     def test_blocks_replay_without_executable_strategy_contract(self):
         replay = {
             **DEFAULT_REPLAY_PAYLOAD,

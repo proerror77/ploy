@@ -169,6 +169,7 @@ class CandidateStrategyReplay:
     evidence: str
     runtime_score: str = ""
     strategy_profile: str = ""
+    basis: str = ""
     blockers: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     decision_contract: dict[str, Any] = field(default_factory=dict)
@@ -331,6 +332,7 @@ def load_candidate_strategy_replay(path: str | None) -> CandidateStrategyReplay:
         evidence=str(evidence),
         runtime_score=str(payload.get("runtime_score", "")),
         strategy_profile=str(payload.get("strategy_profile", "")),
+        basis=str(payload.get("basis", "")),
         blockers=[str(item) for item in blockers],
         metrics=metrics,
         decision_contract=contract,
@@ -362,6 +364,8 @@ def candidate_strategy_replay_blockers(
     blockers = list(replay.blockers)
     if not replay.ready:
         blockers.append("candidate_strategy_replay_not_ready")
+    if replay.basis == "factor_walk_forward_top_bucket_aggregate":
+        blockers.append("candidate_strategy_replay_not_runtime_replay")
 
     if replay.strategy_profile != required_strategy_profile:
         blockers.append(

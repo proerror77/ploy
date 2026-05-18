@@ -45,10 +45,10 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
                 output_md.read_text(encoding="utf-8"),
             )
 
-    def test_builds_ready_replay_for_runtime_mappable_settlement_candidate(self):
+    def test_builds_blocked_aggregate_for_runtime_mappable_settlement_candidate(self):
         payload, markdown = self.run_script(AUTOFACTOR_SETTLEMENT_AUTO_REPORT)
 
-        self.assertTrue(payload["promotion_ready"])
+        self.assertFalse(payload["promotion_ready"])
         self.assertEqual(
             payload["runtime_score"],
             "autofactor_formula:auto_settlement_conservative_settlement_edge",
@@ -64,8 +64,11 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
         self.assertEqual(payload["metrics"]["unique_event_count"], 9966)
         self.assertGreater(payload["metrics"]["total_pnl"], 0)
         self.assertGreater(payload["metrics"]["roi"], 0)
-        self.assertEqual(payload["blocking_risk_flags"], [])
-        self.assertIn("Promotion ready: `true`", markdown)
+        self.assertIn(
+            "requires_runtime_replay_not_top_bucket_aggregate",
+            payload["blocking_risk_flags"],
+        )
+        self.assertIn("Promotion ready: `false`", markdown)
 
     def test_blocks_when_only_candidate_is_wrong_profile(self):
         payload, markdown = self.run_script(
@@ -96,7 +99,7 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
 """
         payload, _ = self.run_script(report)
 
-        self.assertTrue(payload["promotion_ready"])
+        self.assertFalse(payload["promotion_ready"])
         self.assertEqual(
             payload["runtime_score"],
             "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike",
