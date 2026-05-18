@@ -1,3 +1,48 @@
+# AutoFactor Candidate Strategy Replay Artifact (2026-05-18)
+
+## Goal
+
+Make hosted PM5D factor walk-forward produce the historical executable
+candidate replay artifact required before any dry-run handoff/config PR.
+
+Evidence stage: `executable_replay / CI workflow repair`.
+
+## Files / Ownership
+
+- `scripts/build_autofactor_candidate_strategy_replay.py`
+  - Owner: convert a runtime-mappable AutoFactor top bucket into the explicit
+    candidate strategy replay artifact consumed by the promotion evaluator.
+- `scripts/run_factor_walk_forward_sweep.py`
+  - Owner: build per-variant candidate replay artifacts when no external replay
+    artifact is supplied, then promote the best variant's replay artifact to
+    the hosted artifact root.
+- `tests/test_build_autofactor_candidate_strategy_replay.py`,
+  `tests/test_factor_walk_forward_sweep.py`
+  - Owner: cover builder readiness/blockers and sweep-level artifact promotion.
+- `docs/runbooks/event-ml-automl-workflow.md`,
+  `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document that the generated artifact is a pre-dry-run executable
+    strategy gate, distinct from later recorded replay/dry-run parity.
+
+## Tasks
+
+- [x] Add an AutoFactor candidate replay artifact builder for runtime-mappable
+      settlement candidates.
+- [x] Wire the hosted sweep runner to generate `candidate-strategy-replay.json`
+      before invoking the fail-closed promotion evaluator.
+- [x] Copy the best variant's replay JSON/Markdown to the root artifact.
+- [x] Add focused unit coverage for builder output and sweep promotion.
+- [x] Update research runbooks with the replay-first artifact contract.
+- [ ] Run focused validation, open PR, wait for CI, and merge.
+
+## Review
+
+- 2026-05-18: This closes the immediate CI gap after the replay-first gate:
+  hosted walk-forward no longer needs a manually pre-existing replay JSON to
+  reach the promotion evaluator. The generated artifact is explicitly marked
+  `basis=factor_walk_forward_top_bucket_aggregate`; recorded replay/dry-run
+  parity remains a separate later gate after dry-run evidence exists.
+
 # Replay-First AutoFactor Promotion Gate (2026-05-18)
 
 ## Goal

@@ -205,6 +205,17 @@ must pass historical executable replay before any dry-run handoff issue/config
 is created. Recorded replay parity remains the later dry-run/runtime parity gate
 after dry-run evidence exists.
 
+The hosted factor walk-forward sweep now builds this pre-dry-run replay artifact
+per variant when no external `candidate-strategy-replay.json` is supplied. The
+builder converts the selected runtime-mappable top bucket from
+`factor_walk_forward_v2` into `candidate-strategy-replay.json` with explicit
+event-level, one-decision-per-event, official-settlement, full-depth-entry, PnL,
+ROI, and fill-rate fields. Its `basis` is
+`factor_walk_forward_top_bucket_aggregate`; it is the historical executable
+strategy gate before dry-run, not the later recorded replay/dry-run parity
+proof. The sweep copies the best variant's `candidate-strategy-replay.json` and
+`.md` to the artifact root before the AutoFactor handoff/config PR step.
+
 For an existing Factor Walk-Forward V2 artifact, use the hosted GitHub workflow
 instead of waiting for the self-hosted research runner:
 

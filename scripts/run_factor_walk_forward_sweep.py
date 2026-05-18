@@ -175,8 +175,36 @@ def promotion_args(args: argparse.Namespace, report: Path, variant_dir: Path) ->
         "--required-strategy-profile",
         args.required_strategy_profile,
     ]
-    if args.candidate_strategy_replay_json:
-        command.extend(["--candidate-strategy-replay-json", args.candidate_strategy_replay_json])
+    replay_json = args.candidate_strategy_replay_json or str(
+        variant_dir / "candidate-strategy-replay.json"
+    )
+    command.extend(["--candidate-strategy-replay-json", replay_json])
+    for target in args.allowed_target:
+        command.extend(["--allowed-target", target])
+    return command
+
+
+def candidate_replay_args(
+    args: argparse.Namespace,
+    report: Path,
+    variant_dir: Path,
+) -> list[str]:
+    command = [
+        sys.executable,
+        args.candidate_replay_builder,
+        "--report",
+        str(report),
+        "--output-json",
+        str(variant_dir / "candidate-strategy-replay.json"),
+        "--output-md",
+        str(variant_dir / "candidate-strategy-replay.md"),
+        "--required-strategy-profile",
+        args.required_strategy_profile,
+        "--stake-usd",
+        args.stake_usd,
+        "--evidence",
+        str(report),
+    ]
     for target in args.allowed_target:
         command.extend(["--allowed-target", target])
     return command
@@ -307,6 +335,8 @@ def promote_best_variant(best: dict[str, Any] | None, output_dir: Path) -> None:
         "autofactor-factor-registry.json",
         "autofactor-strategy-handoff.json",
         "autofactor-strategy-handoff.md",
+        "candidate-strategy-replay.json",
+        "candidate-strategy-replay.md",
         "evaluator-output.json",
     ]:
         src = source / name
@@ -369,6 +399,28 @@ def run_variant(
     if result.returncode:
         return item
 
+    if not args.candidate_strategy_replay_json:
+        replay_result = subprocess.run(
+            candidate_replay_args(args, report_path, variant_dir),
+            cwd=args.cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        (variant_dir / "candidate-strategy-replay-output.json").write_text(
+            replay_result.stdout,
+            encoding="utf-8",
+        )
+        if replay_result.stderr:
+            (variant_dir / "candidate-strategy-replay-stderr.txt").write_text(
+                replay_result.stderr,
+                encoding="utf-8",
+            )
+        item["candidate_replay_exit_code"] = replay_result.returncode
+        if replay_result.returncode != 0:
+            item["status"] = "candidate_replay_failed"
+            return item
+
     eval_result = subprocess.run(
         promotion_args(args, report_path, variant_dir),
         cwd=args.cwd,
@@ -429,6 +481,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True)
     parser.add_argument("--evaluator", default="scripts/evaluate_autofactor_strategy_promotion.py")
+    parser.add_argument(
+        "--candidate-replay-builder",
+        default="scripts/build_autofactor_candidate_strategy_replay.py",
+    )
     parser.add_argument("--snapshot-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--symbols", required=True)
