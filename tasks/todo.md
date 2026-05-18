@@ -334,6 +334,32 @@ Evidence stage: `walk_forward / alpha-search CI repair`.
   `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
   and `rtk git diff --check`.
 
+# Closed-Loop Target Blocker Priority (2026-05-18)
+
+## Goal
+
+When a target-specific candidate exists, classify the next closed-loop action
+from that candidate's blockers before falling back to global handoff blockers.
+This prevents global market fillability text from masking the real next action,
+such as missing recorded replay parity for a fillable target bucket.
+
+Evidence stage: `walk_forward / alpha-search CI repair`.
+
+## Files / Ownership
+
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: prioritize target-level promotion blockers over handoff/global
+    blockers for action classification.
+- `tests/test_alpha_search_closed_loop_agent.py`
+  - Owner: cover target replay blockers taking priority over global fillability
+    handoff text.
+
+## Tasks
+
+- [x] Classify from target-level blockers when present.
+- [x] Keep handoff/global blockers as fallback when no target blocker exists.
+- [x] Add focused regression coverage.
+
 # Recorded Replay Partial-Fill Cancel Parity (2026-05-13)
 
 ## Goal
