@@ -30,8 +30,9 @@ Evidence stage: `runtime_parity / executable_replay gate`.
       one-event-one-decision, fill-rate, full-depth, and ROI blockers.
 - [x] Make promotion evaluator require `basis=runtime_market_update_replay`.
 - [x] Run full Python validation and diff check.
-- [ ] Open/merge PR and then wire the hosted search workflow to produce this
+- [x] Open/merge PR and then wire the hosted search workflow to produce this
       artifact before config PR creation.
+- [x] Add and validate the read-only GitHub Actions runtime replay workflow.
 
 ## Review
 
@@ -46,6 +47,12 @@ Evidence stage: `runtime_parity / executable_replay gate`.
   `promotion_ready=false`, `trade_count=0`, and blockers
   `trade_count_too_small`, `entry_fill_rate_too_low`, and
   `zero_runtime_orders_and_fills`.
+- 2026-05-18: PR #539 merged with all checks passing. The next slice adds
+  `.github/workflows/runtime-candidate-replay.yml`, a read-only workflow that
+  builds a CI runner, replays the candidate config on Tango recording data, and
+  uploads `candidate-strategy-replay.json`.
+- 2026-05-18: Added the read-only workflow and validated local YAML parsing,
+  full Python tests, and diff whitespace checks.
 
 # AutoFactor Runtime Replay Gate Repair (2026-05-18)
 
