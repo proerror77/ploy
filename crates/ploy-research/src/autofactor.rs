@@ -4,6 +4,7 @@ use std::fmt;
 
 use chrono::Datelike;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::factors::{pearson_ic, spearman_ic};
 use crate::factors_v2::FactorObservationV2;
@@ -109,6 +110,13 @@ impl FactorExpr {
             FactorExpr::Gate { expr, gate, min } => gate_eval(expr, gate, *min, matrix),
         }
     }
+}
+
+pub fn factor_expr_hash(expr: &FactorExpr) -> Result<String, serde_json::Error> {
+    let raw = serde_json::to_vec(expr)?;
+    let mut hasher = Sha256::new();
+    hasher.update(raw);
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1300,7 +1308,11 @@ fn deterministic_mutation_layer(
                 seed,
                 depth,
                 "full_depth_entry_gate",
-                gate(seed.expr.clone(), input("full_depth_entry_fillable_gate"), 0.5),
+                gate(
+                    seed.expr.clone(),
+                    input("full_depth_entry_fillable_gate"),
+                    0.5,
+                ),
                 "add_capacity_gate: hard-filter rows that are not full-depth entry-fillable at the configured stake; this is an execution gate, not predictive alpha.",
             );
         }
@@ -1399,7 +1411,11 @@ fn settlement_native_generated_candidates(input_names: &BTreeSet<String>) -> Vec
             push_generated(
                 &mut out,
                 format!("auto_settlement_{edge_name}_x_full_depth_entry_gate"),
-                gate(input(edge_name), input("full_depth_entry_fillable_gate"), 0.5),
+                gate(
+                    input(edge_name),
+                    input("full_depth_entry_fillable_gate"),
+                    0.5,
+                ),
                 "Settlement edge hard-filtered to rows that are full-depth entry-fillable at the configured stake; this is an execution gate, not predictive alpha.",
             );
         }
@@ -1432,7 +1448,9 @@ fn settlement_native_generated_candidates(input_names: &BTreeSet<String>) -> Vec
         ) {
             push_generated(
                 &mut out,
-                format!("auto_settlement_{edge_name}_x_near_strike_x_capacity_x_entry_price_quality"),
+                format!(
+                    "auto_settlement_{edge_name}_x_near_strike_x_capacity_x_entry_price_quality"
+                ),
                 mul(
                     mul(
                         mul(input(edge_name), input("near_strike_score")),
@@ -1467,7 +1485,9 @@ fn settlement_native_generated_candidates(input_names: &BTreeSet<String>) -> Vec
             if input_names.contains("full_depth_entry_fillable_gate") {
                 push_generated(
                     &mut out,
-                    format!("auto_settlement_{edge_name}_x_external_pressure_x_full_depth_entry_gate"),
+                    format!(
+                        "auto_settlement_{edge_name}_x_external_pressure_x_full_depth_entry_gate"
+                    ),
                     gate(
                         mul(input(edge_name), input("external_pressure")),
                         input("full_depth_entry_fillable_gate"),
@@ -2252,9 +2272,11 @@ mod tests {
     fn evaluates_domain_candidate_with_icir_gate() {
         let (matrix, labels, windows) = synthetic_matrix(24);
         let candidates = domain_seed_candidates(&matrix.input_names());
-        assert!(candidates
-            .iter()
-            .any(|item| item.name == "ofi_l5_depth_norm"));
+        assert!(
+            candidates
+                .iter()
+                .any(|item| item.name == "ofi_l5_depth_norm")
+        );
         let options = AutoFactorOptions {
             min_observations: 20,
             min_window_observations: 6,
@@ -2305,6 +2327,25 @@ mod tests {
     }
 
     #[test]
+    fn factor_expr_hash_is_stable_and_content_addressed() {
+        let base = safe_div_expr(input("ofi_l5"), FactorExpr::Const(0.01));
+        let same = safe_div_expr(input("ofi_l5"), FactorExpr::Const(0.01));
+        let changed_constant = safe_div_expr(input("ofi_l5"), FactorExpr::Const(0.02));
+        let changed_input = safe_div_expr(input("depth_top5"), FactorExpr::Const(0.01));
+
+        let base_hash = factor_expr_hash(&base).expect("base hash");
+        assert_eq!(base_hash, factor_expr_hash(&same).expect("same hash"));
+        assert_ne!(
+            base_hash,
+            factor_expr_hash(&changed_constant).expect("changed constant hash")
+        );
+        assert_ne!(
+            base_hash,
+            factor_expr_hash(&changed_input).expect("changed input hash")
+        );
+    }
+
+    #[test]
     fn mines_domain_candidates_from_v2_repricing_rows() {
         let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
         let options = AutoFactorOptions {
@@ -2322,22 +2363,30 @@ mod tests {
             .expect("repricing gap report");
         assert_eq!(repricing_gap.decision, AutoFactorDecision::Candidate);
         assert!(repricing_gap.spearman_ic > 0.95);
-        assert!(reports
-            .iter()
-            .any(|report| report.name == "poly_lag_pressure"));
-        assert!(reports
-            .iter()
-            .any(|report| report.name == "amplitude_weighted_momentum_30s_sigma"));
-        assert!(reports
-            .iter()
-            .any(|report| report.name == "amplitude_weighted_momentum_30s_vol_gap"));
-        assert!(reports
-            .iter()
-            .any(|report| report.name == "mut_spread_adjusted_external_move_pm_lag_gate"));
-        assert!(reports
-            .iter()
-            .any(|report| report.name
-                == "mut2_mut_spread_adjusted_external_move_pm_lag_gate_squashed"));
+        assert!(
+            reports
+                .iter()
+                .any(|report| report.name == "poly_lag_pressure")
+        );
+        assert!(
+            reports
+                .iter()
+                .any(|report| report.name == "amplitude_weighted_momentum_30s_sigma")
+        );
+        assert!(
+            reports
+                .iter()
+                .any(|report| report.name == "amplitude_weighted_momentum_30s_vol_gap")
+        );
+        assert!(
+            reports
+                .iter()
+                .any(|report| report.name == "mut_spread_adjusted_external_move_pm_lag_gate")
+        );
+        assert!(
+            reports.iter().any(|report| report.name
+                == "mut2_mut_spread_adjusted_external_move_pm_lag_gate_squashed")
+        );
     }
 
     #[test]
@@ -2440,14 +2489,14 @@ mod tests {
                 == "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality"
         }));
         assert!(
+            reports.iter().any(|report| report.name
+                == "mut_auto_settlement_model_full_depth_settlement_edge_capacity")
+        );
+        assert!(
             reports
                 .iter()
-                .any(|report| report.name
-                    == "mut_auto_settlement_model_full_depth_settlement_edge_capacity")
+                .any(|report| report.name.starts_with("mut2_"))
         );
-        assert!(reports
-            .iter()
-            .any(|report| report.name.starts_with("mut2_")));
     }
 
     #[test]
@@ -2553,7 +2602,7 @@ mod tests {
         };
         let prior = LlmPriorSpec {
             mutations: vec![LlmMutationSpec {
-                base_factor: "auto_settlement_full_depth_settlement_edge".to_string(),
+                base_factor: "auto_settlement_model_full_depth_settlement_edge".to_string(),
                 mutation_type: "add_feature_gate".to_string(),
                 name: Some("llm_full_depth_edge_near_strike".to_string()),
                 feature: Some("near_strike_score".to_string()),
@@ -2602,9 +2651,11 @@ mod tests {
         )
         .expect("reports");
 
-        assert!(reports
-            .iter()
-            .all(|report| !report.name.starts_with("auto_settlement_")));
+        assert!(
+            reports
+                .iter()
+                .all(|report| !report.name.starts_with("auto_settlement_"))
+        );
     }
 
     #[test]
@@ -2622,9 +2673,11 @@ mod tests {
                 .expect("reports");
 
         assert!(!reports.is_empty());
-        assert!(reports
-            .iter()
-            .all(|report| report.target.as_deref() == Some("reprice_pnl_30s")));
+        assert!(
+            reports
+                .iter()
+                .all(|report| report.target.as_deref() == Some("reprice_pnl_30s"))
+        );
 
         let formatted = format_autofactor_reports(&reports, reports.len());
         assert!(formatted.contains("reprice_pnl_30s"));

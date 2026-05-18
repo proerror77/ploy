@@ -56,6 +56,16 @@ promotion half:
   search space, typed priors, candidates, rejected expressions, tree trace,
   node metrics, search feedback, and MCTS expansion plan.
 
+FactorEvolve data-surface gates are defined in
+`docs/runbooks/factor-evolve-data-surfaces.md`. Search artifacts and research
+issues should classify data dependencies as `required_for_prediction`,
+`required_for_execution`, `optional_context`, or `missing_blocks_promotion`.
+Current first-class surfaces include Binance aggTrade / spot ticks, Polymarket
+quote ticks, Polymarket full CLOB snapshots, official settlement, and runtime
+fill evidence. Binance futures OI, funding, liquidation, basis / mark data, and
+OKX / Bybit LOB remain external-data roadmap gaps; they block promotion only
+when the candidate hypothesis depends on them.
+
 That means the repo can already do:
 
 ```text
@@ -453,6 +463,46 @@ produces a machine-readable next action and, when appropriate, a bounded typed
 prior draft using only the existing allowed mutation types. It still cannot
 guarantee profitability, does not call an external LLM, and cannot bypass
 walk-forward, promotion, replay parity, dry-run, or live approval gates.
+
+## FactorEvolve Research Manager V0
+
+The FactorEvolve Research Manager starts as a deterministic typed planning
+surface, not an LLM service. Its input contract includes latest run evidence,
+factor registry summary, rejected factor patterns, market-data health, and a
+daily research budget. Its output is a `ResearchManagerPlan` with a theme such
+as `fix_data`, `fix_runtime`, `revise_prior`, or `continue_search`.
+
+The v0 manager cannot mutate evaluator thresholds, train/test split policy,
+target labels, cost/slippage assumptions, promotion gates, or deployment
+configs. LLM participation is allowed only outside this boundary by producing a
+typed prior JSON that the Rust DSL compiler validates before CI evaluates it.
+
+The first CLI surface is:
+
+```bash
+rtk cargo run -p ploy-research --example factor_evolve_daily_plan -- \
+  <input-json> <output-json>
+```
+
+This command is plan-only evidence. It does not run searches, create PRs,
+deploy services, or resume dry-run/live strategies.
+
+The CI entrypoint for the daily loop is
+`.github/workflows/factor-evolve-daily-research.yml`. Its first version is an
+orchestrator, not a strategy mutator:
+
+```text
+typed budget and latest evidence
+  -> factor_evolve_daily_plan
+  -> optional hosted artifact search dispatch
+  -> daily plan artifact / optional tracking issue
+```
+
+`run_mode=plan_only` emits the Research Manager plan only. `run_mode=search`
+requires a retained research snapshot and dispatches the hosted artifact
+walk-forward path with handoff/config mutation disabled. `run_mode=promote_handoff`
+records that a manual handoff review is required; it does not edit strategy
+configs or touch runtime services.
 
 ## Event-Level Promotion Gate
 

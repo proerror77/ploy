@@ -28,6 +28,7 @@ ploy-trading.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true

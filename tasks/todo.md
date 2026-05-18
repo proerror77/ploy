@@ -1,3 +1,334 @@
+# FactorEvolve Research OS Task 8 - Daily Research CI Orchestrator (2026-05-18)
+
+## Goal
+
+Add a safe CI entrypoint for the FactorEvolve daily research loop so routine
+planning and hosted search dispatch can run through GitHub Actions without
+LLM-driven local orchestration.
+
+Evidence stage: `diagnostic / workflow_orchestration`.
+
+## Files / Ownership
+
+- `.github/workflows/factor-evolve-daily-research.yml`
+  - Owner: plan-only and safe hosted-search orchestration.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document the daily CI loop boundary.
+
+## Tasks
+
+- [x] Add workflow inputs for `git_ref`, `snapshot_run_id`,
+      `research_budget_json`, `run_mode`, and `create_issue`.
+- [x] Wire `factor_evolve_daily_plan` as the first typed CI planning step.
+- [x] Allow `run_mode=search` to dispatch the existing hosted artifact
+      walk-forward path with config mutation disabled.
+- [x] Keep `run_mode=promote_handoff` as a review artifact only.
+- [x] Verify YAML and forbidden command patterns.
+
+## Review
+
+- 2026-05-18: Added `.github/workflows/factor-evolve-daily-research.yml`.
+  `plan_only` emits Research Manager artifacts, `search` requires
+  `snapshot_run_id` and dispatches `factor-walk-forward-v2-hosted-artifact.yml`
+  with safe options, and `promote_handoff` writes a review-required artifact
+  instead of changing configs or touching runtime services.
+- 2026-05-18: Validation passed:
+  `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/factor-evolve-daily-research.yml"); puts "ok"'`,
+  `rg -n "deploy|systemctl|ployctl deployments resume|create_config_pr" .github/workflows/factor-evolve-daily-research.yml || true`
+  with no matches, and `rtk git diff --check`. `actionlint` is not installed in
+  this local environment.
+
+# FactorEvolve Research OS Task 7 - External Data Surface Roadmap Gates (2026-05-18)
+
+## Goal
+
+Define FactorEvolve data-surface gates so missing OI, funding, liquidation,
+basis, OKX, or Bybit data cannot be silently treated as present, while avoiding
+blocking unrelated PM5D hypotheses that do not depend on those surfaces.
+
+Evidence stage: `diagnostic / data_surface_contract`.
+
+## Files / Ownership
+
+- `docs/runbooks/factor-evolve-data-surfaces.md`
+  - Owner: current surface status, taxonomy, and fail-closed rules.
+- `docs/PROJECT_SEMANTICS.md`
+  - Owner: repository-level semantic contract for data-surface categories.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: CI/CD alpha-search reference to the FactorEvolve surface gate.
+
+## Tasks
+
+- [x] Document current present and missing surfaces.
+- [x] Add taxonomy for `required_for_prediction`,
+      `required_for_execution`, `optional_context`, and
+      `missing_blocks_promotion`.
+- [x] State fail-closed promotion rules for missing required surfaces.
+- [x] Verify docs and diff hygiene.
+
+## Review
+
+- 2026-05-18: Added `docs/runbooks/factor-evolve-data-surfaces.md` with a
+  current surface table covering Binance aggTrade, partial LOB, futures local
+  book, Polymarket quotes, full CLOB snapshots, official settlement,
+  dry-run/runtime fills, OI, funding, liquidation, basis, OKX, and Bybit.
+- 2026-05-18: `docs/PROJECT_SEMANTICS.md` now names FactorEvolve
+  data-surface categories and makes missing external surfaces promotion blockers
+  only when the hypothesis depends on them.
+- 2026-05-18: Validation passed:
+  `rg -n "FactorEvolve|required_for_prediction|required_for_execution|missing_blocks_promotion" docs/PROJECT_SEMANTICS.md docs/ALPHA_FACTOR_SEARCH_CICD.md docs/runbooks/factor-evolve-data-surfaces.md`
+  and `rtk git diff --check`.
+
+# FactorEvolve Research OS Task 6 - Portfolio Builder V0 (2026-05-18)
+
+## Goal
+
+Add a first-class portfolio builder contract for FactorEvolve so selected alpha
+factors can be composed with de-correlation, fillability, turnover, and capacity
+penalties before any dry-run promotion discussion.
+
+Evidence stage: `walk_forward / portfolio_foundation`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/research_os/portfolio.rs`
+  - Owner: portfolio input/output contracts and greedy selection logic.
+- `crates/ploy-research/examples/factor_portfolio_builder.rs`
+  - Owner: CLI surface for portfolio artifact generation.
+- `crates/ploy-research/src/research_os/mod.rs`
+  - Owner: public module export.
+
+## Tasks
+
+- [x] Define input contract for factor metrics and pairwise correlations.
+- [x] Implement greedy de-correlation selection by reward.
+- [x] Reject high-correlation, low-fill-rate, and non-positive marginal-score
+      factors.
+- [x] Emit selected factors, rejected factors, aggregate reward, max pairwise
+      correlation, and promotion decision.
+- [x] Run Rust, CLI smoke, and diff validation.
+
+## Review
+
+- 2026-05-18: Added `FactorPortfolioInput`, `FactorPortfolioCandidate`,
+  `PairwiseCorrelation`, and `FactorPortfolioOutput`. The v0 selector sorts by
+  reward and rejects candidates with `max_corr_existing >= 0.70`,
+  `top_bucket_full_depth_entry_fill_rate < 0.30`, or non-positive marginal
+  score after `turnover_proxy * 0.10 + capacity_penalty`.
+- 2026-05-18: Promotion decisions are deliberately conservative:
+  `portfolio_candidate` requires at least two selected factors; high-correlation
+  rejection produces `revise`; otherwise the loop remains `continue`.
+- 2026-05-18: Validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-portfolio /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research portfolio --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-portfolio /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research --example factor_portfolio_builder`,
+  a CLI smoke run that emitted two selected factors and
+  `promotion_decision=portfolio_candidate`, and `rtk git diff --check`.
+
+# FactorEvolve Research OS Task 5 - Running Dry-Run Candidate Report Rows (2026-05-18)
+
+## Goal
+
+Make dry-run reports explicitly show simulated deployments that are running but
+have no recent event track-record rows, so a current candidate is not hidden
+behind stale legacy strategy summaries.
+
+Evidence stage: `dry_run_candidate / observability_foundation`.
+
+## Files / Ownership
+
+- `scripts/report_dryrun_summary.py`
+  - Owner: merge deployment config/status records into dry-run report strategy
+    rows.
+- `scripts/check_dryrun_report_contract.py`
+  - Owner: fail the report contract when running simulated deployments are not
+    represented as strategy rows.
+- `tests/test_dryrun_report_running_candidate.py`
+  - Owner: regression coverage for running no-trade candidate visibility.
+
+## Tasks
+
+- [x] Add deployment config/status loading to dry-run report generation.
+- [x] Add explicit zero-activity strategy rows for running simulated
+      deployments with no event track record.
+- [x] Add diagnostics-only rows when orders exist but event-track rows are
+      missing.
+- [x] Harden the report contract checker for running deployment visibility.
+- [x] Run Python unit, compile, and diff validation.
+
+## Review
+
+- 2026-05-18: `report_dryrun_summary.py` now reads deployment records from
+  `config/deployments/*.json`, `PLOY_DEPLOYMENTS_FILE`, and
+  `PLOY_DEPLOYMENT_STATUS_FILE`. It includes these records under
+  top-level `deployments` and creates `activity_status=running_no_recent_trades`
+  strategy rows when a simulated deployment is running but has no track-record
+  events.
+- 2026-05-18: The report also creates
+  `activity_status=orders_without_event_track_record` rows when order
+  diagnostics exist without event-track rows, making accounting gaps visible
+  instead of silently dropping the deployment from `strategies`.
+- 2026-05-18: Validation passed:
+  `python3 -m unittest tests.test_dryrun_report_running_candidate tests.test_dryrun_report_contracts`,
+  `python3 -m py_compile scripts/report_dryrun_summary.py scripts/check_dryrun_report_contract.py tests/test_dryrun_report_running_candidate.py tests/test_dryrun_report_contracts.py`,
+  and `rtk git diff --check`.
+
+# FactorEvolve Research OS Task 4 - Typed Research Manager Plan Surface (2026-05-18)
+
+## Goal
+
+Add the first deterministic FactorEvolve Research Manager boundary so CI can
+choose the next research action from typed evidence without letting LLM output
+mutate evaluator thresholds, splits, costs, promotion gates, or deployments.
+
+Evidence stage: `diagnostic / research_os_foundation`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/research_os/manager.rs`
+  - Owner: typed input/output contracts and fail-closed planning rules.
+- `crates/ploy-research/examples/factor_evolve_daily_plan.rs`
+  - Owner: CLI surface for plan-only research evidence.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document the deterministic v0 manager boundary.
+
+## Tasks
+
+- [x] Add typed Research Manager input/output contracts.
+- [x] Implement deterministic planning themes for data repair, runtime repair,
+      prior revision, and continued MCTS search.
+- [x] Add evidence-stage validation and focused tests.
+- [x] Add a plan-only CLI example and documentation.
+- [x] Run Rust, CLI smoke, and diff validation.
+
+## Review
+
+- 2026-05-18: Added `ResearchManagerInput`, `ResearchBudget`, and
+  `ResearchManagerPlan`. The v0 planner is deterministic: unhealthy market data
+  wins first, ready handoffs without replay parity become `fix_runtime`,
+  stagnation/rejections become `revise_prior`, and selected MCTS nodes become
+  `continue_search`.
+- 2026-05-18: The planner treats numeric `stale_source_count > 0` as unhealthy
+  data, so health summaries from `ployd` cannot slip through because they are
+  not booleans.
+- 2026-05-18: Validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-manager /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research research_os --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-manager /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research --example factor_evolve_daily_plan`,
+  a CLI smoke run that emitted `theme=continue_search`, `candidate_count=12`,
+  `evidence_stage=walk_forward`, and `rtk git diff --check`.
+
+# FactorEvolve Research OS Task 3 - Registry-Compatible Alpha Search Artifacts (2026-05-18)
+
+## Goal
+
+Emit factor identity and metric previews from alpha-search artifacts so later
+Research Manager, registry, and trace layers can consume stable hashes instead
+of parsing report text.
+
+Evidence stage: `factor_attribution / research_os_foundation`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: stable `FactorExpr` hash helper and regression coverage.
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: `factor-registry-preview.json` artifact writer.
+
+## Tasks
+
+- [x] Add stable factor expression hash helper and tests.
+- [x] Emit `factor-registry-preview.json` from alpha-search artifact bundles.
+- [x] Verify hosted artifact workflow already uploads the full alpha-search
+      directory, so no YAML change is required.
+- [x] Run focused Rust/YAML/diff validation.
+
+## Review
+
+- 2026-05-18: Added `factor_expr_hash` using SHA-256 over serialized
+  `FactorExpr`, plus tests proving identical expressions hash the same and
+  changed constants/inputs change the hash.
+- 2026-05-18: Alpha-search now writes `factor-registry-preview.json` with
+  `factor_name`, `target`, `dsl_hash`, `ast_json`, registry status, metrics,
+  and blockers. Existing workflow artifact upload already copies the whole
+  `alpha-search/` directory.
+- 2026-05-18: Updated a drifted typed LLM-prior test from the old quote-implied
+  settlement edge to the current model-based settlement edge family. Validation
+  passed with split Cargo filters:
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-alpha /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research autofactor --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-alpha /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research alpha_search --lib`,
+  workflow YAML parse for `factor-walk-forward-v2-hosted-artifact.yml`, and
+  `rtk git diff --check`.
+
+# FactorEvolve Research OS Task 2 - Binance Futures Local Orderbook Contract (2026-05-18)
+
+## Goal
+
+Add a sequence-correct Binance futures local orderbook research contract so
+FactorEvolve can distinguish partial-depth snapshot diagnostics from
+promotion-grade local book evidence.
+
+Evidence stage: `diagnostic / data_surface_contract`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/orderbook/binance_futures.rs`
+  - Owner: in-memory book and snapshot/diff sequence validation.
+- `docs/runbooks/binance-futures-local-orderbook.md`
+  - Owner: research semantics for partial LOB vs sequence-correct local book.
+
+## Tasks
+
+- [x] Add local book module boundary.
+- [x] Implement snapshot + diff-depth validator.
+- [x] Add tests for first diff bridge, continuous diff, and out-of-order gap.
+- [x] Document that current partial depth is not queue/passive-fill proof.
+- [x] Run focused Rust and diff validation.
+
+## Review
+
+- 2026-05-18: Added `LocalBook`, `BookSnapshot`, `DepthDiff`, and typed
+  `LocalBookError` contracts. Validation rejects first-diff mismatch and later
+  sequence gaps, applies level replacement/removal, and keeps bids/asks sorted.
+- 2026-05-18: Validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-book /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research orderbook --lib`
+  and `rtk git diff --check`.
+
+# FactorEvolve Research OS Task 1 - Registry And Trace Contracts (2026-05-18)
+
+## Goal
+
+Implement the first FactorEvolve Crypto re-architecture slice: durable factor
+registry, factor evaluation, and append-only experiment trace contracts.
+
+Evidence stage: `diagnostic / research_os_foundation`.
+
+## Files / Ownership
+
+- `migrations/042_factor_research_os_registry.sql`
+  - Owner: durable SQL schema for registry, evaluations, and append-only trace.
+- `crates/ploy-research/src/research_os/`
+  - Owner: Rust serialization/hash-chain contracts.
+- `tests/test_factor_research_os_registry.py`
+  - Owner: static migration contract tests.
+
+## Tasks
+
+- [x] Add failing migration contract test.
+- [x] Add migration `042_factor_research_os_registry.sql`.
+- [x] Add Rust `research_os::{registry, trace}` contracts.
+- [x] Add direct `sha2` dependency for `trace_hash`.
+- [x] Run Python/Rust/diff validation.
+
+## Review
+
+- 2026-05-18: Added `factor_registry`, `factor_evaluations`, and
+  `experiment_trace` schema contracts. `experiment_trace` is protected by
+  update/delete triggers that raise `experiment_trace is append-only`.
+- 2026-05-18: Added `FactorLifecycleStatus`, `FactorRegistryEntry`, and
+  deterministic `trace_hash` helper. Validation passed:
+  `python3 -m unittest tests.test_factor_research_os_registry`,
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-registry /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research research_os --lib`,
+  and `rtk git diff --check`.
+
 # Runtime Candidate Replay Entry Accounting Repair (2026-05-18)
 
 ## Goal

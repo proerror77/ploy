@@ -4,7 +4,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::autofactor::{AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr};
+use crate::autofactor::{
+    AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr, factor_expr_hash,
+};
 
 const ALPHA_SEARCH_ARTIFACT_VERSION: &str = "alpha_search_artifacts_v1";
 
@@ -199,6 +201,17 @@ struct SearchFeedbackArtifact {
 }
 
 #[derive(Debug, Serialize)]
+struct FactorRegistryPreviewRow {
+    factor_name: String,
+    target: Option<String>,
+    dsl_hash: String,
+    ast_json: serde_json::Value,
+    status: &'static str,
+    metrics: serde_json::Value,
+    blockers: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct MctsExpansionPlan {
     version: &'static str,
     mode: &'static str,
@@ -354,6 +367,10 @@ pub fn write_alpha_search_artifacts_with_state(
         .map(|(idx, report)| node_metric(idx, report))
         .collect::<Vec<_>>();
     write_json(&output_dir.join("node-metrics.json"), &node_metrics)?;
+    write_json(
+        &output_dir.join("factor-registry-preview.json"),
+        &factor_registry_preview_rows(reports, &node_metrics)?,
+    )?;
     let mcts_state = mcts_search_state(target, &node_metrics, prior_state);
     write_json(&output_dir.join("mcts-state.json"), &mcts_state)?;
     write_json(
@@ -421,6 +438,43 @@ pub fn write_alpha_search_artifacts_with_state(
     })
 }
 
+fn factor_registry_preview_rows(
+    reports: &[AutoFactorReport],
+    node_metrics: &[NodeMetric],
+) -> Result<Vec<FactorRegistryPreviewRow>, AlphaSearchArtifactError> {
+    reports
+        .iter()
+        .zip(node_metrics.iter())
+        .map(|(report, metric)| {
+            Ok(FactorRegistryPreviewRow {
+                factor_name: report.name.clone(),
+                target: report.target.clone(),
+                dsl_hash: factor_expr_hash(&report.expr)?,
+                ast_json: serde_json::to_value(&report.expr)?,
+                status: registry_status(report.decision),
+                metrics: serde_json::to_value(metric)?,
+                blockers: registry_blockers(report),
+            })
+        })
+        .collect()
+}
+
+fn registry_status(decision: AutoFactorDecision) -> &'static str {
+    match decision {
+        AutoFactorDecision::Candidate => "candidate",
+        AutoFactorDecision::Watchlist => "watchlist",
+        AutoFactorDecision::Reject => "rejected",
+    }
+}
+
+fn registry_blockers(report: &AutoFactorReport) -> Vec<String> {
+    if report.decision == AutoFactorDecision::Candidate {
+        Vec::new()
+    } else {
+        vec![report.reason.clone()]
+    }
+}
+
 fn write_json(path: &Path, value: &impl Serialize) -> Result<(), AlphaSearchArtifactError> {
     let raw = serde_json::to_string_pretty(value)?;
     std::fs::write(path, raw)?;
@@ -434,7 +488,11 @@ fn default_hypotheses(target: &str) -> Vec<PriorHypothesis> {
                 id: "settlement_edge_after_execution_cost",
                 hypothesis: "Settlement probability edge is valuable only after full-depth executable entry cost and PM fee are deducted.",
                 expected_mechanism: "True q minus sweep price should rank event-side decisions when depth and quote freshness are adequate.",
-                required_surfaces: vec!["polymarket_full_clob_depth", "official_settlement", "probability_state"],
+                required_surfaces: vec![
+                    "polymarket_full_clob_depth",
+                    "official_settlement",
+                    "probability_state",
+                ],
             },
             PriorHypothesis {
                 id: "capacity_and_near_strike_gate",
@@ -775,11 +833,7 @@ fn normalized_positive(value: f64) -> f64 {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() {
-        value
-    } else {
-        0.0
-    }
+    if value.is_finite() { value } else { 0.0 }
 }
 
 #[cfg(test)]
@@ -866,18 +920,34 @@ mod tests {
         )
         .expect("write artifacts");
         assert_eq!(summary.candidate_count, 1);
-        assert!(tmp
-            .join("full_depth_settlement_executable_pnl/search-space.json")
-            .exists());
-        assert!(tmp
-            .join("full_depth_settlement_executable_pnl/tree-trace.json")
-            .exists());
-        assert!(tmp
-            .join("full_depth_settlement_executable_pnl/mcts-expansion-plan.json")
-            .exists());
-        assert!(tmp
-            .join("full_depth_settlement_executable_pnl/mcts-state.json")
-            .exists());
+        assert!(
+            tmp.join("full_depth_settlement_executable_pnl/search-space.json")
+                .exists()
+        );
+        assert!(
+            tmp.join("full_depth_settlement_executable_pnl/tree-trace.json")
+                .exists()
+        );
+        assert!(
+            tmp.join("full_depth_settlement_executable_pnl/mcts-expansion-plan.json")
+                .exists()
+        );
+        assert!(
+            tmp.join("full_depth_settlement_executable_pnl/mcts-state.json")
+                .exists()
+        );
+        let registry_preview =
+            tmp.join("full_depth_settlement_executable_pnl/factor-registry-preview.json");
+        assert!(registry_preview.exists());
+        let rows: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(registry_preview).expect("read preview"))
+                .expect("preview json");
+        assert_eq!(
+            rows[0]["factor_name"],
+            "auto_settlement_conservative_settlement_edge"
+        );
+        assert_eq!(rows[0]["status"], "candidate");
+        assert!(rows[0]["dsl_hash"].as_str().expect("dsl hash").len() >= 32);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

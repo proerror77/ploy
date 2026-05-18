@@ -27,6 +27,28 @@ def nested_value(payload: dict, path: str):
     return value
 
 
+def deployment_id(record: dict) -> str:
+    return str(record.get("deployment_id") or record.get("id") or "")
+
+
+def state(value) -> str:
+    return value.lower() if isinstance(value, str) else ""
+
+
+def running_simulated_deployment_ids(payload: dict) -> set[str]:
+    deployment_ids = set()
+    for deployment in payload.get("deployments") or []:
+        if not isinstance(deployment, dict):
+            continue
+        dep_id = deployment_id(deployment)
+        runtime_mode = state(deployment.get("runtime_mode"))
+        is_simulated = runtime_mode in {"dry_run", "dryrun", "paper"} or dep_id.endswith((".dryrun", ".paper"))
+        is_running = state(deployment.get("desired_state")) == "running" or state(deployment.get("observed_state")) == "running"
+        if dep_id and is_simulated and is_running:
+            deployment_ids.add(dep_id)
+    return deployment_ids
+
+
 def main() -> int:
     payload = json.load(sys.stdin)
     failures = {
@@ -50,6 +72,18 @@ def main() -> int:
             if basis != "strategy_runtime_orders"
         }
     )
+
+    strategy_deployment_ids = {
+        strategy.get("deployment_id")
+        for strategy in payload.get("strategies") or []
+        if isinstance(strategy, dict) and strategy.get("deployment_id")
+    }
+    for dep_id in sorted(running_simulated_deployment_ids(payload) - strategy_deployment_ids):
+        failures[f"strategies[{dep_id}]"] = {
+            "expected": "running deployment represented as a strategy row",
+            "actual": "missing",
+        }
+
     if failures:
         print(json.dumps({"dry_run_report_contract_failures": failures}, sort_keys=True), file=sys.stderr)
         return 1
