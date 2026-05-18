@@ -22,6 +22,12 @@ DEFAULT_ALLOWED_TARGETS = {
     "tradeable_full_depth_settlement_pnl",
 }
 
+FORMULA_RUNTIME_MAPPED_NAMES = {
+    "amplitude_weighted_momentum_30s_sigma",
+    "mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
+    "mut_spread_adjusted_external_move_full_depth_entry_gate",
+}
+
 
 def parse_float(raw: str, default: float = float("nan")) -> float:
     try:
@@ -82,11 +88,7 @@ def runtime_mapping(name: str) -> dict[str, str]:
                 else name
             ),
         }
-    if (
-        name.startswith("auto_settlement_")
-        or name.startswith("mut_")
-        or name == "amplitude_weighted_momentum_30s_sigma"
-    ):
+    if name.startswith("auto_settlement_") or name in FORMULA_RUNTIME_MAPPED_NAMES:
         return {
             "strategy_profile": "settlement_probability",
             "runtime_score": f"autofactor_formula:{name}",
