@@ -106,7 +106,9 @@ and passes the relevant gates:
 - executable price and fillability assumptions are conservative
 - settlement or exit label matches the intended strategy lane
 - train/test or walk-forward split prevents leakage
-- replay/dry-run parity is present for runtime handoff
+- historical executable replay is present before dry-run handoff
+- replay/dry-run parity is present after dry-run evidence exists and before
+  live promotion
 - runtime scorer/config mapping is explicit
 - risk, stake, kill switch, and daily loss limits are stated
 - caveats and next decision are recorded

@@ -3154,13 +3154,16 @@ pub fn build_settlement_probability_promotion_gate_report(
             if options.replay_parity_ready {
                 "recorded replay parity marked ready by caller".to_string()
             } else {
-                "blocked: no recorded replay parity artifact was supplied to this report"
+                "post-dry-run gate pending: no recorded replay parity artifact was supplied to this report"
                     .to_string()
             }
         }),
     });
 
-    let ready_for_dry_run_handoff = gates.iter().all(|gate| gate.passed);
+    let ready_for_dry_run_handoff = gates
+        .iter()
+        .filter(|gate| gate.gate != "recorded_replay_parity")
+        .all(|gate| gate.passed);
     SettlementProbabilityPromotionGateReport {
         options,
         ready_for_dry_run_handoff,
@@ -10238,7 +10241,7 @@ mod tests {
     }
 
     #[test]
-    fn settlement_probability_promotion_gate_blocks_without_replay_parity() {
+    fn settlement_probability_promotion_gate_tracks_pending_post_dryrun_replay_parity() {
         let probability = SettlementProbabilityReport {
             options: SettlementProbabilityReportOptions::default(),
             baselines: vec![SettlementProbabilityBaselineRow {
@@ -10341,23 +10344,25 @@ mod tests {
             }],
         };
 
-        let blocked = build_settlement_probability_promotion_gate_report(
+        let pending_parity = build_settlement_probability_promotion_gate_report(
             &probability,
             &walk_forward,
             &execution,
             &execution,
             SettlementProbabilityPromotionGateOptions {
-                include_deribit: true,
+                include_deribit: false,
                 data_audit_status: Some("ok".to_string()),
                 replay_parity_ready: false,
                 ..Default::default()
             },
         );
-        assert!(!blocked.ready_for_dry_run_handoff);
-        assert!(blocked
+        assert!(pending_parity.ready_for_dry_run_handoff);
+        assert!(pending_parity
             .gates
             .iter()
-            .any(|gate| gate.gate == "recorded_replay_parity" && !gate.passed));
+            .any(|gate| gate.gate == "recorded_replay_parity"
+                && !gate.passed
+                && gate.evidence.contains("post-dry-run gate pending")));
 
         let ready = build_settlement_probability_promotion_gate_report(
             &probability,
@@ -10422,7 +10427,7 @@ mod tests {
                 && gate.evidence.contains("require_deribit=true include_deribit=false")
         }));
 
-        let text = format_settlement_probability_promotion_gate_report(&blocked);
+        let text = format_settlement_probability_promotion_gate_report(&deribit_required);
         assert!(text.contains("Settlement Probability PRD Promotion Gate"));
         assert!(text.contains("ready_for_dry_run_handoff=false"));
     }

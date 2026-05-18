@@ -1,3 +1,47 @@
+# Pre-Dry-Run Recorded Parity Gate Repair (2026-05-18)
+
+## Goal
+
+Keep recorded replay/dry-run parity in the correct stage: after dry-run
+runtime evidence exists, not before a historically replayed candidate may enter
+dry-run.
+
+Evidence stage: `promotion gate ordering / executable_replay to dry-run`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/factors_v2.rs`
+  - Owner: make `ready_for_dry_run_handoff` ignore the post-dry-run recorded
+    parity advisory row.
+- `scripts/evaluate_autofactor_strategy_promotion.py`,
+  `scripts/run_settlement_probability_prd_gate.py`
+  - Owner: do not turn the recorded parity advisory row into a pre-dry-run
+    global blocker.
+- `docs/PROJECT_SEMANTICS.md`,
+  `docs/runbooks/event-ml-automl-workflow.md`,
+  `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document historical executable replay before dry-run and recorded
+    replay/dry-run parity after dry-run.
+- `tests/test_autofactor_strategy_promotion.py`
+  - Owner: cover that recorded parity no longer blocks the pre-dry-run
+    promotion parser.
+
+## Tasks
+
+- [x] Diagnose old hosted run blocker as premature `recorded_replay_parity`.
+- [x] Keep the report row for traceability but remove it from dry-run handoff
+      readiness.
+- [x] Update Python promotion parsers to treat recorded parity as post-dry-run.
+- [x] Update docs and focused tests.
+- [ ] Run validation, open PR, wait for CI, and merge.
+
+## Review
+
+- 2026-05-18: The previous gate ordering still effectively required dry-run
+  runtime parity before dry-run existed. That made the loop circular. The fixed
+  order is historical executable replay -> dry-run -> recorded replay/dry-run
+  parity -> live/risk scaling.
+
 # AutoFactor Candidate Strategy Replay Artifact (2026-05-18)
 
 ## Goal
