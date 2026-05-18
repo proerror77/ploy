@@ -487,6 +487,23 @@ rtk cargo run -p ploy-research --example factor_evolve_daily_plan -- \
 This command is plan-only evidence. It does not run searches, create PRs,
 deploy services, or resume dry-run/live strategies.
 
+The CI entrypoint for the daily loop is
+`.github/workflows/factor-evolve-daily-research.yml`. Its first version is an
+orchestrator, not a strategy mutator:
+
+```text
+typed budget and latest evidence
+  -> factor_evolve_daily_plan
+  -> optional hosted artifact search dispatch
+  -> daily plan artifact / optional tracking issue
+```
+
+`run_mode=plan_only` emits the Research Manager plan only. `run_mode=search`
+requires a retained research snapshot and dispatches the hosted artifact
+walk-forward path with handoff/config mutation disabled. `run_mode=promote_handoff`
+records that a manual handoff review is required; it does not edit strategy
+configs or touch runtime services.
+
 ## Event-Level Promotion Gate
 
 PM5D settlement strategies are event-rooted binary options. A deployable

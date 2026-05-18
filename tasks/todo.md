@@ -1,3 +1,43 @@
+# FactorEvolve Research OS Task 8 - Daily Research CI Orchestrator (2026-05-18)
+
+## Goal
+
+Add a safe CI entrypoint for the FactorEvolve daily research loop so routine
+planning and hosted search dispatch can run through GitHub Actions without
+LLM-driven local orchestration.
+
+Evidence stage: `diagnostic / workflow_orchestration`.
+
+## Files / Ownership
+
+- `.github/workflows/factor-evolve-daily-research.yml`
+  - Owner: plan-only and safe hosted-search orchestration.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document the daily CI loop boundary.
+
+## Tasks
+
+- [x] Add workflow inputs for `git_ref`, `snapshot_run_id`,
+      `research_budget_json`, `run_mode`, and `create_issue`.
+- [x] Wire `factor_evolve_daily_plan` as the first typed CI planning step.
+- [x] Allow `run_mode=search` to dispatch the existing hosted artifact
+      walk-forward path with config mutation disabled.
+- [x] Keep `run_mode=promote_handoff` as a review artifact only.
+- [x] Verify YAML and forbidden command patterns.
+
+## Review
+
+- 2026-05-18: Added `.github/workflows/factor-evolve-daily-research.yml`.
+  `plan_only` emits Research Manager artifacts, `search` requires
+  `snapshot_run_id` and dispatches `factor-walk-forward-v2-hosted-artifact.yml`
+  with safe options, and `promote_handoff` writes a review-required artifact
+  instead of changing configs or touching runtime services.
+- 2026-05-18: Validation passed:
+  `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/factor-evolve-daily-research.yml"); puts "ok"'`,
+  `rg -n "deploy|systemctl|ployctl deployments resume|create_config_pr" .github/workflows/factor-evolve-daily-research.yml || true`
+  with no matches, and `rtk git diff --check`. `actionlint` is not installed in
+  this local environment.
+
 # FactorEvolve Research OS Task 7 - External Data Surface Roadmap Gates (2026-05-18)
 
 ## Goal
