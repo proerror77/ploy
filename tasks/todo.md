@@ -1,3 +1,42 @@
+# PM5D Settlement AutoFactor Side Selection (2026-05-18)
+
+## Goal
+
+Stop settlement-probability AutoFactor dry-run candidates from being silently
+filtered by the legacy CEX-only direction gate before executable UP/DOWN
+settlement edge is evaluated.
+
+Evidence stage: `dry_run_candidate / runtime_parity repair`.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: settlement AutoFactor runtime side selection and tests.
+
+## Tasks
+
+- [x] Use runtime diagnostics to identify `skip_direction_score` as a major
+      zero-intent blocker.
+- [x] Select settlement AutoFactor UP/DOWN side by executable settlement edge
+      before applying formula/depth gates.
+- [x] Add regression coverage for bypassing the legacy direction gate.
+- [x] Run focused Rust validation.
+- [ ] Open/merge PR and deploy from `main`.
+- [ ] Re-run recording replay diagnostics and then recorded replay parity.
+
+## Review
+
+- 2026-05-18: Post-PR #535 diagnostics on the active recording showed
+  `entry_evaluations=12`, `candidate_events=22`, and zero intents. The
+  dominant blockers were `skip_direction_score`, `skip_edge_score`, and
+  `skip_no_pm_ask`; the first blocker proved the settlement AutoFactor runtime
+  path was still gated by legacy directional alpha before settlement edge was
+  evaluated.
+- 2026-05-18: Focused validation passed:
+  `rtk cargo test --locked -p ploy-strategy-bundles settlement_autofactor --lib`,
+  `rtk cargo check --locked -p ploy-strategy-bundles`, and
+  `rtk git diff --check`.
+
 # PM5D Runtime Diagnostics Output (2026-05-18)
 
 ## Goal

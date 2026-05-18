@@ -1057,6 +1057,45 @@ impl ThreeLayerStrategy {
         Some(if betting_up { fair_up } else { 1.0 - fair_up })
     }
 
+    fn settlement_autofactor_best_direction(
+        &self,
+        event: &EventWindow,
+        now: DateTime<Utc>,
+    ) -> Option<(f64, f64, f64)> {
+        [true, false]
+            .into_iter()
+            .filter_map(|betting_up| {
+                let token_id = if betting_up {
+                    event.up_token.as_ref()
+                } else {
+                    event.down_token.as_ref()
+                };
+                let quote = self.quotes.get(token_id)?;
+                let ask = quote.ask.and_then(|price| price.to_f64())?;
+                if ask < self.config.min_entry_price || ask > self.config.max_entry_price {
+                    return None;
+                }
+                let side_probability = self.runtime_side_fair_probability(event, betting_up, now)?;
+                let edge = three_layer_model::expected_value_per_share(side_probability, ask);
+                if !edge.is_finite() {
+                    return None;
+                }
+                let direction_sign = if betting_up { 1.0 } else { -1.0 };
+                let direction_score =
+                    three_layer_model::threshold_score(side_probability, 0.50, 0.25, false)
+                        .clamp(-0.50, 1.0);
+                Some((edge, direction_sign, side_probability, direction_score))
+            })
+            .max_by(|left, right| {
+                left.0
+                    .partial_cmp(&right.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(_, direction_sign, side_probability, direction_score)| {
+                (direction_sign, side_probability, direction_score)
+            })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn event_ml_feature_values(
         &self,
@@ -1438,16 +1477,33 @@ impl ThreeLayerStrategy {
                 continue;
             }
 
-            // Layer 1: Direction score
-            let Some((direction_sign, effective_p, direction_score)) = evaluate_direction_score(
-                distance_over_sigma,
-                sigma_h,
-                cum_mprice_drift_5m,
-                drift_30s,
-                regime,
-                &self.config,
-            ) else {
-                self.bump("skip_direction_score");
+            let runtime_score = self.config.autofactor_runtime_score.as_deref();
+            let uses_settlement_autofactor = runtime_score
+                .map(is_settlement_autofactor_runtime_score)
+                .unwrap_or(false);
+
+            // Layer 1: Direction score. Settlement AutoFactor profiles select
+            // the executable UP/DOWN side by settlement edge, not by the
+            // legacy CEX-only direction gate.
+            let Some((direction_sign, effective_p, direction_score)) =
+                (if uses_settlement_autofactor {
+                    self.settlement_autofactor_best_direction(event, now)
+                } else {
+                    evaluate_direction_score(
+                        distance_over_sigma,
+                        sigma_h,
+                        cum_mprice_drift_5m,
+                        drift_30s,
+                        regime,
+                        &self.config,
+                    )
+                })
+            else {
+                if uses_settlement_autofactor {
+                    self.bump("skip_settlement_side_score");
+                } else {
+                    self.bump("skip_direction_score");
+                }
                 continue;
             };
 
@@ -1534,11 +1590,7 @@ impl ThreeLayerStrategy {
                 }
             }
 
-            let runtime_score = self.config.autofactor_runtime_score.as_deref();
-            let settlement_formula_side_probability = if runtime_score
-                .map(is_settlement_autofactor_runtime_score)
-                .unwrap_or(false)
-            {
+            let settlement_formula_side_probability = if uses_settlement_autofactor {
                 let Some(side_probability) =
                     self.runtime_side_fair_probability(event, betting_up, now)
                 else {
@@ -4323,6 +4375,72 @@ mod tests {
             }
             other => panic!("expected one settlement AutoFactor entry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn settlement_autofactor_bypasses_legacy_direction_gate_and_selects_edge_side() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::SettlementProbability;
+        config.min_direction_prob = 0.99;
+        config.min_distance_over_sigma = 10.0;
+        config.min_reward_risk = 0.0;
+        config.autofactor_runtime_score =
+            Some("autofactor_formula:auto_settlement_full_depth_settlement_edge".to_string());
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-up"),
+                bid: Some(dec!(0.49)),
+                ask: Some(dec!(0.50)),
+                bid_size: Some(dec!(200)),
+                ask_size: Some(dec!(200)),
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-down"),
+                bid: Some(dec!(0.29)),
+                ask: Some(dec!(0.30)),
+                bid_size: Some(dec!(200)),
+                ask_size: Some(dec!(200)),
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert!(
+            matches!(decisions.as_slice(), [StrategyDecision::Enter { .. }]),
+            "settlement AutoFactor should evaluate executable edge even when legacy direction gate would reject; decisions={decisions:?} diagnostics={diagnostics:?}"
+        );
+        assert_eq!(diagnostics.get("skip_direction_score"), None);
     }
 
     #[test]
