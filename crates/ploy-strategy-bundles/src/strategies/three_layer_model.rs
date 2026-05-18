@@ -129,31 +129,11 @@ pub fn auto_settlement_formula_score(
     let name = runtime_score
         .strip_prefix("autofactor_formula:")
         .unwrap_or(runtime_score);
-    if let Some(base_name) = name.strip_suffix("_full_depth_entry_gate") {
-        if !inputs.entry_capacity_ratio.is_finite() || inputs.entry_capacity_ratio < 1.0 {
-            return None;
-        }
-        let base_name = base_name.strip_prefix("mut_").unwrap_or(base_name);
-        if base_name == "amplitude_weighted_momentum_30s_sigma" {
-            if !inputs.drift_30s.is_finite()
-                || !inputs.direction_sign.is_finite()
-                || !inputs.sigma_horizon.is_finite()
-            {
-                return None;
-            }
-            let side_drift = inputs.drift_30s * inputs.direction_sign;
-            let score = side_drift * inputs.sigma_horizon.abs().ln_1p();
-            return score.is_finite().then_some(score);
-        }
-        if base_name == "spread_adjusted_external_move" {
-            let score = spread_adjusted_external_move_score(
-                inputs.drift_30s * inputs.direction_sign,
-                inputs.side_spread,
-            );
-            return score.is_finite().then_some(score);
-        }
+    let normalized_name = normalize_autofactor_formula_name(name);
+    if let Some(score) = predictive_formula_score(normalized_name, inputs) {
+        return score.is_finite().then_some(score);
     }
-    if name == "amplitude_weighted_momentum_30s_sigma" {
+    if normalized_name == "amplitude_weighted_momentum_30s_sigma" {
         if !inputs.drift_30s.is_finite()
             || !inputs.direction_sign.is_finite()
             || !inputs.sigma_horizon.is_finite()
@@ -172,12 +152,12 @@ pub fn auto_settlement_formula_score(
         "auto_settlement_model_conservative_settlement_edge",
     ]
     .into_iter()
-    .find(|prefix| name.starts_with(prefix))?;
+    .find(|prefix| normalized_name.starts_with(prefix))?;
     if !inputs.settlement_edge.is_finite() {
         return None;
     }
     let mut score = inputs.settlement_edge;
-    let suffix = name.strip_prefix(settlement_prefix)?;
+    let suffix = normalized_name.strip_prefix(settlement_prefix)?;
 
     match suffix {
         "" => {}
@@ -225,6 +205,88 @@ pub fn auto_settlement_formula_score(
         _ => return None,
     }
     score.is_finite().then_some(score)
+}
+
+fn normalize_autofactor_formula_name(mut name: &str) -> &str {
+    loop {
+        if let Some(stripped) = name.strip_prefix("mut2_") {
+            name = stripped;
+        } else if let Some(stripped) = name.strip_prefix("mut_") {
+            name = stripped;
+        } else if let Some(stripped) = name.strip_prefix("mcts_") {
+            name = stripped;
+        } else {
+            return name;
+        }
+    }
+}
+
+fn predictive_formula_score(name: &str, inputs: AutoSettlementFactorInputs) -> Option<f64> {
+    let base = if name.starts_with("amplitude_weighted_momentum_30s_sigma") {
+        "amplitude_weighted_momentum_30s_sigma"
+    } else if name.starts_with("spread_adjusted_external_move") {
+        "spread_adjusted_external_move"
+    } else {
+        return None;
+    };
+    let suffix = name.strip_prefix(base)?;
+    let mut score = match base {
+        "amplitude_weighted_momentum_30s_sigma" => {
+            if !inputs.drift_30s.is_finite()
+                || !inputs.direction_sign.is_finite()
+                || !inputs.sigma_horizon.is_finite()
+            {
+                return None;
+            }
+            inputs.drift_30s * inputs.direction_sign * inputs.sigma_horizon.abs().ln_1p()
+        }
+        "spread_adjusted_external_move" => spread_adjusted_external_move_score(
+            inputs.drift_30s * inputs.direction_sign,
+            inputs.side_spread,
+        ),
+        _ => return None,
+    };
+    if !score.is_finite() {
+        return None;
+    }
+    if suffix.is_empty() {
+        return Some(score);
+    }
+    for mutation in suffix.strip_prefix('_')?.split('_') {
+        match mutation {
+            "squashed" => score = score.tanh(),
+            "near" => continue,
+            "strike" => {
+                score *= auto_settlement_near_strike_score(
+                    inputs.distance_over_sigma,
+                    inputs.direction_sign,
+                );
+            }
+            "capacity" => {
+                score *= auto_settlement_entry_capacity_score(inputs.entry_capacity_ratio)
+            }
+            "full" | "depth" | "entry" => continue,
+            "gate" => {
+                if !inputs.entry_capacity_ratio.is_finite() || inputs.entry_capacity_ratio < 1.0 {
+                    return None;
+                }
+            }
+            "price" => continue,
+            "quality" => score *= auto_settlement_entry_price_quality_score(inputs.entry_price),
+            "spread" => continue,
+            "adjusted" => {
+                if !inputs.side_spread.is_finite() || inputs.side_spread < 0.0 {
+                    return None;
+                }
+                score /= inputs.side_spread + 0.01;
+            }
+            _ => return None,
+        }
+        if !score.is_finite() {
+            return None;
+        }
+    }
+    Some(score)
 }
 
 /// Normal CDF approximation (Abramowitz & Stegun).
