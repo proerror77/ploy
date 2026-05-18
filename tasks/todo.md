@@ -1,3 +1,40 @@
+# Settlement AutoFactor Raw-Score Gate (2026-05-18)
+
+## Goal
+
+Remove the remaining double-gate mismatch where settlement AutoFactor formulas
+must pass both their raw executable-edge threshold and the generic
+`three_layer_min_entry_score` threshold.
+
+Evidence stage: `runtime_parity / executable_replay repair`.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: settlement AutoFactor entry score gating.
+
+## Tasks
+
+- [x] Re-run runtime candidate replay after the full-depth edge gate repair.
+- [x] Confirm `skip_edge_score` is gone and the dominant remaining runtime
+      blocker is `skip_entry_score`.
+- [x] Gate settlement AutoFactor entries on raw formula score against
+      `min_edge`, while leaving non-settlement profiles on the existing generic
+      `min_entry_score` gate.
+- [x] Update regression coverage so a positive but sub-`min_entry_score`
+      executable settlement edge still enters.
+
+## Review
+
+- 2026-05-18: Runtime replay run `26029604514` on `main` processed `635,035`
+  updates with `skip_edge_score` eliminated, but still produced
+  `intents_submitted=0`. Diagnostics shifted to `skip_entry_score=552`,
+  `skip_insufficient_ask_depth=252`, and `skip_settlement_side_score=207`.
+- 2026-05-18: The remaining score mismatch was the generic normalized
+  `min_entry_score=0.25`, which effectively required settlement formula raw
+  edge around `0.04` even though the executable settlement threshold is
+  `three_layer_min_edge=0.02`.
+
 # Settlement AutoFactor Full-Depth Runtime Gate (2026-05-18)
 
 ## Goal

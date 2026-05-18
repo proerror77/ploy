@@ -1742,7 +1742,14 @@ impl ThreeLayerStrategy {
                 )
             };
 
-            if total_score < self.config.min_entry_score {
+            let entry_score_passes = if uses_settlement_autofactor {
+                autofactor_raw_score
+                    .map(|score| score >= self.config.min_edge.max(0.0))
+                    .unwrap_or(total_score >= self.config.min_entry_score)
+            } else {
+                total_score >= self.config.min_entry_score
+            };
+            if !entry_score_passes {
                 self.bump("skip_entry_score");
                 info!(
                     strategy = "three_layer",
@@ -4487,7 +4494,7 @@ mod tests {
                 bid_size: Some(dec!(200)),
                 ask_size: Some(dec!(200)),
                 bid_levels: Vec::new(),
-                ask_levels: vec![level(dec!(0.48), dec!(200))],
+                ask_levels: vec![level(dec!(0.515), dec!(200))],
                 ts: now,
             },
             &positions,
