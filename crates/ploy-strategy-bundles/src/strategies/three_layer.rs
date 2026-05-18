@@ -563,13 +563,10 @@ fn autofactor_formula_entry_score(
     let formula_name = runtime_score
         .strip_prefix("autofactor_formula:")
         .unwrap_or(runtime_score);
-    let base_formula_name = formula_name
-        .strip_prefix("mut_")
-        .unwrap_or(formula_name)
-        .strip_suffix("_full_depth_entry_gate")
-        .unwrap_or_else(|| formula_name.strip_prefix("mut_").unwrap_or(formula_name));
-    let (threshold, scale) = if base_formula_name == "amplitude_weighted_momentum_30s_sigma"
-        || base_formula_name == "spread_adjusted_external_move"
+    let base_formula_name = normalized_autofactor_formula_name(formula_name);
+    let (threshold, scale) = if base_formula_name
+        .starts_with("amplitude_weighted_momentum_30s_sigma")
+        || base_formula_name.starts_with("spread_adjusted_external_move")
     {
         (0.0, 0.02)
     } else {
@@ -584,7 +581,7 @@ fn is_settlement_autofactor_runtime_score(runtime_score: &str) -> bool {
     let name = runtime_score
         .strip_prefix("autofactor_formula:")
         .unwrap_or(runtime_score);
-    let name = name.strip_prefix("mut_").unwrap_or(name);
+    let name = normalized_autofactor_formula_name(name);
     name.starts_with("auto_settlement_full_depth_settlement_edge")
         || name.starts_with("auto_settlement_conservative_settlement_edge")
         || name.starts_with("auto_settlement_model_full_depth_settlement_edge")
@@ -595,9 +592,23 @@ fn is_model_settlement_autofactor_runtime_score(runtime_score: &str) -> bool {
     let name = runtime_score
         .strip_prefix("autofactor_formula:")
         .unwrap_or(runtime_score);
-    let name = name.strip_prefix("mut_").unwrap_or(name);
+    let name = normalized_autofactor_formula_name(name);
     name.starts_with("auto_settlement_model_full_depth_settlement_edge")
         || name.starts_with("auto_settlement_model_conservative_settlement_edge")
+}
+
+fn normalized_autofactor_formula_name(mut name: &str) -> &str {
+    loop {
+        if let Some(stripped) = name.strip_prefix("mut2_") {
+            name = stripped;
+        } else if let Some(stripped) = name.strip_prefix("mut_") {
+            name = stripped;
+        } else if let Some(stripped) = name.strip_prefix("mcts_") {
+            name = stripped;
+        } else {
+            return name;
+        }
+    }
 }
 
 fn signum(value: f64) -> f64 {
@@ -1757,8 +1768,7 @@ impl ThreeLayerStrategy {
             // Layer 3: Edge score
             let (entry_price_f, edge, rr, edge_score) =
                 if settlement_formula_side_probability.is_some() {
-                    let top_quote_edge =
-                        entry_probability - ask - crypto_fee_cost(ask);
+                    let top_quote_edge = entry_probability - ask - crypto_fee_cost(ask);
                     let top_quote_edge_score = three_layer_model::threshold_score(
                         top_quote_edge,
                         self.config.min_edge.max(0.0),
@@ -1858,73 +1868,72 @@ impl ThreeLayerStrategy {
                 })
                 .unwrap_or(f64::NAN);
             let pm_momentum_score = self.pm_momentum_score(token_id, ask, now);
-            let (autofactor_raw_score, total_score) = if let Some(runtime_score) =
-                runtime_score.as_deref()
-            {
-                let inputs = AutoSettlementFactorInputs {
-                    settlement_edge: formula_settlement_edge,
-                    entry_price: executable_formula_entry_price_f,
-                    distance_over_sigma,
-                    direction_sign,
-                    drift_30s,
-                    sigma_horizon: sigma_h,
-                    entry_capacity_ratio,
-                    side_spread,
-                    external_pressure: confirmation_score,
-                    iv_change_1m: 0.0,
-                };
-                let Some((raw, normalized)) =
-                    autofactor_formula_entry_score(runtime_score, inputs, self.config.min_edge)
-                else {
-                    self.bump("skip_autofactor_score_unavailable");
-                    continue;
-                };
-                if uses_settlement_autofactor {
-                    self.bump("settlement_autofactor_formula_evaluations");
-                    self.bump_settlement_autofactor_edge_bucket(
-                        SettlementAutofactorEdgeMetric::TopQuote,
-                        edge,
-                    );
-                    self.bump_settlement_autofactor_edge_bucket(
-                        SettlementAutofactorEdgeMetric::Executable,
-                        formula_settlement_edge,
-                    );
-                    self.bump_settlement_autofactor_edge_bucket(
-                        SettlementAutofactorEdgeMetric::RawFormula,
-                        raw,
-                    );
-                    if raw >= self.config.min_edge.max(0.0) {
-                        self.bump("settlement_autofactor_raw_score_pass_min_edge");
-                    } else {
-                        self.bump("settlement_autofactor_raw_score_fail_min_edge");
-                    }
-                    if formula_settlement_edge >= self.config.min_edge {
-                        self.bump("settlement_autofactor_executable_edge_pass_min_edge");
-                    } else {
-                        self.bump("settlement_autofactor_executable_edge_fail_min_edge");
-                    }
-                }
-                (Some(raw), normalized)
-            } else {
-                (
-                    None,
-                    evaluate_entry_score(
-                        &self.config,
-                        EntryScoreInputs {
-                            direction_score,
-                            distance_over_sigma,
-                            direction_sign,
+            let (autofactor_raw_score, total_score) =
+                if let Some(runtime_score) = runtime_score.as_deref() {
+                    let inputs = AutoSettlementFactorInputs {
+                        settlement_edge: formula_settlement_edge,
+                        entry_price: executable_formula_entry_price_f,
+                        distance_over_sigma,
+                        direction_sign,
+                        drift_30s,
+                        sigma_horizon: sigma_h,
+                        entry_capacity_ratio,
+                        side_spread,
+                        external_pressure: confirmation_score,
+                        iv_change_1m: 0.0,
+                    };
+                    let Some((raw, normalized)) =
+                        autofactor_formula_entry_score(runtime_score, inputs, self.config.min_edge)
+                    else {
+                        self.bump("skip_autofactor_score_unavailable");
+                        continue;
+                    };
+                    if uses_settlement_autofactor {
+                        self.bump("settlement_autofactor_formula_evaluations");
+                        self.bump_settlement_autofactor_edge_bucket(
+                            SettlementAutofactorEdgeMetric::TopQuote,
                             edge,
-                            edge_score,
-                            confirmation: confirmation_score,
-                            repricing_score,
-                            drift_30s,
-                            pm_momentum_score,
-                            liquidity_score: 1.0,
-                        },
-                    ),
-                )
-            };
+                        );
+                        self.bump_settlement_autofactor_edge_bucket(
+                            SettlementAutofactorEdgeMetric::Executable,
+                            formula_settlement_edge,
+                        );
+                        self.bump_settlement_autofactor_edge_bucket(
+                            SettlementAutofactorEdgeMetric::RawFormula,
+                            raw,
+                        );
+                        if raw >= self.config.min_edge.max(0.0) {
+                            self.bump("settlement_autofactor_raw_score_pass_min_edge");
+                        } else {
+                            self.bump("settlement_autofactor_raw_score_fail_min_edge");
+                        }
+                        if formula_settlement_edge >= self.config.min_edge {
+                            self.bump("settlement_autofactor_executable_edge_pass_min_edge");
+                        } else {
+                            self.bump("settlement_autofactor_executable_edge_fail_min_edge");
+                        }
+                    }
+                    (Some(raw), normalized)
+                } else {
+                    (
+                        None,
+                        evaluate_entry_score(
+                            &self.config,
+                            EntryScoreInputs {
+                                direction_score,
+                                distance_over_sigma,
+                                direction_sign,
+                                edge,
+                                edge_score,
+                                confirmation: confirmation_score,
+                                repricing_score,
+                                drift_30s,
+                                pm_momentum_score,
+                                liquidity_score: 1.0,
+                            },
+                        ),
+                    )
+                };
 
             let entry_score_passes = if uses_settlement_autofactor {
                 autofactor_raw_score
@@ -5105,6 +5114,23 @@ mod tests {
         .expect("hard-gated spread-adjusted predictive formula should score fillable rows");
         assert!(spread_raw > raw);
         assert!(spread_score > score);
+
+        let (mcts_spread_raw, mcts_spread_score) = autofactor_formula_entry_score(
+            "autofactor_formula:mcts_mcts_spread_adjusted_external_move_full_depth_entry_gate_spread_adjusted",
+            fillable,
+            config.min_edge,
+        )
+        .expect("MCTS-guided spread-adjusted predictive formula should score fillable rows");
+        assert!(mcts_spread_raw > spread_raw);
+        assert!(mcts_spread_score >= spread_score);
+
+        let (mcts_momentum_raw, _) = autofactor_formula_entry_score(
+            "autofactor_formula:mcts_mcts_amplitude_weighted_momentum_30s_sigma_spread_adjusted_full_depth_entry_gate",
+            fillable,
+            config.min_edge,
+        )
+        .expect("MCTS-guided momentum predictive formula should score fillable rows");
+        assert!(mcts_momentum_raw > raw);
     }
 
     #[test]
