@@ -1604,16 +1604,34 @@ impl ThreeLayerStrategy {
             let entry_probability = settlement_formula_side_probability.unwrap_or(effective_p);
 
             // Layer 3: Edge score
-            let Some((entry_price_f, edge, rr, edge_score)) =
-                evaluate_edge_score(entry_probability, ask, regime, &self.config)
-            else {
-                self.bump("skip_edge_score");
-                continue;
-            };
-            if self.config.profile.uses_snapshot_scoring() && rr < self.config.min_reward_risk {
+            let (entry_price_f, edge, rr, edge_score) =
+                if settlement_formula_side_probability.is_some() {
+                    let top_quote_edge =
+                        entry_probability - ask - crypto_fee_cost(ask);
+                    let top_quote_edge_score = three_layer_model::threshold_score(
+                        top_quote_edge,
+                        self.config.min_edge.max(0.0),
+                        0.08,
+                        false,
+                    )
+                    .clamp(-0.50, 1.0);
+                    (ask, top_quote_edge, 0.0, top_quote_edge_score)
+                } else {
+                    let Some(edge_score) =
+                        evaluate_edge_score(entry_probability, ask, regime, &self.config)
+                    else {
+                        self.bump("skip_edge_score");
+                        continue;
+                    };
+                    edge_score
+                };
+            if settlement_formula_side_probability.is_none()
+                && self.config.profile.uses_snapshot_scoring()
+                && rr < self.config.min_reward_risk
+            {
                 self.bump("skip_reward_risk");
                 continue;
-            }
+            };
 
             let executable_formula_entry_price_f = if settlement_formula_side_probability.is_some()
             {
@@ -4441,6 +4459,82 @@ mod tests {
             "settlement AutoFactor should evaluate executable edge even when legacy direction gate would reject; decisions={decisions:?} diagnostics={diagnostics:?}"
         );
         assert_eq!(diagnostics.get("skip_direction_score"), None);
+    }
+
+    #[test]
+    fn settlement_autofactor_uses_full_depth_before_edge_gate() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::SettlementProbability;
+        config.min_edge = 0.02;
+        config.min_entry_score = 0.25;
+        config.max_sweep_levels = 3;
+        config.max_sweep_price_delta = dec!(0.10);
+        config.autofactor_runtime_score =
+            Some("autofactor_formula:auto_settlement_full_depth_settlement_edge".to_string());
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-up"),
+                bid: Some(dec!(0.53)),
+                ask: Some(dec!(0.55)),
+                bid_size: Some(dec!(200)),
+                ask_size: Some(dec!(200)),
+                bid_levels: Vec::new(),
+                ask_levels: vec![level(dec!(0.48), dec!(200))],
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-down"),
+                bid: Some(dec!(0.43)),
+                ask: Some(dec!(0.47)),
+                bid_size: Some(dec!(200)),
+                ask_size: Some(dec!(200)),
+                bid_levels: Vec::new(),
+                ask_levels: vec![level(dec!(0.47), dec!(200))],
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        match decisions.as_slice() {
+            [StrategyDecision::Enter { signal, .. }] => {
+                let signal = signal.as_ref().expect("signal");
+                assert!(
+                    signal.edge > 0.02,
+                    "expected full-depth executable edge above min_edge, got {}",
+                    signal.edge
+                );
+            }
+            other => panic!(
+                "settlement AutoFactor should not reject on stale top-ask edge before full-depth executable edge; decisions={other:?} diagnostics={diagnostics:?}"
+            ),
+        }
+        assert_eq!(diagnostics.get("skip_edge_score"), None);
     }
 
     #[test]
