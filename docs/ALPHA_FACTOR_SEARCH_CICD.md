@@ -433,6 +433,13 @@ keeps MCTS from repeatedly expanding branches that look strong only because
 the same event contributed multiple diagnostic rows or because the entry was
 not realistically executable.
 
+For settlement targets, AutoFactor scoring itself must be event-level:
+`settlement_executable_pnl`, `full_depth_settlement_executable_pnl`, and
+`tradeable_full_depth_settlement_pnl` collapse observations to one scored
+candidate decision per event before IC, bucket, and promotion metrics are
+computed. Repricing targets can remain row-level diagnostics because their
+question is short-horizon quote movement, not final event settlement.
+
 ## Completion Criteria
 
 The method is fully defined only when CI exposes all of the following:
@@ -506,6 +513,9 @@ Current implementation status:
 - Implemented: alpha-search node metrics and MCTS reward now include
   event-level uniqueness and execution-capacity penalties, so repeated-event or
   high-slippage candidates are de-prioritized before the promotion gate.
+- Implemented: settlement AutoFactor targets score one candidate decision per
+  event before bucket and promotion metrics, while repricing targets preserve
+  row-level diagnostics.
 - Implemented as artifact and input contract: `llm-priors.json` records the
   typed prior schema, and an operator- or LLM-produced prior file can now enter
   CI through `--alpha-search-llm-prior-json` / `options_json.alpha_search_llm_prior_json`.
