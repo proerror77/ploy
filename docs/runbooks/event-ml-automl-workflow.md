@@ -195,11 +195,13 @@ corresponding output paths are provided:
 
 Factor Walk-Forward V2 also includes a constrained settlement-native generator
 for the `full_depth_settlement_executable_pnl` target. It automatically expands
-full-depth and conservative settlement edge primitives into `auto_settlement_*`
-formula candidates with near-strike, capacity, spread, external-pressure, and
-short-IV-change interactions. These rows are still discovery evidence only:
-they must pass the same promotion evaluator and runtime mapping gates before
-becoming a dry-run handoff.
+external model-probability full-depth and conservative settlement edge
+primitives into `auto_settlement_model_*` formula candidates with near-strike,
+capacity, spread, external-pressure, and short-IV-change interactions. PM
+quote-implied fair-edge primitives remain diagnostics because they mostly
+measure market residuals, not predictive settlement probability. These rows are
+still discovery evidence only: they must pass the same promotion evaluator and
+runtime mapping gates before becoming a dry-run handoff.
 The built-in promotion evaluator maps the generated `auto_settlement_*`
 formula family to the `settlement_probability` strategy profile with
 `autofactor_formula:<factor_name>` runtime score identifiers. That mapping only

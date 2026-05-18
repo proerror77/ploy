@@ -150,6 +150,27 @@ BUILTIN_RUNTIME_MAPPINGS: dict[str, dict[str, str]] = {
     },
 }
 
+for _base in (
+    "auto_settlement_model_full_depth_settlement_edge",
+    "auto_settlement_model_conservative_settlement_edge",
+):
+    for _suffix in (
+        "",
+        "_x_near_strike",
+        "_x_capacity",
+        "_x_entry_price_quality",
+        "_x_near_strike_x_capacity",
+        "_x_near_strike_x_capacity_x_entry_price_quality",
+        "_spread_adjusted",
+        "_x_external_pressure",
+        "_x_iv_change",
+    ):
+        _name = f"{_base}{_suffix}"
+        BUILTIN_RUNTIME_MAPPINGS[_name] = {
+            **SETTLEMENT_RUNTIME_MAPPING,
+            "runtime_score": f"autofactor_formula:{_name}",
+        }
+
 
 @dataclass
 class PromotionGate:

@@ -430,9 +430,9 @@ def build_prior(runs: list[dict[str, Any]], decision: dict[str, Any], limit: int
     if not mutations and decision["action"] == "revise_prior":
         mutations.append(
             {
-                "base_factor": "auto_settlement_full_depth_settlement_edge",
+                "base_factor": "auto_settlement_model_full_depth_settlement_edge",
                 "mutation_type": "add_capacity_gate",
-                "name": "llm_full_depth_edge_capacity_gate",
+                "name": "llm_model_full_depth_edge_capacity_gate",
                 "feature": "entry_capacity_score",
             }
         )

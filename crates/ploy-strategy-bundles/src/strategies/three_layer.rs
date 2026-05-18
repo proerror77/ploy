@@ -587,6 +587,17 @@ fn is_settlement_autofactor_runtime_score(runtime_score: &str) -> bool {
     let name = name.strip_prefix("mut_").unwrap_or(name);
     name.starts_with("auto_settlement_full_depth_settlement_edge")
         || name.starts_with("auto_settlement_conservative_settlement_edge")
+        || name.starts_with("auto_settlement_model_full_depth_settlement_edge")
+        || name.starts_with("auto_settlement_model_conservative_settlement_edge")
+}
+
+fn is_model_settlement_autofactor_runtime_score(runtime_score: &str) -> bool {
+    let name = runtime_score
+        .strip_prefix("autofactor_formula:")
+        .unwrap_or(runtime_score);
+    let name = name.strip_prefix("mut_").unwrap_or(name);
+    name.starts_with("auto_settlement_model_full_depth_settlement_edge")
+        || name.starts_with("auto_settlement_model_conservative_settlement_edge")
 }
 
 fn signum(value: f64) -> f64 {
@@ -1135,10 +1146,40 @@ impl ThreeLayerStrategy {
         Some(if betting_up { fair_up } else { 1.0 - fair_up })
     }
 
+    fn runtime_side_model_probability(
+        &self,
+        spot_price: f64,
+        price_to_beat: f64,
+        sigma_horizon: f64,
+        betting_up: bool,
+    ) -> Option<f64> {
+        if spot_price <= 0.0
+            || price_to_beat <= 0.0
+            || !sigma_horizon.is_finite()
+            || sigma_horizon <= 0.0
+        {
+            return None;
+        }
+        let probability_up =
+            three_layer_model::norm_cdf((spot_price / price_to_beat).ln() / sigma_horizon);
+        if !probability_up.is_finite() {
+            return None;
+        }
+        Some(if betting_up {
+            probability_up
+        } else {
+            1.0 - probability_up
+        })
+    }
+
     fn settlement_autofactor_best_direction(
         &self,
         event: &EventWindow,
         now: DateTime<Utc>,
+        spot_price: f64,
+        price_to_beat: f64,
+        sigma_horizon: f64,
+        use_model_probability: bool,
     ) -> Option<(f64, f64, f64)> {
         [true, false]
             .into_iter()
@@ -1153,7 +1194,16 @@ impl ThreeLayerStrategy {
                 if ask < self.config.min_entry_price || ask > self.config.max_entry_price {
                     return None;
                 }
-                let side_probability = self.runtime_side_fair_probability(event, betting_up, now)?;
+                let side_probability = if use_model_probability {
+                    self.runtime_side_model_probability(
+                        spot_price,
+                        price_to_beat,
+                        sigma_horizon,
+                        betting_up,
+                    )?
+                } else {
+                    self.runtime_side_fair_probability(event, betting_up, now)?
+                };
                 let edge = three_layer_model::expected_value_per_share(side_probability, ask);
                 if !edge.is_finite() {
                     return None;
@@ -1560,13 +1610,24 @@ impl ThreeLayerStrategy {
                 .as_deref()
                 .map(is_settlement_autofactor_runtime_score)
                 .unwrap_or(false);
+            let uses_model_settlement_autofactor = runtime_score
+                .as_deref()
+                .map(is_model_settlement_autofactor_runtime_score)
+                .unwrap_or(false);
 
             // Layer 1: Direction score. Settlement AutoFactor profiles select
             // the executable UP/DOWN side by settlement edge, not by the
             // legacy CEX-only direction gate.
             let Some((direction_sign, effective_p, direction_score)) =
                 (if uses_settlement_autofactor {
-                    self.settlement_autofactor_best_direction(event, now)
+                    self.settlement_autofactor_best_direction(
+                        event,
+                        now,
+                        spot_price,
+                        price_to_beat,
+                        sigma_h,
+                        uses_model_settlement_autofactor,
+                    )
                 } else {
                     evaluate_direction_score(
                         distance_over_sigma,
@@ -1673,9 +1734,17 @@ impl ThreeLayerStrategy {
             }
 
             let settlement_formula_side_probability = if uses_settlement_autofactor {
-                let Some(side_probability) =
+                let side_probability = if uses_model_settlement_autofactor {
+                    self.runtime_side_model_probability(
+                        spot_price,
+                        price_to_beat,
+                        sigma_h,
+                        betting_up,
+                    )
+                } else {
                     self.runtime_side_fair_probability(event, betting_up, now)
-                else {
+                };
+                let Some(side_probability) = side_probability else {
                     self.bump("skip_autofactor_score_unavailable");
                     continue;
                 };
@@ -4761,9 +4830,105 @@ mod tests {
     }
 
     #[test]
+    fn model_settlement_autofactor_uses_external_model_probability() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::SettlementProbability;
+        config.min_edge = 0.02;
+        config.min_entry_score = 0.25;
+        config.autofactor_runtime_score =
+            Some("autofactor_formula:auto_settlement_model_full_depth_settlement_edge".to_string());
+        let mut strategy = ThreeLayerStrategy::new(config);
+        for (offset, price) in [
+            (-5, dec!(100000)),
+            (-4, dec!(100020)),
+            (-3, dec!(99990)),
+            (-2, dec!(100040)),
+            (-1, dec!(100000)),
+        ] {
+            strategy.on_update(
+                &MarketUpdate::SpotPrice {
+                    symbol: Arc::from("BTCUSDT"),
+                    price,
+                    ts: now + chrono::Duration::seconds(offset),
+                },
+                &PositionLedger::default(),
+                &OrderLedger::default(),
+            );
+        }
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-up"),
+                bid: Some(dec!(0.19)),
+                ask: Some(dec!(0.20)),
+                bid_size: Some(dec!(200)),
+                ask_size: Some(dec!(200)),
+                bid_levels: Vec::new(),
+                ask_levels: vec![level(dec!(0.20), dec!(200))],
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-down"),
+                bid: Some(dec!(0.79)),
+                ask: Some(dec!(0.80)),
+                bid_size: Some(dec!(200)),
+                ask_size: Some(dec!(200)),
+                bid_levels: Vec::new(),
+                ask_levels: vec![level(dec!(0.80), dec!(200))],
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100500),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        match decisions.as_slice() {
+            [StrategyDecision::Enter { intent, signal }] => {
+                assert_eq!(intent.token_id, "token-up");
+                let signal = signal.as_ref().expect("signal");
+                assert!(
+                    signal.p_hat > 0.50,
+                    "model settlement AutoFactor must use model probability, got {}",
+                    signal.p_hat
+                );
+                assert!(
+                    signal.edge > 0.02,
+                    "expected executable model settlement edge above min_edge, got {}",
+                    signal.edge
+                );
+            }
+            other => panic!("expected model settlement AutoFactor entry, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn identifies_settlement_autofactor_runtime_scores() {
         assert!(is_settlement_autofactor_runtime_score(
             "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike"
+        ));
+        assert!(is_settlement_autofactor_runtime_score(
+            "autofactor_formula:auto_settlement_model_full_depth_settlement_edge_x_near_strike"
+        ));
+        assert!(is_model_settlement_autofactor_runtime_score(
+            "autofactor_formula:auto_settlement_model_conservative_settlement_edge_x_capacity"
         ));
         assert!(is_settlement_autofactor_runtime_score(
             "autofactor_formula:mut_auto_settlement_conservative_settlement_edge_x_capacity"

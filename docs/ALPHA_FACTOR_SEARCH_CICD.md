@@ -259,7 +259,9 @@ Features should be grouped by data meaning, not only by column name:
 - Polymarket quote state: side ask/bid, spread, quote age, PM lag
 - full-depth execution: sweep price, capacity, conservative depth assumptions
 - event geometry: time remaining, distance to strike, near-strike score
-- probability state: q estimates, market prior, EventVolSurface prior
+- probability state: external/model q estimates, market prior, EventVolSurface
+  prior; PM quote-implied fair probability is diagnostic unless paired with an
+  independent predictive model
 - volatility state: realized/IV/DVOL primitives when present and audited
 - risk/friction: fees, slippage, fillability, capacity, turnover proxies
 
