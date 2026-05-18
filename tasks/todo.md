@@ -1,3 +1,44 @@
+# FactorEvolve Research OS Task 7 - External Data Surface Roadmap Gates (2026-05-18)
+
+## Goal
+
+Define FactorEvolve data-surface gates so missing OI, funding, liquidation,
+basis, OKX, or Bybit data cannot be silently treated as present, while avoiding
+blocking unrelated PM5D hypotheses that do not depend on those surfaces.
+
+Evidence stage: `diagnostic / data_surface_contract`.
+
+## Files / Ownership
+
+- `docs/runbooks/factor-evolve-data-surfaces.md`
+  - Owner: current surface status, taxonomy, and fail-closed rules.
+- `docs/PROJECT_SEMANTICS.md`
+  - Owner: repository-level semantic contract for data-surface categories.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: CI/CD alpha-search reference to the FactorEvolve surface gate.
+
+## Tasks
+
+- [x] Document current present and missing surfaces.
+- [x] Add taxonomy for `required_for_prediction`,
+      `required_for_execution`, `optional_context`, and
+      `missing_blocks_promotion`.
+- [x] State fail-closed promotion rules for missing required surfaces.
+- [x] Verify docs and diff hygiene.
+
+## Review
+
+- 2026-05-18: Added `docs/runbooks/factor-evolve-data-surfaces.md` with a
+  current surface table covering Binance aggTrade, partial LOB, futures local
+  book, Polymarket quotes, full CLOB snapshots, official settlement,
+  dry-run/runtime fills, OI, funding, liquidation, basis, OKX, and Bybit.
+- 2026-05-18: `docs/PROJECT_SEMANTICS.md` now names FactorEvolve
+  data-surface categories and makes missing external surfaces promotion blockers
+  only when the hypothesis depends on them.
+- 2026-05-18: Validation passed:
+  `rg -n "FactorEvolve|required_for_prediction|required_for_execution|missing_blocks_promotion" docs/PROJECT_SEMANTICS.md docs/ALPHA_FACTOR_SEARCH_CICD.md docs/runbooks/factor-evolve-data-surfaces.md`
+  and `rtk git diff --check`.
+
 # FactorEvolve Research OS Task 6 - Portfolio Builder V0 (2026-05-18)
 
 ## Goal

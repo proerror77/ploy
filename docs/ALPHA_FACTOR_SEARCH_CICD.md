@@ -56,6 +56,16 @@ promotion half:
   search space, typed priors, candidates, rejected expressions, tree trace,
   node metrics, search feedback, and MCTS expansion plan.
 
+FactorEvolve data-surface gates are defined in
+`docs/runbooks/factor-evolve-data-surfaces.md`. Search artifacts and research
+issues should classify data dependencies as `required_for_prediction`,
+`required_for_execution`, `optional_context`, or `missing_blocks_promotion`.
+Current first-class surfaces include Binance aggTrade / spot ticks, Polymarket
+quote ticks, Polymarket full CLOB snapshots, official settlement, and runtime
+fill evidence. Binance futures OI, funding, liquidation, basis / mark data, and
+OKX / Bybit LOB remain external-data roadmap gaps; they block promotion only
+when the candidate hypothesis depends on them.
+
 That means the repo can already do:
 
 ```text

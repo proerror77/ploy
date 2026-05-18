@@ -91,6 +91,23 @@ Reports must name the data surfaces used and the surfaces missing:
 - Dry-run/runtime fills: observed execution behavior, not a substitute for
   official settlement labels.
 
+FactorEvolve data surfaces use these fail-closed categories:
+
+- `required_for_prediction`: needed to test the stated predictive hypothesis.
+- `required_for_execution`: needed to model executable price, depth, slippage,
+  capacity, or fillability.
+- `optional_context`: useful context that is not required for the current
+  hypothesis.
+- `missing_blocks_promotion`: missing evidence that blocks promotion beyond the
+  current diagnostic or research stage.
+
+Current known FactorEvolve gaps include Binance futures OI, funding,
+liquidation, basis / mark data, and OKX / Bybit LOB as first-class research
+surfaces. These are not automatic blockers for every PM5D settlement factor, but
+they are `missing_blocks_promotion` whenever the hypothesis depends on them.
+Use [docs/runbooks/factor-evolve-data-surfaces.md](runbooks/factor-evolve-data-surfaces.md)
+for the current data-surface gate.
+
 If full-depth CLOB, official settlement, replay parity, or runtime scorer parity
 is missing, mark promotion as blocked unless the task explicitly targets an
 earlier diagnostic stage.
