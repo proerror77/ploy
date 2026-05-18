@@ -1,3 +1,44 @@
+# Settlement AutoFactor Full-Depth Runtime Gate (2026-05-18)
+
+## Goal
+
+Align settlement AutoFactor runtime entry gating with the search-tree
+full-depth executable edge semantics so candidates are not rejected on a
+top-ask edge check before CLOB depth is evaluated.
+
+Evidence stage: `runtime_parity / executable_replay repair`.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: settlement AutoFactor runtime scoring and diagnostics.
+
+## Tasks
+
+- [x] Diagnose runtime replay zero-intent blockers after search produced a
+      runtime-mappable discovery candidate.
+- [x] Move settlement AutoFactor edge rejection behind full-depth executable
+      entry calculation.
+- [x] Add regression coverage for a top-ask edge miss with a positive
+      full-depth executable edge.
+- [x] Run focused Rust validation and package validation.
+
+## Review
+
+- 2026-05-18: Search run `26027662010` found `191` candidates and `118`
+  discovery passes. The best runtime-mappable settlement candidate was
+  `auto_settlement_full_depth_settlement_edge`, but runtime replay run
+  `26027767111` still produced `intents_submitted=0`, `fills=0`, and dominant
+  diagnostics `skip_edge_score=621` / `skip_settlement_side_score=172`.
+- 2026-05-18: The runtime path was evaluating a top-ask edge gate before
+  computing full-depth executable entry price for settlement AutoFactor
+  formulas. This could reject exactly the class of candidates searched under
+  `full_depth_settlement_executable_pnl`.
+- 2026-05-18: Local validation passed:
+  `rtk cargo test --locked -p ploy-strategy-bundles settlement_autofactor --lib`,
+  `rtk cargo check --locked -p ploy-strategy-bundles`, and
+  `rtk git diff --check`.
+
 # Runtime Candidate Replay Score Override (2026-05-18)
 
 ## Goal
