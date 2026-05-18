@@ -27,6 +27,13 @@ use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic}
 use ploy_market_contracts::BookLevel;
 use ploy_operator_contracts::Regime;
 
+#[derive(Debug, Clone, Copy)]
+enum SettlementAutofactorEdgeMetric {
+    TopQuote,
+    Executable,
+    RawFormula,
+}
+
 /// Configuration for the three-layer directional strategy.
 #[derive(Debug, Clone)]
 pub struct ThreeLayerConfig {
@@ -818,6 +825,77 @@ impl ThreeLayerStrategy {
         *self.diagnostics.entry(key).or_insert(0) += value;
     }
 
+    fn bump_settlement_autofactor_edge_bucket(
+        &mut self,
+        metric: SettlementAutofactorEdgeMetric,
+        value: f64,
+    ) {
+        const TOP_QUOTE_EDGE_BUCKETS: [&str; 7] = [
+            "settlement_autofactor_top_quote_edge_lt_neg5pct",
+            "settlement_autofactor_top_quote_edge_neg5_to_neg2pct",
+            "settlement_autofactor_top_quote_edge_neg2_to_0pct",
+            "settlement_autofactor_top_quote_edge_0_to_1pct",
+            "settlement_autofactor_top_quote_edge_1_to_2pct",
+            "settlement_autofactor_top_quote_edge_2_to_5pct",
+            "settlement_autofactor_top_quote_edge_ge_5pct",
+        ];
+        const EXECUTABLE_EDGE_BUCKETS: [&str; 7] = [
+            "settlement_autofactor_executable_edge_lt_neg5pct",
+            "settlement_autofactor_executable_edge_neg5_to_neg2pct",
+            "settlement_autofactor_executable_edge_neg2_to_0pct",
+            "settlement_autofactor_executable_edge_0_to_1pct",
+            "settlement_autofactor_executable_edge_1_to_2pct",
+            "settlement_autofactor_executable_edge_2_to_5pct",
+            "settlement_autofactor_executable_edge_ge_5pct",
+        ];
+        const RAW_FORMULA_BUCKETS: [&str; 7] = [
+            "settlement_autofactor_raw_score_lt_neg5pct",
+            "settlement_autofactor_raw_score_neg5_to_neg2pct",
+            "settlement_autofactor_raw_score_neg2_to_0pct",
+            "settlement_autofactor_raw_score_0_to_1pct",
+            "settlement_autofactor_raw_score_1_to_2pct",
+            "settlement_autofactor_raw_score_2_to_5pct",
+            "settlement_autofactor_raw_score_ge_5pct",
+        ];
+
+        if !value.is_finite() {
+            self.bump(match metric {
+                SettlementAutofactorEdgeMetric::TopQuote => {
+                    "settlement_autofactor_top_quote_edge_nonfinite"
+                }
+                SettlementAutofactorEdgeMetric::Executable => {
+                    "settlement_autofactor_executable_edge_nonfinite"
+                }
+                SettlementAutofactorEdgeMetric::RawFormula => {
+                    "settlement_autofactor_raw_score_nonfinite"
+                }
+            });
+            return;
+        }
+
+        let bucket = if value < -0.05 {
+            0
+        } else if value < -0.02 {
+            1
+        } else if value < 0.0 {
+            2
+        } else if value < 0.01 {
+            3
+        } else if value < 0.02 {
+            4
+        } else if value < 0.05 {
+            5
+        } else {
+            6
+        };
+
+        self.bump(match metric {
+            SettlementAutofactorEdgeMetric::TopQuote => TOP_QUOTE_EDGE_BUCKETS[bucket],
+            SettlementAutofactorEdgeMetric::Executable => EXECUTABLE_EDGE_BUCKETS[bucket],
+            SettlementAutofactorEdgeMetric::RawFormula => RAW_FORMULA_BUCKETS[bucket],
+        });
+    }
+
     fn now(&self) -> DateTime<Utc> {
         self.feed_time.unwrap_or_else(Utc::now)
     }
@@ -1477,8 +1555,9 @@ impl ThreeLayerStrategy {
                 continue;
             }
 
-            let runtime_score = self.config.autofactor_runtime_score.as_deref();
+            let runtime_score = self.config.autofactor_runtime_score.clone();
             let uses_settlement_autofactor = runtime_score
+                .as_deref()
                 .map(is_settlement_autofactor_runtime_score)
                 .unwrap_or(false);
 
@@ -1513,6 +1592,9 @@ impl ThreeLayerStrategy {
             } else {
                 (&event.down_token, "DOWN")
             };
+            if uses_settlement_autofactor {
+                self.bump("settlement_autofactor_side_selected");
+            }
 
             // Skip if already positioned or have active order on this token
             if positions.net_qty(token_id) > Decimal::ZERO {
@@ -1635,6 +1717,7 @@ impl ThreeLayerStrategy {
 
             let executable_formula_entry_price_f = if settlement_formula_side_probability.is_some()
             {
+                self.bump("settlement_autofactor_depth_check_attempts");
                 let Some(entry_price) = Decimal::try_from(entry_price_f).ok() else {
                     self.bump("skip_bad_entry_price");
                     continue;
@@ -1650,14 +1733,17 @@ impl ThreeLayerStrategy {
                     continue;
                 }
                 let Some(depth) = self.quote_depth.get(token_id) else {
+                    self.bump("settlement_autofactor_depth_missing");
                     self.bump("skip_no_ask_size");
                     continue;
                 };
                 let Some(ask_size) = depth.ask_size else {
+                    self.bump("settlement_autofactor_depth_missing");
                     self.bump("skip_no_ask_size");
                     continue;
                 };
                 if depth.ask_levels.is_empty() && ask_size < quantity {
+                    self.bump("settlement_autofactor_top_size_insufficient");
                     self.bump("skip_insufficient_ask_size");
                     continue;
                 }
@@ -1670,9 +1756,11 @@ impl ThreeLayerStrategy {
                     self.config.visible_depth_haircut,
                     self.config.max_sweep_levels,
                 ) else {
+                    self.bump("settlement_autofactor_depth_unfillable");
                     self.bump("skip_insufficient_ask_depth");
                     continue;
                 };
+                self.bump("settlement_autofactor_depth_fillable");
                 executable_entry_price.to_f64().unwrap_or(entry_price_f)
             } else {
                 entry_price_f
@@ -1701,7 +1789,9 @@ impl ThreeLayerStrategy {
                 })
                 .unwrap_or(f64::NAN);
             let pm_momentum_score = self.pm_momentum_score(token_id, ask, now);
-            let (autofactor_raw_score, total_score) = if let Some(runtime_score) = runtime_score {
+            let (autofactor_raw_score, total_score) = if let Some(runtime_score) =
+                runtime_score.as_deref()
+            {
                 let inputs = AutoSettlementFactorInputs {
                     settlement_edge: formula_settlement_edge,
                     entry_price: executable_formula_entry_price_f,
@@ -1720,6 +1810,31 @@ impl ThreeLayerStrategy {
                     self.bump("skip_autofactor_score_unavailable");
                     continue;
                 };
+                if uses_settlement_autofactor {
+                    self.bump("settlement_autofactor_formula_evaluations");
+                    self.bump_settlement_autofactor_edge_bucket(
+                        SettlementAutofactorEdgeMetric::TopQuote,
+                        edge,
+                    );
+                    self.bump_settlement_autofactor_edge_bucket(
+                        SettlementAutofactorEdgeMetric::Executable,
+                        formula_settlement_edge,
+                    );
+                    self.bump_settlement_autofactor_edge_bucket(
+                        SettlementAutofactorEdgeMetric::RawFormula,
+                        raw,
+                    );
+                    if raw >= self.config.min_edge.max(0.0) {
+                        self.bump("settlement_autofactor_raw_score_pass_min_edge");
+                    } else {
+                        self.bump("settlement_autofactor_raw_score_fail_min_edge");
+                    }
+                    if formula_settlement_edge >= self.config.min_edge {
+                        self.bump("settlement_autofactor_executable_edge_pass_min_edge");
+                    } else {
+                        self.bump("settlement_autofactor_executable_edge_fail_min_edge");
+                    }
+                }
                 (Some(raw), normalized)
             } else {
                 (
@@ -4542,6 +4657,107 @@ mod tests {
             ),
         }
         assert_eq!(diagnostics.get("skip_edge_score"), None);
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_depth_fillable"),
+            Some(&1)
+        );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_formula_evaluations"),
+            Some(&1)
+        );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_raw_score_pass_min_edge"),
+            Some(&1)
+        );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_executable_edge_pass_min_edge"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn settlement_autofactor_diagnostics_bucket_failed_raw_score() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::SettlementProbability;
+        config.min_edge = 0.02;
+        config.min_entry_score = 0.25;
+        config.autofactor_runtime_score =
+            Some("autofactor_formula:auto_settlement_full_depth_settlement_edge".to_string());
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-up"),
+                bid: Some(dec!(0.49)),
+                ask: Some(dec!(0.51)),
+                bid_size: Some(dec!(200)),
+                ask_size: Some(dec!(200)),
+                bid_levels: Vec::new(),
+                ask_levels: vec![level(dec!(0.51), dec!(200))],
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-down"),
+                bid: Some(dec!(0.49)),
+                ask: Some(dec!(0.51)),
+                bid_size: Some(dec!(200)),
+                ask_size: Some(dec!(200)),
+                bid_levels: Vec::new(),
+                ask_levels: vec![level(dec!(0.51), dec!(200))],
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(
+            decisions.is_empty(),
+            "negative executable settlement edge should not enter"
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_depth_fillable"),
+            Some(&1)
+        );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_formula_evaluations"),
+            Some(&1)
+        );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_raw_score_fail_min_edge"),
+            Some(&1)
+        );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_executable_edge_fail_min_edge"),
+            Some(&1)
+        );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_raw_score_neg2_to_0pct"),
+            Some(&1)
+        );
+        assert_eq!(diagnostics.get("skip_entry_score"), Some(&1));
     }
 
     #[test]

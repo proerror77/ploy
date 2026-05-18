@@ -1,3 +1,41 @@
+# Settlement AutoFactor Runtime Replay Diagnostics (2026-05-18)
+
+## Goal
+
+Repair the `runtime_parity / executable_replay` debugging surface for
+settlement AutoFactor candidates so a recorded replay with zero intents exposes
+whether the blocker is runtime probability semantics, raw formula threshold,
+full-depth executable edge, or CLOB depth/fillability.
+
+Evidence stage: `runtime_parity / executable_replay repair`.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: add low-cardinality settlement AutoFactor diagnostic counters without
+    changing entry decisions.
+
+## Tasks
+
+- [x] Rebase the diagnostic worktree onto current `origin/main`.
+- [x] Add score/depth bucket diagnostics for settlement AutoFactor runtime replay.
+- [x] Add focused unit coverage for the new diagnostics.
+- [x] Run focused Rust validation and diff checks.
+- [ ] Push PR, merge, and rerun `runtime-candidate-replay.yml` on `main`.
+
+## Review
+
+- 2026-05-18: Added low-cardinality settlement AutoFactor diagnostics for side
+  selection, full-depth fillability, raw formula pass/fail, executable edge
+  pass/fail, and top-quote/executable/raw-score edge buckets. These counters
+  are emitted through the existing `strategy_diagnostics` artifact path and do
+  not change entry decisions.
+- 2026-05-18: Focused validation passed:
+  `rtk cargo test --locked -p ploy-strategy-bundles settlement_autofactor --lib`
+  (`6 passed, 180 filtered out`),
+  `rtk cargo check --locked -p ploy-strategy-bundles`, and
+  `rtk git diff --check`.
+
 # Settlement AutoFactor Raw-Score Gate (2026-05-18)
 
 ## Goal
