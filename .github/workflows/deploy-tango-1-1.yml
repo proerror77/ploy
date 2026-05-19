@@ -190,6 +190,9 @@ jobs:
           cp scripts/report_dryrun_summary.py dist/scripts/report_dryrun_summary.py
           cp scripts/check_dryrun_report_contract.py dist/scripts/check_dryrun_report_contract.py
           cp scripts/import_polymarket_v2_indexer.py dist/scripts/import_polymarket_v2_indexer.py
+          cp scripts/archive_clob_orderbook_snapshots_backfill.sh dist/scripts/archive_clob_orderbook_snapshots_backfill.sh
+          cp scripts/export_clob_orderbook_snapshots_parquet.sh dist/scripts/export_clob_orderbook_snapshots_parquet.sh
+          cp scripts/ploy_orderbook_snapshot_retention.sh dist/scripts/ploy_orderbook_snapshot_retention.sh
           cp scripts/fix_binance_lob_partitions.sql dist/scripts/fix_binance_lob_partitions.sql
           cp scripts/fix_deribit_partitions.sql dist/scripts/fix_deribit_partitions.sql
           cp scripts/fix_clob_trade_partitions.sql dist/scripts/fix_clob_trade_partitions.sql
@@ -209,6 +212,10 @@ jobs:
           cp deployment/systemd/ploy-pm-trade-collector.service dist/deployment/systemd/ploy-pm-trade-collector.service
           cp deployment/systemd/ploy-polymarket-v2-indexer-import.service dist/deployment/systemd/ploy-polymarket-v2-indexer-import.service
           cp deployment/systemd/ploy-polymarket-v2-indexer-import.timer dist/deployment/systemd/ploy-polymarket-v2-indexer-import.timer
+          cp deployment/systemd/ploy-orderbook-snapshot-archive.service dist/deployment/systemd/ploy-orderbook-snapshot-archive.service
+          cp deployment/systemd/ploy-orderbook-snapshot-archive.timer dist/deployment/systemd/ploy-orderbook-snapshot-archive.timer
+          cp deployment/systemd/ploy-orderbook-snapshot-retention.service dist/deployment/systemd/ploy-orderbook-snapshot-retention.service
+          cp deployment/systemd/ploy-orderbook-snapshot-retention.timer dist/deployment/systemd/ploy-orderbook-snapshot-retention.timer
           cp deployment/systemd/polymarket-v2-indexer.service dist/deployment/systemd/polymarket-v2-indexer.service
           cp deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf dist/deployment/systemd/ploy-strategy-directional-dryrun.hardening.conf
           cp deployment/env.polymarket-v2-indexer.example dist/deployment/env.polymarket-v2-indexer.example
@@ -479,6 +486,9 @@ jobs:
             install -m 0755 ./scripts/report_dryrun_summary.py ${DEPLOY_ROOT}/scripts/report_dryrun_summary.py
             install -m 0755 ./scripts/check_dryrun_report_contract.py ${DEPLOY_ROOT}/scripts/check_dryrun_report_contract.py
             install -m 0755 ./scripts/import_polymarket_v2_indexer.py ${DEPLOY_ROOT}/scripts/import_polymarket_v2_indexer.py
+            install -m 0755 ./scripts/archive_clob_orderbook_snapshots_backfill.sh ${DEPLOY_ROOT}/scripts/archive_clob_orderbook_snapshots_backfill.sh
+            install -m 0755 ./scripts/export_clob_orderbook_snapshots_parquet.sh ${DEPLOY_ROOT}/scripts/export_clob_orderbook_snapshots_parquet.sh
+            install -m 0755 ./scripts/ploy_orderbook_snapshot_retention.sh ${DEPLOY_ROOT}/scripts/ploy_orderbook_snapshot_retention.sh
             install -m 0644 ./scripts/fix_binance_lob_partitions.sql ${DEPLOY_ROOT}/scripts/fix_binance_lob_partitions.sql
             install -m 0644 ./scripts/fix_deribit_partitions.sql ${DEPLOY_ROOT}/scripts/fix_deribit_partitions.sql
             install -m 0644 ./scripts/fix_clob_trade_partitions.sql ${DEPLOY_ROOT}/scripts/fix_clob_trade_partitions.sql
@@ -500,11 +510,17 @@ jobs:
             install -m 0644 ./deployment/systemd/ploy-pm-trade-collector.service /etc/systemd/system/ploy-pm-trade-collector.service
             install -m 0644 ./deployment/systemd/ploy-polymarket-v2-indexer-import.service /etc/systemd/system/ploy-polymarket-v2-indexer-import.service
             install -m 0644 ./deployment/systemd/ploy-polymarket-v2-indexer-import.timer /etc/systemd/system/ploy-polymarket-v2-indexer-import.timer
+            install -m 0644 ./deployment/systemd/ploy-orderbook-snapshot-archive.service /etc/systemd/system/ploy-orderbook-snapshot-archive.service
+            install -m 0644 ./deployment/systemd/ploy-orderbook-snapshot-archive.timer /etc/systemd/system/ploy-orderbook-snapshot-archive.timer
+            install -m 0644 ./deployment/systemd/ploy-orderbook-snapshot-retention.service /etc/systemd/system/ploy-orderbook-snapshot-retention.service
+            install -m 0644 ./deployment/systemd/ploy-orderbook-snapshot-retention.timer /etc/systemd/system/ploy-orderbook-snapshot-retention.timer
             install -m 0644 ./deployment/systemd/polymarket-v2-indexer.service /etc/systemd/system/polymarket-v2-indexer.service
             install -m 0644 ./deployment/env.polymarket-v2-indexer.example ${DEPLOY_ROOT}/env.polymarket-v2-indexer.example
             install -m 0644 ./deployment/systemd/ploy-quote-collector.hardening.conf /etc/systemd/system/ploy-quote-collector.service.d/hardening.conf
             systemctl daemon-reload
             systemctl enable --now ploy-polymarket-v2-indexer-import.timer
+            systemctl enable --now ploy-orderbook-snapshot-archive.timer
+            systemctl enable --now ploy-orderbook-snapshot-retention.timer
 
             # Apply additive runner migrations before restarting services.
             mkdir -p ${DEPLOY_ROOT}/migrations
