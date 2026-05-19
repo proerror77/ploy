@@ -1,3 +1,56 @@
+# CLOB Orderbook Archive And Archive-Gated Retention (2026-05-20)
+
+## Goal
+
+Preserve full-fidelity Polymarket CLOB orderbook snapshots in a cold Parquet
+archive before allowing hot Postgres snapshot retention to delete old rows or
+partitions.
+
+Evidence stage: `operational_data_retention`.
+
+## Files / Ownership
+
+- `scripts/export_clob_orderbook_snapshots_parquet.sh`
+  - Owner: one completed-hour full-fidelity Parquet/ZSTD export.
+- `scripts/archive_clob_orderbook_snapshots_backfill.sh`
+  - Owner: bounded sequential gap filler for missing completed archive hours.
+- `scripts/ploy_orderbook_snapshot_retention.sh`
+  - Owner: split orderbook snapshot retention with archive-complete gate.
+- `scripts/ploy_maintenance.sh`
+  - Owner: general maintenance cleanup, archive-gated orderbook cleanup, and
+    bounded artifact/log retention.
+- `deployment/systemd/ploy-orderbook-snapshot-archive.*`
+  - Owner: archive timer/service.
+- `deployment/systemd/ploy-orderbook-snapshot-retention.*`
+  - Owner: retention timer/service.
+- `.github/workflows/deploy-tango-1-1.yml` and
+  `scripts/ci/deploy_tango_cloud_assist.py`
+  - Owner: ship scripts/units and enable timers during Tango deploys.
+- `docs/runbooks/orderbook-snapshot-archive.md`
+  - Owner: operator policy and verification commands.
+- `tests/test_ploy_maintenance_defaults.py`
+  - Owner: static regression coverage for safe defaults.
+- `tasks/todo.md`
+  - Owner: current session tracking for this extracted PR slice.
+
+## Tasks
+
+- [x] Create a clean worktree from current `origin/main`.
+- [x] Extract only orderbook archive/retention changes from the dirty source
+      worktree.
+- [x] Validate shell syntax, workflow syntax, and maintenance tests.
+- [x] Commit a focused orderbook archive/retention change.
+- [ ] Push and open a focused PR.
+
+## Review
+
+- 2026-05-20: Validation passed:
+  `bash -n scripts/export_clob_orderbook_snapshots_parquet.sh scripts/archive_clob_orderbook_snapshots_backfill.sh scripts/ploy_orderbook_snapshot_retention.sh scripts/ploy_maintenance.sh`,
+  `python3 -m unittest tests.test_ploy_maintenance_defaults`,
+  `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/deploy-tango-1-1.yml"); puts "deploy workflow yaml ok"'`,
+  and `rtk git diff --check`.
+- 2026-05-20: Committed on branch `fix/orderbook-archive-retention`.
+
 # Replay Backtest Evidence Stage Hardening (2026-05-20)
 
 ## Goal
