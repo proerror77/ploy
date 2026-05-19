@@ -586,6 +586,9 @@ fn is_settlement_autofactor_runtime_score(runtime_score: &str) -> bool {
         || name.starts_with("auto_settlement_conservative_settlement_edge")
         || name.starts_with("auto_settlement_model_full_depth_settlement_edge")
         || name.starts_with("auto_settlement_model_conservative_settlement_edge")
+        || name.starts_with("amplitude_weighted_momentum_30s_sigma")
+        || (name.starts_with("spread_adjusted_external_move")
+            && name != "spread_adjusted_external_move")
 }
 
 fn is_model_settlement_autofactor_runtime_score(runtime_score: &str) -> bool {
@@ -4942,8 +4945,14 @@ mod tests {
         assert!(is_settlement_autofactor_runtime_score(
             "autofactor_formula:mut_auto_settlement_conservative_settlement_edge_x_capacity"
         ));
-        assert!(!is_settlement_autofactor_runtime_score(
+        assert!(is_settlement_autofactor_runtime_score(
+            "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted"
+        ));
+        assert!(is_settlement_autofactor_runtime_score(
             "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate"
+        ));
+        assert!(!is_settlement_autofactor_runtime_score(
+            "autofactor_formula:spread_adjusted_external_move"
         ));
     }
 

@@ -17580,3 +17580,41 @@ Evidence stage: `runtime_parity / executable_replay_request`.
   `python3 -m unittest tests.test_build_autofactor_candidate_strategy_replay tests.test_autofactor_strategy_promotion tests.test_alpha_search_closed_loop_agent`,
   `python3 -m py_compile scripts/build_autofactor_candidate_strategy_replay.py scripts/evaluate_autofactor_strategy_promotion.py scripts/alpha_search_closed_loop_agent.py`,
   local simulation against artifact `26096201040`, and `rtk git diff --check`.
+
+# Runtime Replay Predictive AutoFactor Lane Repair (2026-05-20)
+
+## Goal
+
+Fix the runtime replay zero-intent result for predictive AutoFactor formula
+scores by routing runtime-supported predictive formulas through the settlement
+AutoFactor lane instead of the legacy CEX direction gate.
+
+Evidence stage: `runtime_parity / executable_replay_request`.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: settlement AutoFactor runtime-score classification and focused
+    regression coverage.
+
+## Tasks
+
+- [x] Inspect runtime replay artifact `26122319275`: it processed 5,000,000
+      updates but emitted 0 intents / 0 trades.
+- [x] Align runtime settlement-lane classification with the promotion mapping
+      for predictive formula mutations.
+- [x] Preserve bare `autofactor_formula:spread_adjusted_external_move` outside
+      settlement AutoFactor classification.
+- [x] Run focused Rust validation and diff validation.
+
+## Review
+
+- 2026-05-20: Root cause was runtime classification drift: formula scoring
+  supported `amplitude_weighted_momentum_30s_sigma*` and mutated
+  `spread_adjusted_external_move*`, but
+  `is_settlement_autofactor_runtime_score()` did not classify them as settlement
+  AutoFactor scores. Runtime replay therefore selected the legacy direction
+  gate before formula scoring and produced no entry intents.
+- 2026-05-20: Validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-replay-zero-intents /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles autofactor_formula --lib`
+  and `rtk git diff --check`.
