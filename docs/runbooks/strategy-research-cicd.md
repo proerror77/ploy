@@ -71,6 +71,16 @@ when the mismatch is understood and tracked as a follow-up issue.
 | Trade deploy | `.github/workflows/deploy-trade.yml` | Deploy runner/configs to `ploy-trade-1` through a protected environment |
 | Platform release | `.github/workflows/release-platform.yml` | Build platform bundle and optionally deploy it |
 
+`backtest.yml` emits `strategy_backtest_evaluation` as replay/backtest
+evidence, not as dry-run or live promotion evidence. Its `data_dir` path uses
+the legacy streaming Parquet feed for quote-tick replay; it does not consume the
+full-fidelity CLOB lake under `/opt/ploy/data/lake/orderbook_snapshots` yet.
+Treat profitable backtest metrics as blocked for promotion until the artifact
+also has full-depth CLOB fillability, official settlement, replay/dry-run
+parity, and runtime scorer parity. The machine-readable fields
+`evidence_stage`, `promotion_ready`, `blocking_risk_flags`, and
+`advisory_flags` are the operator-facing source of truth for that distinction.
+
 `recorded-replay-parity.yml` defaults `since=auto` and `until=auto`. In auto
 mode it scans the target recording on `tango-1-1`, intersects that recording
 coverage with the dry-run report for the target deployment, prefers the latest
@@ -152,6 +162,12 @@ Backtest evidence must explicitly state whether it is exploratory diagnostics or
 executable strategy accounting. Event-scoped strategies must not count multiple
 diagnostic rows as multiple deployable trades unless the runtime can execute the
 same entries under the same risk rules.
+
+For PM5D AutoFactor handoff, promotion also requires the AutoFactor report's
+top deployable bucket to expose event-level decision fields. Missing
+`top_bucket_unique_event_count` / `top_bucket_max_event_decisions` blocks
+handoff, and `top_bucket_max_event_decisions > 1` blocks handoff because the
+candidate is still relying on repeated rows from the same event.
 
 ## Decision Labels
 
