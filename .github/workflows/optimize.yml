@@ -40,7 +40,7 @@ on:
         required: false
         default: ""
       options_json:
-        description: "Advanced options JSON: timestamps, data_dir, limits, preflight_only, timeout, local snapshot registry, min_trades"
+        description: "Advanced options JSON: timestamps, diagnostic data_dir, limits, preflight_only, timeout, local snapshot registry, min_trades"
         required: false
         default: '{"train_start_ts":"","train_end_ts":"","val_start_ts":"","val_end_ts":"","data_dir":"/tmp/ploy-parquet","max_preflight_rows":15000000,"max_preflight_bytes":"80GiB","max_symbols":6,"max_days":8,"allow_large_window":false,"preflight_only":false,"max_updates":"","duckdb_memory_limit":"6GB","optimize_timeout_minutes":90,"allow_live_parquet_debug":false,"issue_number":"","snapshot_registry_dir":"","min_trades":""}'
 

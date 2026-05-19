@@ -1,3 +1,49 @@
+# Replay Backtest Evidence Stage Hardening (2026-05-20)
+
+## Goal
+
+Make replay/backtest artifacts self-describing enough that profitable backtests
+cannot be mistaken for dry-run or live promotion evidence without full-depth,
+settlement, and parity gates.
+
+Evidence stage: `diagnostic / replay_backtest_contract`.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+  - Owner: machine-readable evidence stage, data surface, and promotion blocker
+    fields in `strategy_backtest_evaluation`.
+- `.github/workflows/backtest.yml`
+  - Owner: workflow summary and issue comment surface the same blocker fields.
+- `.github/workflows/optimize.yml`
+  - Owner: input copy preserves diagnostic data source wording.
+- `docs/runbooks/strategy-research-cicd.md`
+  - Owner: operator-facing backtest promotion caveat.
+- `tests/test_replay_backtest_evidence_contract.py`
+  - Owner: lightweight static regression coverage for the evidence contract.
+- `tasks/todo.md`
+  - Owner: current session tracking for this extracted PR slice.
+
+## Tasks
+
+- [x] Create a clean worktree from current `origin/main`.
+- [x] Extract only replay/backtest evidence contract changes from the dirty
+      source worktree.
+- [x] Validate workflow syntax and focused static tests.
+- [x] Commit a focused replay/backtest evidence contract change.
+- [ ] Push and open a focused PR.
+
+## Review
+
+- 2026-05-20: Validation passed:
+  `python3 -m unittest tests.test_replay_backtest_evidence_contract`,
+  `ruby -e 'require "yaml"; %w[.github/workflows/backtest.yml .github/workflows/optimize.yml].each { |f| YAML.load_file(f) }; puts "workflow yaml ok"'`,
+  `rtk git diff --check`, and
+  `CARGO_TARGET_DIR=/tmp/ploy-replay-evidence-check /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-strategy-bundles --example run_backtest`.
+  The cargo check completed with existing warnings in strategy modules, but no
+  errors.
+- 2026-05-20: Committed on branch `fix/replay-backtest-evidence-contract`.
+
 # Rust-First CI Language Boundary (2026-05-20)
 
 ## Goal

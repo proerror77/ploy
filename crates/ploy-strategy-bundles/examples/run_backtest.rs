@@ -13,12 +13,12 @@
 //! If no --db-url is given, uses synthetic market data.
 
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_strategy_bundles::strategies::directional::DirectionalConfig;
 use ploy_strategy_bundles::{
-    DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder, ReversalStrategy,
-    RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig, StrategyLogic,
-    StrategyRuntime, ThreeLayerProfile, ThreeLayerStrategy, config::FullConfig,
+    config::FullConfig, DirectionalStrategy, HistoricalFeed, MarketUpdate, NullRecorder,
+    ReversalStrategy, RuntimeConfig, RuntimeMode, SimulatedExecutor, SimulatedExecutorConfig,
+    StrategyLogic, StrategyRuntime, ThreeLayerProfile, ThreeLayerStrategy,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -490,14 +490,22 @@ fn main() {
                 output_json.as_deref(),
                 &strategy_variant,
                 config_path.as_deref(),
+                "parquet_stream",
+                Some(dir.as_str()),
                 start_date.as_deref(),
                 end_date.as_deref(),
+                &backtest_options,
                 &result,
                 &snapshot,
             );
         }
     } else {
         let eager_source_load_secs;
+        let source_kind = if db_url.is_some() {
+            "db_eager"
+        } else {
+            "synthetic"
+        };
         let data: Vec<MarketUpdate> = if let Some(ref url) = db_url {
             let from = start_date.as_deref().unwrap_or("2026-03-28");
             let to = end_date.as_deref().unwrap_or("2026-04-03");
@@ -557,7 +565,7 @@ fn main() {
             timing_json.as_deref(),
             json!({
                 "command": "run_backtest",
-                "source": if db_url.is_some() { "db-eager" } else { "synthetic" },
+                "source": source_kind,
                 "config": config_path.as_deref(),
                 "strategy_variant": &strategy_variant,
                 "symbols": &strategy_config.symbols,
@@ -582,8 +590,11 @@ fn main() {
             output_json.as_deref(),
             &strategy_variant,
             config_path.as_deref(),
+            source_kind,
+            None,
             start_date.as_deref(),
             end_date.as_deref(),
+            &backtest_options,
             &result,
             &snapshot,
         );
@@ -594,8 +605,11 @@ fn write_backtest_evaluation_json(
     path: Option<&str>,
     strategy_variant: &str,
     config_path: Option<&str>,
+    source_kind: &str,
+    data_dir: Option<&str>,
     start_date: Option<&str>,
     end_date: Option<&str>,
+    backtest_options: &HistoricalLoadOptions,
     result: &ploy_strategy_bundles::RuntimeResult,
     snapshot: &ploy_trading::TradingRuntimeSnapshot,
 ) {
@@ -605,8 +619,11 @@ fn write_backtest_evaluation_json(
     let artifact = build_backtest_evaluation_artifact(
         strategy_variant,
         config_path,
+        source_kind,
+        data_dir,
         start_date,
         end_date,
+        backtest_options,
         result,
         snapshot,
     );
@@ -632,19 +649,65 @@ fn write_backtest_evaluation_json(
 fn build_backtest_evaluation_artifact(
     strategy_variant: &str,
     config_path: Option<&str>,
+    source_kind: &str,
+    data_dir: Option<&str>,
     start_date: Option<&str>,
     end_date: Option<&str>,
+    backtest_options: &HistoricalLoadOptions,
     result: &ploy_strategy_bundles::RuntimeResult,
     snapshot: &ploy_trading::TradingRuntimeSnapshot,
 ) -> serde_json::Value {
     let cashflow = snapshot.fill_cashflow_summary();
-    let mut risk_flags = Vec::new();
+    let mut artifact_risk_flags = Vec::new();
     if snapshot.orders.is_empty() {
-        risk_flags.push("no_order_level_rows");
+        artifact_risk_flags.push("no_order_level_rows");
     }
     if snapshot.fills.is_empty() {
-        risk_flags.push("no_fill_level_rows");
+        artifact_risk_flags.push("no_fill_level_rows");
     }
+
+    let has_official_settlement_gate = backtest_options.require_official_settlement;
+    let has_full_depth_clob = false;
+    let has_replay_dryrun_parity = false;
+    let has_runtime_scorer_parity = false;
+    let is_synthetic = source_kind == "synthetic";
+
+    let mut blocking_risk_flags = Vec::new();
+    if !has_full_depth_clob {
+        blocking_risk_flags.push("missing_full_depth_clob_fillability");
+    }
+    if !has_official_settlement_gate {
+        blocking_risk_flags.push("missing_official_settlement_gate");
+    }
+    if !has_replay_dryrun_parity {
+        blocking_risk_flags.push("missing_replay_dryrun_parity");
+    }
+    if !has_runtime_scorer_parity {
+        blocking_risk_flags.push("missing_runtime_scorer_parity");
+    }
+    if is_synthetic {
+        blocking_risk_flags.push("synthetic_data_source");
+    }
+    blocking_risk_flags.extend(artifact_risk_flags.iter().copied());
+
+    let mut advisory_flags = Vec::new();
+    if source_kind == "parquet_stream" {
+        advisory_flags.push("parquet_stream_uses_quote_ticks_not_full_clob_lake");
+    }
+    if source_kind == "db_eager" {
+        advisory_flags.push("db_eager_mode_is_debug_or_small_window_only");
+    }
+
+    let evidence_stage = if !is_synthetic && has_official_settlement_gate {
+        "executable_replay"
+    } else {
+        "diagnostic"
+    };
+    let canonical_result = if artifact_risk_flags.is_empty() {
+        "continue"
+    } else {
+        "fix-workflow-or-data-source"
+    };
 
     json!({
         "schema_version": 1,
@@ -652,9 +715,29 @@ fn build_backtest_evaluation_artifact(
         "producer": "run_backtest",
         "generated_at": Utc::now().to_rfc3339(),
         "replay_mode": "backtest",
-        "canonical_result": if risk_flags.is_empty() { "continue" } else { "fix-workflow-or-data-source" },
+        "evidence_stage": evidence_stage,
+        "canonical_result": canonical_result,
+        "promotion_ready": false,
+        "promotion_decision": "pending replay/dry-run parity review",
         "strategy_variant": strategy_variant,
         "config_path": config_path,
+        "source": {
+            "kind": source_kind,
+            "data_dir": data_dir,
+        },
+        "data_surfaces": {
+            "binance_l2_requested": backtest_options.include_l2,
+            "lob_sample_secs": backtest_options.lob_sample_secs,
+            "spot_sample_secs": backtest_options.spot_sample_secs,
+            "official_settlement_required": has_official_settlement_gate,
+            "full_depth_clob_fillability": has_full_depth_clob,
+            "runtime_replay_parity": has_replay_dryrun_parity,
+            "runtime_scorer_parity": has_runtime_scorer_parity,
+        },
+        "gate_notes": [
+            "Backtest evidence alone is not promotion evidence.",
+            "Promotion requires full-depth CLOB fillability, official settlement, replay/dry-run parity, and runtime scorer parity."
+        ],
         "window": {
             "start_date": start_date,
             "end_date": end_date,
@@ -673,7 +756,9 @@ fn build_backtest_evaluation_artifact(
             "gross_sell_proceeds": cashflow.gross_sell_proceeds,
             "elapsed_secs": result.elapsed_secs,
         },
-        "risk_flags": risk_flags,
+        "risk_flags": artifact_risk_flags,
+        "blocking_risk_flags": blocking_risk_flags,
+        "advisory_flags": advisory_flags,
         "runtime_evidence": normalized_runtime_evidence(snapshot),
     })
 }
@@ -841,7 +926,11 @@ fn normalized_runtime_evidence(
 }
 
 fn empty_to_none(value: &str) -> Option<&str> {
-    if value.is_empty() { None } else { Some(value) }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn trade_side_label(side: ploy_trading::TradeSide) -> &'static str {
