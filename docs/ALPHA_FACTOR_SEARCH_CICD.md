@@ -500,7 +500,10 @@ typed budget and latest evidence
 
 `run_mode=plan_only` emits the Research Manager plan only. `run_mode=search`
 requires a retained research snapshot and dispatches the hosted artifact
-walk-forward path with handoff/config mutation disabled. `run_mode=promote_handoff`
+walk-forward path with handoff/config mutation disabled. Pass
+`max_quote_age_secs` to match the retained snapshot compile setting; for the
+current compact snapshots the daily workflow defaults this to `2` so the
+hosted walk-forward validator does not reject the snapshot. `run_mode=promote_handoff`
 records that a manual handoff review is required; it does not edit strategy
 configs or touch runtime services.
 

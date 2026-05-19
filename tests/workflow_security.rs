@@ -103,6 +103,29 @@ fn workflow_dispatch_inputs_stay_lintable() {
 }
 
 #[test]
+fn factor_evolve_daily_search_passes_snapshot_quote_age() {
+    let workflow = workflow_contents(".github/workflows/factor-evolve-daily-research.yml");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "max_quote_age_secs:",
+        "MAX_QUOTE_AGE_SECS: ${{ github.event.inputs.max_quote_age_secs }}",
+        "\"max_quote_age_secs\": max_quote_age_secs",
+        "-f options_json=\"$(cat artifacts/factor-evolve-daily/hosted-options.json)\"",
+    ] {
+        if !workflow.contains(needle) {
+            offenders.push(format!("missing daily workflow quote-age handoff: {needle}"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "FactorEvolve daily search workflow guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn event_ml_rolling_evidence_has_hosted_artifact_lane() {
     let workflow = workflow_contents(".github/workflows/event-ml-rolling-evidence.yml");
     let runbook = workflow_contents("docs/runbooks/event-ml-automl-workflow.md");

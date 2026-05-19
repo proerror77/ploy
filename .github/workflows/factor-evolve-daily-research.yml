@@ -15,6 +15,10 @@ on:
         description: "Comma-separated symbols present in the snapshot"
         required: false
         default: "BTCUSDT,ETHUSDT"
+      max_quote_age_secs:
+        description: "Max quote age used when the snapshot was compiled"
+        required: false
+        default: "2"
       research_budget_json:
         description: "Research budget JSON"
         required: false
@@ -153,16 +157,21 @@ jobs:
           GIT_REF: ${{ github.event.inputs.git_ref }}
           SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
           SYMBOLS: ${{ github.event.inputs.symbols }}
+          MAX_QUOTE_AGE_SECS: ${{ github.event.inputs.max_quote_age_secs }}
         run: |
           set -euo pipefail
           python3 - <<'PY' > artifacts/factor-evolve-daily/hosted-options.json
           import json
+          import os
+
+          max_quote_age_secs = os.environ.get("MAX_QUOTE_AGE_SECS", "2").strip() or "2"
           print(json.dumps({
               "chain_next_run": False,
               "chain_remaining": 0,
               "create_handoff_issue": False,
               "fail_if_blocked": False,
               "data_quality_mode": "event_complete",
+              "max_quote_age_secs": max_quote_age_secs,
               "alpha_search_plan_target": "full_depth_settlement_executable_pnl",
               "allowed_target": "full_depth_settlement_executable_pnl",
               "required_strategy_profile": "settlement_probability",
