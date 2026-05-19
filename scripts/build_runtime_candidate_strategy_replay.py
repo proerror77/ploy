@@ -18,6 +18,12 @@ from typing import Any
 
 
 RUNTIME_REPLAY_BASIS = "runtime_market_update_replay"
+COUNTERFACTUAL_THRESHOLDS = (
+    ("0.05", "005"),
+    ("0.10", "010"),
+    ("0.15", "015"),
+    ("0.25", "025"),
+)
 
 
 def decimal_value(raw: Any, default: Decimal = Decimal("0")) -> Decimal:
@@ -44,6 +50,53 @@ def runtime_evidence(payload: dict[str, Any]) -> dict[str, Any]:
 def result_payload(payload: dict[str, Any]) -> dict[str, Any]:
     result = payload.get("result")
     return result if isinstance(result, dict) else {}
+
+
+def int_metric(payload: dict[str, Any], key: str) -> int:
+    try:
+        return int(payload.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def score_counterfactual(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    if not diagnostics:
+        return {}
+    formula_evaluations = int_metric(diagnostics, "settlement_autofactor_formula_evaluations")
+    direct: dict[str, int] = {}
+    reverse: dict[str, int] = {}
+    for label, suffix in COUNTERFACTUAL_THRESHOLDS:
+        direct[label] = int_metric(
+            diagnostics,
+            f"settlement_autofactor_predictive_score_ge_{suffix}",
+        )
+        reverse[label] = int_metric(
+            diagnostics,
+            f"settlement_autofactor_predictive_reverse_score_ge_{suffix}",
+        )
+    if not formula_evaluations and not any(direct.values()) and not any(reverse.values()):
+        return {}
+
+    configured_direct = direct["0.25"]
+    configured_reverse = reverse["0.25"]
+    if configured_reverse > configured_direct:
+        diagnosis = "reverse_direction_stronger_at_configured_threshold"
+    elif configured_direct == 0 and any(value > 0 for key, value in direct.items() if key != "0.25"):
+        diagnosis = "direct_signal_exists_below_configured_threshold"
+    elif configured_direct == 0:
+        diagnosis = "direct_signal_too_weak_at_all_reported_thresholds"
+    else:
+        diagnosis = "direct_signal_passes_configured_threshold"
+
+    return {
+        "formula_evaluations": formula_evaluations,
+        "depth_fillable": int_metric(diagnostics, "settlement_autofactor_depth_fillable"),
+        "entry_score_skips": int_metric(diagnostics, "skip_entry_score"),
+        "configured_entry_threshold": "0.25",
+        "direct_pass_counts": direct,
+        "reverse_direction_pass_counts": reverse,
+        "diagnosis": diagnosis,
+    }
 
 
 def purpose_is_entry(row: dict[str, Any]) -> bool:
@@ -182,8 +235,9 @@ def build_artifact(
         blocking_flags.append("zero_runtime_orders_and_fills")
 
     diagnostics = runtime_eval.get("strategy_diagnostics") or result.get("strategy_diagnostics") or {}
+    counterfactual = score_counterfactual(diagnostics)
 
-    return {
+    artifact = {
         "schema_version": 1,
         "kind": "autofactor_candidate_strategy_replay",
         "evidence_stage": "executable_replay",
@@ -216,6 +270,9 @@ def build_artifact(
         "strategy_diagnostics": diagnostics,
         "blocking_risk_flags": blocking_flags,
     }
+    if counterfactual:
+        artifact["score_counterfactual"] = counterfactual
+    return artifact
 
 
 def render_markdown(artifact: dict[str, Any]) -> str:
@@ -240,6 +297,26 @@ def render_markdown(artifact: dict[str, Any]) -> str:
         "",
     ]
     lines.extend(f"- `{flag}`" for flag in flags) if flags else lines.append("- `<none>`")
+    counterfactual = artifact.get("score_counterfactual")
+    if isinstance(counterfactual, dict):
+        lines.extend(
+            [
+                "",
+                "## Score Counterfactual",
+                "",
+                f"- Diagnosis: `{counterfactual.get('diagnosis')}`",
+                f"- Formula evaluations: `{counterfactual.get('formula_evaluations')}`",
+                f"- Depth-fillable evaluations: `{counterfactual.get('depth_fillable')}`",
+                f"- Entry score skips: `{counterfactual.get('entry_score_skips')}`",
+                "",
+                "| threshold | direct passes | reverse-direction passes |",
+                "| --- | ---: | ---: |",
+            ]
+        )
+        direct = counterfactual.get("direct_pass_counts") or {}
+        reverse = counterfactual.get("reverse_direction_pass_counts") or {}
+        for threshold, _suffix in COUNTERFACTUAL_THRESHOLDS:
+            lines.append(f"| `{threshold}` | `{direct.get(threshold, 0)}` | `{reverse.get(threshold, 0)}` |")
     lines.append("")
     return "\n".join(lines)
 

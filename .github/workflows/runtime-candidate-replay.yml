@@ -364,7 +364,7 @@ jobs:
             if [ -f artifacts/runtime-replay/candidate-strategy-replay.json ]; then
               echo ""
               echo '```json'
-              python3 -c 'import json; data=json.load(open("artifacts/runtime-replay/candidate-strategy-replay.json")); print(json.dumps({"promotion_ready": data.get("promotion_ready"), "basis": data.get("basis"), "metrics": data.get("metrics"), "blocking_risk_flags": data.get("blocking_risk_flags")}, indent=2, sort_keys=True))'
+              python3 -c 'import json; data=json.load(open("artifacts/runtime-replay/candidate-strategy-replay.json")); print(json.dumps({"promotion_ready": data.get("promotion_ready"), "basis": data.get("basis"), "metrics": data.get("metrics"), "score_counterfactual": data.get("score_counterfactual"), "blocking_risk_flags": data.get("blocking_risk_flags")}, indent=2, sort_keys=True))'
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
@@ -388,11 +388,13 @@ jobs:
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
             let ready = false;
             let metrics = {};
+            let scoreCounterfactual = {};
             let blockers = ["missing_candidate_strategy_replay_artifact"];
             if (fs.existsSync("artifacts/runtime-replay/candidate-strategy-replay.json")) {
               const data = JSON.parse(fs.readFileSync("artifacts/runtime-replay/candidate-strategy-replay.json", "utf8"));
               ready = Boolean(data.promotion_ready);
               metrics = data.metrics || {};
+              scoreCounterfactual = data.score_counterfactual || {};
               blockers = data.blocking_risk_flags || [];
             }
             const body = [
@@ -410,6 +412,7 @@ jobs:
               `- Unique events: \`${metrics.unique_event_count ?? "n/a"}\``,
               `- Entry fill rate: \`${metrics.entry_fill_rate ?? "n/a"}\``,
               `- ROI: \`${metrics.roi ?? "n/a"}\``,
+              `- Score counterfactual: \`${scoreCounterfactual.diagnosis ?? "n/a"}\``,
               `- Blocking flags: \`${blockers.join(", ") || "none"}\``
             ].join("\n");
             await github.rest.issues.createComment({
