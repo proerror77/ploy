@@ -17603,6 +17603,8 @@ Evidence stage: `runtime_parity / executable_replay_request`.
       updates but emitted 0 intents / 0 trades.
 - [x] Align runtime settlement-lane classification with the promotion mapping
       for predictive formula mutations.
+- [x] Gate predictive formulas on their normalized entry score instead of raw
+      settlement-edge `min_edge`.
 - [x] Preserve bare `autofactor_formula:spread_adjusted_external_move` outside
       settlement AutoFactor classification.
 - [x] Run focused Rust validation and diff validation.
@@ -17615,6 +17617,11 @@ Evidence stage: `runtime_parity / executable_replay_request`.
   `is_settlement_autofactor_runtime_score()` did not classify them as settlement
   AutoFactor scores. Runtime replay therefore selected the legacy direction
   gate before formula scoring and produced no entry intents.
+- 2026-05-20: Second replay `26123152101` confirmed the formula lane was active
+  (`settlement_autofactor_formula_evaluations=2934`), but all entries were
+  blocked by raw-score `min_edge`. Predictive formulas are now gated by their
+  normalized entry score; traditional settlement-edge formulas keep the raw
+  edge gate.
 - 2026-05-20: Validation passed:
   `CARGO_TARGET_DIR=/tmp/ploy-runtime-replay-zero-intents /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles autofactor_formula --lib`
   and `rtk git diff --check`.

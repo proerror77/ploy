@@ -586,9 +586,7 @@ fn is_settlement_autofactor_runtime_score(runtime_score: &str) -> bool {
         || name.starts_with("auto_settlement_conservative_settlement_edge")
         || name.starts_with("auto_settlement_model_full_depth_settlement_edge")
         || name.starts_with("auto_settlement_model_conservative_settlement_edge")
-        || name.starts_with("amplitude_weighted_momentum_30s_sigma")
-        || (name.starts_with("spread_adjusted_external_move")
-            && name != "spread_adjusted_external_move")
+        || is_predictive_settlement_autofactor_name(name)
 }
 
 fn is_model_settlement_autofactor_runtime_score(runtime_score: &str) -> bool {
@@ -598,6 +596,34 @@ fn is_model_settlement_autofactor_runtime_score(runtime_score: &str) -> bool {
     let name = normalized_autofactor_formula_name(name);
     name.starts_with("auto_settlement_model_full_depth_settlement_edge")
         || name.starts_with("auto_settlement_model_conservative_settlement_edge")
+}
+
+fn is_predictive_settlement_autofactor_runtime_score(runtime_score: &str) -> bool {
+    let name = runtime_score
+        .strip_prefix("autofactor_formula:")
+        .unwrap_or(runtime_score);
+    is_predictive_settlement_autofactor_name(normalized_autofactor_formula_name(name))
+}
+
+fn is_predictive_settlement_autofactor_name(name: &str) -> bool {
+    name.starts_with("amplitude_weighted_momentum_30s_sigma")
+        || (name.starts_with("spread_adjusted_external_move")
+            && name != "spread_adjusted_external_move")
+}
+
+fn settlement_autofactor_entry_score_passes(
+    runtime_score: &str,
+    raw_score: Option<f64>,
+    total_score: f64,
+    config: &ThreeLayerConfig,
+) -> bool {
+    if is_predictive_settlement_autofactor_runtime_score(runtime_score) {
+        total_score >= config.min_entry_score
+    } else {
+        raw_score
+            .map(|score| score >= config.min_edge.max(0.0))
+            .unwrap_or(total_score >= config.min_entry_score)
+    }
 }
 
 fn normalized_autofactor_formula_name(mut name: &str) -> &str {
@@ -1938,10 +1964,15 @@ impl ThreeLayerStrategy {
                     )
                 };
 
-            let entry_score_passes = if uses_settlement_autofactor {
-                autofactor_raw_score
-                    .map(|score| score >= self.config.min_edge.max(0.0))
-                    .unwrap_or(total_score >= self.config.min_entry_score)
+            let entry_score_passes = if let (true, Some(runtime_score)) =
+                (uses_settlement_autofactor, runtime_score.as_deref())
+            {
+                settlement_autofactor_entry_score_passes(
+                    runtime_score,
+                    autofactor_raw_score,
+                    total_score,
+                    &self.config,
+                )
             } else {
                 total_score >= self.config.min_entry_score
             };
@@ -4953,6 +4984,32 @@ mod tests {
         ));
         assert!(!is_settlement_autofactor_runtime_score(
             "autofactor_formula:spread_adjusted_external_move"
+        ));
+    }
+
+    #[test]
+    fn predictive_settlement_autofactor_uses_normalized_entry_gate() {
+        let mut config = test_config();
+        config.min_edge = 0.02;
+        config.min_entry_score = 0.25;
+
+        assert!(settlement_autofactor_entry_score_passes(
+            "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
+            Some(0.006),
+            0.30,
+            &config,
+        ));
+        assert!(!settlement_autofactor_entry_score_passes(
+            "autofactor_formula:auto_settlement_conservative_settlement_edge",
+            Some(0.006),
+            0.30,
+            &config,
+        ));
+        assert!(settlement_autofactor_entry_score_passes(
+            "autofactor_formula:auto_settlement_conservative_settlement_edge",
+            Some(0.021),
+            0.30,
+            &config,
         ));
     }
 
