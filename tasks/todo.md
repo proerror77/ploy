@@ -1,3 +1,47 @@
+# FactorEvolve Daily Search Snapshot Quote-Age Fix (2026-05-19)
+
+## Goal
+
+Finish the FactorEvolve daily research plan by fixing the observed hosted
+search dispatch mismatch: the daily orchestrator dispatched a retained snapshot
+compiled with `max_quote_age_secs=2` into hosted walk-forward defaults that
+requested `30`, causing the validator to reject the snapshot.
+
+Evidence stage: `diagnostic / workflow_orchestration`.
+
+## Files / Ownership
+
+- `.github/workflows/factor-evolve-daily-research.yml`
+  - Owner: pass snapshot quote-age settings into hosted search options.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document the quote-age handoff requirement.
+- `tests/workflow_security.rs`
+  - Owner: regression guard that daily search forwards quote age.
+
+## Tasks
+
+- [x] Inspect recent failed hosted walk-forward runs and identify the
+      snapshot/request `max_quote_age_secs` mismatch.
+- [x] Add `max_quote_age_secs` to the daily research workflow inputs.
+- [x] Forward `max_quote_age_secs` into downstream hosted workflow
+      `options_json`.
+- [x] Document the retained-snapshot quote-age requirement.
+- [x] Add a workflow security regression guard.
+- [x] Run focused validation.
+
+## Review
+
+- 2026-05-19: Failed hosted run `26043424032` wrote
+  `snapshot max_quote_age_secs 2 does not match requested 30`. The daily
+  workflow now defaults `max_quote_age_secs` to `2` and forwards it in
+  `hosted-options.json`, keeping `run_mode=search` aligned with compact
+  retained snapshots while still allowing callers to override the value.
+- 2026-05-19: Validation passed:
+  `ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].each { |f| YAML.load_file(f) }; puts "ok"'`,
+  `CARGO_TARGET_DIR=/tmp/ploy-factor-evolve-audit /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test workflow_security`,
+  `rg -n "deploy|systemctl|ployctl deployments resume|create_config_pr" .github/workflows/factor-evolve-daily-research.yml || true`
+  with no matches, and `rtk git diff --check`.
+
 # FactorEvolve Research OS Task 8 - Daily Research CI Orchestrator (2026-05-18)
 
 ## Goal
