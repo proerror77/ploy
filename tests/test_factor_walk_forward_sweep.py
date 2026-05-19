@@ -353,7 +353,7 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertEqual(first_marker, "<empty>")
         self.assertEqual(second_marker, "auto_settlement")
 
-    def test_summary_separates_discovery_from_runtime_mappable_candidates(self):
+    def test_summary_marks_predictive_formula_mutation_runtime_mappable(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             (tmp / "snapshot").mkdir()
@@ -373,19 +373,23 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             variant["best_discovery_factor"]["name"],
             "mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
         )
-        self.assertIn(
+        self.assertNotIn(
             "missing_runtime_strategy_mapping",
             variant["best_discovery_factor"]["blockers"],
         )
         self.assertEqual(
             variant["best_runtime_mappable_factor"]["name"],
-            "auto_settlement_conservative_settlement_edge",
+            "mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
         )
         self.assertEqual(
             variant["best_runtime_mappable_factor"]["top_bucket_avg_label"],
-            2.507843,
+            1.660059,
         )
-        self.assertEqual(variant["best_runtime_mappable_factor"]["complexity"], 1)
+        self.assertEqual(variant["best_runtime_mappable_factor"]["complexity"], 6)
+        self.assertEqual(
+            variant["best_runtime_mappable_factor"]["runtime_mapping"]["runtime_score"],
+            "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
+        )
         self.assertEqual(variant["qualified_count"], 0)
         self.assertEqual(variant["decision"], "blocked")
         self.assertIsNone(variant["best_qualified_strategy"])
