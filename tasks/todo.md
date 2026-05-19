@@ -17625,3 +17625,51 @@ Evidence stage: `runtime_parity / executable_replay_request`.
 - 2026-05-20: Validation passed:
   `CARGO_TARGET_DIR=/tmp/ploy-runtime-replay-zero-intents /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles autofactor_formula --lib`
   and `rtk git diff --check`.
+
+# Runtime Replay Score Counterfactual Diagnostic (2026-05-20)
+
+## Goal
+
+Make runtime replay answer why a predictive AutoFactor candidate emits zero
+entry intents by reporting direct-vs-reverse direction score threshold counts
+from the same MarketUpdate replay.
+
+Evidence stage: `runtime_parity / diagnostic`.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: runtime predictive score counters.
+- `scripts/build_runtime_candidate_strategy_replay.py`
+  - Owner: machine-readable score counterfactual artifact and markdown summary.
+- `.github/workflows/runtime-candidate-replay.yml`
+  - Owner: expose counterfactual diagnosis in workflow summaries and issue
+    comments.
+- `tests/test_build_runtime_candidate_strategy_replay.py`
+  - Owner: Python artifact regression coverage.
+
+## Tasks
+
+- [x] Keep the workflow research-only: no deploy, no config mutation, no live
+      trading.
+- [x] Add runtime counters for direct and reverse predictive scores at
+      `0.05`, `0.10`, `0.15`, and `0.25` normalized entry-score thresholds.
+- [x] Add `score_counterfactual` to the runtime candidate replay artifact.
+- [x] Surface the diagnosis in workflow summary and replay evidence comments.
+- [x] Run focused Rust/Python/workflow validation.
+- [ ] Open PR, wait for CI, merge, then trigger a fresh runtime replay from
+      `main`.
+
+## Review
+
+- 2026-05-20: Previous replay `26123999276` showed the formula lane was active
+  but ended with `intents_submitted=0`, `settlement_autofactor_formula_evaluations=2934`,
+  and `skip_entry_score=2934`. The new diagnostic will distinguish
+  `reverse_direction_stronger_at_configured_threshold` from
+  `direct_signal_exists_below_configured_threshold` and
+  `direct_signal_too_weak_at_all_reported_thresholds`.
+- 2026-05-20: Local validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-counterfactual-diagnostic /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-strategy-bundles autofactor --lib`,
+  `python3 -m unittest tests.test_build_runtime_candidate_strategy_replay`,
+  `python3 -m py_compile scripts/build_runtime_candidate_strategy_replay.py`,
+  and `rtk git diff --check`.

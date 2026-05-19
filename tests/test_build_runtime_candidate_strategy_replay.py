@@ -180,6 +180,53 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         self.assertIn("zero_runtime_orders_and_fills", payload["blocking_risk_flags"])
         self.assertEqual(payload["strategy_diagnostics"]["skip_edge_score"], 183)
 
+    def test_adds_score_counterfactual_from_runtime_diagnostics(self):
+        payload, markdown = self.run_script(
+            {
+                "result": {
+                    "updates_processed": 1000,
+                    "intents_submitted": 0,
+                    "strategy_diagnostics": {
+                        "settlement_autofactor_formula_evaluations": 20,
+                        "settlement_autofactor_depth_fillable": 18,
+                        "skip_entry_score": 18,
+                        "settlement_autofactor_predictive_score_ge_005": 12,
+                        "settlement_autofactor_predictive_score_ge_010": 8,
+                        "settlement_autofactor_predictive_score_ge_015": 3,
+                        "settlement_autofactor_predictive_score_ge_025": 0,
+                        "settlement_autofactor_predictive_reverse_score_ge_005": 2,
+                        "settlement_autofactor_predictive_reverse_score_ge_010": 1,
+                        "settlement_autofactor_predictive_reverse_score_ge_015": 0,
+                        "settlement_autofactor_predictive_reverse_score_ge_025": 0,
+                    },
+                },
+                "runtime_evidence": {
+                    "basis": "trading_runtime_snapshot",
+                    "events": [],
+                    "orders": [],
+                    "fills": [],
+                    "intents": [],
+                },
+            },
+            "--full-depth-entry",
+            "--min-trade-count",
+            "2",
+        )
+
+        counterfactual = payload["score_counterfactual"]
+        self.assertEqual(counterfactual["formula_evaluations"], 20)
+        self.assertEqual(counterfactual["depth_fillable"], 18)
+        self.assertEqual(counterfactual["entry_score_skips"], 18)
+        self.assertEqual(counterfactual["direct_pass_counts"]["0.15"], 3)
+        self.assertEqual(counterfactual["direct_pass_counts"]["0.25"], 0)
+        self.assertEqual(counterfactual["reverse_direction_pass_counts"]["0.10"], 1)
+        self.assertEqual(
+            counterfactual["diagnosis"],
+            "direct_signal_exists_below_configured_threshold",
+        )
+        self.assertIn("## Score Counterfactual", markdown)
+        self.assertIn("| `0.15` | `3` | `0` |", markdown)
+
     def test_blocks_open_settlement_and_unconfirmed_depth(self):
         payload, _ = self.run_script(
             runtime_eval_payload(settled=False),

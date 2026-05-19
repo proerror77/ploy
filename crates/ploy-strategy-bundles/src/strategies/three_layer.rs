@@ -947,6 +947,44 @@ impl ThreeLayerStrategy {
         });
     }
 
+    fn bump_predictive_autofactor_counterfactual_scores(&mut self, raw: f64, score: f64) {
+        if !score.is_finite() {
+            self.bump("settlement_autofactor_predictive_score_nonfinite");
+            return;
+        }
+        let reverse_score =
+            three_layer_model::threshold_score(-raw, 0.0, 0.02, false).clamp(-0.50, 1.0);
+        for (threshold, direct_key, reverse_key) in [
+            (
+                0.05,
+                "settlement_autofactor_predictive_score_ge_005",
+                "settlement_autofactor_predictive_reverse_score_ge_005",
+            ),
+            (
+                0.10,
+                "settlement_autofactor_predictive_score_ge_010",
+                "settlement_autofactor_predictive_reverse_score_ge_010",
+            ),
+            (
+                0.15,
+                "settlement_autofactor_predictive_score_ge_015",
+                "settlement_autofactor_predictive_reverse_score_ge_015",
+            ),
+            (
+                0.25,
+                "settlement_autofactor_predictive_score_ge_025",
+                "settlement_autofactor_predictive_reverse_score_ge_025",
+            ),
+        ] {
+            if score >= threshold {
+                self.bump(direct_key);
+            }
+            if reverse_score >= threshold {
+                self.bump(reverse_key);
+            }
+        }
+    }
+
     fn now(&self) -> DateTime<Utc> {
         self.feed_time.unwrap_or_else(Utc::now)
     }
@@ -1931,6 +1969,11 @@ impl ThreeLayerStrategy {
                             SettlementAutofactorEdgeMetric::RawFormula,
                             raw,
                         );
+                        if is_predictive_settlement_autofactor_runtime_score(runtime_score) {
+                            self.bump_predictive_autofactor_counterfactual_scores(
+                                raw, normalized,
+                            );
+                        }
                         if raw >= self.config.min_edge.max(0.0) {
                             self.bump("settlement_autofactor_raw_score_pass_min_edge");
                         } else {
@@ -5011,6 +5054,39 @@ mod tests {
             0.30,
             &config,
         ));
+    }
+
+    #[test]
+    fn predictive_autofactor_records_direct_and_reverse_threshold_counts() {
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+
+        strategy.bump_predictive_autofactor_counterfactual_scores(0.006, 0.30);
+        strategy.bump_predictive_autofactor_counterfactual_scores(-0.004, -0.20);
+
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_predictive_score_ge_005"),
+            Some(&1)
+        );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_predictive_score_ge_025"),
+            Some(&1)
+        );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_predictive_reverse_score_ge_005"),
+            Some(&1)
+        );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_predictive_reverse_score_ge_015"),
+            Some(&1)
+        );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_predictive_reverse_score_ge_025"),
+            None
+        );
     }
 
     #[test]
