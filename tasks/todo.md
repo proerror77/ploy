@@ -17525,3 +17525,58 @@ trade lifecycle for PM5D binary-option events.
   `.github/workflows/deploy-tango-1-1.yml` did not yet include migration 041 in
   `DEPLOY_MIGRATIONS`; added a separate workflow-only fix before triggering any
   tango deploy.
+
+# AutoFactor Runtime Candidate Replay Mapping (2026-05-20)
+
+## Goal
+
+Map runtime-supported predictive AutoFactor formula mutations to settlement
+runtime scores and make closed-loop `fix_runtime` decisions emit an explicit
+runtime replay request.
+
+Evidence stage: `runtime_parity / executable_replay_request`.
+
+## Files / Ownership
+
+- `scripts/build_autofactor_candidate_strategy_replay.py`
+  - Owner: infer settlement runtime mapping for predictive formula mutations
+    while keeping bare `spread_adjusted_external_move` in the repricing lane.
+- `scripts/evaluate_autofactor_strategy_promotion.py`
+  - Owner: use the same inferred mapping during promotion evaluation.
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: route blockers to the selected runtime replay candidate and emit
+    `runtime-candidate-replay.yml` inputs.
+- `tests/test_build_autofactor_candidate_strategy_replay.py`,
+  `tests/test_autofactor_strategy_promotion.py`, and
+  `tests/test_alpha_search_closed_loop_agent.py`
+  - Owner: focused regression coverage for mapping, blocker selection, and
+    runtime replay request output.
+
+## Tasks
+
+- [x] Infer settlement runtime mapping for predictive formula mutations:
+      `amplitude_weighted_momentum_30s_sigma*` and mutated
+      `spread_adjusted_external_move*`.
+- [x] Preserve the bare `spread_adjusted_external_move` repricing mapping.
+- [x] Keep top-bucket aggregate candidate replay blocked until runtime replay
+      evidence replaces it.
+- [x] Make closed-loop `fix_runtime` output include
+      `runtime-candidate-replay.yml` dispatch inputs for the selected runtime
+      score.
+- [x] Run focused Python tests, py_compile, artifact simulation, and diff
+      validation.
+
+## Review
+
+- 2026-05-20: The hosted walk-forward artifact now maps
+  `mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted` to
+  `runtime_score=autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted`
+  with `strategy_profile=settlement_probability`; the aggregate replay remains
+  blocked by `requires_runtime_replay_not_top_bucket_aggregate`.
+- 2026-05-20: Promotion evaluation stays blocked, but the relevant blockers are
+  now runtime replay blockers instead of missing runtime mapping noise. Closed
+  loop now requests `runtime-candidate-replay.yml` for the selected score.
+- 2026-05-20: Validation passed:
+  `python3 -m unittest tests.test_build_autofactor_candidate_strategy_replay tests.test_autofactor_strategy_promotion tests.test_alpha_search_closed_loop_agent`,
+  `python3 -m py_compile scripts/build_autofactor_candidate_strategy_replay.py scripts/evaluate_autofactor_strategy_promotion.py scripts/alpha_search_closed_loop_agent.py`,
+  local simulation against artifact `26096201040`, and `rtk git diff --check`.

@@ -138,7 +138,14 @@ def blocker_strings(payload: Any) -> list[str]:
 def target_blocker_strings(payload: Any, target: str) -> list[str]:
     out: list[str] = []
     eligible: list[str] = []
+    profile_matched: list[str] = []
+    replay_matched: list[str] = []
     if isinstance(payload, dict):
+        required_profile = str(payload.get("required_strategy_profile") or "settlement_probability")
+        replay = payload.get("candidate_strategy_replay")
+        replay_runtime_score = ""
+        if isinstance(replay, dict):
+            replay_runtime_score = str(replay.get("runtime_score") or "")
         evaluated = payload.get("evaluated_factors")
         if isinstance(evaluated, list):
             for item in evaluated:
@@ -162,8 +169,17 @@ def target_blocker_strings(payload: Any, target: str) -> list[str]:
                         and isinstance(runtime_mapping, dict)
                         and runtime_mapping.get("runtime_score")
                     ):
+                        runtime_score = str(runtime_mapping.get("runtime_score") or "")
                         eligible.extend(row_blockers)
+                        if replay_runtime_score and runtime_score == replay_runtime_score:
+                            replay_matched.extend(row_blockers)
+                        if runtime_mapping.get("strategy_profile") == required_profile:
+                            profile_matched.extend(row_blockers)
             payload = {key: value for key, value in payload.items() if key != "evaluated_factors"}
+        if replay_matched:
+            return replay_matched
+        if profile_matched:
+            return profile_matched
         if eligible:
             return eligible
         out.extend(blocker_strings(payload))
@@ -301,6 +317,7 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
         and chain.get("should_dispatch") is True
     )
     best = best_run(runs)
+    runtime_request = runtime_replay_request(current) if action == "fix_runtime" else None
     return {
         "schema_version": 1,
         "kind": "alpha_search_closed_loop_decision",
@@ -320,7 +337,39 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "promotion_blockers": blockers,
         "next_steps": next_steps(action),
         "prior_revision_required": action == "revise_prior",
+        "runtime_replay_request": runtime_request,
     }
+
+
+def runtime_replay_request(run: dict[str, Any]) -> dict[str, Any] | None:
+    for source in (run.get("promotion"), run.get("handoff")):
+        if not isinstance(source, dict):
+            continue
+        replay = source.get("candidate_strategy_replay")
+        if not isinstance(replay, dict):
+            continue
+        runtime_score = str(replay.get("runtime_score") or "").strip()
+        strategy_profile = str(replay.get("strategy_profile") or "settlement_probability").strip()
+        if not runtime_score:
+            continue
+        return {
+            "workflow": "runtime-candidate-replay.yml",
+            "git_ref": "main",
+            "reason": "replace aggregate top-bucket diagnostic with runtime_market_update_replay evidence",
+            "inputs": {
+                "deployment_id": "pm5d.threelayer.settlement-probability-btc-eth.dryrun",
+                "config_path": "/opt/ploy/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+                "recording_path": "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson",
+                "runtime_score": runtime_score,
+                "strategy_profile": strategy_profile or "settlement_probability",
+                "min_trade_count": "50",
+                "min_fill_rate": "0.30",
+                "min_roi": "0",
+                "full_depth_entry": "true",
+                "skip_settlement_exits": "false",
+            },
+        }
+    return None
 
 
 def summarize_run(run: dict[str, Any]) -> dict[str, Any]:
@@ -368,8 +417,8 @@ def next_steps(action: str) -> list[str]:
         ]
     if action == "fix_runtime":
         return [
-            "Fix runtime scorer/config/parity mapping before promoting any factor.",
-            "Rerun recorded replay/dry-run parity after the runtime fix.",
+            "Run runtime-candidate-replay.yml for the requested runtime score to replace the top-bucket aggregate with runtime_market_update_replay evidence.",
+            "Feed the resulting runtime-candidate-replay artifact back into the AutoFactor promotion evaluator before any dry-run handoff.",
         ]
     return [
         "Repair the workflow artifact bundle before interpreting search quality.",
@@ -471,6 +520,23 @@ def write_markdown(decision: dict[str, Any], path: Path, prior_path: Path | None
     lines.extend(f"- {item}" for item in decision["next_steps"])
     if prior_path is not None:
         lines.extend(["", f"Typed prior draft: `{prior_path}`"])
+    runtime_request = decision.get("runtime_replay_request")
+    if isinstance(runtime_request, dict):
+        lines.extend(["", "## Runtime Replay Request", ""])
+        lines.append(f"- Workflow: `{runtime_request.get('workflow')}`")
+        lines.append(f"- Reason: `{runtime_request.get('reason')}`")
+        inputs = runtime_request.get("inputs") if isinstance(runtime_request.get("inputs"), dict) else {}
+        for key in (
+            "deployment_id",
+            "config_path",
+            "recording_path",
+            "runtime_score",
+            "strategy_profile",
+            "full_depth_entry",
+            "skip_settlement_exits",
+        ):
+            if key in inputs:
+                lines.append(f"- {key}: `{inputs[key]}`")
     if decision["promotion_blockers"]:
         lines.extend(["", "## Promotion Blockers", ""])
         lines.extend(f"- `{item}`" for item in decision["promotion_blockers"][:20])

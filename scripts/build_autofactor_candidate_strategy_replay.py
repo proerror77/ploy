@@ -30,6 +30,11 @@ FORMULA_RUNTIME_MAPPED_NAMES = {
     "mut_spread_adjusted_external_move_full_depth_entry_gate",
 }
 
+PREDICTIVE_FORMULA_BASES = (
+    "amplitude_weighted_momentum_30s_sigma",
+    "spread_adjusted_external_move",
+)
+
 
 def parse_float(raw: str, default: float = float("nan")) -> float:
     try:
@@ -43,6 +48,23 @@ def parse_int(raw: str, default: int = 0) -> int:
         return int(raw)
     except (TypeError, ValueError):
         return default
+
+
+def normalize_formula_name(name: str) -> str:
+    while True:
+        for prefix in ("mut2_", "mut_", "mcts_"):
+            if name.startswith(prefix):
+                name = name[len(prefix) :]
+                break
+        else:
+            return name
+
+
+def is_settlement_predictive_formula(name: str) -> bool:
+    normalized = normalize_formula_name(name)
+    if normalized == "spread_adjusted_external_move":
+        return False
+    return any(normalized.startswith(base) for base in PREDICTIVE_FORMULA_BASES)
 
 
 def parse_autofactor_rows(report_text: str) -> list[dict[str, Any]]:
@@ -90,7 +112,11 @@ def runtime_mapping(name: str) -> dict[str, str]:
                 else name
             ),
         }
-    if name.startswith("auto_settlement_") or name in FORMULA_RUNTIME_MAPPED_NAMES:
+    if (
+        name.startswith("auto_settlement_")
+        or name in FORMULA_RUNTIME_MAPPED_NAMES
+        or is_settlement_predictive_formula(name)
+    ):
         return {
             "strategy_profile": "settlement_probability",
             "runtime_score": f"autofactor_formula:{name}",

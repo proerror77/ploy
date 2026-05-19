@@ -109,6 +109,43 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
             "auto_settlement_full_depth_settlement_edge_x_near_strike",
         )
 
+    def test_selects_runtime_mappable_predictive_formula_mutation(self):
+        report = """=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=false stake_usd=15.00 min_entry_fill_rate=0.3000 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=100 event_complete_rows=200 replay_parity_ready=false
+gate,passed,evidence
+recorded_replay_parity,false,post-dry-run gate pending
+
+# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,top_bucket_unique_event_count,top_bucket_max_event_decisions,complexity
+1,mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted,full_depth_settlement_executable_pnl,candidate,passed,529,0.201235,0.117332,4,1.668090,1.0000,2,1.0000,0.7500,106,4.083066,0.6981,1.0000,18.51,1.42,106,1,8
+2,amplitude_weighted_momentum_30s_sigma,full_depth_settlement_executable_pnl,candidate,passed,529,0.165183,0.100246,4,1.474733,1.0000,2,1.0000,1.0000,106,2.366817,0.6321,1.0000,44.93,1.46,106,1,4
+"""
+        payload, _ = self.run_script(report)
+
+        self.assertEqual(
+            payload["runtime_score"],
+            "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
+        )
+        self.assertEqual(
+            payload["source_factor"]["name"],
+            "mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
+        )
+
+    def test_keeps_bare_spread_adjusted_external_move_in_repricing_lane(self):
+        payload, _ = self.run_script(
+            AUTOFACTOR_REPORT,
+            "--allowed-target",
+            "full_depth_settlement_executable_pnl",
+            "--required-strategy-profile",
+            "settlement_probability",
+        )
+
+        self.assertFalse(payload["promotion_ready"])
+        self.assertEqual(payload["runtime_score"], "")
+        self.assertIn("runtime_profile_mismatch", ",".join(payload["blocking_risk_flags"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -150,6 +150,11 @@ BUILTIN_RUNTIME_MAPPINGS: dict[str, dict[str, str]] = {
     },
 }
 
+PREDICTIVE_FORMULA_BASES = (
+    "amplitude_weighted_momentum_30s_sigma",
+    "spread_adjusted_external_move",
+)
+
 for _base in (
     "auto_settlement_model_full_depth_settlement_edge",
     "auto_settlement_model_conservative_settlement_edge",
@@ -535,6 +540,29 @@ def load_runtime_mappings(path: str | None) -> dict[str, dict[str, str]]:
     return mappings
 
 
+def normalize_formula_name(name: str) -> str:
+    while True:
+        for prefix in ("mut2_", "mut_", "mcts_"):
+            if name.startswith(prefix):
+                name = name[len(prefix) :]
+                break
+        else:
+            return name
+
+
+def inferred_runtime_mapping(name: str) -> dict[str, str] | None:
+    normalized = normalize_formula_name(name)
+    if normalized == "spread_adjusted_external_move":
+        return None
+    if any(normalized.startswith(base) for base in PREDICTIVE_FORMULA_BASES):
+        return {
+            **SETTLEMENT_RUNTIME_MAPPING,
+            "strategy_family": "predictive_settlement_probability",
+            "runtime_score": f"autofactor_formula:{name}",
+        }
+    return None
+
+
 MODEL_SPECIFIC_PRD_GATE_PREFIXES = (
     "symbol_holdout:",
     "walk_forward_oos:",
@@ -628,7 +656,7 @@ def evaluate(
 
     for row in rows:
         blockers: list[str] = []
-        mapping = runtime_mappings.get(row.name)
+        mapping = runtime_mappings.get(row.name) or inferred_runtime_mapping(row.name)
         formula_specific = is_autofactor_formula(mapping)
         suppress_global_fillability = (
             formula_specific
