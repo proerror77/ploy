@@ -17657,7 +17657,7 @@ Evidence stage: `runtime_parity / diagnostic`.
 - [x] Add `score_counterfactual` to the runtime candidate replay artifact.
 - [x] Surface the diagnosis in workflow summary and replay evidence comments.
 - [x] Run focused Rust/Python/workflow validation.
-- [ ] Open PR, wait for CI, merge, then trigger a fresh runtime replay from
+- [x] Open PR, wait for CI, merge, then trigger a fresh runtime replay from
       `main`.
 
 ## Review
@@ -17673,3 +17673,13 @@ Evidence stage: `runtime_parity / diagnostic`.
   `python3 -m unittest tests.test_build_runtime_candidate_strategy_replay`,
   `python3 -m py_compile scripts/build_runtime_candidate_strategy_replay.py`,
   and `rtk git diff --check`.
+- 2026-05-20: PR #558 merged as `2919e192` after all required CI checks passed.
+  Fresh runtime replay run `26125506227` completed successfully from `main`
+  against
+  `autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted`.
+  It processed `5,000,000` updates, evaluated `2,934` depth-fillable formula
+  candidates, emitted `0` intents/trades, and reported
+  `score_counterfactual.diagnosis=direct_signal_too_weak_at_all_reported_thresholds`.
+  Direct and reverse-direction pass counts were `0` at `0.05`, `0.10`,
+  `0.15`, and `0.25`, so the current candidate should be revised/rejected
+  rather than promoted or rescued with a simple threshold cut.
