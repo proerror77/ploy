@@ -91,17 +91,6 @@ jobs:
           # RUSTSEC-2025-0021: gix-features 0.39.1 SHA-1 collision; pulled by burn-dataset, no git ops in prod.
           cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0049 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 --ignore RUSTSEC-2026-0104 --ignore RUSTSEC-2025-0021
 
-  python-script-tests:
-    name: Python script tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Run Python unittest suite
-        run: python3 -m unittest discover -s tests -p 'test_*.py'
-
   rust-control-plane:
     name: Rust control-plane/core
     runs-on: ubuntu-latest

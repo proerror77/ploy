@@ -1,3 +1,43 @@
+# Rust-First CI Language Boundary (2026-05-20)
+
+## Goal
+
+Keep the required PR `Test` workflow focused on the Rust-first platform
+contract while preserving legacy Python helper compatibility in an isolated,
+path-scoped workflow.
+
+Evidence stage: `workflow_contract`.
+
+## Files / Ownership
+
+- `.github/workflows/test.yml`
+  - Owner: required Rust-first CI gate.
+- `.github/workflows/legacy-python-tools.yml`
+  - Owner: non-required compatibility checks for legacy Python helpers.
+- `docs/runbooks/ci-language-policy.md`
+  - Owner: language-boundary policy and migration rule.
+- `docs/runbooks/strategy-research-cicd.md`
+  - Owner: research workflow map reference to the isolated legacy Python gate.
+- `tasks/todo.md`
+  - Owner: current session tracking for this extracted PR slice.
+
+## Tasks
+
+- [x] Create a clean worktree from current `origin/main`.
+- [x] Extract only the CI language-boundary changes from the dirty source
+      worktree.
+- [x] Validate workflow syntax and static policy expectations.
+- [x] Commit a focused CI language-boundary change.
+- [ ] Push and open a focused PR.
+
+## Review
+
+- 2026-05-20: Validation passed:
+  `ruby -e 'require "yaml"; Dir[".github/workflows/*.yml"].sort.each { |f| YAML.load_file(f) }; puts "workflow yaml ok"'`,
+  `rtk git diff --check`, and a static search confirming Python unittest
+  discovery now appears only in `.github/workflows/legacy-python-tools.yml`.
+- 2026-05-20: Committed on branch `docs/ci-language-policy`.
+
 # FactorEvolve Daily Search Snapshot Quote-Age Fix (2026-05-19)
 
 ## Goal
