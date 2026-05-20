@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tests.test_autofactor_strategy_promotion import (
     AUTOFACTOR_REPORT,
+    AUTOFACTOR_LLM_RUNTIME_PASS_THROUGH_MUTATION_REPORT,
     AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
 )
 
@@ -131,6 +132,19 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
         self.assertEqual(
             payload["source_factor"]["name"],
             "mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
+        )
+
+    def test_selects_llm_runtime_pass_through_predictive_formula_mutation(self):
+        payload, _ = self.run_script(AUTOFACTOR_LLM_RUNTIME_PASS_THROUGH_MUTATION_REPORT)
+
+        self.assertEqual(
+            payload["runtime_score"],
+            "autofactor_formula:"
+            "llm_mut_spread_adjusted_external_move_near_strike_runtime_pass_through_add_spread_penalty",
+        )
+        self.assertEqual(
+            payload["source_factor"]["name"],
+            "llm_mut_spread_adjusted_external_move_near_strike_runtime_pass_through_add_spread_penalty",
         )
 
     def test_selects_poly_lag_pressure_predictive_formula_mutation(self):

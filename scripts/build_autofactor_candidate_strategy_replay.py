@@ -60,7 +60,7 @@ def parse_int(raw: str, default: int = 0) -> int:
 
 def normalize_formula_name(name: str) -> str:
     while True:
-        for prefix in ("mut2_", "mut_", "mcts_"):
+        for prefix in ("llm_", "mut2_", "mut_", "mcts_"):
             if name.startswith(prefix):
                 name = name[len(prefix) :]
                 break

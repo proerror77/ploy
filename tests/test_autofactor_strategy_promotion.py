@@ -106,6 +106,14 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
 2,spread_adjusted_external_move,full_depth_settlement_executable_pnl,candidate,passed,529,0.214428,0.141198,4,1.412625,1.0000,2,1.0000,1.0000,106,3.710549,0.6981,1.0000,23.70,1.40,106,1,5
 """
 
+AUTOFACTOR_LLM_RUNTIME_PASS_THROUGH_MUTATION_REPORT = """
+# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,top_bucket_unique_event_count,top_bucket_max_event_decisions,complexity
+1,llm_mut_spread_adjusted_external_move_near_strike_runtime_pass_through_add_spread_penalty,full_depth_settlement_executable_pnl,candidate,passed,529,0.139249,0.117332,4,1.668090,0.8750,2,1.0000,0.7500,106,3.669036,0.6981,1.0000,18.51,1.42,106,1,10
+"""
+
 AUTOFACTOR_POLY_LAG_PRESSURE_REPORT = """
 # AutoFactor target=full_depth_settlement_executable_pnl
 === AutoFactor Seed Candidate Report ===
@@ -419,6 +427,34 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "runtime_profile_mismatch:repricing_momentum!=settlement_probability",
             bare_spread["blockers"],
         )
+
+    def test_qualifies_llm_runtime_pass_through_predictive_formula_mutation(self):
+        runtime_score = (
+            "autofactor_formula:"
+            "llm_mut_spread_adjusted_external_move_near_strike_runtime_pass_through_add_spread_penalty"
+        )
+        replay = {
+            **DEFAULT_REPLAY_PAYLOAD,
+            "runtime_score": runtime_score,
+        }
+        _, payload, registry, handoff, handoff_md = self.run_script(
+            READY_GATE + AUTOFACTOR_LLM_RUNTIME_PASS_THROUGH_MUTATION_REPORT,
+            replay_payload=replay,
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(registry["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(handoff["strategies"][0]["runtime_score"], runtime_score)
+        self.assertEqual(
+            handoff["strategies"][0]["strategy_family"],
+            "predictive_settlement_probability",
+        )
+        self.assertNotIn(
+            "missing_runtime_strategy_mapping",
+            handoff["strategies"][0].get("blockers", []),
+        )
+        self.assertIn("runtime_pass_through_add_spread_penalty", handoff_md)
 
     def test_qualifies_poly_lag_pressure_predictive_formula_mutation(self):
         replay = {
