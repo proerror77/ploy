@@ -131,6 +131,21 @@ pub struct NamedFactorExpr {
 pub struct LlmPriorSpec {
     #[serde(default)]
     pub mutations: Vec<LlmMutationSpec>,
+    #[serde(default)]
+    pub runtime_avoid_factors: Vec<RuntimeAvoidFactorSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeAvoidFactorSpec {
+    pub base_factor: String,
+    #[serde(default)]
+    pub factor_family: Option<String>,
+    #[serde(default)]
+    pub runtime_score: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub metrics: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2601,6 +2616,7 @@ mod tests {
             ..Default::default()
         };
         let prior = LlmPriorSpec {
+            runtime_avoid_factors: Vec::new(),
             mutations: vec![LlmMutationSpec {
                 base_factor: "auto_settlement_model_full_depth_settlement_edge".to_string(),
                 mutation_type: "add_feature_gate".to_string(),

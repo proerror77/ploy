@@ -1,3 +1,47 @@
+# Runtime Feedback Avoid-List For Alpha Search (2026-05-20)
+
+## Goal
+
+Carry runtime replay pass-through failures across closed-loop search iterations
+so MCTS does not keep reselecting factor families that already collapsed before
+executable runtime entry.
+
+Evidence stage: `walk_forward / runtime_parity`.
+
+## Files / Ownership
+
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: accumulate runtime pass-through collapsed factors into the typed
+    prior draft.
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: typed prior schema for runtime avoid factors.
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: reward penalty, node metrics, and MCTS filtering for prior-supplied
+    runtime avoid factors.
+- `tests/test_alpha_search_closed_loop_agent.py`
+  - Owner: regression coverage for avoid-list accumulation.
+- `tasks/todo.md`
+  - Owner: current session tracking.
+
+## Tasks
+
+- [x] Create a clean worktree from current `origin/main`.
+- [x] Add cumulative runtime avoid factors to closed-loop typed priors.
+- [x] Consume prior avoid factors in Rust alpha-search scoring/filtering.
+- [x] Add focused Python and Rust regression coverage.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, merge, and rerun hosted walk-forward.
+
+## Review
+
+- 2026-05-20: Validation passed:
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent`,
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-feedback-avoidlist /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research alpha_search --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-feedback-avoidlist-example /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research --features db --example factor_walk_forward_v2`,
+  and `rtk git diff --check`. The cargo check completed with existing warnings
+  in strategy modules, but no errors.
+
 # Research Snapshot Empty Timestamp SSH Fix (2026-05-20)
 
 ## Goal

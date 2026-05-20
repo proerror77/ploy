@@ -5,7 +5,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::autofactor::{
-    AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr, factor_expr_hash,
+    AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr, LlmPriorSpec,
+    factor_expr_hash,
 };
 
 const ALPHA_SEARCH_ARTIFACT_VERSION: &str = "alpha_search_artifacts_v1";
@@ -38,7 +39,10 @@ impl AlphaSearchRuntimeFeedback {
     }
 
     fn entry_signal_rate(&self) -> f64 {
-        ratio_usize(self.entry_signals, self.direct_passes_at_configured_threshold)
+        ratio_usize(
+            self.entry_signals,
+            self.direct_passes_at_configured_threshold,
+        )
     }
 
     fn executable_edge_pass_rate(&self) -> f64 {
@@ -228,6 +232,7 @@ struct SearchFeedbackArtifact {
     best_candidate: Option<String>,
     best_reward: Option<f64>,
     runtime_feedback: Option<RuntimeFeedbackSummary>,
+    runtime_avoid_factors: Vec<RuntimeAvoidFactorSummary>,
     interpretation: &'static str,
 }
 
@@ -240,6 +245,27 @@ struct RuntimeFeedbackSummary {
     formula_evaluations: usize,
     executable_edge_pass_min_edge: usize,
     pass_through_collapse: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeAvoidFactorSummary {
+    base_factor: String,
+    factor_family: String,
+    runtime_score: Option<String>,
+    reason: Option<String>,
+    source: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeAvoidance {
+    base_factor: String,
+    factor_family: String,
+    runtime_score: Option<String>,
+    reason: Option<String>,
+    source: &'static str,
+    entry_signal_rate: Option<f64>,
+    executable_edge_pass_rate: Option<f64>,
+    penalty: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -313,6 +339,7 @@ pub fn write_alpha_search_artifacts_with_state(
         options,
         prior_state,
         None,
+        None,
     )
 }
 
@@ -324,6 +351,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
     options: &AutoFactorOptions,
     prior_state: Option<&MctsSearchStateArtifact>,
     runtime_feedback: Option<&AlphaSearchRuntimeFeedback>,
+    llm_prior: Option<&LlmPriorSpec>,
 ) -> Result<AlphaSearchArtifactSummary, AlphaSearchArtifactError> {
     let output_dir = output_root.as_ref().join(target);
     std::fs::create_dir_all(&output_dir)?;
@@ -423,10 +451,11 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
         .collect::<Vec<_>>();
     write_json(&output_dir.join("rejected-expressions.json"), &rejected)?;
 
+    let runtime_avoidances = runtime_avoidances(runtime_feedback, llm_prior);
     let node_metrics = reports
         .iter()
         .enumerate()
-        .map(|(idx, report)| node_metric(idx, report, runtime_feedback))
+        .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances))
         .collect::<Vec<_>>();
     write_json(&output_dir.join("node-metrics.json"), &node_metrics)?;
     write_json(
@@ -454,8 +483,8 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
                     parent: None,
                     factor_name: report.name.clone(),
                     mutation: "seed",
-                    selected_dimension: selected_dimension(report, runtime_feedback),
-                    reward: reward(report, runtime_feedback),
+                    selected_dimension: selected_dimension(report, &runtime_avoidances),
+                    reward: reward(report, &runtime_avoidances),
                     visits: 1,
                     decision: report.decision.as_str().to_string(),
                 })
@@ -496,6 +525,16 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
             executable_edge_pass_min_edge: feedback.executable_edge_pass_min_edge,
             pass_through_collapse: feedback.is_pass_through_collapse(),
         }),
+        runtime_avoid_factors: runtime_avoidances
+            .iter()
+            .map(|avoidance| RuntimeAvoidFactorSummary {
+                base_factor: avoidance.base_factor.clone(),
+                factor_family: avoidance.factor_family.clone(),
+                runtime_score: avoidance.runtime_score.clone(),
+                reason: avoidance.reason.clone(),
+                source: avoidance.source,
+            })
+            .collect(),
         interpretation: "Search feedback is discovery evidence only. Promotion still requires the AutoFactor strategy-promotion gate and replay/runtime parity.",
     };
     write_json(&output_dir.join("search-feedback.json"), &feedback)?;
@@ -595,16 +634,16 @@ fn candidate_source(name: &str) -> &'static str {
 fn node_metric(
     idx: usize,
     report: &AutoFactorReport,
-    runtime_feedback: Option<&AlphaSearchRuntimeFeedback>,
+    runtime_avoidances: &[RuntimeAvoidance],
 ) -> NodeMetric {
-    let matching_feedback = matching_runtime_feedback(report, runtime_feedback);
+    let matching_avoidance = matching_runtime_avoidance(report, runtime_avoidances);
     NodeMetric {
         id: format!("node-{idx}"),
         factor_name: report.name.clone(),
         target: report.target.clone(),
         decision: report.decision.as_str().to_string(),
         reason: report.reason.clone(),
-        selected_dimension: selected_dimension(report, runtime_feedback),
+        selected_dimension: selected_dimension(report, runtime_avoidances),
         effectiveness: normalized_positive(report.top_bucket_avg_label),
         stability: report.positive_window_ratio.clamp(0.0, 1.0),
         diversity: 1.0 / report.complexity.max(1) as f64,
@@ -618,7 +657,7 @@ fn node_metric(
         } else {
             0.5
         },
-        reward: reward(report, runtime_feedback),
+        reward: reward(report, runtime_avoidances),
         spearman_ic: finite_or_zero(report.spearman_ic),
         icir: finite_or_zero(report.icir),
         positive_window_ratio: finite_or_zero(report.positive_window_ratio),
@@ -632,10 +671,11 @@ fn node_metric(
         top_bucket_avg_entry_sweep_levels: finite_or_zero(report.top_bucket_avg_entry_sweep_levels),
         top_bucket_unique_event_count: report.top_bucket_unique_event_count,
         top_bucket_max_event_decisions: report.top_bucket_max_event_decisions,
-        runtime_entry_signal_rate: matching_feedback.map(AlphaSearchRuntimeFeedback::entry_signal_rate),
-        runtime_executable_edge_pass_rate: matching_feedback
-            .map(AlphaSearchRuntimeFeedback::executable_edge_pass_rate),
-        runtime_pass_through_penalty: runtime_pass_through_penalty(report, runtime_feedback),
+        runtime_entry_signal_rate: matching_avoidance
+            .and_then(|avoidance| avoidance.entry_signal_rate),
+        runtime_executable_edge_pass_rate: matching_avoidance
+            .and_then(|avoidance| avoidance.executable_edge_pass_rate),
+        runtime_pass_through_penalty: runtime_pass_through_penalty(report, runtime_avoidances),
         monotonicity_score: finite_or_zero(report.monotonicity_score),
         complexity: report.complexity,
     }
@@ -752,7 +792,7 @@ fn proposed_mutation(selected_dimension: &str) -> &'static str {
     }
 }
 
-fn reward(report: &AutoFactorReport, runtime_feedback: Option<&AlphaSearchRuntimeFeedback>) -> f64 {
+fn reward(report: &AutoFactorReport, runtime_avoidances: &[RuntimeAvoidance]) -> f64 {
     let decision_bonus = match report.decision {
         AutoFactorDecision::Candidate => 1.0,
         AutoFactorDecision::Watchlist => 0.25,
@@ -768,7 +808,7 @@ fn reward(report: &AutoFactorReport, runtime_feedback: Option<&AlphaSearchRuntim
         + finite_or_zero(report.monotonicity_score)
         - event_decision_penalty(report)
         - execution_penalty(report)
-        - runtime_pass_through_penalty(report, runtime_feedback)
+        - runtime_pass_through_penalty(report, runtime_avoidances)
         - (report.complexity as f64 / 32.0)
 }
 
@@ -843,9 +883,9 @@ fn event_decision_penalty(report: &AutoFactorReport) -> f64 {
 
 fn selected_dimension(
     report: &AutoFactorReport,
-    runtime_feedback: Option<&AlphaSearchRuntimeFeedback>,
+    runtime_avoidances: &[RuntimeAvoidance],
 ) -> String {
-    if runtime_pass_through_penalty(report, runtime_feedback) >= 8.0 {
+    if runtime_pass_through_penalty(report, runtime_avoidances) >= 8.0 {
         return "runtime_executable_entry".to_string();
     }
     if report.top_bucket_n > 0
@@ -933,33 +973,83 @@ fn ratio_usize(numerator: usize, denominator: usize) -> f64 {
     }
 }
 
-fn matching_runtime_feedback<'a>(
+fn runtime_avoidances(
+    runtime_feedback: Option<&AlphaSearchRuntimeFeedback>,
+    llm_prior: Option<&LlmPriorSpec>,
+) -> Vec<RuntimeAvoidance> {
+    let mut out = Vec::new();
+    if let Some(feedback) = runtime_feedback.filter(|feedback| feedback.is_pass_through_collapse())
+    {
+        out.push(RuntimeAvoidance {
+            base_factor: feedback.base_factor.clone(),
+            factor_family: normalized_factor_family(&feedback.base_factor),
+            runtime_score: Some(feedback.runtime_score.clone()),
+            reason: Some("runtime_pass_through_collapse".to_string()),
+            source: "runtime_replay_feedback",
+            entry_signal_rate: Some(feedback.entry_signal_rate()),
+            executable_edge_pass_rate: Some(feedback.executable_edge_pass_rate()),
+            penalty: runtime_feedback_penalty(feedback),
+        });
+    }
+    if let Some(prior) = llm_prior {
+        for item in &prior.runtime_avoid_factors {
+            let family = item
+                .factor_family
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(normalized_factor_family)
+                .unwrap_or_else(|| normalized_factor_family(&item.base_factor));
+            if family.is_empty() {
+                continue;
+            }
+            let duplicate = out.iter().any(|existing| {
+                existing.factor_family == family
+                    || existing.base_factor == item.base_factor
+                    || (existing.runtime_score.as_deref().is_some()
+                        && existing.runtime_score.as_deref() == item.runtime_score.as_deref())
+            });
+            if duplicate {
+                continue;
+            }
+            out.push(RuntimeAvoidance {
+                base_factor: item.base_factor.clone(),
+                factor_family: family,
+                runtime_score: item.runtime_score.clone(),
+                reason: item.reason.clone(),
+                source: "typed_prior",
+                entry_signal_rate: None,
+                executable_edge_pass_rate: None,
+                penalty: 12.0,
+            });
+        }
+    }
+    out
+}
+
+fn matching_runtime_avoidance<'a>(
     report: &AutoFactorReport,
-    runtime_feedback: Option<&'a AlphaSearchRuntimeFeedback>,
-) -> Option<&'a AlphaSearchRuntimeFeedback> {
-    let feedback = runtime_feedback?;
-    if !feedback.is_pass_through_collapse() {
-        return None;
-    }
-    let base = normalized_factor_key(&feedback.base_factor);
+    runtime_avoidances: &'a [RuntimeAvoidance],
+) -> Option<&'a RuntimeAvoidance> {
     let name = normalized_factor_key(&report.name);
-    if base.is_empty() {
-        return None;
-    }
-    if name == base || name.contains(&base) || base.contains(&name) {
-        Some(feedback)
-    } else {
-        None
-    }
+    let family = normalized_factor_family(&report.name);
+    runtime_avoidances.iter().find(|avoidance| {
+        !avoidance.factor_family.is_empty()
+            && (family == avoidance.factor_family
+                || name == avoidance.factor_family
+                || name == normalized_factor_key(&avoidance.base_factor))
+    })
 }
 
 fn runtime_pass_through_penalty(
     report: &AutoFactorReport,
-    runtime_feedback: Option<&AlphaSearchRuntimeFeedback>,
+    runtime_avoidances: &[RuntimeAvoidance],
 ) -> f64 {
-    let Some(feedback) = matching_runtime_feedback(report, runtime_feedback) else {
-        return 0.0;
-    };
+    matching_runtime_avoidance(report, runtime_avoidances)
+        .map(|avoidance| avoidance.penalty)
+        .unwrap_or(0.0)
+}
+
+fn runtime_feedback_penalty(feedback: &AlphaSearchRuntimeFeedback) -> f64 {
     let entry_penalty = if feedback.direct_passes_at_configured_threshold >= 50 {
         let shortfall = 1.0 - feedback.entry_signal_rate();
         (shortfall * 5.0).clamp(0.0, 5.0)
@@ -977,6 +1067,37 @@ fn runtime_pass_through_penalty(
         0.0
     };
     (entry_penalty + edge_penalty + 4.0).min(12.0)
+}
+
+fn normalized_factor_family(raw: &str) -> String {
+    let mut value = normalized_factor_key(raw);
+    let suffixes = [
+        "_runtime_pass_through_add_spread_penalty",
+        "_runtime_pass_through_add_capacity_gate",
+        "_full_depth_entry_gate",
+        "_spread_adjusted",
+        "_near_strike",
+        "_capacity",
+        "_squashed",
+        "_pm_lag",
+        "_clip",
+    ];
+    loop {
+        let mut changed = false;
+        for suffix in suffixes {
+            if let Some(stripped) = value.strip_suffix(suffix) {
+                if !stripped.is_empty() {
+                    value = stripped.to_string();
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    value
 }
 
 fn normalized_factor_key(raw: &str) -> String {
@@ -1210,10 +1331,11 @@ mod tests {
         one_event.top_bucket_max_event_decisions = 1;
 
         let reports = vec![repeated, one_event];
+        let runtime_avoidances = Vec::new();
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, None))
+            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances))
             .collect::<Vec<_>>();
         let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
@@ -1225,7 +1347,7 @@ mod tests {
             Some("auto_settlement_lower_raw_score_one_event")
         );
         assert!(
-            reward(&reports[0], None) < reward(&reports[1], None),
+            reward(&reports[0], &runtime_avoidances) < reward(&reports[1], &runtime_avoidances),
             "repeated-event penalty should dominate raw IC/top-bucket strength"
         );
     }
@@ -1237,9 +1359,13 @@ mod tests {
         report.top_bucket_max_event_decisions = 3;
         report.reason = "passed".to_string();
 
-        assert_eq!(selected_dimension(&report, None), "event_uniqueness");
+        let runtime_avoidances = Vec::new();
         assert_eq!(
-            proposed_mutation(&selected_dimension(&report, None)),
+            selected_dimension(&report, &runtime_avoidances),
+            "event_uniqueness"
+        );
+        assert_eq!(
+            proposed_mutation(&selected_dimension(&report, &runtime_avoidances)),
             "add_capacity_gate"
         );
     }
@@ -1251,7 +1377,11 @@ mod tests {
         report.top_bucket_avg_entry_sweep_levels = 3.4;
         report.reason = "passed".to_string();
 
-        assert_eq!(selected_dimension(&report, None), "execution_quality");
+        let runtime_avoidances = Vec::new();
+        assert_eq!(
+            selected_dimension(&report, &runtime_avoidances),
+            "execution_quality"
+        );
         assert!(execution_penalty(&report) > 0.0);
     }
 
@@ -1262,7 +1392,8 @@ mod tests {
         collapsed.icir = 3.0;
         collapsed.top_bucket_avg_label = 3.0;
 
-        let mut alternative = sample_report("auto_settlement_full_depth_settlement_edge_x_capacity");
+        let mut alternative =
+            sample_report("auto_settlement_full_depth_settlement_edge_x_capacity");
         alternative.spearman_ic = 0.25;
         alternative.icir = 0.9;
         alternative.top_bucket_avg_label = 0.35;
@@ -1277,13 +1408,14 @@ mod tests {
             depth_fillable: 2934,
             executable_edge_pass_min_edge: 5,
         };
+        let runtime_avoidances = runtime_avoidances(Some(&feedback), None);
 
         assert_eq!(
-            selected_dimension(&collapsed, Some(&feedback)),
+            selected_dimension(&collapsed, &runtime_avoidances),
             "runtime_executable_entry"
         );
         assert!(
-            reward(&collapsed, Some(&feedback)) < reward(&alternative, Some(&feedback)),
+            reward(&collapsed, &runtime_avoidances) < reward(&alternative, &runtime_avoidances),
             "runtime pass-through collapse should dominate top-bucket reward"
         );
     }
@@ -1306,19 +1438,71 @@ mod tests {
             depth_fillable: 2934,
             executable_edge_pass_min_edge: 5,
         };
+        let runtime_avoidances = runtime_avoidances(Some(&feedback), None);
         let reports = vec![collapsed, alternative];
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, Some(&feedback)))
+            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances))
             .collect::<Vec<_>>();
         let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
-        assert!(!plan
-            .selected_nodes
+        assert!(
+            !plan
+                .selected_nodes
+                .iter()
+                .any(|node| node.factor_name == "mcts_spread_adjusted_external_move_near_strike")
+        );
+        assert_eq!(
+            plan.selected_nodes
+                .first()
+                .map(|node| node.factor_name.as_str()),
+            Some("auto_settlement_full_depth_settlement_edge_x_capacity")
+        );
+    }
+
+    #[test]
+    fn typed_prior_runtime_avoid_list_filters_failed_family_variants() {
+        let mut squashed = sample_report("mut_spread_adjusted_external_move_squashed");
+        squashed.spearman_ic = 0.95;
+        squashed.icir = 3.0;
+        squashed.top_bucket_avg_label = 3.0;
+
+        let mut spread_adjusted =
+            sample_report("mcts_spread_adjusted_external_move_spread_adjusted");
+        spread_adjusted.spearman_ic = 0.90;
+        spread_adjusted.icir = 2.5;
+        spread_adjusted.top_bucket_avg_label = 2.5;
+
+        let alternative = sample_report("auto_settlement_full_depth_settlement_edge_x_capacity");
+        let prior = LlmPriorSpec {
+            mutations: Vec::new(),
+            runtime_avoid_factors: vec![crate::autofactor::RuntimeAvoidFactorSpec {
+                base_factor: "mut_spread_adjusted_external_move_squashed".to_string(),
+                factor_family: Some("spread_adjusted_external_move".to_string()),
+                runtime_score: Some(
+                    "autofactor_formula:mut_spread_adjusted_external_move_squashed".to_string(),
+                ),
+                reason: Some("runtime_pass_through_collapse".to_string()),
+                metrics: serde_json::Value::Null,
+            }],
+        };
+        let runtime_avoidances = runtime_avoidances(None, Some(&prior));
+        let reports = vec![squashed, spread_adjusted, alternative];
+        let metrics = reports
             .iter()
-            .any(|node| node.factor_name == "mcts_spread_adjusted_external_move_near_strike"));
+            .enumerate()
+            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances))
+            .collect::<Vec<_>>();
+        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
+
+        assert!(
+            plan.selected_nodes
+                .iter()
+                .all(|node| !node.factor_name.contains("spread_adjusted_external_move"))
+        );
         assert_eq!(
             plan.selected_nodes
                 .first()
