@@ -57,6 +57,14 @@ Evidence stage: `walk_forward / runtime_parity`.
   `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
   `python3 -m unittest tests.test_alpha_search_closed_loop_agent`, and
   `rtk git diff --check`.
+- 2026-05-20: Hosted validation run `26146003613` showed the direct
+  `evaluated_factors` request path was fixed, but the fallback
+  `candidate_strategy_replay.runtime_score` path could still point to an
+  avoided family. The fallback now skips avoided runtime families as well.
+  Validation passed:
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent`, and
+  `rtk git diff --check`.
 
 # Research Snapshot Empty Timestamp SSH Fix (2026-05-20)
 
