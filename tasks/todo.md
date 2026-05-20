@@ -1,3 +1,36 @@
+# Research Snapshot Empty Timestamp SSH Fix (2026-05-20)
+
+## Goal
+
+Prevent `research-snapshot.yml` from dropping empty `start_ts` / `end_ts`
+arguments when invoking the remote compiler over SSH.
+
+Evidence stage: `workflow_contract`.
+
+## Files / Ownership
+
+- `.github/workflows/research-snapshot.yml`
+  - Owner: preserve empty timestamp options across the SSH boundary.
+- `tests/workflow_security.rs`
+  - Owner: static regression for the empty timestamp sentinel contract.
+- `tasks/todo.md`
+  - Owner: current session tracking for this workflow fix.
+
+## Tasks
+
+- [x] Reproduce the failure from run `26133466284`.
+- [x] Confirm explicit timestamp workaround with successful run `26135455846`.
+- [x] Patch the workflow so default empty timestamps remain safe.
+- [x] Validate YAML, workflow security test, and whitespace.
+- [ ] Push, open PR, wait for CI, and merge.
+
+## Review
+
+- 2026-05-20: Validation passed:
+  `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/research-snapshot.yml"); puts "ok"'`,
+  `CARGO_TARGET_DIR=/tmp/ploy-workflow-security-empty-ts /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test workflow_security`,
+  and `rtk git diff --check`.
+
 # Hosted Walk-Forward Candidate Replay Feedback (2026-05-20)
 
 ## Goal
