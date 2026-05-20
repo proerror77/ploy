@@ -1,3 +1,44 @@
+# Hosted Walk-Forward Candidate Replay Feedback (2026-05-20)
+
+## Goal
+
+Let hosted Factor Walk-Forward consume a prior runtime candidate replay artifact
+as replay feedback without misusing the alpha search plan artifact path.
+
+Evidence stage: `runtime_parity / walk_forward`.
+
+## Files / Ownership
+
+- `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`
+  - Owner: `candidate_strategy_replay_*` options, artifact download, and sweep
+    argument wiring.
+- `.github/workflows/factor-walk-forward-v2.yml`
+  - Owner: snapshot-route allowlist for the new hosted options.
+- `tests/workflow_security.rs`
+  - Owner: static regression for keeping runtime replay artifacts separate
+    from alpha search plan artifacts.
+- `docs/runbooks/event-ml-automl-workflow.md`
+  - Owner: operator note for runtime replay feedback inputs.
+- `tasks/todo.md`
+  - Owner: current session tracking for this workflow fix.
+
+## Tasks
+
+- [x] Create a clean worktree from current `origin/main`.
+- [x] Add a separate candidate strategy replay artifact input and download
+      path.
+- [x] Preserve the alpha search plan contract as an MCTS plan-only input.
+- [x] Validate YAML, workflow static tests, and whitespace.
+- [ ] Push, open PR, wait for CI, and merge.
+- [ ] Rerun hosted walk-forward with runtime replay run `26133959259`.
+
+## Review
+
+- 2026-05-20: Validation passed:
+  `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml"); YAML.load_file(".github/workflows/factor-walk-forward-v2.yml"); puts "ok"'`,
+  `CARGO_TARGET_DIR=/tmp/ploy-workflow-security /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test workflow_security`,
+  and `rtk git diff --check`.
+
 # CLOB Orderbook Archive And Archive-Gated Retention (2026-05-20)
 
 ## Goal

@@ -505,6 +505,74 @@ fn hosted_factor_walk_forward_splits_replay_parity_artifact_suffix() {
 }
 
 #[test]
+fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
+    let hosted = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
+    let router = workflow_contents(".github/workflows/factor-walk-forward-v2.yml");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "candidate_strategy_replay_json",
+        "candidate_strategy_replay_run_id",
+        "candidate_strategy_replay_artifact_name",
+        "candidate_strategy_replay_run_id must be <run-id>:<artifact-name>",
+        "Download candidate strategy replay artifact",
+        "runtime-candidate-replay-${WALK_CANDIDATE_STRATEGY_REPLAY_RUN_ID}",
+        "--require candidate-strategy-replay.json",
+        "artifacts/candidate-strategy-replay/candidate-strategy-replay.json",
+        "--candidate-strategy-replay-json",
+    ] {
+        if !hosted.contains(needle) {
+            offenders.push(format!(
+                "factor-walk-forward-v2-hosted-artifact.yml: missing `{needle}`"
+            ));
+        }
+    }
+
+    let candidate_section = hosted
+        .split("- name: Download candidate strategy replay artifact")
+        .nth(1)
+        .and_then(|tail| tail.split("- name: Cache cargo build").next())
+        .unwrap_or("");
+    if candidate_section.contains("--strip-prefix") {
+        offenders.push(
+            "factor-walk-forward-v2-hosted-artifact.yml: candidate replay artifact must not use alpha-search strip-prefix"
+                .to_string(),
+        );
+    }
+    if !hosted.contains("--strip-prefix \"factor-walk-forward-v2/alpha-search/${WALK_ALPHA_SEARCH_PLAN_TARGET}\"")
+        || !hosted.contains("--require mcts-expansion-plan.json")
+    {
+        offenders.push(
+            "factor-walk-forward-v2-hosted-artifact.yml: alpha search plan artifact contract was weakened"
+                .to_string(),
+        );
+    }
+
+    let route_allowlist = router
+        .split("allowed = {")
+        .nth(1)
+        .and_then(|tail| tail.split("raw = os.environ").next())
+        .unwrap_or("");
+    for needle in [
+        "candidate_strategy_replay_json",
+        "candidate_strategy_replay_run_id",
+        "candidate_strategy_replay_artifact_name",
+    ] {
+        if !route_allowlist.contains(needle) {
+            offenders.push(format!(
+                "factor-walk-forward-v2.yml: hosted route allowlist missing `{needle}`"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "hosted factor walk-forward candidate replay feedback guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn tango_deploy_keeps_pm5d_live_paused() {
     let workflow = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
     let cloud_assist = workflow_contents("scripts/ci/deploy_tango_cloud_assist.py");
