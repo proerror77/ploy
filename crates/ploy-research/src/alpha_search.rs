@@ -1074,6 +1074,10 @@ fn normalized_factor_family(raw: &str) -> String {
     let suffixes = [
         "_runtime_pass_through_add_spread_penalty",
         "_runtime_pass_through_add_capacity_gate",
+        "_add_spread_penalty",
+        "_add_capacity_gate",
+        "_add_feature_gate",
+        "_entry_price_quality",
         "_full_depth_entry_gate",
         "_spread_adjusted",
         "_near_strike",
@@ -1464,13 +1468,14 @@ mod tests {
 
     #[test]
     fn typed_prior_runtime_avoid_list_filters_failed_family_variants() {
-        let mut squashed = sample_report("mut_spread_adjusted_external_move_squashed");
+        let mut squashed =
+            sample_report("llm_mut_spread_adjusted_external_move_squashed_add_capacity_gate");
         squashed.spearman_ic = 0.95;
         squashed.icir = 3.0;
         squashed.top_bucket_avg_label = 3.0;
 
         let mut spread_adjusted =
-            sample_report("mcts_spread_adjusted_external_move_spread_adjusted");
+            sample_report("mcts_spread_adjusted_external_move_spread_adjusted_entry_price_quality");
         spread_adjusted.spearman_ic = 0.90;
         spread_adjusted.icir = 2.5;
         spread_adjusted.top_bucket_avg_label = 2.5;

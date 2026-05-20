@@ -41,6 +41,14 @@ Evidence stage: `walk_forward / runtime_parity`.
   `CARGO_TARGET_DIR=/tmp/ploy-runtime-feedback-avoidlist-example /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research --features db --example factor_walk_forward_v2`,
   and `rtk git diff --check`. The cargo check completed with existing warnings
   in strategy modules, but no errors.
+- 2026-05-20: Hosted validation run `26144939837` showed the avoid-list was
+  emitted but LLM/MCTS suffixes such as `_add_capacity_gate` and
+  `_entry_price_quality` still escaped family matching. Tightened runtime
+  family normalization and added focused regressions. Validation passed:
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent`,
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-avoid-family-suffix /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research alpha_search --lib`,
+  and `rtk git diff --check`.
 
 # Research Snapshot Empty Timestamp SSH Fix (2026-05-20)
 

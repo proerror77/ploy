@@ -741,6 +741,12 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                 prior["runtime_avoid_factors"][0]["factor_family"],
                 "spread_adjusted_external_move",
             )
+            self.assertEqual(
+                agent.factor_family(
+                    "llm_mut_spread_adjusted_external_move_squashed_add_capacity_gate"
+                ),
+                "spread_adjusted_external_move",
+            )
 
     def test_runtime_avoid_factors_accumulate_from_search_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
