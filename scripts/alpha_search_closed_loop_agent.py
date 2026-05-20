@@ -397,6 +397,68 @@ def runtime_pass_through_feedback(run: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def runtime_mapping_gap_feedback(run: dict[str, Any]) -> dict[str, Any]:
+    promotion = run.get("promotion")
+    if not isinstance(promotion, dict):
+        return {}
+    evaluated = promotion.get("evaluated_factors")
+    if not isinstance(evaluated, list):
+        return {}
+    target = run.get("target") or DEFAULT_TARGET
+    feedback = run.get("feedback") if isinstance(run.get("feedback"), dict) else {}
+    best_candidate = str(feedback.get("best_candidate") or "")
+    plan_nodes = selected_nodes(run.get("plan") if isinstance(run.get("plan"), dict) else {})
+    top_selected = str(plan_nodes[0].get("factor_name") or "") if plan_nodes else ""
+
+    candidates: list[dict[str, Any]] = []
+    for item in evaluated:
+        if not isinstance(item, dict):
+            continue
+        factor = item.get("factor")
+        if not isinstance(factor, dict):
+            continue
+        if factor.get("target") not in {None, target}:
+            continue
+        if factor.get("decision") != "candidate" or factor.get("reason") != "passed":
+            continue
+        blockers = blocker_strings(item)
+        if "missing_runtime_strategy_mapping" not in blockers:
+            continue
+        name = str(factor.get("name") or "")
+        if not name:
+            continue
+        candidates.append({"item": item, "factor": factor, "blockers": blockers, "name": name})
+    if not candidates:
+        return {}
+
+    def score(candidate: dict[str, Any]) -> tuple[float, float, float, float]:
+        factor = candidate["factor"]
+        name = candidate["name"]
+        return (
+            1.0 if best_candidate and name == best_candidate else 0.0,
+            1.0 if top_selected and name == top_selected else 0.0,
+            as_float(factor.get("top_bucket_avg_label")) or 0.0,
+            as_float(factor.get("spearman_ic")) or 0.0,
+        )
+
+    selected = max(candidates, key=score)
+    factor = selected["factor"]
+    base_factor = selected["name"]
+    return {
+        "reason": "missing_runtime_strategy_mapping",
+        "base_factor": base_factor,
+        "factor_family": factor_family(base_factor),
+        "runtime_score": "",
+        "metrics": {
+            "top_bucket_avg_label": factor.get("top_bucket_avg_label"),
+            "positive_window_ratio": factor.get("positive_window_ratio"),
+            "symbol_positive_ratio": factor.get("symbol_positive_ratio"),
+            "spearman_ic": factor.get("spearman_ic"),
+        },
+        "blockers": selected["blockers"],
+    }
+
+
 def latest_run(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return runs[-1]
 
@@ -422,9 +484,15 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
     handoff_blockers = blocker_strings(handoff)
     runtime_feedback = runtime_pass_through_feedback(current)
     runtime_blockers = runtime_feedback.get("blockers") if runtime_feedback else []
+    runtime_unmapped_feedback = runtime_mapping_gap_feedback(current)
+    runtime_unmapped_blockers = (
+        runtime_unmapped_feedback.get("blockers") if runtime_unmapped_feedback else []
+    )
     blockers = list(target_blockers or handoff_blockers)
     if isinstance(runtime_blockers, list):
         blockers.extend(str(item) for item in runtime_blockers)
+    if isinstance(runtime_unmapped_blockers, list):
+        blockers.extend(str(item) for item in runtime_unmapped_blockers)
     blocker_action = classify_blockers(blockers)
 
     candidate_count = int(feedback.get("candidate_count") or 0)
@@ -444,6 +512,9 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
     elif runtime_feedback:
         action = "revise_prior"
         reason = str(runtime_feedback.get("reason") or "runtime_pass_through_collapse")
+    elif runtime_unmapped_feedback:
+        action = "revise_prior"
+        reason = str(runtime_unmapped_feedback.get("reason") or "missing_runtime_strategy_mapping")
     elif blocker_action in {"fix_runtime", "fix_data", "fix_workflow", "revise_prior"}:
         action = blocker_action
         reason = f"promotion_blockers_require_{blocker_action}"
@@ -518,6 +589,7 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "prior_revision_required": action == "revise_prior",
         "runtime_replay_request": runtime_request,
         "runtime_pass_through_feedback": runtime_feedback,
+        "runtime_unmapped_feedback": runtime_unmapped_feedback,
     }
 
 
@@ -768,6 +840,21 @@ def collect_runtime_avoid_factors(
                 "runtime_score": runtime_feedback.get("runtime_score"),
                 "reason": runtime_feedback.get("reason") or "runtime_pass_through_collapse",
                 "metrics": runtime_feedback.get("metrics"),
+            }
+    runtime_unmapped_feedback = decision.get("runtime_unmapped_feedback")
+    if isinstance(runtime_unmapped_feedback, dict) and runtime_unmapped_feedback:
+        base_factor = str(runtime_unmapped_feedback.get("base_factor") or "").strip()
+        family = str(
+            runtime_unmapped_feedback.get("factor_family") or factor_family(base_factor)
+        ).strip()
+        if base_factor and family:
+            by_family[family] = {
+                "base_factor": base_factor,
+                "factor_family": family,
+                "runtime_score": runtime_unmapped_feedback.get("runtime_score") or "",
+                "reason": runtime_unmapped_feedback.get("reason")
+                or "missing_runtime_strategy_mapping",
+                "metrics": runtime_unmapped_feedback.get("metrics"),
             }
     return [by_family[key] for key in sorted(by_family)]
 

@@ -213,6 +213,70 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             )
             self.assertEqual(decision["decision"], "fix_runtime")
 
+    def test_unmapped_best_candidate_revises_prior_with_runtime_avoid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = artifact(
+                Path(tmp),
+                chain_reason="continue",
+                should_dispatch=True,
+                selected_nodes=[
+                    {
+                        "factor_name": "mcts_mcts_ofi_l5_depth_norm_spread_adjusted_capacity",
+                        "selected_dimension": "execution_quality",
+                        "proposed_mutation": "add_capacity_gate",
+                    }
+                ],
+                feedback={
+                    "target": agent.DEFAULT_TARGET,
+                    "candidate_count": 20,
+                    "rejected_count": 5,
+                    "passed_count": 2,
+                    "best_candidate": "mcts_mcts_ofi_l5_depth_norm_spread_adjusted_capacity",
+                    "best_reward": 5.71,
+                },
+                promotion={
+                    "decision": "blocked",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "missing_runtime_strategy_mapping",
+                                "requires_runtime_replay_not_top_bucket_aggregate",
+                            ],
+                            "factor": {
+                                "name": "mcts_mcts_ofi_l5_depth_norm_spread_adjusted_capacity",
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                                "top_bucket_avg_label": 5.40,
+                                "positive_window_ratio": 1.0,
+                                "symbol_positive_ratio": 1.0,
+                                "spearman_ic": 0.20,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            runs = [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            decision = agent.closed_loop_decision(runs)
+            prior = agent.build_prior(runs, decision, 3)
+
+            self.assertEqual(decision["decision"], "revise_prior")
+            self.assertEqual(decision["reason"], "missing_runtime_strategy_mapping")
+            self.assertIsNone(decision["runtime_replay_request"])
+            self.assertEqual(
+                decision["runtime_unmapped_feedback"]["base_factor"],
+                "mcts_mcts_ofi_l5_depth_norm_spread_adjusted_capacity",
+            )
+            self.assertEqual(
+                prior["runtime_avoid_factors"][0]["factor_family"],
+                "ofi_l5_depth_norm",
+            )
+            self.assertEqual(
+                prior["runtime_avoid_factors"][0]["reason"],
+                "missing_runtime_strategy_mapping",
+            )
+
     def test_execution_blockers_take_priority_over_runtime_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = artifact(
