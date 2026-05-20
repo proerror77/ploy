@@ -106,6 +106,14 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
 2,spread_adjusted_external_move,full_depth_settlement_executable_pnl,candidate,passed,529,0.214428,0.141198,4,1.412625,1.0000,2,1.0000,1.0000,106,3.710549,0.6981,1.0000,23.70,1.40,106,1,5
 """
 
+AUTOFACTOR_POLY_LAG_PRESSURE_REPORT = """
+# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,top_bucket_unique_event_count,top_bucket_max_event_decisions,complexity
+1,mut_poly_lag_pressure_spread_adjusted,full_depth_settlement_executable_pnl,candidate,passed,529,0.181235,0.107332,4,1.568090,1.0000,2,1.0000,0.7500,106,3.083066,0.6681,1.0000,18.51,1.42,106,1,8
+"""
+
 AUTOFACTOR_TRADEABLE_HARD_GATE_REPORT = """
 # AutoFactor target=tradeable_full_depth_settlement_pnl
 === AutoFactor Seed Candidate Report ===
@@ -403,6 +411,29 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "runtime_profile_mismatch:repricing_momentum!=settlement_probability",
             bare_spread["blockers"],
         )
+
+    def test_qualifies_poly_lag_pressure_predictive_formula_mutation(self):
+        replay = {
+            **DEFAULT_REPLAY_PAYLOAD,
+            "runtime_score": "autofactor_formula:mut_poly_lag_pressure_spread_adjusted",
+        }
+        _, payload, registry, handoff, handoff_md = self.run_script(
+            READY_GATE + AUTOFACTOR_POLY_LAG_PRESSURE_REPORT,
+            replay_payload=replay,
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(registry["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(
+            handoff["strategies"][0]["runtime_score"],
+            "autofactor_formula:mut_poly_lag_pressure_spread_adjusted",
+        )
+        self.assertEqual(
+            handoff["strategies"][0]["strategy_family"],
+            "predictive_settlement_probability",
+        )
+        self.assertIn("mut_poly_lag_pressure_spread_adjusted", handoff_md)
 
     def test_qualifies_tradeable_hard_gate_predictive_formula_when_gate_is_ready(self):
         replay = {

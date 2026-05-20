@@ -566,6 +566,7 @@ fn autofactor_formula_entry_score(
     let base_formula_name = normalized_autofactor_formula_name(formula_name);
     let (threshold, scale) = if base_formula_name
         .starts_with("amplitude_weighted_momentum_30s_sigma")
+        || base_formula_name.starts_with("poly_lag_pressure")
         || base_formula_name.starts_with("spread_adjusted_external_move")
     {
         (0.0, 0.02)
@@ -607,6 +608,7 @@ fn is_predictive_settlement_autofactor_runtime_score(runtime_score: &str) -> boo
 
 fn is_predictive_settlement_autofactor_name(name: &str) -> bool {
     name.starts_with("amplitude_weighted_momentum_30s_sigma")
+        || name.starts_with("poly_lag_pressure")
         || (name.starts_with("spread_adjusted_external_move")
             && name != "spread_adjusted_external_move")
 }
@@ -1947,6 +1949,7 @@ impl ThreeLayerStrategy {
                         entry_capacity_ratio,
                         side_spread,
                         external_pressure: confirmation_score,
+                        pm_lag_secs: quote_age.max(0) as f64,
                         iv_change_1m: 0.0,
                     };
                     let Some((raw, normalized)) =
@@ -4536,6 +4539,7 @@ mod tests {
             entry_capacity_ratio: 3.0,
             side_spread: 0.03,
             external_pressure: 0.0,
+            pm_lag_secs: 0.0,
             iv_change_1m: 0.0,
         };
         let (raw, score) = autofactor_formula_entry_score(
@@ -5023,6 +5027,9 @@ mod tests {
             "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted"
         ));
         assert!(is_settlement_autofactor_runtime_score(
+            "autofactor_formula:mut_poly_lag_pressure_spread_adjusted"
+        ));
+        assert!(is_settlement_autofactor_runtime_score(
             "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate"
         ));
         assert!(!is_settlement_autofactor_runtime_score(
@@ -5105,6 +5112,7 @@ mod tests {
             entry_capacity_ratio: 3.0,
             side_spread: 0.03,
             external_pressure: 0.0,
+            pm_lag_secs: 0.0,
             iv_change_1m: 0.0,
         };
         let far_inputs = AutoSettlementFactorInputs {
@@ -5146,6 +5154,7 @@ mod tests {
             entry_capacity_ratio: 3.0,
             side_spread: 0.03,
             external_pressure: 0.0,
+            pm_lag_secs: 0.0,
             iv_change_1m: 0.0,
         };
         let low_ticket_inputs = AutoSettlementFactorInputs {
@@ -5187,6 +5196,7 @@ mod tests {
             entry_capacity_ratio: 3.0,
             side_spread: 0.03,
             external_pressure: 0.0,
+            pm_lag_secs: 0.0,
             iv_change_1m: 0.0,
         };
         let opposed = AutoSettlementFactorInputs {
@@ -5214,6 +5224,43 @@ mod tests {
     }
 
     #[test]
+    fn predictive_poly_lag_pressure_formula_uses_quote_age_pressure_and_drift() {
+        let config = test_config();
+        let inputs = AutoSettlementFactorInputs {
+            settlement_edge: -0.01,
+            entry_price: 0.48,
+            distance_over_sigma: 0.20,
+            direction_sign: 1.0,
+            drift_30s: 0.006,
+            sigma_horizon: 4.0,
+            entry_capacity_ratio: 3.0,
+            side_spread: 0.03,
+            external_pressure: 0.80,
+            pm_lag_secs: 6.0,
+            iv_change_1m: 0.0,
+        };
+
+        let (raw, score) = autofactor_formula_entry_score(
+            "autofactor_formula:mut_poly_lag_pressure_spread_adjusted",
+            inputs,
+            config.min_edge,
+        )
+        .expect("poly lag pressure predictive formula should score finite inputs");
+
+        assert!(raw > 0.0);
+        assert!(score > 0.0);
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mut_poly_lag_pressure_spread_adjusted",
+            AutoSettlementFactorInputs {
+                pm_lag_secs: f64::NAN,
+                ..inputs
+            },
+            config.min_edge,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn predictive_autofactor_formula_supports_full_depth_entry_gate() {
         let config = test_config();
         let fillable = AutoSettlementFactorInputs {
@@ -5226,6 +5273,7 @@ mod tests {
             entry_capacity_ratio: 1.20,
             side_spread: 0.03,
             external_pressure: 0.0,
+            pm_lag_secs: 0.0,
             iv_change_1m: 0.0,
         };
         let unfillable = AutoSettlementFactorInputs {

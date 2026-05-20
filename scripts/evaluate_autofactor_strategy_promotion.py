@@ -152,6 +152,7 @@ BUILTIN_RUNTIME_MAPPINGS: dict[str, dict[str, str]] = {
 
 PREDICTIVE_FORMULA_BASES = (
     "amplitude_weighted_momentum_30s_sigma",
+    "poly_lag_pressure",
     "spread_adjusted_external_move",
 )
 
