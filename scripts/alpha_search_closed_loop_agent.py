@@ -111,6 +111,10 @@ def load_artifact(path: Path, target: str) -> dict[str, Any]:
             path / "alpha-search-chain" / "input-alpha-search-plan" / "next-llm-prior.json"
         )
         or {},
+        "input_feedback": optional_json(
+            path / "alpha-search-chain" / "input-alpha-search-plan" / "search-feedback.json"
+        )
+        or {},
     }
 
 
@@ -815,6 +819,9 @@ def collect_runtime_avoid_factors(
 ) -> list[dict[str, Any]]:
     by_family: dict[str, dict[str, Any]] = {}
 
+    def is_runtime_collapse(item: dict[str, Any]) -> bool:
+        return str(item.get("reason") or "") == "runtime_pass_through_collapse"
+
     def add_item(item: dict[str, Any]) -> None:
         base_factor = str(item.get("base_factor") or "").strip()
         family = str(item.get("factor_family") or factor_family(base_factor)).strip()
@@ -828,7 +835,10 @@ def collect_runtime_avoid_factors(
         }
         if item.get("metrics") is not None:
             payload["metrics"] = item.get("metrics")
-        by_family.setdefault(family, payload)
+        existing = by_family.get(family)
+        if existing is not None and is_runtime_collapse(existing) and not is_runtime_collapse(payload):
+            return
+        by_family[family] = payload
 
     for run in runs:
         prior = run.get("input_prior") if isinstance(run, dict) else {}
@@ -837,6 +847,17 @@ def collect_runtime_avoid_factors(
         )
         if isinstance(prior_existing, list):
             for item in prior_existing:
+                if isinstance(item, dict):
+                    add_item(item)
+
+        input_feedback = run.get("input_feedback") if isinstance(run, dict) else {}
+        input_existing = (
+            input_feedback.get("runtime_avoid_factors")
+            if isinstance(input_feedback, dict)
+            else None
+        )
+        if isinstance(input_existing, list):
+            for item in input_existing:
                 if isinstance(item, dict):
                     add_item(item)
 
@@ -867,15 +888,28 @@ def collect_runtime_avoid_factors(
             runtime_unmapped_feedback.get("factor_family") or factor_family(base_factor)
         ).strip()
         if base_factor and family:
-            by_family[family] = {
+            add_item({
                 "base_factor": base_factor,
                 "factor_family": family,
                 "runtime_score": runtime_unmapped_feedback.get("runtime_score") or "",
                 "reason": runtime_unmapped_feedback.get("reason")
                 or "missing_runtime_strategy_mapping",
                 "metrics": runtime_unmapped_feedback.get("metrics"),
-            }
+            })
     return [by_family[key] for key in sorted(by_family)]
+
+
+def runtime_feedback_has_direct_signal(runtime_feedback: dict[str, Any]) -> bool:
+    metrics = runtime_feedback.get("metrics")
+    if not isinstance(metrics, dict):
+        return True
+    direct_passes = as_float(metrics.get("direct_passes_at_configured_threshold"))
+    entry_signals = as_float(metrics.get("entry_signals"))
+    if direct_passes is not None and direct_passes <= 0:
+        return False
+    if entry_signals is not None and entry_signals <= 0 and direct_passes == 0:
+        return False
+    return True
 
 
 def build_prior(runs: list[dict[str, Any]], decision: dict[str, Any], limit: int) -> dict[str, Any]:
@@ -888,7 +922,11 @@ def build_prior(runs: list[dict[str, Any]], decision: dict[str, Any], limit: int
         if isinstance(item, dict)
     }
     runtime_feedback = decision.get("runtime_pass_through_feedback")
-    if isinstance(runtime_feedback, dict) and runtime_feedback:
+    if (
+        isinstance(runtime_feedback, dict)
+        and runtime_feedback
+        and runtime_feedback_has_direct_signal(runtime_feedback)
+    ):
         base_factor = str(runtime_feedback.get("base_factor") or "")
         if base_factor:
             for mutation_type in ("add_spread_penalty", "add_capacity_gate"):
