@@ -1,3 +1,42 @@
+# Closed-Loop Unmapped Runtime Prior (2026-05-20)
+
+## Goal
+
+When the current best AutoFactor candidate has no runtime strategy mapping and
+there is no non-avoided runtime replay request to run, make the closed-loop
+produce a prior revision instead of an unactionable `fix_runtime` decision with
+`runtime_replay_request=null`.
+
+Evidence stage: `walk_forward / runtime_parity`.
+
+## Files / Ownership
+
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: classify unmapped runtime candidates as prior-revision evidence.
+- `tests/test_alpha_search_closed_loop_agent.py`
+  - Owner: regression coverage for `fix_runtime` without a replay request.
+- `tasks/todo.md`
+  - Owner: current session tracking.
+
+## Tasks
+
+- [x] Reproduce the workflow gap from run `26154725630`.
+- [x] Add unmapped-runtime feedback and avoid-list propagation.
+- [x] Add focused tests.
+- [x] Run focused validation.
+- [ ] PR, CI, merge, and rerun hosted validation.
+
+## Review
+
+- 2026-05-20: Fixed the closed-loop classifier so a best candidate with
+  `missing_runtime_strategy_mapping` and no actionable runtime replay request
+  becomes `revise_prior` instead of an empty `fix_runtime`. The typed prior now
+  carries the unmapped factor family as a runtime avoid item; validation passed:
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent`, and a local
+  replay of run `26154725630`'s artifact showing `decision=revise_prior` with
+  `ofi_l5_depth_norm` in `runtime_avoid_factors`.
+
 # Poly Lag Pressure Runtime Mapping (2026-05-20)
 
 ## Goal
