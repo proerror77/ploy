@@ -378,6 +378,13 @@ until snapshot export is moved to a hosted-safe data source.
 When replay parity evidence uses a non-default artifact name, encode the input
 as `replay_parity_run_id=<run-id>:<artifact-name>` so the workflow stays within
 GitHub's 10-input dispatch limit.
+When runtime candidate replay evidence should feed the next hosted search,
+pass it separately as
+`options_json.candidate_strategy_replay_run_id=<run-id>` or
+`<run-id>:<artifact-name>`. Do not overload `alpha_search_plan_run_id` for this:
+alpha search plan artifacts are expected to contain `mcts-expansion-plan.json`,
+while runtime replay artifacts are expected to contain
+`candidate-strategy-replay.json`.
 
 Use `--output-dir <dir>` to choose the artifact directory. Without it, the
 runner writes under `<dataset>/workflow_runs/event_ml_<timestamp>`.
