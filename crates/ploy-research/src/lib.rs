@@ -86,7 +86,8 @@ pub fn crate_marker() -> &'static str {
 // `factors_new::Regime` alias.
 pub use alpha_search::{
     read_mcts_search_state, write_alpha_search_artifacts, write_alpha_search_artifacts_with_state,
-    AlphaSearchArtifactError, AlphaSearchArtifactSummary, MctsSearchStateArtifact,
+    write_alpha_search_artifacts_with_state_and_runtime_feedback, AlphaSearchArtifactError,
+    AlphaSearchArtifactSummary, AlphaSearchRuntimeFeedback, MctsSearchStateArtifact,
     MctsSearchStateNode,
 };
 pub use attribution::{factor_pnl, regime_pnl, AttributionReport, RegimePnl};

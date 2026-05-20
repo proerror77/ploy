@@ -17834,3 +17834,47 @@ Evidence stage: `walk_forward / runtime_parity`.
   `python3 -m unittest tests.test_alpha_search_closed_loop_agent`,
   `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
   and `rtk git diff --check`.
+
+# Runtime Executable Objective For Alpha Search (2026-05-20)
+
+## Goal
+
+Make alpha-search reward and MCTS expansion aware of runtime replay
+pass-through collapse so candidates with strong top-bucket diagnostics but zero
+or tiny executable runtime entries are penalized before the next search run.
+
+Evidence stage: `walk_forward / runtime_parity`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: runtime replay feedback model, reward penalty, node metrics, and
+    MCTS expansion filtering.
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: parse candidate replay artifacts into alpha-search runtime feedback.
+- `scripts/run_factor_walk_forward_sweep.py`
+  - Owner: pass candidate replay JSON into the Rust alpha-search artifact path.
+- `crates/ploy-research/src/lib.rs`
+  - Owner: public exports for the example binary.
+- `tasks/todo.md`
+  - Owner: current session tracking.
+
+## Tasks
+
+- [x] Add optional runtime feedback to alpha-search artifact generation.
+- [x] Penalize and filter MCTS expansion nodes matching a replayed runtime
+      pass-through collapse.
+- [x] Wire hosted sweep candidate replay JSON into Rust alpha-search artifacts.
+- [x] Add Rust unit coverage for runtime pass-through penalty and MCTS filtering.
+- [x] Run focused Rust/Python/workflow validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+## Review
+
+- 2026-05-20: Validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-executable-objective /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research alpha_search --lib`,
+  `python3 -m py_compile scripts/run_factor_walk_forward_sweep.py`,
+  `python3 -m unittest tests.test_factor_walk_forward_sweep`,
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-executable-objective-example /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research --features db --example factor_walk_forward_v2`,
+  and `rtk git diff --check`. The cargo check completed with existing warnings
+  in strategy modules, but no errors.
