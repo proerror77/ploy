@@ -654,6 +654,15 @@ jobs:
                 "artifacts/factor-walk-forward-v2-upload/snapshot-provenance/${file}"
             fi
           done
+          candidate_strategy_replay_json="${WALK_CANDIDATE_STRATEGY_REPLAY_JSON}"
+          if [ -z "${candidate_strategy_replay_json}" ] && [ -f artifacts/candidate-strategy-replay/candidate-strategy-replay.json ]; then
+            candidate_strategy_replay_json="artifacts/candidate-strategy-replay/candidate-strategy-replay.json"
+          fi
+          if [ -n "${candidate_strategy_replay_json}" ] && [ -f "${candidate_strategy_replay_json}" ]; then
+            mkdir -p artifacts/factor-walk-forward-v2-upload/candidate-strategy-replay
+            cp "${candidate_strategy_replay_json}" \
+              artifacts/factor-walk-forward-v2-upload/candidate-strategy-replay/candidate-strategy-replay.json
+          fi
 
       - name: Prepare alpha search chain decision
         if: always()
