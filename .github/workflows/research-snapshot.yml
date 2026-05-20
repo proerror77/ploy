@@ -295,14 +295,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
+          empty_arg="__ploy_empty__"
           ssh tango-1-1 /bin/bash -s -- \
             "${DEPLOY_ROOT}" \
             "${REMOTE_DIR}" \
             "${{ github.event.inputs.symbols }}" \
             "${{ github.event.inputs.start_date }}" \
             "${{ github.event.inputs.end_date }}" \
-            "${SNAPSHOT_START_TS}" \
-            "${SNAPSHOT_END_TS}" \
+            "${SNAPSHOT_START_TS:-${empty_arg}}" \
+            "${SNAPSHOT_END_TS:-${empty_arg}}" \
             "${{ github.event.inputs.stake_usd }}" \
             "${SNAPSHOT_LOB_SAMPLE_SECS}" \
             "${SNAPSHOT_PM_BOOK_SAMPLE_SECS}" \
@@ -329,6 +330,12 @@ jobs:
           required_sources="${14}"
           data_audit_status="${15}"
           include_deribit="${16}"
+          if [ "${start_ts}" = "__ploy_empty__" ]; then
+            start_ts=""
+          fi
+          if [ "${end_ts}" = "__ploy_empty__" ]; then
+            end_ts=""
+          fi
 
           set -a
           . "${deploy_root}/.env"

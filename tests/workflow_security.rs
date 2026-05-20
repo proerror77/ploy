@@ -103,6 +103,30 @@ fn workflow_dispatch_inputs_stay_lintable() {
 }
 
 #[test]
+fn research_snapshot_preserves_empty_timestamp_args_over_ssh() {
+    let workflow = workflow_contents(".github/workflows/research-snapshot.yml");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "empty_arg=\"__ploy_empty__\"",
+        "\"${SNAPSHOT_START_TS:-${empty_arg}}\"",
+        "\"${SNAPSHOT_END_TS:-${empty_arg}}\"",
+        "if [ \"${start_ts}\" = \"__ploy_empty__\" ]; then",
+        "if [ \"${end_ts}\" = \"__ploy_empty__\" ]; then",
+    ] {
+        if !workflow.contains(needle) {
+            offenders.push(format!("research-snapshot.yml: missing `{needle}`"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "research snapshot SSH empty timestamp guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn factor_evolve_daily_search_passes_snapshot_quote_age() {
     let workflow = workflow_contents(".github/workflows/factor-evolve-daily-research.yml");
     let mut offenders = Vec::new();
