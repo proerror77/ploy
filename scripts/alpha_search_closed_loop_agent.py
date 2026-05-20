@@ -525,6 +525,7 @@ def runtime_replay_request(run: dict[str, Any]) -> dict[str, Any] | None:
     candidate = runtime_replay_candidate(run)
     if candidate is not None:
         return candidate
+    avoided_families = runtime_avoid_families(run)
     for source in (run.get("promotion"), run.get("handoff")):
         if not isinstance(source, dict):
             continue
@@ -534,6 +535,8 @@ def runtime_replay_request(run: dict[str, Any]) -> dict[str, Any] | None:
         runtime_score = str(replay.get("runtime_score") or "").strip()
         strategy_profile = str(replay.get("strategy_profile") or "settlement_probability").strip()
         if not runtime_score:
+            continue
+        if factor_family(runtime_score_base_factor(runtime_score)) in avoided_families:
             continue
         return {
             "workflow": "runtime-candidate-replay.yml",

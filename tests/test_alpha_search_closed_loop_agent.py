@@ -736,6 +736,46 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             self.assertEqual(request["source_factor"], "mut_poly_lag_pressure_spread_adjusted")
             self.assertEqual(request["inputs"]["runtime_score"], next_runtime_score)
 
+    def test_fix_runtime_fallback_request_skips_runtime_avoid_families(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            avoided_runtime_score = (
+                "autofactor_formula:mut_spread_adjusted_external_move_spread_adjusted"
+            )
+            path = artifact(
+                Path(tmp),
+                feedback={
+                    "target": agent.DEFAULT_TARGET,
+                    "candidate_count": 20,
+                    "rejected_count": 5,
+                    "passed_count": 2,
+                    "best_candidate": "mut_poly_lag_pressure_spread_adjusted",
+                    "best_reward": 4.12,
+                    "runtime_avoid_factors": [
+                        {
+                            "base_factor": "mut_spread_adjusted_external_move_near_strike",
+                            "factor_family": "spread_adjusted_external_move",
+                            "runtime_score": "autofactor_formula:mut_spread_adjusted_external_move_near_strike",
+                            "reason": "runtime_pass_through_collapse",
+                        }
+                    ],
+                },
+                promotion={
+                    "decision": "blocked",
+                    "required_strategy_profile": "settlement_probability",
+                    "evaluated_factors": [],
+                    "candidate_strategy_replay": {
+                        "runtime_score": avoided_runtime_score,
+                        "strategy_profile": "settlement_probability",
+                    },
+                },
+            )
+
+            decision = agent.closed_loop_decision(
+                [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            )
+
+            self.assertIsNone(decision["runtime_replay_request"])
+
     def test_runtime_pass_through_collapse_generates_targeted_prior(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime_score = "autofactor_formula:mut_spread_adjusted_external_move_squashed"
