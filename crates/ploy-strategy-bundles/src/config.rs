@@ -833,7 +833,9 @@ venue = "sportsbook"
                 || runtime_score
                     == "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate"
                 || runtime_score
-                    == "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate",
+                    == "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate"
+                || runtime_score
+                    == "autofactor_formula:mut_poly_lag_pressure_spread_adjusted",
             "settlement probability dry-run config should use a supported settlement AutoFactor formula, got {runtime_score}"
         );
         let raw = auto_settlement_formula_score(
@@ -848,6 +850,7 @@ venue = "sportsbook"
                 entry_capacity_ratio: 3.0,
                 side_spread: 0.03,
                 external_pressure: 1.0,
+                pm_lag_secs: 6.0,
                 iv_change_1m: 1.0,
             },
         )

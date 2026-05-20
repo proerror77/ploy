@@ -60,6 +60,7 @@ pub struct AutoSettlementFactorInputs {
     pub entry_capacity_ratio: f64,
     pub side_spread: f64,
     pub external_pressure: f64,
+    pub pm_lag_secs: f64,
     pub iv_change_1m: f64,
 }
 
@@ -224,6 +225,8 @@ fn normalize_autofactor_formula_name(mut name: &str) -> &str {
 fn predictive_formula_score(name: &str, inputs: AutoSettlementFactorInputs) -> Option<f64> {
     let base = if name.starts_with("amplitude_weighted_momentum_30s_sigma") {
         "amplitude_weighted_momentum_30s_sigma"
+    } else if name.starts_with("poly_lag_pressure") {
+        "poly_lag_pressure"
     } else if name.starts_with("spread_adjusted_external_move") {
         "spread_adjusted_external_move"
     } else {
@@ -239,6 +242,18 @@ fn predictive_formula_score(name: &str, inputs: AutoSettlementFactorInputs) -> O
                 return None;
             }
             inputs.drift_30s * inputs.direction_sign * inputs.sigma_horizon.abs().ln_1p()
+        }
+        "poly_lag_pressure" => {
+            if !inputs.external_pressure.is_finite()
+                || !inputs.drift_30s.is_finite()
+                || !inputs.direction_sign.is_finite()
+                || !inputs.pm_lag_secs.is_finite()
+            {
+                return None;
+            }
+            inputs.external_pressure
+                * (inputs.drift_30s * inputs.direction_sign).abs().ln_1p()
+                * (inputs.pm_lag_secs.max(0.0) / 3.0).tanh()
         }
         "spread_adjusted_external_move" => spread_adjusted_external_move_score(
             inputs.drift_30s * inputs.direction_sign,
