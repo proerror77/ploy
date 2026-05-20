@@ -342,6 +342,9 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def runtime_replay_request(run: dict[str, Any]) -> dict[str, Any] | None:
+    candidate = runtime_replay_candidate(run)
+    if candidate is not None:
+        return candidate
     for source in (run.get("promotion"), run.get("handoff")):
         if not isinstance(source, dict):
             continue
@@ -370,6 +373,80 @@ def runtime_replay_request(run: dict[str, Any]) -> dict[str, Any] | None:
             },
         }
     return None
+
+
+def runtime_replay_candidate(run: dict[str, Any]) -> dict[str, Any] | None:
+    promotion = run.get("promotion")
+    if not isinstance(promotion, dict):
+        return None
+    evaluated = promotion.get("evaluated_factors")
+    if not isinstance(evaluated, list):
+        return None
+    target = run.get("target") or DEFAULT_TARGET
+    required_profile = str(
+        promotion.get("required_strategy_profile") or "settlement_probability"
+    )
+    candidates: list[dict[str, Any]] = []
+    for item in evaluated:
+        if not isinstance(item, dict):
+            continue
+        factor = item.get("factor")
+        runtime_mapping = item.get("runtime_mapping")
+        if not isinstance(factor, dict) or not isinstance(runtime_mapping, dict):
+            continue
+        if factor.get("target") not in {None, target}:
+            continue
+        if factor.get("decision") != "candidate" or factor.get("reason") != "passed":
+            continue
+        if runtime_mapping.get("strategy_profile") != required_profile:
+            continue
+        runtime_score = str(runtime_mapping.get("runtime_score") or "").strip()
+        if not runtime_score:
+            continue
+        candidates.append(item)
+    if not candidates:
+        return None
+
+    def score(item: dict[str, Any]) -> tuple[float, float, float, float]:
+        factor = item.get("factor") if isinstance(item.get("factor"), dict) else {}
+        return (
+            1.0
+            if factor.get("decision") == "candidate" and factor.get("reason") == "passed"
+            else 0.0,
+            as_float(factor.get("positive_window_ratio")) or 0.0,
+            as_float(factor.get("symbol_positive_ratio")) or 0.0,
+            as_float(factor.get("spearman_ic")) or 0.0,
+        )
+
+    selected = max(candidates, key=score)
+    factor = selected.get("factor") if isinstance(selected.get("factor"), dict) else {}
+    mapping = (
+        selected.get("runtime_mapping")
+        if isinstance(selected.get("runtime_mapping"), dict)
+        else {}
+    )
+    runtime_score = str(mapping.get("runtime_score") or "").strip()
+    strategy_profile = str(mapping.get("strategy_profile") or required_profile).strip()
+    if not runtime_score:
+        return None
+    return {
+        "workflow": "runtime-candidate-replay.yml",
+        "git_ref": "main",
+        "reason": "replace aggregate top-bucket diagnostic with runtime_market_update_replay evidence",
+        "source_factor": str(factor.get("name") or ""),
+        "inputs": {
+            "deployment_id": "pm5d.threelayer.settlement-probability-btc-eth.dryrun",
+            "config_path": "/opt/ploy/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+            "recording_path": "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson",
+            "runtime_score": runtime_score,
+            "strategy_profile": strategy_profile or "settlement_probability",
+            "min_trade_count": "50",
+            "min_fill_rate": "0.30",
+            "min_roi": "0",
+            "full_depth_entry": "true",
+            "skip_settlement_exits": "false",
+        },
+    }
 
 
 def summarize_run(run: dict[str, Any]) -> dict[str, Any]:

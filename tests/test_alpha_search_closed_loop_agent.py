@@ -504,6 +504,79 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             self.assertEqual(request["inputs"]["runtime_score"], runtime_score)
             self.assertEqual(request["inputs"]["strategy_profile"], "settlement_probability")
 
+    def test_fix_runtime_request_uses_best_current_runtime_mappable_factor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stale_runtime_score = (
+                "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted"
+            )
+            better_runtime_score = (
+                "autofactor_formula:mut_spread_adjusted_external_move_spread_adjusted"
+            )
+            path = artifact(
+                Path(tmp),
+                promotion={
+                    "decision": "blocked",
+                    "required_strategy_profile": "settlement_probability",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "requires_runtime_replay_not_top_bucket_aggregate",
+                                "candidate_strategy_replay_not_runtime_replay:factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
+                            ],
+                            "factor": {
+                                "name": "mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                                "positive_window_ratio": 1.0,
+                                "symbol_positive_ratio": 1.0,
+                                "spearman_ic": 0.10,
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": stale_runtime_score,
+                                "strategy_profile": "settlement_probability",
+                            },
+                        },
+                        {
+                            "blockers": [
+                                "requires_runtime_replay_not_top_bucket_aggregate",
+                                "candidate_strategy_replay_not_runtime_replay:factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
+                                f"candidate_strategy_replay_runtime_score_mismatch:{stale_runtime_score}!={better_runtime_score}",
+                            ],
+                            "factor": {
+                                "name": "mut_spread_adjusted_external_move_spread_adjusted",
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                                "positive_window_ratio": 1.0,
+                                "symbol_positive_ratio": 1.0,
+                                "spearman_ic": 0.22,
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": better_runtime_score,
+                                "strategy_profile": "settlement_probability",
+                            },
+                        },
+                    ],
+                    "candidate_strategy_replay": {
+                        "runtime_score": stale_runtime_score,
+                        "strategy_profile": "settlement_probability",
+                    },
+                },
+            )
+
+            decision = agent.closed_loop_decision(
+                [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            )
+
+            request = decision["runtime_replay_request"]
+            self.assertEqual(decision["decision"], "fix_runtime")
+            self.assertEqual(
+                request["source_factor"],
+                "mut_spread_adjusted_external_move_spread_adjusted",
+            )
+            self.assertEqual(request["inputs"]["runtime_score"], better_runtime_score)
+
     def test_cli_markdown_includes_runtime_replay_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
