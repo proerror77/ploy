@@ -143,6 +143,8 @@ def factor_args(
         command.extend(["--factor-name-filter", values["factor_name_filter"]])
     if replay_parity_json:
         command.extend(["--replay-parity-json", replay_parity_json])
+    if args.candidate_strategy_replay_json:
+        command.extend(["--candidate-strategy-replay-json", args.candidate_strategy_replay_json])
     if args.require_deribit:
         command.append("--require-deribit")
     if alpha_search_output_dir:

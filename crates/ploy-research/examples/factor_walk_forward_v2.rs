@@ -25,12 +25,13 @@ use ploy_research::{
     review_trade_formation_v1_with_deribit_and_pm_books, validate_snapshot_request_coverage,
     walk_forward_factor_combo_v1_with_deribit_and_pm_books,
     walk_forward_factors_v2_with_deribit_and_pm_books,
-    walk_forward_meta_label_v1_with_deribit_and_pm_books, write_alpha_search_artifacts_with_state,
+    walk_forward_meta_label_v1_with_deribit_and_pm_books,
+    write_alpha_search_artifacts_with_state_and_runtime_feedback, AlphaSearchRuntimeFeedback,
     AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options, FactorObservation,
-    FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
-    FillabilityReviewOptions, FullDepthExecutionMatrixOptions, LiquidityGateV1Options,
-    LiquidityGatedAlphaV1Options, LlmPriorSpec, MetaLabelWalkForwardOptions, RepricingIcOptions,
-    ResearchSnapshotRequest, SettlementProbabilityDataQualityMode,
+    FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions, FillabilityReviewOptions,
+    FullDepthExecutionMatrixOptions, LiquidityGateV1Options, LiquidityGatedAlphaV1Options,
+    LlmPriorSpec, MetaLabelWalkForwardOptions, RepricingIcOptions, ResearchSnapshotRequest,
+    SettlementProbabilityDataQualityMode,
     SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
     SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
 };
@@ -265,6 +266,72 @@ fn read_llm_prior(path: &str) -> LlmPriorSpec {
         .unwrap_or_else(|err| panic!("parse alpha search LLM prior JSON {path} failed: {err}"))
 }
 
+fn runtime_feedback_from_candidate_replay(path: &str) -> Option<AlphaSearchRuntimeFeedback> {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("read candidate strategy replay JSON {path} failed: {err}"));
+    let json: serde_json::Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|err| panic!("parse candidate strategy replay JSON {path} failed: {err}"));
+    let runtime_score = json
+        .get("runtime_score")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let base_factor = runtime_score
+        .strip_prefix("autofactor_formula:")
+        .unwrap_or(runtime_score.as_str())
+        .to_string();
+    if base_factor.is_empty() {
+        return None;
+    }
+    let diagnostics = json
+        .get("strategy_diagnostics")
+        .and_then(serde_json::Value::as_object);
+    let counterfactual = json
+        .get("score_counterfactual")
+        .and_then(serde_json::Value::as_object);
+    let metric = |key: &str| -> usize {
+        diagnostics
+            .and_then(|values| values.get(key))
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(0)
+    };
+    let configured_threshold = counterfactual
+        .and_then(|values| values.get("configured_entry_threshold"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("0.25");
+    let direct_passes = counterfactual
+        .and_then(|values| values.get("direct_pass_counts"))
+        .and_then(|counts| counts.get(configured_threshold))
+        .or_else(|| {
+            counterfactual
+                .and_then(|values| values.get("direct_pass_counts"))
+                .and_then(|counts| counts.get("0.25"))
+        })
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or_else(|| metric("settlement_autofactor_predictive_score_ge_025"));
+    Some(AlphaSearchRuntimeFeedback {
+        runtime_score,
+        base_factor,
+        entry_signals: metric("entry_signals"),
+        direct_passes_at_configured_threshold: direct_passes,
+        formula_evaluations: metric("settlement_autofactor_formula_evaluations")
+            .max(counterfactual
+                .and_then(|values| values.get("formula_evaluations"))
+                .and_then(serde_json::Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or(0)),
+        depth_fillable: metric("settlement_autofactor_depth_fillable")
+            .max(counterfactual
+                .and_then(|values| values.get("depth_fillable"))
+                .and_then(serde_json::Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or(0)),
+        executable_edge_pass_min_edge: metric("settlement_autofactor_executable_edge_pass_min_edge"),
+    })
+}
+
 fn filter_autofactor_reports(
     reports: Vec<ploy_research::AutoFactorReport>,
     factor_name_filter: Option<&str>,
@@ -374,6 +441,7 @@ async fn main() {
 
     let snapshot_dir = flag_value(&args, "--snapshot-dir");
     let replay_parity_json = flag_value(&args, "--replay-parity-json");
+    let candidate_strategy_replay_json = flag_value(&args, "--candidate-strategy-replay-json");
     let alpha_search_output_dir = flag_value(&args, "--alpha-search-output-dir");
     let alpha_search_plan_json = flag_value(&args, "--alpha-search-plan-json");
     let alpha_search_llm_prior_json = flag_value(&args, "--alpha-search-llm-prior-json");
@@ -798,6 +866,19 @@ async fn main() {
     if let Some(path) = alpha_search_state_json.as_deref() {
         eprintln!("alpha search cumulative MCTS state loaded from {path}");
     }
+    let runtime_feedback = candidate_strategy_replay_json
+        .as_deref()
+        .and_then(runtime_feedback_from_candidate_replay);
+    if let Some(feedback) = runtime_feedback.as_ref() {
+        eprintln!(
+            "alpha search runtime feedback loaded: runtime_score={} entry_signals={} direct_passes={} executable_edge_pass_min_edge={} formula_evaluations={}",
+            feedback.runtime_score,
+            feedback.entry_signals,
+            feedback.direct_passes_at_configured_threshold,
+            feedback.executable_edge_pass_min_edge,
+            feedback.formula_evaluations
+        );
+    }
     if let Some(path) = alpha_search_plan_json.as_deref() {
         eprintln!(
             "alpha search MCTS plan loaded: {} selected nodes from {}",
@@ -827,13 +908,14 @@ async fn main() {
                     alpha_search_output_dir.as_deref(),
                     alpha_search_input_names.as_ref(),
                 ) {
-                    match write_alpha_search_artifacts_with_state(
+                    match write_alpha_search_artifacts_with_state_and_runtime_feedback(
                         output_dir,
                         target.as_str(),
                         input_names,
                         &reports,
                         &autofactor_options,
                         mcts_state.as_ref(),
+                        runtime_feedback.as_ref(),
                     ) {
                         Ok(summary) => eprintln!(
                             "alpha search artifacts written target={} candidates={} rejected={} best={} dir={}",

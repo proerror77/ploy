@@ -20,6 +20,33 @@ pub struct AlphaSearchArtifactSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlphaSearchRuntimeFeedback {
+    pub runtime_score: String,
+    pub base_factor: String,
+    pub entry_signals: usize,
+    pub direct_passes_at_configured_threshold: usize,
+    pub formula_evaluations: usize,
+    pub depth_fillable: usize,
+    pub executable_edge_pass_min_edge: usize,
+}
+
+impl AlphaSearchRuntimeFeedback {
+    pub fn is_pass_through_collapse(&self) -> bool {
+        (self.direct_passes_at_configured_threshold >= 50 && self.entry_signals < 50)
+            || (self.formula_evaluations >= 500 && self.executable_edge_pass_min_edge < 50)
+            || (self.depth_fillable >= 500 && self.entry_signals < 50)
+    }
+
+    fn entry_signal_rate(&self) -> f64 {
+        ratio_usize(self.entry_signals, self.direct_passes_at_configured_threshold)
+    }
+
+    fn executable_edge_pass_rate(&self) -> f64 {
+        ratio_usize(self.executable_edge_pass_min_edge, self.formula_evaluations)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MctsSearchStateArtifact {
     pub version: String,
     pub mode: String,
@@ -174,6 +201,9 @@ struct NodeMetric {
     top_bucket_avg_entry_sweep_levels: f64,
     top_bucket_unique_event_count: usize,
     top_bucket_max_event_decisions: usize,
+    runtime_entry_signal_rate: Option<f64>,
+    runtime_executable_edge_pass_rate: Option<f64>,
+    runtime_pass_through_penalty: f64,
     monotonicity_score: f64,
     complexity: usize,
 }
@@ -197,7 +227,19 @@ struct SearchFeedbackArtifact {
     passed_count: usize,
     best_candidate: Option<String>,
     best_reward: Option<f64>,
+    runtime_feedback: Option<RuntimeFeedbackSummary>,
     interpretation: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeFeedbackSummary {
+    runtime_score: String,
+    base_factor: String,
+    entry_signals: usize,
+    direct_passes_at_configured_threshold: usize,
+    formula_evaluations: usize,
+    executable_edge_pass_min_edge: usize,
+    pass_through_collapse: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -262,6 +304,26 @@ pub fn write_alpha_search_artifacts_with_state(
     reports: &[AutoFactorReport],
     options: &AutoFactorOptions,
     prior_state: Option<&MctsSearchStateArtifact>,
+) -> Result<AlphaSearchArtifactSummary, AlphaSearchArtifactError> {
+    write_alpha_search_artifacts_with_state_and_runtime_feedback(
+        output_root,
+        target,
+        input_names,
+        reports,
+        options,
+        prior_state,
+        None,
+    )
+}
+
+pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
+    output_root: impl AsRef<Path>,
+    target: &str,
+    input_names: &[String],
+    reports: &[AutoFactorReport],
+    options: &AutoFactorOptions,
+    prior_state: Option<&MctsSearchStateArtifact>,
+    runtime_feedback: Option<&AlphaSearchRuntimeFeedback>,
 ) -> Result<AlphaSearchArtifactSummary, AlphaSearchArtifactError> {
     let output_dir = output_root.as_ref().join(target);
     std::fs::create_dir_all(&output_dir)?;
@@ -364,7 +426,7 @@ pub fn write_alpha_search_artifacts_with_state(
     let node_metrics = reports
         .iter()
         .enumerate()
-        .map(|(idx, report)| node_metric(idx, report))
+        .map(|(idx, report)| node_metric(idx, report, runtime_feedback))
         .collect::<Vec<_>>();
     write_json(&output_dir.join("node-metrics.json"), &node_metrics)?;
     write_json(
@@ -392,8 +454,8 @@ pub fn write_alpha_search_artifacts_with_state(
                     parent: None,
                     factor_name: report.name.clone(),
                     mutation: "seed",
-                    selected_dimension: selected_dimension(report),
-                    reward: reward(report),
+                    selected_dimension: selected_dimension(report, runtime_feedback),
+                    reward: reward(report, runtime_feedback),
                     visits: 1,
                     decision: report.decision.as_str().to_string(),
                 })
@@ -425,6 +487,15 @@ pub fn write_alpha_search_artifacts_with_state(
             .count(),
         best_candidate: best.map(|metric| metric.factor_name.clone()),
         best_reward: best.map(|metric| metric.reward),
+        runtime_feedback: runtime_feedback.map(|feedback| RuntimeFeedbackSummary {
+            runtime_score: feedback.runtime_score.clone(),
+            base_factor: feedback.base_factor.clone(),
+            entry_signals: feedback.entry_signals,
+            direct_passes_at_configured_threshold: feedback.direct_passes_at_configured_threshold,
+            formula_evaluations: feedback.formula_evaluations,
+            executable_edge_pass_min_edge: feedback.executable_edge_pass_min_edge,
+            pass_through_collapse: feedback.is_pass_through_collapse(),
+        }),
         interpretation: "Search feedback is discovery evidence only. Promotion still requires the AutoFactor strategy-promotion gate and replay/runtime parity.",
     };
     write_json(&output_dir.join("search-feedback.json"), &feedback)?;
@@ -521,14 +592,19 @@ fn candidate_source(name: &str) -> &'static str {
     }
 }
 
-fn node_metric(idx: usize, report: &AutoFactorReport) -> NodeMetric {
+fn node_metric(
+    idx: usize,
+    report: &AutoFactorReport,
+    runtime_feedback: Option<&AlphaSearchRuntimeFeedback>,
+) -> NodeMetric {
+    let matching_feedback = matching_runtime_feedback(report, runtime_feedback);
     NodeMetric {
         id: format!("node-{idx}"),
         factor_name: report.name.clone(),
         target: report.target.clone(),
         decision: report.decision.as_str().to_string(),
         reason: report.reason.clone(),
-        selected_dimension: selected_dimension(report),
+        selected_dimension: selected_dimension(report, runtime_feedback),
         effectiveness: normalized_positive(report.top_bucket_avg_label),
         stability: report.positive_window_ratio.clamp(0.0, 1.0),
         diversity: 1.0 / report.complexity.max(1) as f64,
@@ -542,7 +618,7 @@ fn node_metric(idx: usize, report: &AutoFactorReport) -> NodeMetric {
         } else {
             0.5
         },
-        reward: reward(report),
+        reward: reward(report, runtime_feedback),
         spearman_ic: finite_or_zero(report.spearman_ic),
         icir: finite_or_zero(report.icir),
         positive_window_ratio: finite_or_zero(report.positive_window_ratio),
@@ -556,6 +632,10 @@ fn node_metric(idx: usize, report: &AutoFactorReport) -> NodeMetric {
         top_bucket_avg_entry_sweep_levels: finite_or_zero(report.top_bucket_avg_entry_sweep_levels),
         top_bucket_unique_event_count: report.top_bucket_unique_event_count,
         top_bucket_max_event_decisions: report.top_bucket_max_event_decisions,
+        runtime_entry_signal_rate: matching_feedback.map(AlphaSearchRuntimeFeedback::entry_signal_rate),
+        runtime_executable_edge_pass_rate: matching_feedback
+            .map(AlphaSearchRuntimeFeedback::executable_edge_pass_rate),
+        runtime_pass_through_penalty: runtime_pass_through_penalty(report, runtime_feedback),
         monotonicity_score: finite_or_zero(report.monotonicity_score),
         complexity: report.complexity,
     }
@@ -625,6 +705,7 @@ fn mcts_expansion_plan(
     let mut selected = metrics
         .iter()
         .filter(|metric| metric.decision != "reject")
+        .filter(|metric| metric.runtime_pass_through_penalty < 8.0)
         .map(|metric| {
             let state_node = state_by_factor.get(metric.factor_name.as_str());
             let visits = state_node.map(|node| node.visits).unwrap_or(1).max(1) as f64;
@@ -658,6 +739,7 @@ fn mcts_expansion_plan(
 
 fn proposed_mutation(selected_dimension: &str) -> &'static str {
     match selected_dimension {
+        "runtime_executable_entry" => "add_spread_penalty",
         "sample_power" => "do_not_expand_collect_more_data",
         "stability" => "add_feature_gate",
         "effectiveness" => "replace_denominator",
@@ -670,7 +752,7 @@ fn proposed_mutation(selected_dimension: &str) -> &'static str {
     }
 }
 
-fn reward(report: &AutoFactorReport) -> f64 {
+fn reward(report: &AutoFactorReport, runtime_feedback: Option<&AlphaSearchRuntimeFeedback>) -> f64 {
     let decision_bonus = match report.decision {
         AutoFactorDecision::Candidate => 1.0,
         AutoFactorDecision::Watchlist => 0.25,
@@ -686,6 +768,7 @@ fn reward(report: &AutoFactorReport) -> f64 {
         + finite_or_zero(report.monotonicity_score)
         - event_decision_penalty(report)
         - execution_penalty(report)
+        - runtime_pass_through_penalty(report, runtime_feedback)
         - (report.complexity as f64 / 32.0)
 }
 
@@ -758,7 +841,13 @@ fn event_decision_penalty(report: &AutoFactorReport) -> f64 {
     }
 }
 
-fn selected_dimension(report: &AutoFactorReport) -> String {
+fn selected_dimension(
+    report: &AutoFactorReport,
+    runtime_feedback: Option<&AlphaSearchRuntimeFeedback>,
+) -> String {
+    if runtime_pass_through_penalty(report, runtime_feedback) >= 8.0 {
+        return "runtime_executable_entry".to_string();
+    }
     if report.top_bucket_n > 0
         && (report.top_bucket_unique_event_count == 0 || report.top_bucket_max_event_decisions > 1)
     {
@@ -834,6 +923,81 @@ fn normalized_positive(value: f64) -> f64 {
 
 fn finite_or_zero(value: f64) -> f64 {
     if value.is_finite() { value } else { 0.0 }
+}
+
+fn ratio_usize(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+fn matching_runtime_feedback<'a>(
+    report: &AutoFactorReport,
+    runtime_feedback: Option<&'a AlphaSearchRuntimeFeedback>,
+) -> Option<&'a AlphaSearchRuntimeFeedback> {
+    let feedback = runtime_feedback?;
+    if !feedback.is_pass_through_collapse() {
+        return None;
+    }
+    let base = normalized_factor_key(&feedback.base_factor);
+    let name = normalized_factor_key(&report.name);
+    if base.is_empty() {
+        return None;
+    }
+    if name == base || name.contains(&base) || base.contains(&name) {
+        Some(feedback)
+    } else {
+        None
+    }
+}
+
+fn runtime_pass_through_penalty(
+    report: &AutoFactorReport,
+    runtime_feedback: Option<&AlphaSearchRuntimeFeedback>,
+) -> f64 {
+    let Some(feedback) = matching_runtime_feedback(report, runtime_feedback) else {
+        return 0.0;
+    };
+    let entry_penalty = if feedback.direct_passes_at_configured_threshold >= 50 {
+        let shortfall = 1.0 - feedback.entry_signal_rate();
+        (shortfall * 5.0).clamp(0.0, 5.0)
+    } else {
+        0.0
+    };
+    let edge_penalty = if feedback.formula_evaluations >= 500 {
+        let shortfall = 0.02 - feedback.executable_edge_pass_rate();
+        if shortfall > 0.0 {
+            (shortfall / 0.02 * 5.0).clamp(0.0, 5.0)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    (entry_penalty + edge_penalty + 4.0).min(12.0)
+}
+
+fn normalized_factor_key(raw: &str) -> String {
+    let mut value = raw
+        .strip_prefix("autofactor_formula:")
+        .unwrap_or(raw)
+        .to_string();
+    loop {
+        let next = value
+            .strip_prefix("llm_")
+            .or_else(|| value.strip_prefix("mcts_"))
+            .or_else(|| value.strip_prefix("mut_"));
+        let Some(stripped) = next else {
+            break;
+        };
+        value = stripped.to_string();
+    }
+    if let Some((prefix, _)) = value.split_once("_runtime_pass_through_") {
+        value = prefix.to_string();
+    }
+    value
 }
 
 #[cfg(test)]
@@ -1049,7 +1213,7 @@ mod tests {
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report))
+            .map(|(idx, report)| node_metric(idx, report, None))
             .collect::<Vec<_>>();
         let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
@@ -1061,7 +1225,7 @@ mod tests {
             Some("auto_settlement_lower_raw_score_one_event")
         );
         assert!(
-            reward(&reports[0]) < reward(&reports[1]),
+            reward(&reports[0], None) < reward(&reports[1], None),
             "repeated-event penalty should dominate raw IC/top-bucket strength"
         );
     }
@@ -1073,9 +1237,9 @@ mod tests {
         report.top_bucket_max_event_decisions = 3;
         report.reason = "passed".to_string();
 
-        assert_eq!(selected_dimension(&report), "event_uniqueness");
+        assert_eq!(selected_dimension(&report, None), "event_uniqueness");
         assert_eq!(
-            proposed_mutation(&selected_dimension(&report)),
+            proposed_mutation(&selected_dimension(&report, None)),
             "add_capacity_gate"
         );
     }
@@ -1087,7 +1251,79 @@ mod tests {
         report.top_bucket_avg_entry_sweep_levels = 3.4;
         report.reason = "passed".to_string();
 
-        assert_eq!(selected_dimension(&report), "execution_quality");
+        assert_eq!(selected_dimension(&report, None), "execution_quality");
         assert!(execution_penalty(&report) > 0.0);
+    }
+
+    #[test]
+    fn runtime_pass_through_collapse_penalizes_matching_factor_family() {
+        let mut collapsed = sample_report("mut_spread_adjusted_external_move_near_strike");
+        collapsed.spearman_ic = 0.95;
+        collapsed.icir = 3.0;
+        collapsed.top_bucket_avg_label = 3.0;
+
+        let mut alternative = sample_report("auto_settlement_full_depth_settlement_edge_x_capacity");
+        alternative.spearman_ic = 0.25;
+        alternative.icir = 0.9;
+        alternative.top_bucket_avg_label = 0.35;
+
+        let feedback = AlphaSearchRuntimeFeedback {
+            runtime_score: "autofactor_formula:mut_spread_adjusted_external_move_near_strike"
+                .to_string(),
+            base_factor: "mut_spread_adjusted_external_move_near_strike".to_string(),
+            entry_signals: 0,
+            direct_passes_at_configured_threshold: 146,
+            formula_evaluations: 2934,
+            depth_fillable: 2934,
+            executable_edge_pass_min_edge: 5,
+        };
+
+        assert_eq!(
+            selected_dimension(&collapsed, Some(&feedback)),
+            "runtime_executable_entry"
+        );
+        assert!(
+            reward(&collapsed, Some(&feedback)) < reward(&alternative, Some(&feedback)),
+            "runtime pass-through collapse should dominate top-bucket reward"
+        );
+    }
+
+    #[test]
+    fn runtime_pass_through_collapse_filters_mcts_expansion_nodes() {
+        let mut collapsed = sample_report("mcts_spread_adjusted_external_move_near_strike");
+        collapsed.spearman_ic = 0.95;
+        collapsed.icir = 3.0;
+        collapsed.top_bucket_avg_label = 3.0;
+
+        let alternative = sample_report("auto_settlement_full_depth_settlement_edge_x_capacity");
+        let feedback = AlphaSearchRuntimeFeedback {
+            runtime_score: "autofactor_formula:mut_spread_adjusted_external_move_near_strike"
+                .to_string(),
+            base_factor: "mut_spread_adjusted_external_move_near_strike".to_string(),
+            entry_signals: 0,
+            direct_passes_at_configured_threshold: 146,
+            formula_evaluations: 2934,
+            depth_fillable: 2934,
+            executable_edge_pass_min_edge: 5,
+        };
+        let reports = vec![collapsed, alternative];
+        let metrics = reports
+            .iter()
+            .enumerate()
+            .map(|(idx, report)| node_metric(idx, report, Some(&feedback)))
+            .collect::<Vec<_>>();
+        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
+
+        assert!(!plan
+            .selected_nodes
+            .iter()
+            .any(|node| node.factor_name == "mcts_spread_adjusted_external_move_near_strike"));
+        assert_eq!(
+            plan.selected_nodes
+                .first()
+                .map(|node| node.factor_name.as_str()),
+            Some("auto_settlement_full_depth_settlement_edge_x_capacity")
+        );
     }
 }
