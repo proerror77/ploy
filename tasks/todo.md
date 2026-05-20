@@ -17799,3 +17799,38 @@ Evidence stage: `walk_forward / runtime_parity`.
   `python3 -m unittest tests.test_alpha_search_closed_loop_agent`,
   `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
   and `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml"); puts "ok"'`.
+
+# Runtime Replay Request Candidate Selection (2026-05-20)
+
+## Goal
+
+Make closed-loop runtime replay requests target the current run's best
+runtime-mappable candidate instead of falling back to a lower-priority candidate
+with stronger generic IC-style tie-breakers.
+
+Evidence stage: `walk_forward / runtime_parity`.
+
+## Files / Ownership
+
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: runtime replay request candidate ranking.
+- `tests/test_alpha_search_closed_loop_agent.py`
+  - Owner: regression coverage for best-candidate preference.
+- `tasks/todo.md`
+  - Owner: current session tracking.
+
+## Tasks
+
+- [x] Prefer `search-feedback.best_candidate` when selecting a runtime replay
+      request.
+- [x] Add a regression test where the best candidate has lower Spearman IC than
+      another candidate.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+## Review
+
+- 2026-05-20: Validation passed:
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent`,
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
+  and `rtk git diff --check`.
