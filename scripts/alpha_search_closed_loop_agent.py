@@ -566,6 +566,7 @@ def runtime_replay_candidate(run: dict[str, Any]) -> dict[str, Any] | None:
     required_profile = str(
         promotion.get("required_strategy_profile") or "settlement_probability"
     )
+    avoided_families = runtime_avoid_families(run)
     candidates: list[dict[str, Any]] = []
     for item in evaluated:
         if not isinstance(item, dict):
@@ -577,6 +578,9 @@ def runtime_replay_candidate(run: dict[str, Any]) -> dict[str, Any] | None:
         if factor.get("target") not in {None, target}:
             continue
         if factor.get("decision") != "candidate" or factor.get("reason") != "passed":
+            continue
+        factor_name = str(factor.get("name") or "")
+        if factor_family(factor_name) in avoided_families:
             continue
         if runtime_mapping.get("strategy_profile") != required_profile:
             continue
@@ -631,6 +635,23 @@ def runtime_replay_candidate(run: dict[str, Any]) -> dict[str, Any] | None:
             "skip_settlement_exits": "false",
         },
     }
+
+
+def runtime_avoid_families(run: dict[str, Any]) -> set[str]:
+    feedback = run.get("feedback") if isinstance(run, dict) else {}
+    raw_items = feedback.get("runtime_avoid_factors") if isinstance(feedback, dict) else None
+    if not isinstance(raw_items, list):
+        return set()
+    families: set[str] = set()
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        family = str(item.get("factor_family") or "").strip()
+        if not family:
+            family = factor_family(str(item.get("base_factor") or ""))
+        if family:
+            families.add(family)
+    return families
 
 
 def summarize_run(run: dict[str, Any]) -> dict[str, Any]:

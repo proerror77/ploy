@@ -661,6 +661,81 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             )
             self.assertEqual(request["inputs"]["runtime_score"], best_runtime_score)
 
+    def test_fix_runtime_request_skips_runtime_avoid_families(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            avoided_runtime_score = (
+                "autofactor_formula:mut_spread_adjusted_external_move_spread_adjusted"
+            )
+            next_runtime_score = "autofactor_formula:mut_poly_lag_pressure_spread_adjusted"
+            path = artifact(
+                Path(tmp),
+                feedback={
+                    "target": agent.DEFAULT_TARGET,
+                    "candidate_count": 20,
+                    "rejected_count": 5,
+                    "passed_count": 2,
+                    "best_candidate": "mut_poly_lag_pressure_spread_adjusted",
+                    "best_reward": 4.12,
+                    "runtime_avoid_factors": [
+                        {
+                            "base_factor": "mut_spread_adjusted_external_move_near_strike",
+                            "factor_family": "spread_adjusted_external_move",
+                            "runtime_score": "autofactor_formula:mut_spread_adjusted_external_move_near_strike",
+                            "reason": "runtime_pass_through_collapse",
+                        }
+                    ],
+                },
+                promotion={
+                    "decision": "blocked",
+                    "required_strategy_profile": "settlement_probability",
+                    "evaluated_factors": [
+                        {
+                            "blockers": ["requires_runtime_replay_not_top_bucket_aggregate"],
+                            "factor": {
+                                "name": "mut_spread_adjusted_external_move_spread_adjusted",
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                                "positive_window_ratio": 1.0,
+                                "symbol_positive_ratio": 1.0,
+                                "spearman_ic": 0.50,
+                                "top_bucket_avg_label": 3.0,
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": avoided_runtime_score,
+                                "strategy_profile": "settlement_probability",
+                            },
+                        },
+                        {
+                            "blockers": ["requires_runtime_replay_not_top_bucket_aggregate"],
+                            "factor": {
+                                "name": "mut_poly_lag_pressure_spread_adjusted",
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                                "positive_window_ratio": 0.8,
+                                "symbol_positive_ratio": 1.0,
+                                "spearman_ic": 0.10,
+                                "top_bucket_avg_label": 1.0,
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": next_runtime_score,
+                                "strategy_profile": "settlement_probability",
+                            },
+                        },
+                    ],
+                },
+            )
+
+            decision = agent.closed_loop_decision(
+                [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            )
+            request = decision["runtime_replay_request"]
+
+            self.assertEqual(decision["decision"], "fix_runtime")
+            self.assertEqual(request["source_factor"], "mut_poly_lag_pressure_spread_adjusted")
+            self.assertEqual(request["inputs"]["runtime_score"], next_runtime_score)
+
     def test_runtime_pass_through_collapse_generates_targeted_prior(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime_score = "autofactor_formula:mut_spread_adjusted_external_move_squashed"
