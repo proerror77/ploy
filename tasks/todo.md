@@ -49,6 +49,14 @@ Evidence stage: `walk_forward / runtime_parity`.
   `python3 -m unittest tests.test_alpha_search_closed_loop_agent`,
   `CARGO_TARGET_DIR=/tmp/ploy-runtime-avoid-family-suffix /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research alpha_search --lib`,
   and `rtk git diff --check`.
+- 2026-05-20: Hosted validation run `26145597100` showed search selection
+  avoided failed runtime families, but the closed-loop runtime replay request
+  still selected an avoided promotion candidate from `evaluated_factors`.
+  Runtime replay request selection now skips `runtime_avoid_factors` families.
+  Validation passed:
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent`, and
+  `rtk git diff --check`.
 
 # Research Snapshot Empty Timestamp SSH Fix (2026-05-20)
 
