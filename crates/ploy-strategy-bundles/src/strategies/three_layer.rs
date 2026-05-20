@@ -1694,6 +1694,10 @@ impl ThreeLayerStrategy {
                 .as_deref()
                 .map(is_model_settlement_autofactor_runtime_score)
                 .unwrap_or(false);
+            let uses_predictive_settlement_autofactor = runtime_score
+                .as_deref()
+                .map(is_predictive_settlement_autofactor_runtime_score)
+                .unwrap_or(false);
 
             // Layer 1: Direction score. Settlement AutoFactor profiles select
             // the executable UP/DOWN side by settlement edge, not by the
@@ -1973,9 +1977,7 @@ impl ThreeLayerStrategy {
                             raw,
                         );
                         if is_predictive_settlement_autofactor_runtime_score(runtime_score) {
-                            self.bump_predictive_autofactor_counterfactual_scores(
-                                raw, normalized,
-                            );
+                            self.bump_predictive_autofactor_counterfactual_scores(raw, normalized);
                         }
                         if raw >= self.config.min_edge.max(0.0) {
                             self.bump("settlement_autofactor_raw_score_pass_min_edge");
@@ -2118,13 +2120,30 @@ impl ThreeLayerStrategy {
                 continue;
             };
             let executable_entry_price_f = executable_entry_price.to_f64().unwrap_or(entry_price_f);
-            let executable_edge = entry_probability
+            let settlement_executable_edge = entry_probability
                 - executable_entry_price_f
                 - crypto_fee_cost(executable_entry_price_f);
-            if executable_edge < self.config.min_edge {
+            let executable_edge = if uses_predictive_settlement_autofactor {
+                autofactor_raw_score.unwrap_or(settlement_executable_edge)
+            } else {
+                settlement_executable_edge
+            };
+            if !executable_edge.is_finite() {
                 self.bump("skip_edge_score");
                 continue;
             }
+            if !uses_predictive_settlement_autofactor && executable_edge < self.config.min_edge {
+                self.bump("skip_edge_score");
+                continue;
+            }
+            let signal_probability = if uses_predictive_settlement_autofactor {
+                (executable_entry_price_f
+                    + crypto_fee_cost(executable_entry_price_f)
+                    + executable_edge)
+                    .clamp(0.01, 0.99)
+            } else {
+                entry_probability
+            };
 
             let intent_id = format!(
                 "tl_{}_{}_{}_{}",
@@ -2153,7 +2172,7 @@ impl ThreeLayerStrategy {
                 intent_id: Some(intent_id),
                 symbol: symbol.to_string(),
                 direction: direction.to_string(),
-                p_hat: entry_probability,
+                p_hat: signal_probability,
                 edge: executable_edge,
                 entry_price: executable_entry_price,
                 decision: "enter".to_string(),
@@ -2172,7 +2191,7 @@ impl ThreeLayerStrategy {
                 pm_momentum_score = format!("{:.3}", pm_momentum_score),
                 autofactor_runtime_score = self.config.autofactor_runtime_score.as_deref().unwrap_or(""),
                 autofactor_raw_score = autofactor_raw_score.map(|score| format!("{score:.4}")).unwrap_or_default(),
-                p_hat = entry_probability,
+                p_hat = signal_probability,
                 edge = executable_edge,
                 entry_price = %executable_entry_price,
                 limit_price = %entry_limit_price,
@@ -5258,6 +5277,104 @@ mod tests {
         assert!(opposed_raw < 0.0);
         assert!(aligned_score > config.min_entry_score);
         assert!(opposed_score < aligned_score);
+    }
+
+    #[test]
+    fn predictive_autofactor_runtime_entry_uses_formula_edge_not_pm_fair_edge() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::SettlementProbability;
+        config.min_edge = 0.02;
+        config.min_entry_score = 0.25;
+        config.min_distance_over_sigma = 0.0;
+        config.autofactor_runtime_score = Some(
+            "autofactor_formula:mut_spread_adjusted_external_move_spread_adjusted".to_string(),
+        );
+        let mut strategy = ThreeLayerStrategy::new(config);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        for (offset, price) in [
+            (-30, dec!(100000)),
+            (-20, dec!(100100)),
+            (-10, dec!(100300)),
+            (-1, dec!(100600)),
+        ] {
+            strategy.on_update(
+                &MarketUpdate::SpotPrice {
+                    symbol: Arc::from("BTCUSDT"),
+                    price,
+                    ts: now + chrono::Duration::seconds(offset),
+                },
+                &positions,
+                &orders,
+            );
+        }
+        discover_test_event(&mut strategy, now);
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-up"),
+                bid: Some(dec!(0.49)),
+                ask: Some(dec!(0.50)),
+                bid_size: Some(dec!(200)),
+                ask_size: Some(dec!(200)),
+                bid_levels: Vec::new(),
+                ask_levels: vec![level(dec!(0.50), dec!(200))],
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-down"),
+                bid: Some(dec!(0.48)),
+                ask: Some(dec!(0.52)),
+                bid_size: Some(dec!(200)),
+                ask_size: Some(dec!(200)),
+                bid_levels: Vec::new(),
+                ask_levels: vec![level(dec!(0.52), dec!(200))],
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+
+        let decisions = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100800),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+
+        match decisions.as_slice() {
+            [StrategyDecision::Enter { intent, signal }] => {
+                assert_eq!(intent.token_id, "token-up");
+                let signal = signal.as_ref().expect("signal");
+                assert!(
+                    signal.edge > 0.02,
+                    "predictive formula edge should drive entry, got {}",
+                    signal.edge
+                );
+            }
+            other => panic!(
+                "strong predictive AutoFactor should not be killed by PM fair-edge gate; decisions={other:?} diagnostics={diagnostics:?}"
+            ),
+        }
+        assert_eq!(diagnostics.get("skip_edge_score"), None);
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_formula_evaluations"),
+            Some(&1)
+        );
     }
 
     #[test]
