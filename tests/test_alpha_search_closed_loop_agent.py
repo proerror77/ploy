@@ -583,6 +583,84 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             )
             self.assertEqual(request["inputs"]["runtime_score"], better_runtime_score)
 
+    def test_fix_runtime_request_prefers_feedback_best_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            best_runtime_score = "autofactor_formula:mut_spread_adjusted_external_move_near_strike"
+            higher_ic_runtime_score = "autofactor_formula:mut_spread_adjusted_external_move_squashed"
+            path = artifact(
+                Path(tmp),
+                feedback={
+                    "target": agent.DEFAULT_TARGET,
+                    "candidate_count": 20,
+                    "rejected_count": 5,
+                    "passed_count": 2,
+                    "best_candidate": "mut_spread_adjusted_external_move_near_strike",
+                    "best_reward": 6.75,
+                },
+                promotion={
+                    "decision": "blocked",
+                    "required_strategy_profile": "settlement_probability",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "requires_runtime_replay_not_top_bucket_aggregate",
+                                "candidate_strategy_replay_not_runtime_replay:factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
+                            ],
+                            "factor": {
+                                "name": "mut_spread_adjusted_external_move_squashed",
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                                "positive_window_ratio": 1.0,
+                                "symbol_positive_ratio": 1.0,
+                                "spearman_ic": 0.40,
+                                "top_bucket_avg_label": 2.88,
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": higher_ic_runtime_score,
+                                "strategy_profile": "settlement_probability",
+                            },
+                        },
+                        {
+                            "blockers": [
+                                "requires_runtime_replay_not_top_bucket_aggregate",
+                                "candidate_strategy_replay_not_runtime_replay:factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
+                            ],
+                            "factor": {
+                                "name": "mut_spread_adjusted_external_move_near_strike",
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                                "positive_window_ratio": 1.0,
+                                "symbol_positive_ratio": 1.0,
+                                "spearman_ic": 0.20,
+                                "top_bucket_avg_label": 3.01,
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": best_runtime_score,
+                                "strategy_profile": "settlement_probability",
+                            },
+                        },
+                    ],
+                    "candidate_strategy_replay": {
+                        "runtime_score": higher_ic_runtime_score,
+                        "strategy_profile": "settlement_probability",
+                    },
+                },
+            )
+
+            decision = agent.closed_loop_decision(
+                [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            )
+            request = decision["runtime_replay_request"]
+
+            self.assertEqual(decision["decision"], "fix_runtime")
+            self.assertEqual(
+                request["source_factor"],
+                "mut_spread_adjusted_external_move_near_strike",
+            )
+            self.assertEqual(request["inputs"]["runtime_score"], best_runtime_score)
+
     def test_runtime_pass_through_collapse_generates_targeted_prior(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime_score = "autofactor_formula:mut_spread_adjusted_external_move_squashed"

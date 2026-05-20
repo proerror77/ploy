@@ -542,12 +542,16 @@ def runtime_replay_candidate(run: dict[str, Any]) -> dict[str, Any] | None:
     if not candidates:
         return None
 
-    def score(item: dict[str, Any]) -> tuple[float, float, float, float]:
+    best_candidate_name = str((run.get("feedback") or {}).get("best_candidate") or "")
+
+    def score(item: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
         factor = item.get("factor") if isinstance(item.get("factor"), dict) else {}
         return (
+            1.0 if best_candidate_name and factor.get("name") == best_candidate_name else 0.0,
             1.0
             if factor.get("decision") == "candidate" and factor.get("reason") == "passed"
             else 0.0,
+            as_float(factor.get("top_bucket_avg_label")) or 0.0,
             as_float(factor.get("positive_window_ratio")) or 0.0,
             as_float(factor.get("symbol_positive_ratio")) or 0.0,
             as_float(factor.get("spearman_ic")) or 0.0,
