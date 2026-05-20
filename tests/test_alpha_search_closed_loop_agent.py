@@ -933,6 +933,98 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                 "auto_settlement_model_full_depth_settlement_edge_x_external_pressure",
             )
 
+    def test_zero_direct_signal_collapse_wins_over_unmapped_same_family(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base_factor = (
+                "mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted"
+            )
+            runtime_score = f"autofactor_formula:{base_factor}"
+            path = artifact(
+                Path(tmp),
+                chain_reason="continue",
+                should_dispatch=True,
+                selected_nodes=[
+                    {
+                        "factor_name": "mcts_mcts_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted_spread_adjusted",
+                        "selected_dimension": "execution_quality",
+                        "proposed_mutation": "add_capacity_gate",
+                    },
+                    {
+                        "factor_name": "mut_amplitude_weighted_momentum_30s_vol_gap_spread_adjusted",
+                        "selected_dimension": "effectiveness",
+                        "proposed_mutation": "replace_denominator",
+                    },
+                ],
+                candidate_strategy_replay={
+                    "basis": "runtime_market_update_replay",
+                    "promotion_ready": False,
+                    "runtime_score": runtime_score,
+                    "metrics": {"trade_count": 0, "unique_event_count": 0, "roi": 0.0},
+                    "score_counterfactual": {
+                        "configured_entry_threshold": "0.25",
+                        "depth_fillable": 2508,
+                        "direct_pass_counts": {
+                            "0.05": 0,
+                            "0.10": 0,
+                            "0.15": 0,
+                            "0.25": 0,
+                        },
+                        "formula_evaluations": 2508,
+                    },
+                    "strategy_diagnostics": {
+                        "entry_signals": 0,
+                        "settlement_autofactor_depth_fillable": 2508,
+                        "settlement_autofactor_executable_edge_pass_min_edge": 2255,
+                        "settlement_autofactor_formula_evaluations": 2508,
+                        "skip_entry_score": 2508,
+                    },
+                },
+                promotion={
+                    "decision": "blocked",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "missing_runtime_strategy_mapping",
+                                "candidate_strategy_replay_not_ready",
+                            ],
+                            "factor": {
+                                "name": "mcts_mcts_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted_spread_adjusted",
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                                "top_bucket_avg_label": 1.33,
+                                "positive_window_ratio": 1.0,
+                                "symbol_positive_ratio": 1.0,
+                                "spearman_ic": 0.19,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            runs = [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            decision = agent.closed_loop_decision(runs)
+            prior = agent.build_prior(runs, decision, 3)
+
+            self.assertEqual(decision["decision"], "revise_prior")
+            self.assertEqual(decision["reason"], "runtime_pass_through_collapse")
+            self.assertEqual(
+                prior["runtime_avoid_factors"][0]["reason"],
+                "runtime_pass_through_collapse",
+            )
+            self.assertEqual(
+                prior["runtime_avoid_factors"][0]["base_factor"],
+                base_factor,
+            )
+            self.assertNotIn(
+                "auto_settlement_model_full_depth_settlement_edge_x_external_pressure",
+                " ".join(item["base_factor"] for item in prior["mutations"]),
+            )
+            self.assertEqual(
+                prior["mutations"][0]["base_factor"],
+                "mut_amplitude_weighted_momentum_30s_vol_gap_spread_adjusted",
+            )
+
     def test_runtime_avoid_factors_accumulate_from_search_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             near_strike_score = "autofactor_formula:mut_spread_adjusted_external_move_near_strike"
@@ -1036,6 +1128,22 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                     ]
                 },
             )
+            write_json(
+                path
+                / "alpha-search-chain"
+                / "input-alpha-search-plan"
+                / "search-feedback.json",
+                {
+                    "runtime_avoid_factors": [
+                        {
+                            "base_factor": "mut_poly_lag_pressure_spread_adjusted",
+                            "factor_family": "poly_lag_pressure",
+                            "runtime_score": "autofactor_formula:mut_poly_lag_pressure_spread_adjusted",
+                            "reason": "runtime_pass_through_collapse",
+                        }
+                    ]
+                },
+            )
 
             runs = [agent.load_artifact(path, agent.DEFAULT_TARGET)]
             decision = agent.closed_loop_decision(runs)
@@ -1047,6 +1155,7 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                 [
                     "amplitude_weighted_momentum_30s_sigma",
                     "auto_settlement_model_full_depth_settlement_edge_x_external_pressure",
+                    "poly_lag_pressure",
                 ],
             )
             self.assertEqual(len(prior["mutations"]), 1)
