@@ -5181,6 +5181,43 @@ mod tests {
     }
 
     #[test]
+    fn autofactor_composed_model_formula_supports_external_pressure_and_spread() {
+        let mut config = test_config();
+        config.profile = ThreeLayerProfile::SettlementProbability;
+        config.min_edge = 0.02;
+
+        let inputs = AutoSettlementFactorInputs {
+            settlement_edge: 0.06,
+            entry_price: 0.30,
+            distance_over_sigma: 0.20,
+            direction_sign: 1.0,
+            drift_30s: 0.0,
+            sigma_horizon: 0.0,
+            entry_capacity_ratio: 3.0,
+            side_spread: 0.03,
+            external_pressure: 0.50,
+            pm_lag_secs: 0.0,
+            iv_change_1m: 0.0,
+        };
+
+        let (raw, score) = autofactor_formula_entry_score(
+            "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted",
+            inputs,
+            config.min_edge,
+        )
+        .expect("composed settlement model formula should score");
+
+        assert!((raw - 0.75).abs() < 1e-9);
+        assert!(score > 0.0);
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_near_strike_near_strike",
+            inputs,
+            config.min_edge,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn predictive_autofactor_formula_uses_external_drift_before_pm_edge() {
         let mut config = test_config();
         config.profile = ThreeLayerProfile::SettlementProbability;
