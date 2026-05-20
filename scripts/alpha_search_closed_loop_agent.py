@@ -107,6 +107,10 @@ def load_artifact(path: Path, target: str) -> dict[str, Any]:
         "chain": chain,
         "search_space": optional_json(alpha_root / "search-space.json") or {},
         "candidate_strategy_replay": candidate_strategy_replay or {},
+        "input_prior": optional_json(
+            path / "alpha-search-chain" / "input-alpha-search-plan" / "next-llm-prior.json"
+        )
+        or {},
     }
 
 
@@ -807,27 +811,39 @@ def collect_runtime_avoid_factors(
     runs: list[dict[str, Any]], decision: dict[str, Any]
 ) -> list[dict[str, Any]]:
     by_family: dict[str, dict[str, Any]] = {}
+
+    def add_item(item: dict[str, Any]) -> None:
+        base_factor = str(item.get("base_factor") or "").strip()
+        family = str(item.get("factor_family") or factor_family(base_factor)).strip()
+        if not base_factor or not family:
+            return
+        payload = {
+            "base_factor": base_factor,
+            "factor_family": family,
+            "runtime_score": item.get("runtime_score") or "",
+            "reason": item.get("reason") or "runtime_pass_through_collapse",
+        }
+        if item.get("metrics") is not None:
+            payload["metrics"] = item.get("metrics")
+        by_family.setdefault(family, payload)
+
     for run in runs:
+        prior = run.get("input_prior") if isinstance(run, dict) else {}
+        prior_existing = (
+            prior.get("runtime_avoid_factors") if isinstance(prior, dict) else None
+        )
+        if isinstance(prior_existing, list):
+            for item in prior_existing:
+                if isinstance(item, dict):
+                    add_item(item)
+
         feedback = run.get("feedback") if isinstance(run, dict) else {}
         existing = feedback.get("runtime_avoid_factors") if isinstance(feedback, dict) else None
         if not isinstance(existing, list):
             continue
         for item in existing:
-            if not isinstance(item, dict):
-                continue
-            base_factor = str(item.get("base_factor") or "").strip()
-            family = str(item.get("factor_family") or factor_family(base_factor)).strip()
-            if not base_factor or not family:
-                continue
-            by_family.setdefault(
-                family,
-                {
-                    "base_factor": base_factor,
-                    "factor_family": family,
-                    "runtime_score": item.get("runtime_score"),
-                    "reason": item.get("reason") or "runtime_pass_through_collapse",
-                },
-            )
+            if isinstance(item, dict):
+                add_item(item)
 
     runtime_feedback = decision.get("runtime_pass_through_feedback")
     if isinstance(runtime_feedback, dict) and runtime_feedback:
@@ -863,6 +879,11 @@ def build_prior(runs: list[dict[str, Any]], decision: dict[str, Any], limit: int
     current = latest_run(runs)
     mutations = []
     runtime_avoid_factors = collect_runtime_avoid_factors(runs, decision)
+    runtime_avoid_families = {
+        str(item.get("factor_family") or "").strip()
+        for item in runtime_avoid_factors
+        if isinstance(item, dict)
+    }
     runtime_feedback = decision.get("runtime_pass_through_feedback")
     if isinstance(runtime_feedback, dict) and runtime_feedback:
         base_factor = str(runtime_feedback.get("base_factor") or "")
@@ -888,6 +909,8 @@ def build_prior(runs: list[dict[str, Any]], decision: dict[str, Any], limit: int
             break
         base_factor = str(node.get("factor_name") or "")
         if not base_factor:
+            continue
+        if factor_family(base_factor) in runtime_avoid_families:
             continue
         mutation_type = mutation_from_node(node)
         if mutation_type == "do_not_expand_collect_more_data":

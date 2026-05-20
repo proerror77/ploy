@@ -985,6 +985,56 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                 "mut_spread_adjusted_external_move_near_strike",
             )
 
+    def test_prior_runtime_avoid_factors_carry_forward_and_skip_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = artifact(
+                Path(tmp),
+                chain_reason="reward_stagnation",
+                selected_nodes=[
+                    {
+                        "factor_name": "mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
+                        "selected_dimension": "exploit",
+                        "proposed_mutation": "add_capacity_gate",
+                    },
+                    {
+                        "factor_name": "mut_spread_adjusted_external_move_squashed",
+                        "selected_dimension": "execution_quality",
+                        "proposed_mutation": "add_capacity_gate",
+                    },
+                ],
+            )
+            write_json(
+                path
+                / "alpha-search-chain"
+                / "input-alpha-search-plan"
+                / "next-llm-prior.json",
+                {
+                    "runtime_avoid_factors": [
+                        {
+                            "base_factor": "mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
+                            "factor_family": "amplitude_weighted_momentum_30s_sigma",
+                            "runtime_score": "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
+                            "reason": "runtime_pass_through_collapse",
+                        }
+                    ]
+                },
+            )
+
+            runs = [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            decision = agent.closed_loop_decision(runs)
+            prior = agent.build_prior(runs, decision, 3)
+
+            self.assertEqual(decision["decision"], "revise_prior")
+            self.assertEqual(
+                [item["factor_family"] for item in prior["runtime_avoid_factors"]],
+                ["amplitude_weighted_momentum_30s_sigma"],
+            )
+            self.assertEqual(len(prior["mutations"]), 1)
+            self.assertEqual(
+                prior["mutations"][0]["base_factor"],
+                "mut_spread_adjusted_external_move_squashed",
+            )
+
     def test_cli_markdown_includes_runtime_replay_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

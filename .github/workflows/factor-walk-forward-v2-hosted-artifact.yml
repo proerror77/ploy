@@ -663,6 +663,11 @@ jobs:
             cp "${candidate_strategy_replay_json}" \
               artifacts/factor-walk-forward-v2-upload/candidate-strategy-replay/candidate-strategy-replay.json
           fi
+          if [ -d artifacts/alpha-search-plan ]; then
+            mkdir -p artifacts/factor-walk-forward-v2-upload/alpha-search-chain/input-alpha-search-plan
+            cp -R artifacts/alpha-search-plan/. \
+              artifacts/factor-walk-forward-v2-upload/alpha-search-chain/input-alpha-search-plan/
+          fi
 
       - name: Prepare alpha search chain decision
         if: always()
