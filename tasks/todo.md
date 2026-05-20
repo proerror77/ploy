@@ -1,3 +1,50 @@
+# Predictive AutoFactor Runtime Entry Edge (2026-05-20)
+
+## Goal
+
+Fix the runtime pass-through collapse where predictive AutoFactor formulas can
+pass their configured formula threshold during replay but still produce zero
+entry intents because the final runtime gate re-applies PM fair-probability
+settlement edge instead of the predictive formula edge.
+
+Evidence stage: `executable_replay / runtime_parity`.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: runtime entry semantics for predictive settlement AutoFactor
+    formulas and regression coverage.
+- `tasks/todo.md`
+  - Owner: current session tracking and evidence summary.
+
+## Tasks
+
+- [x] Inspect runtime replay artifacts for run `26162114854`.
+- [x] Reproduce the direct-pass to zero-entry gate collapse with a Rust unit
+      test.
+- [x] Change predictive AutoFactor runtime entries to use formula edge at the
+      final executable entry gate.
+- [x] Keep pure settlement-edge AutoFactor formulas on the existing
+      PM/model-probability settlement edge gate.
+- [x] Run focused Rust and Python validation.
+- [ ] PR, CI, merge, and rerun runtime-candidate replay.
+
+## Review
+
+- 2026-05-20: Runtime replay `26162114854` showed the selected predictive
+  formula was not dead: `settlement_autofactor_predictive_score_ge_025=146`.
+  All direct passes were still blocked before order creation because final
+  executable edge used PM fair probability; diagnostics showed
+  `skip_edge_score=146` and `settlement_autofactor_executable_edge_pass_min_edge=5`.
+- 2026-05-20: Added
+  `predictive_autofactor_runtime_entry_uses_formula_edge_not_pm_fair_edge`,
+  which failed before the fix with `raw_score_pass_min_edge=1`,
+  `predictive_score_ge_025=1`, and `skip_edge_score=1`. After the fix,
+  focused validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-entry-debug-target rtk cargo test --locked -p ploy-strategy-bundles predictive_autofactor_runtime_entry_uses_formula_edge_not_pm_fair_edge --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-entry-debug-target rtk cargo test --locked -p ploy-strategy-bundles settlement_autofactor --lib`, and
+  `python3 -m unittest tests.test_build_runtime_candidate_strategy_replay tests.test_alpha_search_closed_loop_agent`.
+
 # Composed Settlement AutoFactor Runtime Mapping (2026-05-20)
 
 ## Goal
