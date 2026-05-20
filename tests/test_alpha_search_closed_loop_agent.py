@@ -737,6 +737,68 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             self.assertEqual(prior["mutations"][0]["mutation_type"], "add_spread_penalty")
             self.assertEqual(prior["mutations"][0]["feature"], "side_spread")
             self.assertEqual(prior["mutations"][1]["mutation_type"], "add_capacity_gate")
+            self.assertEqual(
+                prior["runtime_avoid_factors"][0]["factor_family"],
+                "spread_adjusted_external_move",
+            )
+
+    def test_runtime_avoid_factors_accumulate_from_search_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            near_strike_score = "autofactor_formula:mut_spread_adjusted_external_move_near_strike"
+            path = artifact(
+                Path(tmp),
+                chain_reason="continue",
+                should_dispatch=True,
+                feedback={
+                    "target": agent.DEFAULT_TARGET,
+                    "candidate_count": 4,
+                    "rejected_count": 1,
+                    "passed_count": 0,
+                    "best_candidate": "mut_spread_adjusted_external_move_squashed",
+                    "best_reward": 1.25,
+                    "runtime_avoid_factors": [
+                        {
+                            "base_factor": "mut_spread_adjusted_external_move_squashed",
+                            "factor_family": "spread_adjusted_external_move",
+                            "runtime_score": "autofactor_formula:mut_spread_adjusted_external_move_squashed",
+                            "reason": "runtime_pass_through_collapse",
+                        }
+                    ],
+                },
+                candidate_strategy_replay={
+                    "basis": "runtime_market_update_replay",
+                    "promotion_ready": False,
+                    "runtime_score": near_strike_score,
+                    "metrics": {"trade_count": 0, "unique_event_count": 0, "roi": 0.0},
+                    "score_counterfactual": {
+                        "configured_entry_threshold": "0.25",
+                        "depth_fillable": 2934,
+                        "direct_pass_counts": {"0.25": 146},
+                        "formula_evaluations": 2934,
+                    },
+                    "strategy_diagnostics": {
+                        "entry_signals": 0,
+                        "settlement_autofactor_depth_fillable": 2934,
+                        "settlement_autofactor_executable_edge_pass_min_edge": 5,
+                        "settlement_autofactor_formula_evaluations": 2934,
+                    },
+                },
+            )
+
+            runs = [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            decision = agent.closed_loop_decision(runs)
+            prior = agent.build_prior(runs, decision, 3)
+
+            self.assertEqual(decision["decision"], "revise_prior")
+            self.assertEqual(len(prior["runtime_avoid_factors"]), 1)
+            self.assertEqual(
+                prior["runtime_avoid_factors"][0]["factor_family"],
+                "spread_adjusted_external_move",
+            )
+            self.assertEqual(
+                prior["runtime_avoid_factors"][0]["base_factor"],
+                "mut_spread_adjusted_external_move_near_strike",
+            )
 
     def test_cli_markdown_includes_runtime_replay_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

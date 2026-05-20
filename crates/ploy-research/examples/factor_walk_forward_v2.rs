@@ -5,9 +5,16 @@
 //! scores executable PnL after PM CLOB fillability.
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
 use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
+    AlphaSearchRuntimeFeedback, AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options,
+    FactorObservation, FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
+    FillabilityReviewOptions, FullDepthExecutionMatrixOptions, LiquidityGateV1Options,
+    LiquidityGatedAlphaV1Options, LlmPriorSpec, MetaLabelWalkForwardOptions, RepricingIcOptions,
+    ResearchSnapshotRequest, SettlementProbabilityDataQualityMode,
+    SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
+    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
     autofactor_matrix_from_v2, build_factor_observations_v2_with_deribit_and_pm_books,
     build_factor_observations_with_lob_sampled, build_factor_stability_report,
     build_full_depth_execution_matrix, build_settlement_probability_promotion_gate_report,
@@ -26,14 +33,7 @@ use ploy_research::{
     walk_forward_factor_combo_v1_with_deribit_and_pm_books,
     walk_forward_factors_v2_with_deribit_and_pm_books,
     walk_forward_meta_label_v1_with_deribit_and_pm_books,
-    write_alpha_search_artifacts_with_state_and_runtime_feedback, AlphaSearchRuntimeFeedback,
-    AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options, FactorObservation,
-    FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions, FillabilityReviewOptions,
-    FullDepthExecutionMatrixOptions, LiquidityGateV1Options, LiquidityGatedAlphaV1Options,
-    LlmPriorSpec, MetaLabelWalkForwardOptions, RepricingIcOptions, ResearchSnapshotRequest,
-    SettlementProbabilityDataQualityMode,
-    SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
-    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
+    write_alpha_search_artifacts_with_state_and_runtime_feedback,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashSet;
@@ -316,19 +316,23 @@ fn runtime_feedback_from_candidate_replay(path: &str) -> Option<AlphaSearchRunti
         base_factor,
         entry_signals: metric("entry_signals"),
         direct_passes_at_configured_threshold: direct_passes,
-        formula_evaluations: metric("settlement_autofactor_formula_evaluations")
-            .max(counterfactual
+        formula_evaluations: metric("settlement_autofactor_formula_evaluations").max(
+            counterfactual
                 .and_then(|values| values.get("formula_evaluations"))
                 .and_then(serde_json::Value::as_u64)
                 .map(|value| value as usize)
-                .unwrap_or(0)),
-        depth_fillable: metric("settlement_autofactor_depth_fillable")
-            .max(counterfactual
+                .unwrap_or(0),
+        ),
+        depth_fillable: metric("settlement_autofactor_depth_fillable").max(
+            counterfactual
                 .and_then(|values| values.get("depth_fillable"))
                 .and_then(serde_json::Value::as_u64)
                 .map(|value| value as usize)
-                .unwrap_or(0)),
-        executable_edge_pass_min_edge: metric("settlement_autofactor_executable_edge_pass_min_edge"),
+                .unwrap_or(0),
+        ),
+        executable_edge_pass_min_edge: metric(
+            "settlement_autofactor_executable_edge_pass_min_edge",
+        ),
     })
 }
 
@@ -916,6 +920,7 @@ async fn main() {
                         &autofactor_options,
                         mcts_state.as_ref(),
                         runtime_feedback.as_ref(),
+                        llm_prior.as_ref(),
                     ) {
                         Ok(summary) => eprintln!(
                             "alpha search artifacts written target={} candidates={} rejected={} best={} dir={}",

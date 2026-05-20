@@ -259,6 +259,47 @@ def runtime_score_base_factor(runtime_score: str) -> str:
     return runtime_score
 
 
+def normalized_factor_key(raw: str) -> str:
+    value = runtime_score_base_factor(str(raw or "").strip())
+    while True:
+        next_value = value
+        for prefix in ("llm_", "mcts_", "mut_"):
+            if next_value.startswith(prefix):
+                next_value = next_value[len(prefix) :]
+                break
+        if next_value == value:
+            break
+        value = next_value
+    marker = "_runtime_pass_through_"
+    if marker in value:
+        value = value.split(marker, 1)[0]
+    return value
+
+
+def factor_family(raw: str) -> str:
+    value = normalized_factor_key(raw)
+    suffixes = (
+        "_runtime_pass_through_add_spread_penalty",
+        "_runtime_pass_through_add_capacity_gate",
+        "_full_depth_entry_gate",
+        "_spread_adjusted",
+        "_near_strike",
+        "_capacity",
+        "_squashed",
+        "_pm_lag",
+        "_clip",
+    )
+    changed = True
+    while changed:
+        changed = False
+        for suffix in suffixes:
+            if value.endswith(suffix) and len(value) > len(suffix):
+                value = value[: -len(suffix)]
+                changed = True
+                break
+    return value
+
+
 def configured_direct_passes(counterfactual: dict[str, Any]) -> int | None:
     threshold = str(counterfactual.get("configured_entry_threshold") or "")
     counts = counterfactual.get("direct_pass_counts")
@@ -662,9 +703,51 @@ def mutation_from_node(node: dict[str, Any]) -> str:
     return DIMENSION_TO_MUTATION.get(dimension, "clip_or_squash")
 
 
+def collect_runtime_avoid_factors(
+    runs: list[dict[str, Any]], decision: dict[str, Any]
+) -> list[dict[str, Any]]:
+    by_family: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        feedback = run.get("feedback") if isinstance(run, dict) else {}
+        existing = feedback.get("runtime_avoid_factors") if isinstance(feedback, dict) else None
+        if not isinstance(existing, list):
+            continue
+        for item in existing:
+            if not isinstance(item, dict):
+                continue
+            base_factor = str(item.get("base_factor") or "").strip()
+            family = str(item.get("factor_family") or factor_family(base_factor)).strip()
+            if not base_factor or not family:
+                continue
+            by_family.setdefault(
+                family,
+                {
+                    "base_factor": base_factor,
+                    "factor_family": family,
+                    "runtime_score": item.get("runtime_score"),
+                    "reason": item.get("reason") or "runtime_pass_through_collapse",
+                },
+            )
+
+    runtime_feedback = decision.get("runtime_pass_through_feedback")
+    if isinstance(runtime_feedback, dict) and runtime_feedback:
+        base_factor = str(runtime_feedback.get("base_factor") or "").strip()
+        family = factor_family(base_factor)
+        if base_factor and family:
+            by_family[family] = {
+                "base_factor": base_factor,
+                "factor_family": family,
+                "runtime_score": runtime_feedback.get("runtime_score"),
+                "reason": runtime_feedback.get("reason") or "runtime_pass_through_collapse",
+                "metrics": runtime_feedback.get("metrics"),
+            }
+    return [by_family[key] for key in sorted(by_family)]
+
+
 def build_prior(runs: list[dict[str, Any]], decision: dict[str, Any], limit: int) -> dict[str, Any]:
     current = latest_run(runs)
     mutations = []
+    runtime_avoid_factors = collect_runtime_avoid_factors(runs, decision)
     runtime_feedback = decision.get("runtime_pass_through_feedback")
     if isinstance(runtime_feedback, dict) and runtime_feedback:
         base_factor = str(runtime_feedback.get("base_factor") or "")
@@ -730,6 +813,7 @@ def build_prior(runs: list[dict[str, Any]], decision: dict[str, Any], limit: int
         "source": "alpha_search_closed_loop_agent",
         "target": current["target"],
         "decision_reason": decision["reason"],
+        "runtime_avoid_factors": runtime_avoid_factors,
         "mutations": mutations,
     }
 
