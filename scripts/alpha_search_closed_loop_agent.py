@@ -85,6 +85,15 @@ def load_artifact(path: Path, target: str) -> dict[str, Any]:
     if chain is None:
         chain = optional_json(root.parent / "alpha-search-chain" / "chain-decision.json")
     chain = chain or {}
+    candidate_strategy_replay = optional_json(
+        path / "candidate-strategy-replay" / "candidate-strategy-replay.json"
+    )
+    if candidate_strategy_replay is None:
+        candidate_strategy_replay = optional_json(
+            root.parent / "candidate-strategy-replay" / "candidate-strategy-replay.json"
+        )
+    if candidate_strategy_replay is None:
+        candidate_strategy_replay = optional_json(root / "candidate-strategy-replay.json")
     return {
         "artifact_dir": str(path),
         "root": root,
@@ -97,6 +106,7 @@ def load_artifact(path: Path, target: str) -> dict[str, Any]:
         "promotion": optional_json(root / "autofactor-strategy-promotion.json") or {},
         "chain": chain,
         "search_space": optional_json(alpha_root / "search-space.json") or {},
+        "candidate_strategy_replay": candidate_strategy_replay or {},
     }
 
 
@@ -225,6 +235,123 @@ def classify_blockers(blockers: list[str]) -> str | None:
     return None
 
 
+def runtime_replay_payload(run: dict[str, Any]) -> dict[str, Any]:
+    replay = run.get("candidate_strategy_replay")
+    if isinstance(replay, dict) and replay:
+        return replay
+    promotion = run.get("promotion")
+    if isinstance(promotion, dict):
+        replay = promotion.get("candidate_strategy_replay")
+        if isinstance(replay, dict):
+            return replay
+    handoff = run.get("handoff")
+    if isinstance(handoff, dict):
+        replay = handoff.get("candidate_strategy_replay")
+        if isinstance(replay, dict):
+            return replay
+    return {}
+
+
+def runtime_score_base_factor(runtime_score: str) -> str:
+    prefix = "autofactor_formula:"
+    if runtime_score.startswith(prefix):
+        return runtime_score[len(prefix) :]
+    return runtime_score
+
+
+def configured_direct_passes(counterfactual: dict[str, Any]) -> int | None:
+    threshold = str(counterfactual.get("configured_entry_threshold") or "")
+    counts = counterfactual.get("direct_pass_counts")
+    if not threshold or not isinstance(counts, dict):
+        return None
+    value = counts.get(threshold)
+    if value is None:
+        try:
+            value = counts.get(f"{float(threshold):.2f}")
+        except ValueError:
+            value = None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def runtime_pass_through_feedback(run: dict[str, Any]) -> dict[str, Any]:
+    replay = runtime_replay_payload(run)
+    if not replay:
+        return {}
+    metrics = replay.get("metrics") if isinstance(replay.get("metrics"), dict) else {}
+    diagnostics = (
+        replay.get("strategy_diagnostics")
+        if isinstance(replay.get("strategy_diagnostics"), dict)
+        else {}
+    )
+    counterfactual = (
+        replay.get("score_counterfactual")
+        if isinstance(replay.get("score_counterfactual"), dict)
+        else {}
+    )
+    runtime_score = str(replay.get("runtime_score") or "").strip()
+    formula_evaluations = int(
+        as_float(diagnostics.get("settlement_autofactor_formula_evaluations"))
+        or as_float(counterfactual.get("formula_evaluations"))
+        or 0
+    )
+    depth_fillable = int(
+        as_float(diagnostics.get("settlement_autofactor_depth_fillable"))
+        or as_float(counterfactual.get("depth_fillable"))
+        or 0
+    )
+    executable_edge_pass = int(
+        as_float(diagnostics.get("settlement_autofactor_executable_edge_pass_min_edge"))
+        or 0
+    )
+    entry_signals = int(
+        as_float(diagnostics.get("entry_signals"))
+        or as_float(metrics.get("trade_count"))
+        or 0
+    )
+    direct_passes = configured_direct_passes(counterfactual)
+    if direct_passes is None:
+        direct_passes = int(
+            as_float(diagnostics.get("settlement_autofactor_predictive_score_ge_025"))
+            or 0
+        )
+
+    blockers: list[str] = []
+    if direct_passes >= 50 and entry_signals < 50:
+        blockers.append(
+            f"runtime_entry_pass_through_too_low:{entry_signals}/{direct_passes}<50"
+        )
+    if formula_evaluations >= 500 and executable_edge_pass < 50:
+        blockers.append(
+            "runtime_executable_edge_pass_min_edge_too_low:"
+            f"{executable_edge_pass}/{formula_evaluations}<50"
+        )
+    if depth_fillable >= 500 and entry_signals < 50:
+        blockers.append(
+            f"runtime_depth_fillable_to_entry_signal_collapse:{entry_signals}/{depth_fillable}<50"
+        )
+    if not blockers:
+        return {}
+    return {
+        "reason": "runtime_pass_through_collapse",
+        "runtime_score": runtime_score,
+        "base_factor": runtime_score_base_factor(runtime_score),
+        "metrics": {
+            "entry_signals": entry_signals,
+            "direct_passes_at_configured_threshold": direct_passes,
+            "formula_evaluations": formula_evaluations,
+            "depth_fillable": depth_fillable,
+            "executable_edge_pass_min_edge": executable_edge_pass,
+            "skip_entry_score": diagnostics.get("skip_entry_score"),
+            "skip_edge_score": diagnostics.get("skip_edge_score"),
+            "skip_settlement_side_score": diagnostics.get("skip_settlement_side_score"),
+        },
+        "blockers": blockers,
+    }
+
+
 def latest_run(runs: list[dict[str, Any]]) -> dict[str, Any]:
     return runs[-1]
 
@@ -248,7 +375,11 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
     plan = current["plan"]
     target_blockers = target_blocker_strings(current["promotion"], current["target"])
     handoff_blockers = blocker_strings(handoff)
-    blockers = target_blockers or handoff_blockers
+    runtime_feedback = runtime_pass_through_feedback(current)
+    runtime_blockers = runtime_feedback.get("blockers") if runtime_feedback else []
+    blockers = list(target_blockers or handoff_blockers)
+    if isinstance(runtime_blockers, list):
+        blockers.extend(str(item) for item in runtime_blockers)
     blocker_action = classify_blockers(blockers)
 
     candidate_count = int(feedback.get("candidate_count") or 0)
@@ -265,6 +396,9 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
     if handoff.get("status") == "ready":
         action = "ready_handoff"
         reason = "autofactor_strategy_handoff_ready"
+    elif runtime_feedback:
+        action = "revise_prior"
+        reason = str(runtime_feedback.get("reason") or "runtime_pass_through_collapse")
     elif blocker_action in {"fix_runtime", "fix_data", "fix_workflow", "revise_prior"}:
         action = blocker_action
         reason = f"promotion_blockers_require_{blocker_action}"
@@ -338,6 +472,7 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "next_steps": next_steps(action),
         "prior_revision_required": action == "revise_prior",
         "runtime_replay_request": runtime_request,
+        "runtime_pass_through_feedback": runtime_feedback,
     }
 
 
@@ -526,7 +661,29 @@ def mutation_from_node(node: dict[str, Any]) -> str:
 def build_prior(runs: list[dict[str, Any]], decision: dict[str, Any], limit: int) -> dict[str, Any]:
     current = latest_run(runs)
     mutations = []
+    runtime_feedback = decision.get("runtime_pass_through_feedback")
+    if isinstance(runtime_feedback, dict) and runtime_feedback:
+        base_factor = str(runtime_feedback.get("base_factor") or "")
+        if base_factor:
+            for mutation_type in ("add_spread_penalty", "add_capacity_gate"):
+                if len(mutations) >= limit:
+                    break
+                item: dict[str, Any] = {
+                    "base_factor": base_factor,
+                    "mutation_type": mutation_type,
+                    "name": f"llm_{base_factor}_runtime_pass_through_{mutation_type}",
+                    "feedback_reason": runtime_feedback.get("reason"),
+                    "runtime_metrics": runtime_feedback.get("metrics"),
+                }
+                feature = choose_feature(current["search_space"], mutation_type)
+                if feature:
+                    item["feature"] = feature
+                if mutation_type == "add_spread_penalty":
+                    item["constant"] = 0.01
+                mutations.append(item)
     for node in selected_nodes(current["plan"])[:limit]:
+        if len(mutations) >= limit:
+            break
         base_factor = str(node.get("factor_name") or "")
         if not base_factor:
             continue

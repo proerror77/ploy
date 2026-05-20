@@ -457,6 +457,14 @@ Execution blockers also take priority over runtime mapping blockers. For
 example, `one_event_decision_violation`, top-bucket slippage, or fillability
 problems mean the candidate is still a search/prior problem; the classifier
 returns `revise_prior` even if the same factor also lacks a runtime mapping.
+When a runtime candidate replay artifact is present, the hosted workflow keeps
+the full `candidate-strategy-replay.json` in the uploaded artifact bundle so
+the classifier can inspect runtime diagnostics, not only promotion blockers.
+If the score has many direct threshold passes but runtime entry signals still
+collapse at executable edge, min-edge, side, or depth gates, the classifier
+returns `revise_prior` with a runtime pass-through typed-prior draft. That
+prevents the next search from repeating factors that look strong in aggregate
+top-bucket diagnostics but cannot survive the executable runtime decision path.
 
 This is the current closed-loop boundary: a failed or stagnant search now
 produces a machine-readable next action and, when appropriate, a bounded typed

@@ -25,6 +25,7 @@ def artifact(
     selected_nodes: list[dict] | None = None,
     feedback: dict | None = None,
     promotion: dict | None = None,
+    candidate_strategy_replay: dict | None = None,
     write_feedback: bool = True,
 ) -> Path:
     target = "full_depth_settlement_executable_pnl"
@@ -91,6 +92,11 @@ def artifact(
             "should_dispatch": should_dispatch,
         },
     )
+    if candidate_strategy_replay is not None:
+        write_json(
+            root / "candidate-strategy-replay" / "candidate-strategy-replay.json",
+            candidate_strategy_replay,
+        )
     return root
 
 
@@ -576,6 +582,83 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                 "mut_spread_adjusted_external_move_spread_adjusted",
             )
             self.assertEqual(request["inputs"]["runtime_score"], better_runtime_score)
+
+    def test_runtime_pass_through_collapse_generates_targeted_prior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_score = "autofactor_formula:mut_spread_adjusted_external_move_squashed"
+            path = artifact(
+                Path(tmp),
+                chain_reason="continue",
+                should_dispatch=True,
+                candidate_strategy_replay={
+                    "basis": "runtime_market_update_replay",
+                    "promotion_ready": False,
+                    "runtime_score": runtime_score,
+                    "metrics": {
+                        "trade_count": 2,
+                        "unique_event_count": 2,
+                        "roi": -0.22916199066660334,
+                    },
+                    "score_counterfactual": {
+                        "configured_entry_threshold": "0.25",
+                        "depth_fillable": 2918,
+                        "direct_pass_counts": {
+                            "0.05": 1188,
+                            "0.10": 1059,
+                            "0.15": 936,
+                            "0.25": 744,
+                        },
+                        "formula_evaluations": 2918,
+                    },
+                    "strategy_diagnostics": {
+                        "entry_signals": 2,
+                        "settlement_autofactor_depth_fillable": 2918,
+                        "settlement_autofactor_executable_edge_pass_min_edge": 5,
+                        "settlement_autofactor_formula_evaluations": 2918,
+                        "skip_edge_score": 742,
+                        "skip_entry_score": 2174,
+                        "skip_settlement_side_score": 2017,
+                    },
+                },
+                promotion={
+                    "decision": "blocked",
+                    "candidate_strategy_replay": {
+                        "basis": "runtime_market_update_replay",
+                        "ready": False,
+                        "runtime_score": runtime_score,
+                        "metrics": {"trade_count": 2, "roi": -0.22916199066660334},
+                        "blockers": [
+                            "trade_count_too_small:2<50",
+                            "roi_too_low:-0.229162<0.000000",
+                        ],
+                    },
+                    "evaluated_factors": [],
+                },
+            )
+
+            runs = [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            decision = agent.closed_loop_decision(runs)
+            prior = agent.build_prior(runs, decision, 3)
+
+            self.assertEqual(decision["decision"], "revise_prior")
+            self.assertEqual(decision["reason"], "runtime_pass_through_collapse")
+            self.assertIn(
+                "runtime_entry_pass_through_too_low:2/744<50",
+                decision["promotion_blockers"],
+            )
+            self.assertEqual(
+                decision["runtime_pass_through_feedback"]["metrics"][
+                    "executable_edge_pass_min_edge"
+                ],
+                5,
+            )
+            self.assertEqual(
+                prior["mutations"][0]["base_factor"],
+                "mut_spread_adjusted_external_move_squashed",
+            )
+            self.assertEqual(prior["mutations"][0]["mutation_type"], "add_spread_penalty")
+            self.assertEqual(prior["mutations"][0]["feature"], "side_spread")
+            self.assertEqual(prior["mutations"][1]["mutation_type"], "add_capacity_gate")
 
     def test_cli_markdown_includes_runtime_replay_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

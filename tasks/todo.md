@@ -17757,3 +17757,45 @@ Evidence stage: `runtime_parity / diagnostic`.
   Direct and reverse-direction pass counts were `0` at `0.05`, `0.10`,
   `0.15`, and `0.25`, so the current candidate should be revised/rejected
   rather than promoted or rescued with a simple threshold cut.
+
+# Runtime Pass-Through Closed-Loop Feedback (2026-05-20)
+
+## Goal
+
+Feed runtime candidate replay diagnostics back into the alpha-search closed-loop
+prior so the next search penalizes candidates that look good in top-bucket
+research diagnostics but collapse before executable runtime entry.
+
+Evidence stage: `walk_forward / runtime_parity`.
+
+## Files / Ownership
+
+- `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`
+  - Owner: preserve the full runtime candidate replay artifact in the hosted
+    walk-forward upload bundle.
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: classify runtime pass-through collapse as `revise_prior` and emit a
+    typed prior draft from runtime diagnostics.
+- `tests/test_alpha_search_closed_loop_agent.py`
+  - Owner: regression coverage for replay-diagnostic feedback.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document the closed-loop boundary.
+- `tasks/todo.md`
+  - Owner: current session tracking.
+
+## Tasks
+
+- [x] Create a clean worktree from current `origin/main`.
+- [x] Preserve `candidate-strategy-replay.json` in hosted walk-forward artifacts.
+- [x] Teach the closed-loop agent to detect runtime entry pass-through collapse.
+- [x] Generate runtime-diagnostic typed-prior mutations before generic MCTS
+      selected-node mutations.
+- [x] Run focused Python/workflow validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+## Review
+
+- 2026-05-20: Validation passed:
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent`,
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
+  and `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml"); puts "ok"'`.
