@@ -203,9 +203,84 @@ pub fn auto_settlement_formula_score(
             }
             score *= inputs.iv_change_1m;
         }
-        _ => return None,
+        _ => score = composed_settlement_formula_suffix_score(score, suffix, inputs)?,
     }
     score.is_finite().then_some(score)
+}
+
+fn composed_settlement_formula_suffix_score(
+    mut score: f64,
+    suffix: &str,
+    inputs: AutoSettlementFactorInputs,
+) -> Option<f64> {
+    let mut applied_effects: Vec<&'static str> = Vec::new();
+    for mutation in suffix.strip_prefix('_')?.split('_') {
+        let effect = match mutation {
+            "squashed" => Some("squashed"),
+            "strike" => Some("near_strike"),
+            "capacity" => Some("capacity"),
+            "gate" => Some("full_depth_entry_gate"),
+            "quality" => Some("entry_price_quality"),
+            "adjusted" => Some("spread_adjusted"),
+            "pressure" => Some("external_pressure"),
+            "change" => Some("iv_change"),
+            _ => None,
+        };
+        if let Some(effect) = effect {
+            if applied_effects.contains(&effect) {
+                return None;
+            }
+            applied_effects.push(effect);
+        }
+        match mutation {
+            "x" => continue,
+            "squashed" => score = score.tanh(),
+            "near" => continue,
+            "strike" => {
+                score *= auto_settlement_near_strike_score(
+                    inputs.distance_over_sigma,
+                    inputs.direction_sign,
+                );
+            }
+            "capacity" => {
+                score *= auto_settlement_entry_capacity_score(inputs.entry_capacity_ratio)
+            }
+            "full" | "depth" | "entry" => continue,
+            "gate" => {
+                if !inputs.entry_capacity_ratio.is_finite() || inputs.entry_capacity_ratio < 1.0 {
+                    return None;
+                }
+            }
+            "price" => continue,
+            "quality" => score *= auto_settlement_entry_price_quality_score(inputs.entry_price),
+            "spread" => continue,
+            "adjusted" => {
+                if !inputs.side_spread.is_finite() || inputs.side_spread < 0.0 {
+                    return None;
+                }
+                score /= inputs.side_spread + 0.01;
+            }
+            "external" => continue,
+            "pressure" => {
+                if !inputs.external_pressure.is_finite() {
+                    return None;
+                }
+                score *= inputs.external_pressure;
+            }
+            "iv" => continue,
+            "change" => {
+                if !inputs.iv_change_1m.is_finite() {
+                    return None;
+                }
+                score *= inputs.iv_change_1m;
+            }
+            _ => return None,
+        }
+        if !score.is_finite() {
+            return None;
+        }
+    }
+    Some(score)
 }
 
 fn normalize_autofactor_formula_name(mut name: &str) -> &str {

@@ -36,6 +36,13 @@ PREDICTIVE_FORMULA_BASES = (
     "spread_adjusted_external_move",
 )
 
+SETTLEMENT_FORMULA_BASES = (
+    "auto_settlement_full_depth_settlement_edge",
+    "auto_settlement_conservative_settlement_edge",
+    "auto_settlement_model_full_depth_settlement_edge",
+    "auto_settlement_model_conservative_settlement_edge",
+)
+
 
 def parse_float(raw: str, default: float = float("nan")) -> float:
     try:
@@ -66,6 +73,51 @@ def is_settlement_predictive_formula(name: str) -> bool:
     if normalized == "spread_adjusted_external_move":
         return False
     return any(normalized.startswith(base) for base in PREDICTIVE_FORMULA_BASES)
+
+
+def is_settlement_formula(name: str) -> bool:
+    normalized = normalize_formula_name(name)
+    for base in SETTLEMENT_FORMULA_BASES:
+        if not normalized.startswith(base):
+            continue
+        return settlement_formula_suffix_supported(normalized[len(base) :])
+    return False
+
+
+def settlement_formula_suffix_supported(suffix: str) -> bool:
+    if not suffix:
+        return True
+    tokens = suffix.removeprefix("_").split("_")
+    applied: set[str] = set()
+    for token in tokens:
+        effect = {
+            "strike": "near_strike",
+            "capacity": "capacity",
+            "quality": "entry_price_quality",
+            "adjusted": "spread_adjusted",
+            "pressure": "external_pressure",
+            "change": "iv_change",
+            "gate": "full_depth_entry_gate",
+            "squashed": "squashed",
+        }.get(token)
+        if effect:
+            if effect in applied:
+                return False
+            applied.add(effect)
+            continue
+        if token not in {
+            "x",
+            "near",
+            "full",
+            "depth",
+            "entry",
+            "price",
+            "spread",
+            "external",
+            "iv",
+        }:
+            return False
+    return True
 
 
 def parse_autofactor_rows(report_text: str) -> list[dict[str, Any]]:
@@ -114,7 +166,7 @@ def runtime_mapping(name: str) -> dict[str, str]:
             ),
         }
     if (
-        name.startswith("auto_settlement_")
+        is_settlement_formula(name)
         or name in FORMULA_RUNTIME_MAPPED_NAMES
         or is_settlement_predictive_formula(name)
     ):
