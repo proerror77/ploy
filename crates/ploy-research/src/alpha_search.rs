@@ -1097,6 +1097,10 @@ fn normalized_factor_family(raw: &str) -> String {
                 }
             }
         }
+        if !changed && value.ends_with("_x") && value.len() > 2 {
+            value.truncate(value.len() - 2);
+            changed = true;
+        }
         if !changed {
             break;
         }
@@ -1493,12 +1497,12 @@ mod tests {
                 metrics: serde_json::Value::Null,
             }],
         };
-        let runtime_avoidances = runtime_avoidances(None, Some(&prior));
+        let prior_avoidances = runtime_avoidances(None, Some(&prior));
         let reports = vec![squashed, spread_adjusted, alternative];
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances))
+            .map(|(idx, report)| node_metric(idx, report, &prior_avoidances))
             .collect::<Vec<_>>();
         let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
@@ -1514,5 +1518,33 @@ mod tests {
                 .map(|node| node.factor_name.as_str()),
             Some("auto_settlement_full_depth_settlement_edge_x_capacity")
         );
+
+        let dangling_interaction = sample_report(
+            "mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_x_full_depth_entry_gate_spread_adjusted",
+        );
+        let composed_prior = LlmPriorSpec {
+            mutations: Vec::new(),
+            runtime_avoid_factors: vec![crate::autofactor::RuntimeAvoidFactorSpec {
+                base_factor:
+                    "mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted"
+                        .to_string(),
+                factor_family: Some(
+                    "auto_settlement_model_full_depth_settlement_edge_x_external_pressure"
+                        .to_string(),
+                ),
+                runtime_score: Some(
+                    "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted"
+                        .to_string(),
+                ),
+                reason: Some("runtime_pass_through_collapse".to_string()),
+                metrics: serde_json::Value::Null,
+            }],
+        };
+        let composed_avoidances = runtime_avoidances(None, Some(&composed_prior));
+        assert_eq!(
+            normalized_factor_family(&dangling_interaction.name),
+            "auto_settlement_model_full_depth_settlement_edge_x_external_pressure"
+        );
+        assert!(matching_runtime_avoidance(&dangling_interaction, &composed_avoidances).is_some());
     }
 }

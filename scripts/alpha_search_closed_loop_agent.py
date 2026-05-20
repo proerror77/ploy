@@ -305,6 +305,9 @@ def factor_family(raw: str) -> str:
                 value = value[: -len(suffix)]
                 changed = True
                 break
+        if not changed and value.endswith("_x") and len(value) > 2:
+            value = value[:-2]
+            changed = True
     return value
 
 

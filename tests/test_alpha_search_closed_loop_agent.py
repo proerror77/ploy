@@ -926,6 +926,12 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                 ),
                 "spread_adjusted_external_move",
             )
+            self.assertEqual(
+                agent.factor_family(
+                    "mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_x_full_depth_entry_gate_spread_adjusted"
+                ),
+                "auto_settlement_model_full_depth_settlement_edge_x_external_pressure",
+            )
 
     def test_runtime_avoid_factors_accumulate_from_search_feedback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1001,6 +1007,11 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                         "selected_dimension": "execution_quality",
                         "proposed_mutation": "add_capacity_gate",
                     },
+                    {
+                        "factor_name": "mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_x_full_depth_entry_gate_spread_adjusted",
+                        "selected_dimension": "execution_quality",
+                        "proposed_mutation": "add_capacity_gate",
+                    },
                 ],
             )
             write_json(
@@ -1015,6 +1026,12 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                             "factor_family": "amplitude_weighted_momentum_30s_sigma",
                             "runtime_score": "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
                             "reason": "runtime_pass_through_collapse",
+                        },
+                        {
+                            "base_factor": "mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted",
+                            "factor_family": "auto_settlement_model_full_depth_settlement_edge_x_external_pressure",
+                            "runtime_score": "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted",
+                            "reason": "runtime_pass_through_collapse",
                         }
                     ]
                 },
@@ -1027,7 +1044,10 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             self.assertEqual(decision["decision"], "revise_prior")
             self.assertEqual(
                 [item["factor_family"] for item in prior["runtime_avoid_factors"]],
-                ["amplitude_weighted_momentum_30s_sigma"],
+                [
+                    "amplitude_weighted_momentum_30s_sigma",
+                    "auto_settlement_model_full_depth_settlement_edge_x_external_pressure",
+                ],
             )
             self.assertEqual(len(prior["mutations"]), 1)
             self.assertEqual(
