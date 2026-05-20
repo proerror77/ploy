@@ -281,6 +281,10 @@ def factor_family(raw: str) -> str:
     suffixes = (
         "_runtime_pass_through_add_spread_penalty",
         "_runtime_pass_through_add_capacity_gate",
+        "_add_spread_penalty",
+        "_add_capacity_gate",
+        "_add_feature_gate",
+        "_entry_price_quality",
         "_full_depth_entry_gate",
         "_spread_adjusted",
         "_near_strike",
