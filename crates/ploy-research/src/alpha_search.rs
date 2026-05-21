@@ -4,7 +4,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::autofactor::{AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr};
+use crate::autofactor::{
+    factor_expr_hash, AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr,
+};
 
 const ALPHA_SEARCH_ARTIFACT_VERSION: &str = "alpha_search_artifacts_v1";
 
@@ -194,6 +196,36 @@ struct SearchFeedbackArtifact {
 }
 
 #[derive(Debug, Serialize)]
+struct FactorRegistryPreviewArtifact {
+    version: &'static str,
+    target: String,
+    factors: Vec<FactorRegistryPreviewRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct FactorRegistryPreviewRow {
+    factor_name: String,
+    target: Option<String>,
+    dsl_hash: String,
+    ast_json: FactorExpr,
+    status: &'static str,
+    metrics: serde_json::Value,
+    blockers: Vec<String>,
+    runtime_contract: RuntimeContractPreview,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeContractPreview {
+    dsl_hash: String,
+    ast_json: FactorExpr,
+    runtime_score: Option<String>,
+    strategy_profile: Option<String>,
+    strategy_family: Option<String>,
+    ast_input_names: Vec<String>,
+    blockers: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct MctsExpansionPlan {
     version: &'static str,
     mode: &'static str,
@@ -349,6 +381,10 @@ pub fn write_alpha_search_artifacts_with_state(
         .map(|(idx, report)| node_metric(idx, report))
         .collect::<Vec<_>>();
     write_json(&output_dir.join("node-metrics.json"), &node_metrics)?;
+    write_json(
+        &output_dir.join("factor-registry-preview.json"),
+        &factor_registry_preview(target, reports)?,
+    )?;
     let mcts_state = mcts_search_state(target, &node_metrics, prior_state);
     write_json(&output_dir.join("mcts-state.json"), &mcts_state)?;
     write_json(
@@ -414,6 +450,127 @@ pub fn write_alpha_search_artifacts_with_state(
         rejected_count: rejected.len(),
         best_candidate: feedback.best_candidate,
     })
+}
+
+fn factor_registry_preview(
+    target: &str,
+    reports: &[AutoFactorReport],
+) -> Result<FactorRegistryPreviewArtifact, AlphaSearchArtifactError> {
+    let mut factors = Vec::with_capacity(reports.len());
+    for report in reports {
+        let dsl_hash = factor_expr_hash(&report.expr)?;
+        let runtime_contract = runtime_contract_preview(report, &dsl_hash);
+        let mut blockers = Vec::new();
+        if report.decision == AutoFactorDecision::Reject {
+            blockers.push(format!("autofactor_rejected:{}", report.reason));
+        } else if report.decision == AutoFactorDecision::Watchlist {
+            blockers.push(format!("autofactor_watchlist:{}", report.reason));
+        }
+        blockers.extend(runtime_contract.blockers.iter().cloned());
+        factors.push(FactorRegistryPreviewRow {
+            factor_name: report.name.clone(),
+            target: report.target.clone(),
+            dsl_hash,
+            ast_json: report.expr.clone(),
+            status: registry_status(report.decision),
+            metrics: serde_json::json!({
+                "n": report.n,
+                "spearman_ic": report.spearman_ic,
+                "icir": report.icir,
+                "positive_window_ratio": report.positive_window_ratio,
+                "symbol_count": report.symbol_count,
+                "symbol_positive_ratio": report.symbol_positive_ratio,
+                "top_bucket_avg_label": report.top_bucket_avg_label,
+                "top_bucket_full_depth_entry_fill_rate": report.top_bucket_full_depth_entry_fill_rate,
+                "top_bucket_unique_event_count": report.top_bucket_unique_event_count,
+                "top_bucket_max_event_decisions": report.top_bucket_max_event_decisions,
+                "monotonicity_score": report.monotonicity_score,
+                "complexity": report.complexity,
+                "reason": report.reason,
+            }),
+            blockers,
+            runtime_contract,
+        });
+    }
+    Ok(FactorRegistryPreviewArtifact {
+        version: ALPHA_SEARCH_ARTIFACT_VERSION,
+        target: target.to_string(),
+        factors,
+    })
+}
+
+fn registry_status(decision: AutoFactorDecision) -> &'static str {
+    match decision {
+        AutoFactorDecision::Candidate => "candidate",
+        AutoFactorDecision::Watchlist => "watchlist",
+        AutoFactorDecision::Reject => "rejected",
+    }
+}
+
+fn runtime_contract_preview(report: &AutoFactorReport, dsl_hash: &str) -> RuntimeContractPreview {
+    let ast_input_names = report.expr.input_names().into_iter().collect::<Vec<_>>();
+    let mut blockers = Vec::new();
+    let mapping = runtime_mapping_for_factor(&report.name);
+    if mapping.runtime_score.is_none() {
+        blockers.push("missing_runtime_score".to_string());
+    }
+    if mapping.strategy_profile.is_none() {
+        blockers.push("missing_runtime_strategy_profile".to_string());
+    }
+    RuntimeContractPreview {
+        dsl_hash: dsl_hash.to_string(),
+        ast_json: report.expr.clone(),
+        runtime_score: mapping.runtime_score,
+        strategy_profile: mapping.strategy_profile,
+        strategy_family: mapping.strategy_family,
+        ast_input_names,
+        blockers,
+    }
+}
+
+struct RuntimeMapping {
+    runtime_score: Option<String>,
+    strategy_profile: Option<String>,
+    strategy_family: Option<String>,
+}
+
+fn runtime_mapping_for_factor(name: &str) -> RuntimeMapping {
+    if name.starts_with("auto_settlement_") {
+        return RuntimeMapping {
+            runtime_score: Some(format!("autofactor_formula:{name}")),
+            strategy_profile: Some("settlement_probability".to_string()),
+            strategy_family: Some("settlement_probability".to_string()),
+        };
+    }
+    match name {
+        "amplitude_weighted_momentum_30s_sigma"
+        | "mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate"
+        | "mut_spread_adjusted_external_move_full_depth_entry_gate" => RuntimeMapping {
+            runtime_score: Some(format!("autofactor_formula:{name}")),
+            strategy_profile: Some("settlement_probability".to_string()),
+            strategy_family: Some("predictive_settlement_probability".to_string()),
+        },
+        "spread_adjusted_external_move" => RuntimeMapping {
+            runtime_score: Some("spread_adjusted_external_move_score".to_string()),
+            strategy_profile: Some("repricing_momentum".to_string()),
+            strategy_family: Some("repricing".to_string()),
+        },
+        "repricing_gap_side_10s" => RuntimeMapping {
+            runtime_score: Some("repricing_gap_side_10s".to_string()),
+            strategy_profile: Some("repricing_momentum".to_string()),
+            strategy_family: Some("repricing".to_string()),
+        },
+        "settlement_fair_edge" => RuntimeMapping {
+            runtime_score: None,
+            strategy_profile: None,
+            strategy_family: Some("settlement_probability".to_string()),
+        },
+        _ => RuntimeMapping {
+            runtime_score: None,
+            strategy_profile: None,
+            strategy_family: None,
+        },
+    }
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<(), AlphaSearchArtifactError> {
@@ -755,6 +912,25 @@ mod tests {
         assert!(tmp
             .join("full_depth_settlement_executable_pnl/mcts-state.json")
             .exists());
+        let registry_preview_raw = std::fs::read_to_string(
+            tmp.join("full_depth_settlement_executable_pnl/factor-registry-preview.json"),
+        )
+        .expect("registry preview");
+        let registry_preview: serde_json::Value =
+            serde_json::from_str(&registry_preview_raw).expect("registry preview json");
+        let factor = &registry_preview["factors"][0];
+        assert_eq!(
+            factor["runtime_contract"]["runtime_score"],
+            "autofactor_formula:auto_settlement_conservative_settlement_edge"
+        );
+        assert_eq!(
+            factor["runtime_contract"]["strategy_profile"],
+            "settlement_probability"
+        );
+        assert_eq!(
+            factor["runtime_contract"]["ast_input_names"][0],
+            "conservative_settlement_edge"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

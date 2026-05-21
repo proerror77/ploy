@@ -28,6 +28,7 @@ ploy-trading.workspace = true
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
@@ -118,3 +119,11 @@ path = "examples/dryrun_correction_matrix.rs"
 name = "collector_data_utilization"
 path = "examples/collector_data_utilization.rs"
 required-features = ["db"]
+
+[[example]]
+name = "factor_evolve_daily_plan"
+path = "examples/factor_evolve_daily_plan.rs"
+
+[[example]]
+name = "factor_portfolio_builder"
+path = "examples/factor_portfolio_builder.rs"

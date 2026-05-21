@@ -117,6 +117,46 @@ class DryRunReportContractTests(unittest.TestCase):
         self.assertEqual(payload["runtime_evidence"]["orders"], [])
         self.assertEqual(payload["runtime_evidence"]["fills"], [])
 
+    def test_running_deployment_without_trades_can_be_reported_as_zero_strategy_row(self) -> None:
+        summary = load_summary_module()
+        records = [
+            {
+                "deployment_id": "pm5d.threelayer.settlement-probability-btc-eth.dryrun",
+                "runtime_mode": "paper",
+                "desired_state": "running",
+                "observed_state": "running",
+            }
+        ]
+        keys = summary.running_deployment_keys(records)
+        self.assertEqual(
+            keys,
+            {
+                (
+                    "paper",
+                    "three_layer",
+                    "pm5d.threelayer.settlement-probability-btc-eth.dryrun",
+                )
+            },
+        )
+
+        runtime_mode, strategy_id, deployment_id = next(iter(keys))
+        strategy_payload = summary.build_report_slice([], [])
+        strategy_payload.update(
+            {
+                "runtime_mode": runtime_mode,
+                "strategy_id": strategy_id,
+                "deployment_id": deployment_id,
+                "label": summary.strategy_label(runtime_mode, strategy_id, deployment_id),
+                "experiment_label": summary.experiment_label(runtime_mode, strategy_id, deployment_id),
+                "execution_diagnostics": summary.build_execution_diagnostics([]),
+            }
+        )
+
+        self.assertEqual(strategy_payload["summary"]["closed_trades"], 0)
+        self.assertEqual(strategy_payload["summary"]["open_exposure"], 0)
+        self.assertEqual(strategy_payload["metrics"]["sharpe"], None)
+        self.assertEqual(strategy_payload["execution_diagnostics"]["basis"], "strategy_runtime_orders")
+
     def test_runtime_evidence_query_exports_event_order_and_fill_rows(self) -> None:
         script = SUMMARY_SCRIPT.read_text()
 

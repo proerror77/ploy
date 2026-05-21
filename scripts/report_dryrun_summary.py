@@ -8,6 +8,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from statistics import mean, stdev
 
 
@@ -356,6 +357,89 @@ def strategy_key(row) -> tuple[str, str, str]:
         row.get("strategy_id") or "",
         row.get("deployment_id") or "",
     )
+
+
+def deployment_state_candidates():
+    configured = os.environ.get("PLOY_DRYRUN_DEPLOYMENTS_JSON")
+    if configured:
+        for item in configured.split(os.pathsep):
+            if item:
+                yield Path(item)
+    yield Path("run/platform/deployments.json")
+    yield Path("data/state/deployments.json")
+    yield Path("/opt/ploy/run/platform/deployments.json")
+    yield Path("/opt/ploy/data/state/deployments.json")
+    yield Path("config/deployments")
+
+
+def load_deployment_records():
+    records = []
+    seen = set()
+    for candidate in deployment_state_candidates():
+        for record in read_deployment_candidate(candidate):
+            deployment_id = record.get("deployment_id")
+            if not deployment_id or deployment_id in seen:
+                continue
+            seen.add(deployment_id)
+            records.append(record)
+    return records
+
+
+def read_deployment_candidate(path: Path):
+    if path.is_dir():
+        records = []
+        for child in sorted(path.glob("*.json")):
+            records.extend(read_deployment_candidate(child))
+        return records
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if isinstance(raw, dict):
+        deployments = raw.get("deployments")
+        if isinstance(deployments, list):
+            return [item for item in deployments if isinstance(item, dict)]
+        return [raw]
+    return []
+
+
+def running_deployment_keys(records):
+    keys = set()
+    for record in records:
+        runtime_mode = normalize_runtime_mode(record.get("runtime_mode"))
+        if runtime_mode not in SIMULATED_RUNTIME_MODES:
+            continue
+        desired = str(record.get("desired_state") or "").lower()
+        observed = str(record.get("observed_state") or "").lower()
+        if desired != "running" and observed != "running":
+            continue
+        deployment_id = str(record.get("deployment_id") or "")
+        if not deployment_id:
+            continue
+        strategy_id = str(record.get("strategy_id") or infer_strategy_id(deployment_id))
+        keys.add((runtime_mode, strategy_id, deployment_id))
+    return keys
+
+
+def normalize_runtime_mode(value):
+    raw = str(value or "").lower()
+    if raw in ("paper", "dryrun", "dry_run"):
+        return raw
+    if raw == "simulated":
+        return "paper"
+    return raw
+
+
+def infer_strategy_id(deployment_id: str) -> str:
+    if "threelayer" in deployment_id or "three-layer" in deployment_id:
+        return "three_layer"
+    if deployment_id.startswith("pm5d."):
+        return "directional"
+    return "unknown"
 
 
 def humanize_deployment_id(deployment_id: str) -> str:
@@ -890,10 +974,19 @@ def main() -> int:
         daily_by_strategy[strategy_key(row)].append(row)
 
     diagnostics_by_strategy = {strategy_key(row): row for row in order_diagnostics}
+    existing_deployment_ids = {
+        key[2] for key in set(events_by_strategy.keys()) | set(diagnostics_by_strategy.keys())
+    }
+    deployment_keys = {
+        key
+        for key in running_deployment_keys(load_deployment_records())
+        if key[2] not in existing_deployment_ids
+    }
 
     strategies = []
-    for runtime_mode, strategy_id, deployment_id in sorted(events_by_strategy.keys()):
-        strategy_events = events_by_strategy[(runtime_mode, strategy_id, deployment_id)]
+    strategy_keys = set(events_by_strategy.keys()) | deployment_keys | set(diagnostics_by_strategy.keys())
+    for runtime_mode, strategy_id, deployment_id in sorted(strategy_keys):
+        strategy_events = events_by_strategy.get((runtime_mode, strategy_id, deployment_id), [])
         strategy_daily_rows = daily_by_strategy.get((runtime_mode, strategy_id, deployment_id), [])
         strategy_diagnostics = diagnostics_by_strategy.get((runtime_mode, strategy_id, deployment_id))
         strategy_payload = build_report_slice(strategy_events, strategy_daily_rows)

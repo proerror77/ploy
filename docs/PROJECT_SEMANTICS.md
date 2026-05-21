@@ -95,6 +95,14 @@ If full-depth CLOB, official settlement, replay parity, or runtime scorer parity
 is missing, mark promotion as blocked unless the task explicitly targets an
 earlier diagnostic stage.
 
+FactorEvolve data-surface reports should classify every surface as
+`required_for_prediction`, `required_for_execution`, `optional_context`, or
+`missing_blocks_promotion`. The current detailed surface map lives in
+[docs/runbooks/factor-evolve-data-surfaces.md](runbooks/factor-evolve-data-surfaces.md).
+Binance partial LOB snapshots are prediction diagnostics; sequence-correct
+local-book evidence is required before claiming queue-position, passive-fill, or
+LOB execution-quality promotion evidence.
+
 ## Promotion Gates
 
 A PM5D or event-ML strategy may move toward dry-run only when the evidence names

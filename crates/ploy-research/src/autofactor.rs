@@ -54,6 +54,42 @@ pub enum FactorExpr {
 }
 
 impl FactorExpr {
+    pub fn input_names(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        self.collect_input_names(&mut out);
+        out
+    }
+
+    fn collect_input_names(&self, out: &mut BTreeSet<String>) {
+        match self {
+            FactorExpr::Input(name) => {
+                out.insert(name.clone());
+            }
+            FactorExpr::Const(_) => {}
+            FactorExpr::Add(lhs, rhs)
+            | FactorExpr::Sub(lhs, rhs)
+            | FactorExpr::Mul(lhs, rhs)
+            | FactorExpr::SafeDiv(lhs, rhs)
+            | FactorExpr::Max(lhs, rhs)
+            | FactorExpr::Min(lhs, rhs) => {
+                lhs.collect_input_names(out);
+                rhs.collect_input_names(out);
+            }
+            FactorExpr::Tanh(expr)
+            | FactorExpr::Log1pAbs(expr)
+            | FactorExpr::SqrtAbs(expr)
+            | FactorExpr::Delta { expr, .. }
+            | FactorExpr::RollingMean { expr, .. }
+            | FactorExpr::RollingStd { expr, .. }
+            | FactorExpr::ZScore { expr, .. }
+            | FactorExpr::Clip { expr, .. } => expr.collect_input_names(out),
+            FactorExpr::Gate { expr, gate, .. } => {
+                expr.collect_input_names(out);
+                gate.collect_input_names(out);
+            }
+        }
+    }
+
     pub fn complexity(&self) -> usize {
         match self {
             FactorExpr::Input(_) | FactorExpr::Const(_) => 1,
@@ -109,6 +145,15 @@ impl FactorExpr {
             FactorExpr::Gate { expr, gate, min } => gate_eval(expr, gate, *min, matrix),
         }
     }
+}
+
+pub fn factor_expr_hash(expr: &FactorExpr) -> Result<String, serde_json::Error> {
+    use sha2::{Digest, Sha256};
+
+    let raw = serde_json::to_vec(expr)?;
+    let mut hasher = Sha256::new();
+    hasher.update(raw);
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2149,6 +2194,27 @@ mod tests {
         assert_eq!(values[0], 1.0);
         assert!(values[1].is_nan());
         assert_eq!(values[2], 3.0);
+    }
+
+    #[test]
+    fn factor_expr_hash_is_stable_and_sensitive_to_ast_changes() {
+        let expr_a = FactorExpr::SafeDiv(Box::new(input("ofi_l5")), Box::new(input("depth_top5")));
+        let expr_b = FactorExpr::SafeDiv(Box::new(input("ofi_l5")), Box::new(input("depth_top5")));
+        let expr_c =
+            FactorExpr::SafeDiv(Box::new(input("ofi_l5")), Box::new(FactorExpr::Const(2.0)));
+
+        assert_eq!(
+            factor_expr_hash(&expr_a).expect("hash a"),
+            factor_expr_hash(&expr_b).expect("hash b")
+        );
+        assert_ne!(
+            factor_expr_hash(&expr_a).expect("hash a"),
+            factor_expr_hash(&expr_c).expect("hash c")
+        );
+        assert_eq!(
+            expr_a.input_names(),
+            BTreeSet::from(["ofi_l5".to_string(), "depth_top5".to_string()])
+        );
     }
 
     #[test]

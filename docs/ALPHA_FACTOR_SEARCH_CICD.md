@@ -394,6 +394,28 @@ prior draft using only the existing allowed mutation types. It still cannot
 guarantee profitability, does not call an external LLM, and cannot bypass
 walk-forward, promotion, replay parity, dry-run, or live approval gates.
 
+## Research Manager Typed Plan Boundary
+
+`crates/ploy-research/examples/factor_evolve_daily_plan.rs` is the deterministic
+Research Manager v0 surface. It reads a typed JSON input, validates
+`evidence_stage`, and emits one of the bounded next-plan themes:
+`fix_data`, `fix_runtime`, `revise_prior`, or `continue_search`.
+
+This manager does not call an LLM. Future LLM integration is allowed only by
+producing a typed prior JSON for the existing alpha-search mutation contract.
+It must not mutate evaluator thresholds, split policy, label definitions, cost
+model, promotion gates, strategy config, or deployment state.
+
+Hosted alpha-search bundles now include `factor-registry-preview.json`, which
+records the factor name, target, DSL hash, AST JSON, metrics, blockers, and a
+typed runtime-contract preview. Missing runtime scores or strategy profiles are
+represented as blockers and remain fail-closed for promotion.
+
+For FactorEvolve data-surface gates, use
+`docs/runbooks/factor-evolve-data-surfaces.md`. Alpha-search evidence should
+name whether each surface is `required_for_prediction`,
+`required_for_execution`, `optional_context`, or `missing_blocks_promotion`.
+
 ## Event-Level Promotion Gate
 
 PM5D settlement strategies are event-rooted binary options. A deployable
