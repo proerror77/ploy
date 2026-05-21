@@ -33,6 +33,25 @@
 - [x] Record runtime replay dispatch intent in the uploaded alpha-search-chain
       artifact before dispatching.
 
+## Task 9: Close Runtime Replay Feedback Into Research OS Trace
+
+**Files:**
+- Modify: `.github/workflows/runtime-candidate-replay.yml`
+- Modify: `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`
+- Modify: `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+- Modify: `docs/runbooks/event-ml-automl-workflow.md`
+- Test: `tests/workflow_security.rs`
+
+- [x] Keep `runtime-candidate-replay.yml` within the GitHub 10-input limit by
+      moving advanced replay/promotion feedback fields into `options_json`.
+- [x] Pass the hosted source factor-walk-forward run id/artifact into runtime
+      replay dispatches.
+- [x] After runtime replay artifact upload, dispatch
+      `autofactor-strategy-promotion.yml` in evaluator-only mode when source
+      context is present.
+- [x] Keep handoff issue creation and config PR creation disabled in the
+      automatic feedback path.
+
 ## Boundary Map
 
 - New Research OS plane:
@@ -206,4 +225,6 @@ full snapshot artifact automatically and dispatch the hosted walk-forward path.
 Runtime replay evidence may be dispatched automatically from the closed-loop
 request, but dry-run/config promotion is restored separately when a runtime
 replay artifact with `basis=runtime_market_update_replay` is fed into
-`autofactor-strategy-promotion.yml` in explicit legacy promotion mode.
+`autofactor-strategy-promotion.yml` in explicit legacy promotion mode. Automatic
+runtime replay feedback may run the promotion evaluator to produce
+`autofactor-research-trace.json`; it does not create issues, PRs, or deploy.

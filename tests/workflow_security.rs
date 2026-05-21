@@ -664,19 +664,24 @@ fn hosted_factor_walk_forward_can_dispatch_runtime_replay_request() {
     let workflow = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
     let mut offenders = Vec::new();
 
-    for needle in [
-        "auto_dispatch_runtime_replay",
-        "Dispatch runtime replay request",
-        "runtime_replay_request",
-        "runtime-replay-dispatch.json",
-        "runtime-replay-dispatch.md",
-        "RUNTIME_REPLAY_SHOULD_DISPATCH",
-        "gh workflow run runtime-candidate-replay.yml",
-        "-f runtime_score=\"${RUNTIME_REPLAY_RUNTIME_SCORE}\"",
-        "-f skip_settlement_exits=\"${RUNTIME_REPLAY_SKIP_SETTLEMENT_EXITS}\"",
-        "source_artifact_name",
-        "factor-walk-forward-v2-{os.environ['GITHUB_RUN_ID']}",
-    ] {
+	    for needle in [
+	        "auto_dispatch_runtime_replay",
+	        "Dispatch runtime replay request",
+	        "runtime_replay_request",
+	        "runtime-replay-dispatch.json",
+	        "runtime-replay-dispatch.md",
+	        "runtime_replay_options",
+	        "source_factor_walk_forward_run_id",
+	        "auto_dispatch_promotion_evaluation",
+	        "RUNTIME_REPLAY_OPTIONS_JSON",
+	        "RUNTIME_REPLAY_SHOULD_DISPATCH",
+	        "gh workflow run runtime-candidate-replay.yml",
+	        "-f runtime_score=\"${RUNTIME_REPLAY_RUNTIME_SCORE}\"",
+	        "-f skip_settlement_exits=\"${RUNTIME_REPLAY_SKIP_SETTLEMENT_EXITS}\"",
+	        "-f options_json=\"${RUNTIME_REPLAY_OPTIONS_JSON}\"",
+	        "source_artifact_name",
+	        "factor-walk-forward-v2-{os.environ['GITHUB_RUN_ID']}",
+	    ] {
         if !workflow.contains(needle) {
             offenders.push(format!(
                 "factor-walk-forward-v2-hosted-artifact.yml: missing `{needle}`"
@@ -806,18 +811,29 @@ fn runtime_candidate_replay_publishes_autofactor_promotion_followup() {
         ));
     }
 
-    for needle in [
-        "Write AutoFactor promotion follow-up",
-        "autofactor-promotion-options.json",
-        "autofactor-promotion-followup.json",
-        "autofactor-promotion-followup.md",
-        "\"candidate_strategy_replay_run_id\": run_id",
-        "\"candidate_strategy_replay_artifact_name\": artifact_name",
-        "\"requires_factor_walk_forward_run_id\": True",
-        "gh workflow run autofactor-strategy-promotion.yml",
-        "-f factor_walk_forward_run_id=<factor-walk-forward-run-id>",
-        "runtime-candidate-replay-${{ github.run_id }}",
-    ] {
+	    for needle in [
+	        "actions: write",
+	        "options_json:",
+	        "Parse replay options",
+	        "unknown options_json keys",
+	        "source_factor_walk_forward_run_id",
+	        "source_factor_walk_forward_run_id must be <run-id>:<artifact-name>",
+	        "auto_dispatch_promotion_evaluation",
+	        "Write AutoFactor promotion follow-up",
+	        "autofactor-promotion-options.json",
+	        "autofactor-promotion-followup.json",
+	        "autofactor-promotion-followup.md",
+	        "autofactor-promotion-dispatch.json",
+	        "\"candidate_strategy_replay_run_id\": run_id",
+	        "\"candidate_strategy_replay_artifact_name\": artifact_name",
+	        "\"requires_factor_walk_forward_run_id\": not bool(source_run_id)",
+	        "\"auto_dispatch_promotion_evaluation\": should_dispatch",
+	        "Dispatch AutoFactor promotion evaluation",
+	        "gh workflow run autofactor-strategy-promotion.yml",
+	        "factor_walk_forward_run_id=${PROMOTION_FACTOR_WALK_FORWARD_RUN_ID}",
+	        "options_json=${PROMOTION_OPTIONS_JSON}",
+	        "runtime-candidate-replay-${{ github.run_id }}",
+	    ] {
         if !workflow.contains(needle) {
             offenders.push(format!("runtime-candidate-replay.yml: missing `{needle}`"));
         }

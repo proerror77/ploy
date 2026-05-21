@@ -1,3 +1,60 @@
+# Runtime Replay Promotion Feedback Bridge (2026-05-21)
+
+## Goal
+
+Close the read-only runtime replay result back into the Research OS evidence
+loop: hosted walk-forward dispatches runtime replay with source context, runtime
+replay uploads the true `runtime_market_update_replay` artifact, then
+automatically re-runs AutoFactor promotion evaluation in no-issue/no-config mode
+to produce fresh handoff and trace artifacts.
+
+Evidence stage: `runtime_parity / research_os_feedback`.
+
+## Files / Ownership
+
+- `.github/workflows/runtime-candidate-replay.yml`
+  - Owner: advanced replay options, source walk-forward context, and
+    evaluator-only promotion feedback dispatch.
+- `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`
+  - Owner: pass source run/artifact context into runtime replay dispatches.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`,
+  `docs/runbooks/event-ml-automl-workflow.md`, and
+  `docs/superpowers/plans/2026-05-21-research-os-architecture-cutover.md`
+  - Owner: document the feedback boundary.
+- `tests/workflow_security.rs`
+  - Owner: enforce the 10-input limit and no-config feedback path.
+
+## Tasks
+
+- [x] Move runtime replay `min_roi` and source/promotion feedback fields into
+      `options_json`.
+- [x] Preserve hosted source factor-walk-forward run id and artifact name in
+      runtime replay dispatch options.
+- [x] Make runtime replay upload promotion follow-up and dispatch metadata.
+- [x] Dispatch AutoFactor promotion evaluation after runtime replay artifact
+      upload when source context is present.
+- [x] Keep automatic feedback evaluator-only: no handoff issue, no config PR,
+      no deploy.
+- [x] Run focused workflow/YAML validation and push.
+
+## Review
+
+- 2026-05-21: Closed the runtime replay feedback gap without reopening config
+  promotion. `runtime-candidate-replay.yml` now keeps advanced controls inside
+  `options_json`, preserving the 10-input dispatch limit while carrying
+  `min_roi`, source factor-walk-forward run/artifact, and evaluator feedback
+  settings. Hosted walk-forward runtime replay dispatches now pass that source
+  context, and runtime replay writes `autofactor-promotion-dispatch.json` before
+  optionally dispatching `autofactor-strategy-promotion.yml` in evaluator-only
+  mode with `create_handoff_issue=false` and `create_config_pr=false`.
+- 2026-05-21: Validation passed:
+  YAML parse for runtime candidate replay, hosted walk-forward, AutoFactor
+  promotion, and daily research workflows; `CARGO_TARGET_DIR=/tmp/ploy-research-os-feedback
+  rtk cargo test --locked --test workflow_security` (`27 passed`);
+  `python3 -m unittest tests.test_resolve_github_artifact
+  tests.test_alpha_search_closed_loop_agent tests.test_summarize_alpha_search_chain`
+  (`37 tests OK`); and `rtk git diff --check`.
+
 # Automated Research OS Orchestration (2026-05-21)
 
 ## Goal

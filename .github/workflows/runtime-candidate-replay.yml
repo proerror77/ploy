@@ -31,10 +31,6 @@ on:
         description: "Minimum entry fill rate required"
         required: false
         default: "0.30"
-      min_roi:
-        description: "Minimum replay ROI required"
-        required: false
-        default: "0"
       full_depth_entry:
         description: "Confirm this replay config uses full-depth executable entry accounting"
         required: false
@@ -43,6 +39,10 @@ on:
         options:
           - "true"
           - "false"
+      options_json:
+        description: "Advanced options JSON: min ROI, source walk-forward run, and promotion-feedback dispatch"
+        required: false
+        default: "{}"
       skip_settlement_exits:
         description: "Skip settlement exits while replaying; false is required for settlement PnL evidence"
         required: false
@@ -57,6 +57,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write
   issues: write
 
 env:
@@ -75,6 +76,88 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Parse replay options
+        env:
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
+          INPUT_STRATEGY_PROFILE: ${{ github.event.inputs.strategy_profile }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/runtime-replay
+          python3 - <<'PY'
+          import json
+          import os
+
+          raw = os.environ.get("OPTIONS_JSON") or "{}"
+          try:
+              options = json.loads(raw)
+          except json.JSONDecodeError as error:
+              raise SystemExit(f"options_json is not valid JSON: {error}") from error
+          if not isinstance(options, dict):
+              raise SystemExit("options_json must decode to an object")
+
+          defaults = {
+              "min_roi": "0",
+              "source_factor_walk_forward_run_id": "",
+              "source_factor_walk_forward_artifact_name": "",
+              "source_git_ref": "main",
+              "auto_dispatch_promotion_evaluation": "false",
+              "promotion_required_strategy_profile": "",
+              "promotion_allowed_target": "full_depth_settlement_executable_pnl",
+          }
+          unknown = sorted(set(options) - set(defaults))
+          if unknown:
+              raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
+          bool_keys = {"auto_dispatch_promotion_evaluation"}
+
+          def option_text(key: str, default: str = "") -> str:
+              value = options.get(key, default)
+              if isinstance(value, bool):
+                  return "true" if value else "false"
+              if value is None:
+                  return ""
+              if isinstance(value, (int, float)):
+                  return str(value)
+              if not isinstance(value, str):
+                  raise SystemExit(f"options_json.{key} must be a string, number, boolean, or null")
+              return value
+
+          values = {key: option_text(key, default) for key, default in defaults.items()}
+          for key in bool_keys:
+              if values[key].lower() not in {"true", "false"}:
+                  raise SystemExit(f"options_json.{key} must be boolean")
+              values[key] = values[key].lower()
+
+          source_run_id = values["source_factor_walk_forward_run_id"]
+          if ":" in source_run_id and not values["source_factor_walk_forward_artifact_name"]:
+              run_id, artifact_name = source_run_id.split(":", 1)
+              if not run_id or not artifact_name:
+                  raise SystemExit(
+                      "source_factor_walk_forward_run_id must be <run-id>:<artifact-name>"
+                  )
+              values["source_factor_walk_forward_run_id"] = run_id
+              values["source_factor_walk_forward_artifact_name"] = artifact_name
+
+          if not values["promotion_required_strategy_profile"]:
+              values["promotion_required_strategy_profile"] = os.environ.get(
+                  "INPUT_STRATEGY_PROFILE", "settlement_probability"
+              )
+
+          env = {
+              "REPLAY_MIN_ROI": values["min_roi"],
+              "SOURCE_FACTOR_WALK_FORWARD_RUN_ID": values["source_factor_walk_forward_run_id"],
+              "SOURCE_FACTOR_WALK_FORWARD_ARTIFACT_NAME": values["source_factor_walk_forward_artifact_name"],
+              "SOURCE_GIT_REF": values["source_git_ref"] or "main",
+              "AUTO_DISPATCH_PROMOTION_EVALUATION": values["auto_dispatch_promotion_evaluation"],
+              "PROMOTION_REQUIRED_STRATEGY_PROFILE": values["promotion_required_strategy_profile"],
+              "PROMOTION_ALLOWED_TARGET": values["promotion_allowed_target"],
+          }
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              for key, value in env.items():
+                  if "\n" in value or "\r" in value:
+                      raise SystemExit(f"options_json.{key} must be single-line")
+                  handle.write(f"{key}={value}\n")
+          PY
 
       - name: Build replay runner from workflow ref
         run: |
@@ -330,7 +413,6 @@ jobs:
           STRATEGY_PROFILE: ${{ github.event.inputs.strategy_profile }}
           MIN_TRADE_COUNT: ${{ github.event.inputs.min_trade_count }}
           MIN_FILL_RATE: ${{ github.event.inputs.min_fill_rate }}
-          MIN_ROI: ${{ github.event.inputs.min_roi }}
           FULL_DEPTH_ENTRY: ${{ github.event.inputs.full_depth_entry }}
         run: |
           set -euo pipefail
@@ -340,7 +422,7 @@ jobs:
             --strategy-profile "${STRATEGY_PROFILE}"
             --min-trade-count "${MIN_TRADE_COUNT}"
             --min-fill-rate "${MIN_FILL_RATE}"
-            --min-roi "${MIN_ROI}"
+            --min-roi "${REPLAY_MIN_ROI}"
             --evidence "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             --output-json artifacts/runtime-replay/candidate-strategy-replay.json
             --output-md artifacts/runtime-replay/candidate-strategy-replay.md
@@ -371,7 +453,17 @@ jobs:
           options = {
               "candidate_strategy_replay_run_id": run_id,
               "candidate_strategy_replay_artifact_name": artifact_name,
+              "create_handoff_issue": False,
+              "create_config_pr": False,
+              "fail_if_blocked": False,
           }
+          source_run_id = os.environ.get("SOURCE_FACTOR_WALK_FORWARD_RUN_ID", "").strip()
+          source_artifact = os.environ.get("SOURCE_FACTOR_WALK_FORWARD_ARTIFACT_NAME", "").strip()
+          source_git_ref = os.environ.get("SOURCE_GIT_REF", "main").strip() or "main"
+          should_dispatch = (
+              os.environ.get("AUTO_DISPATCH_PROMOTION_EVALUATION", "false") == "true"
+              and bool(source_run_id)
+          )
           payload = {
               "kind": "autofactor_promotion_followup",
               "runtime_candidate_replay_run_id": run_id,
@@ -379,9 +471,29 @@ jobs:
               "runtime_candidate_replay_url": run_url,
               "runtime_score": os.environ["RUNTIME_SCORE"],
               "strategy_profile": os.environ["STRATEGY_PROFILE"],
+              "source_factor_walk_forward_run_id": source_run_id,
+              "source_factor_walk_forward_artifact_name": source_artifact,
+              "source_git_ref": source_git_ref,
               "promotion_options_json": options,
               "promotion_workflow": "autofactor-strategy-promotion.yml",
-              "requires_factor_walk_forward_run_id": True,
+              "requires_factor_walk_forward_run_id": not bool(source_run_id),
+              "auto_dispatch_promotion_evaluation": should_dispatch,
+          }
+          dispatch = {
+              "kind": "autofactor_promotion_dispatch",
+              "should_dispatch": should_dispatch,
+              "blocked_reason": "" if should_dispatch else "missing_source_factor_walk_forward_run_id",
+              "workflow": "autofactor-strategy-promotion.yml",
+              "git_ref": source_git_ref,
+              "factor_walk_forward_run_id": source_run_id,
+              "artifact_name": source_artifact,
+              "required_strategy_profile": os.environ.get(
+                  "PROMOTION_REQUIRED_STRATEGY_PROFILE", os.environ["STRATEGY_PROFILE"]
+              ),
+              "allowed_target": os.environ.get(
+                  "PROMOTION_ALLOWED_TARGET", "full_depth_settlement_executable_pnl"
+              ),
+              "options_json": options,
           }
           out_dir = Path("artifacts/runtime-replay")
           out_dir.mkdir(parents=True, exist_ok=True)
@@ -393,12 +505,19 @@ jobs:
               json.dumps(payload, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
+          (out_dir / "autofactor-promotion-dispatch.json").write_text(
+              json.dumps(dispatch, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          factor_run_arg = source_run_id or "<factor-walk-forward-run-id>"
+          artifact_arg = f" -f artifact_name={shlex.quote(source_artifact)}" if source_artifact else ""
           command = (
               "gh workflow run autofactor-strategy-promotion.yml "
-              "-f git_ref=main "
-              "-f factor_walk_forward_run_id=<factor-walk-forward-run-id> "
-              f"-f required_strategy_profile={shlex.quote(os.environ['STRATEGY_PROFILE'])} "
-              "-f allowed_target=full_depth_settlement_executable_pnl "
+              f"-f git_ref={shlex.quote(source_git_ref)} "
+              f"-f factor_walk_forward_run_id={shlex.quote(factor_run_arg)}"
+              f"{artifact_arg} "
+              f"-f required_strategy_profile={shlex.quote(dispatch['required_strategy_profile'])} "
+              f"-f allowed_target={shlex.quote(dispatch['allowed_target'])} "
               f"-f options_json={shlex.quote(json.dumps(options, separators=(',', ':')))}"
           )
           (out_dir / "autofactor-promotion-followup.md").write_text(
@@ -410,6 +529,8 @@ jobs:
                       f"- Runtime replay artifact: `{artifact_name}`",
                       f"- Runtime score: `{os.environ['RUNTIME_SCORE']}`",
                       f"- Strategy profile: `{os.environ['STRATEGY_PROFILE']}`",
+                      f"- Source factor walk-forward run: `{source_run_id or 'required'}`",
+                      f"- Auto promotion evaluation dispatch: `{str(should_dispatch).lower()}`",
                       "",
                       "Use this replay artifact as the direct candidate strategy replay input for the source factor walk-forward run:",
                       "",
@@ -451,6 +572,57 @@ jobs:
           path: artifacts/runtime-replay/
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Dispatch AutoFactor promotion evaluation
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dispatch_path="artifacts/runtime-replay/autofactor-promotion-dispatch.json"
+          if [ ! -f "${dispatch_path}" ]; then
+            echo "Missing promotion dispatch metadata; skipping evaluator dispatch."
+            exit 0
+          fi
+          python3 - <<'PY' > artifacts/runtime-replay/autofactor-promotion-dispatch.env
+          import json
+          from pathlib import Path
+
+          dispatch = json.loads(Path("artifacts/runtime-replay/autofactor-promotion-dispatch.json").read_text(encoding="utf-8"))
+          env = {
+              "PROMOTION_SHOULD_DISPATCH": "true" if dispatch.get("should_dispatch") is True else "false",
+              "PROMOTION_GIT_REF": str(dispatch.get("git_ref") or "main"),
+              "PROMOTION_FACTOR_WALK_FORWARD_RUN_ID": str(dispatch.get("factor_walk_forward_run_id") or ""),
+              "PROMOTION_ARTIFACT_NAME": str(dispatch.get("artifact_name") or ""),
+              "PROMOTION_REQUIRED_STRATEGY_PROFILE": str(dispatch.get("required_strategy_profile") or "settlement_probability"),
+              "PROMOTION_ALLOWED_TARGET": str(dispatch.get("allowed_target") or "full_depth_settlement_executable_pnl"),
+              "PROMOTION_OPTIONS_JSON": json.dumps(dispatch.get("options_json") or {}, separators=(",", ":")),
+          }
+          for key, value in env.items():
+              if "\n" in value or "\r" in value:
+                  raise SystemExit(f"{key} must be single-line")
+              print(f"{key}={value}")
+          PY
+          # shellcheck disable=SC1091
+          . artifacts/runtime-replay/autofactor-promotion-dispatch.env
+          if [ "${PROMOTION_SHOULD_DISPATCH}" != "true" ]; then
+            echo "Promotion evaluator auto-dispatch disabled or missing source walk-forward run."
+            exit 0
+          fi
+          args=(
+            workflow run autofactor-strategy-promotion.yml
+            --ref "${PROMOTION_GIT_REF}"
+            -f "git_ref=${PROMOTION_GIT_REF}"
+            -f "factor_walk_forward_run_id=${PROMOTION_FACTOR_WALK_FORWARD_RUN_ID}"
+            -f "required_strategy_profile=${PROMOTION_REQUIRED_STRATEGY_PROFILE}"
+            -f "allowed_target=${PROMOTION_ALLOWED_TARGET}"
+            -f "options_json=${PROMOTION_OPTIONS_JSON}"
+          )
+          if [ -n "${PROMOTION_ARTIFACT_NAME}" ]; then
+            args+=(-f "artifact_name=${PROMOTION_ARTIFACT_NAME}")
+          fi
+          gh "${args[@]}"
+          echo "Dispatched AutoFactor promotion evaluator for factor walk-forward run ${PROMOTION_FACTOR_WALK_FORWARD_RUN_ID}."
 
       - name: Comment replay evidence on issue
         if: always()

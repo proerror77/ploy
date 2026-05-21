@@ -237,7 +237,11 @@ Manager can plan from trace/blocker state instead of scattered markdown. When
 `auto_dispatch_runtime_replay=true`, the hosted walk-forward run may dispatch
 `runtime-candidate-replay.yml` from the closed-loop
 `runtime_replay_request`. That is a read-only replay evidence step, not config
-promotion.
+promotion. Hosted-dispatched runtime replay carries the source walk-forward run
+inside its `options_json`; after uploading `runtime-candidate-replay-*`, it may
+dispatch `autofactor-strategy-promotion.yml` in evaluator-only mode to produce
+a fresh handoff and `autofactor-research-trace.json`. That evaluator feedback
+keeps `create_handoff_issue=false` and `create_config_pr=false`.
 
 The hosted factor walk-forward sweep can build a per-variant
 `candidate-strategy-replay.json` from the selected runtime-mappable top bucket
@@ -259,6 +263,9 @@ For AutoFactor candidates that are not yet deployed, use
 Tango config as a template, writes a temporary replay config, and overrides
 `three_layer_autofactor_runtime_score` with the supplied `runtime_score` before
 replaying. It does not edit the deployed config or restart a service.
+Advanced fields, including `min_roi`, source factor-walk-forward run id, and
+promotion-evaluator feedback dispatch, live in `options_json` so the workflow
+stays within GitHub's 10-input dispatch limit.
 
 ```bash
 python3 scripts/build_runtime_candidate_strategy_replay.py \

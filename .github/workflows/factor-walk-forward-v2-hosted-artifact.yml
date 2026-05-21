@@ -834,6 +834,7 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_GIT_REF: ${{ github.event.inputs.git_ref }}
         run: |
           set -euo pipefail
           dispatch_dir="artifacts/factor-walk-forward-v2-upload/alpha-search-chain"
@@ -879,7 +880,6 @@ jobs:
                       "strategy_profile",
                       "min_trade_count",
                       "min_fill_rate",
-                      "min_roi",
                       "full_depth_entry",
                       "skip_settlement_exits",
                   ]
@@ -887,7 +887,17 @@ jobs:
                   if missing:
                       record["blocked_reason"] = "runtime_replay_request_missing:" + ",".join(missing)
                   else:
+                      runtime_options = {
+                          "min_roi": str(inputs.get("min_roi", "0")),
+                          "source_factor_walk_forward_run_id": os.environ["GITHUB_RUN_ID"],
+                          "source_factor_walk_forward_artifact_name": f"factor-walk-forward-v2-{os.environ['GITHUB_RUN_ID']}",
+                          "source_git_ref": os.environ.get("SOURCE_GIT_REF") or os.environ.get("GITHUB_REF_NAME") or "main",
+                          "auto_dispatch_promotion_evaluation": True,
+                          "promotion_required_strategy_profile": str(inputs["strategy_profile"]),
+                          "promotion_allowed_target": "full_depth_settlement_executable_pnl",
+                      }
                       record["should_dispatch"] = True
+                      record["runtime_replay_options"] = runtime_options
                       env = {
                           "RUNTIME_REPLAY_SHOULD_DISPATCH": "true",
                           "RUNTIME_REPLAY_REF": str(request.get("git_ref") or os.environ.get("GITHUB_REF_NAME") or "main"),
@@ -898,9 +908,9 @@ jobs:
                           "RUNTIME_REPLAY_STRATEGY_PROFILE": str(inputs["strategy_profile"]),
                           "RUNTIME_REPLAY_MIN_TRADE_COUNT": str(inputs["min_trade_count"]),
                           "RUNTIME_REPLAY_MIN_FILL_RATE": str(inputs["min_fill_rate"]),
-                          "RUNTIME_REPLAY_MIN_ROI": str(inputs["min_roi"]),
                           "RUNTIME_REPLAY_FULL_DEPTH_ENTRY": str(inputs["full_depth_entry"]).lower(),
                           "RUNTIME_REPLAY_SKIP_SETTLEMENT_EXITS": str(inputs["skip_settlement_exits"]).lower(),
+                          "RUNTIME_REPLAY_OPTIONS_JSON": json.dumps(runtime_options, separators=(",", ":")),
                       }
           else:
               record["blocked_reason"] = "no_runtime_candidate_replay_request"
@@ -947,9 +957,9 @@ jobs:
             -f strategy_profile="${RUNTIME_REPLAY_STRATEGY_PROFILE}" \
             -f min_trade_count="${RUNTIME_REPLAY_MIN_TRADE_COUNT}" \
             -f min_fill_rate="${RUNTIME_REPLAY_MIN_FILL_RATE}" \
-            -f min_roi="${RUNTIME_REPLAY_MIN_ROI}" \
             -f full_depth_entry="${RUNTIME_REPLAY_FULL_DEPTH_ENTRY}" \
-            -f skip_settlement_exits="${RUNTIME_REPLAY_SKIP_SETTLEMENT_EXITS}"
+            -f skip_settlement_exits="${RUNTIME_REPLAY_SKIP_SETTLEMENT_EXITS}" \
+            -f options_json="${RUNTIME_REPLAY_OPTIONS_JSON}"
           cat "${dispatch_dir}/runtime-replay-dispatch.md"
 
       - name: Upload report artifact

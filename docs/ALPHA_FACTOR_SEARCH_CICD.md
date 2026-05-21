@@ -290,7 +290,13 @@ directly with `options_json.candidate_strategy_replay_run_id`.
 `autofactor-promotion-options.json` and
 `autofactor-promotion-followup.{json,md}` so the replay artifact can be fed
 back into the promotion evaluator without hand-building the `options_json`
-payload.
+payload. When a hosted walk-forward run dispatches runtime replay from a
+closed-loop request, it passes the source factor walk-forward run through
+`runtime-candidate-replay.yml` `options_json`; after the replay artifact is
+uploaded, the replay workflow automatically dispatches
+`autofactor-strategy-promotion.yml` in evaluator-only mode. That feedback
+workflow emits `autofactor-research-trace.json` for the next Research Manager
+cycle, but still sets `create_handoff_issue=false` and `create_config_pr=false`.
 
 Promotion mapping must fail closed when runtime scorer semantics are not proven
 to match the research DSL. Current unsupported runtime-promotion families
@@ -565,10 +571,12 @@ walk-forward path with handoff/config mutation disabled. Pass
 current compact snapshots the daily workflow defaults this to `2` so the
 hosted walk-forward validator does not reject the snapshot.
 `auto_dispatch_runtime_replay=true` allows the hosted run to execute a
-read-only runtime replay request emitted by the closed-loop classifier. It still
-does not promote a candidate. `run_mode=promote_handoff` records that a manual
-handoff review is required; it does not edit strategy configs or touch runtime
-services.
+read-only runtime replay request emitted by the closed-loop classifier. The
+runtime replay can then automatically re-run the promotion evaluator only to
+produce updated handoff/trace evidence. It still does not promote a candidate,
+create a config PR, or touch runtime services. `run_mode=promote_handoff`
+records that a manual handoff review is required; it does not edit strategy
+configs or touch runtime services.
 
 ## Event-Level Promotion Gate
 
@@ -679,6 +687,10 @@ Current implementation status:
   `runtime_replay_request` into a guarded `runtime-candidate-replay.yml`
   dispatch when `options_json.auto_dispatch_runtime_replay=true`, while keeping
   config PR and handoff creation behind explicit legacy promotion controls.
+- Implemented: runtime replay artifacts dispatched from hosted walk-forward can
+  automatically feed the exact replay run back into
+  `autofactor-strategy-promotion.yml` evaluator-only mode, producing a fresh
+  Research OS trace without opening issues, PRs, or deployments.
 - Implemented: AutoFactor promotion now fail-closes on missing or repeated
   top-bucket event decisions, so dry-run handoff cannot count repeated rows
   from the same event as independent deployable trades.
