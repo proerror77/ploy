@@ -1,3 +1,67 @@
+# Automated Research OS Orchestration (2026-05-21)
+
+## Goal
+
+Move FactorEvolve from manually supplied research run ids toward an automated
+research-only loop: latest retained snapshot/trace resolution, scheduled daily
+planning, hosted walk-forward dispatch, and guarded runtime replay evidence
+dispatch from closed-loop decisions.
+
+Evidence stage: `walk_forward / runtime_parity orchestration`.
+
+## Files / Ownership
+
+- `scripts/resolve_github_artifact.py`
+  - Owner: resolve retained GitHub artifacts by prefix and required contract
+    files.
+- `.github/workflows/factor-evolve-daily-research.yml`
+  - Owner: scheduled daily Research OS orchestration and latest artifact
+    resolution.
+- `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`
+  - Owner: convert closed-loop runtime replay requests into guarded replay
+    workflow dispatches.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`,
+  `docs/runbooks/event-ml-automl-workflow.md`, and
+  `docs/superpowers/plans/2026-05-21-research-os-architecture-cutover.md`
+  - Owner: document the automated research boundary.
+- `tests/test_resolve_github_artifact.py` and `tests/workflow_security.rs`
+  - Owner: resolver and workflow contract coverage.
+
+## Tasks
+
+- [x] Add a resolver for latest retained full snapshot and Research OS trace
+      artifacts.
+- [x] Add scheduled daily research with automatic snapshot/trace resolution.
+- [x] Keep daily search research-only and keep config/handoff promotion
+      explicit.
+- [x] Add hosted runtime replay auto-dispatch behind
+      `options_json.auto_dispatch_runtime_replay`.
+- [x] Preserve runtime replay dispatch records in uploaded alpha-search-chain
+      artifacts.
+- [x] Run focused Python, YAML, workflow-security, and diff validation.
+- [x] Commit and push the orchestration migration.
+
+## Review
+
+- 2026-05-21: Added retained artifact resolution for scheduled daily Research
+  OS runs, preserving research-only hosted search dispatch while removing the
+  manual `snapshot_run_id` requirement when a full retained snapshot exists.
+  Hosted walk-forward can now write a runtime replay dispatch record and trigger
+  `runtime-candidate-replay.yml` from a closed-loop
+  `runtime_replay_request` when `auto_dispatch_runtime_replay=true`; config PR
+  and handoff creation remain explicit legacy promotion actions.
+- 2026-05-21: Validation passed so far:
+  `python3 -m py_compile scripts/download_github_artifact.py
+  scripts/resolve_github_artifact.py tests/test_resolve_github_artifact.py`;
+  `python3 -m unittest tests.test_resolve_github_artifact
+  tests.test_alpha_search_closed_loop_agent tests.test_summarize_alpha_search_chain`
+  (`37 tests OK`); YAML parse for daily research, hosted walk-forward,
+  runtime candidate replay, and AutoFactor promotion workflows; `CARGO_TARGET_DIR=/tmp/ploy-research-os-orchestration
+  rtk cargo test --locked --test workflow_security` (`27 passed`); and
+  `rtk git diff --check`.
+- 2026-05-21: Landed as `Automate FactorEvolve research orchestration` on
+  `fix/autofactor-runtime-feedback`.
+
 # Research OS Architecture Cutover (2026-05-21)
 
 ## Goal

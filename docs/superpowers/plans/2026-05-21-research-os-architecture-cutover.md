@@ -10,6 +10,29 @@
 
 ---
 
+## Task 8: Automate Daily Evidence Orchestration
+
+**Files:**
+- Create: `scripts/resolve_github_artifact.py`
+- Modify: `.github/workflows/factor-evolve-daily-research.yml`
+- Modify: `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`
+- Modify: `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+- Modify: `docs/runbooks/event-ml-automl-workflow.md`
+- Test: `tests/test_resolve_github_artifact.py`
+- Test: `tests/workflow_security.rs`
+
+- [x] Add a retained artifact resolver for latest full `research-snapshot-*`
+      and latest `autofactor-research-trace.json` artifacts.
+- [x] Add a scheduled daily research entrypoint that can run without manually
+      supplied snapshot or trace run ids.
+- [x] Keep daily search in `research_chain_mode=research_only` and preserve
+      explicit legacy promotion/config boundaries.
+- [x] Let hosted walk-forward dispatch `runtime-candidate-replay.yml` only when
+      `closed-loop-decision.json` contains a runtime replay request and
+      `options_json.auto_dispatch_runtime_replay=true`.
+- [x] Record runtime replay dispatch intent in the uploaded alpha-search-chain
+      artifact before dispatching.
+
 ## Boundary Map
 
 - New Research OS plane:
@@ -178,4 +201,9 @@ Research is restored when a `factor-evolve-daily-research.yml run_mode=search` d
 - `alpha-search-chain/closed-loop-decision.json`
 - `autofactor-research-trace.json` when promotion evaluation is explicitly requested
 
-Dry-run/config promotion is restored separately when a runtime replay artifact with `basis=runtime_market_update_replay` is fed into `autofactor-strategy-promotion.yml` in explicit legacy promotion mode.
+Scheduled research is restored when the daily workflow can resolve a retained
+full snapshot artifact automatically and dispatch the hosted walk-forward path.
+Runtime replay evidence may be dispatched automatically from the closed-loop
+request, but dry-run/config promotion is restored separately when a runtime
+replay artifact with `basis=runtime_market_update_replay` is fed into
+`autofactor-strategy-promotion.yml` in explicit legacy promotion mode.

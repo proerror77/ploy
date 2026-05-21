@@ -619,6 +619,90 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
 }
 
 #[test]
+fn factor_evolve_daily_resolves_artifacts_before_dispatch() {
+    let workflow = workflow_contents(".github/workflows/factor-evolve-daily-research.yml");
+    let dispatch_inputs = workflow_dispatch_input_names(&workflow);
+    let mut offenders = Vec::new();
+
+    if dispatch_inputs.len() > 10 {
+        offenders.push(format!(
+            "factor-evolve-daily-research.yml: workflow_dispatch has {} inputs; artifact resolution must not exceed the GitHub limit",
+            dispatch_inputs.len()
+        ));
+    }
+
+    for needle in [
+        "schedule:",
+        "Resolve daily research inputs",
+        "scripts/resolve_github_artifact.py",
+        "--artifact-prefix research-snapshot-",
+        "--artifact-prefix autofactor-strategy-promotion-",
+        "--require feature-snapshot-manifest.json",
+        "--require autofactor-research-trace.json",
+        "RESOLVED_SNAPSHOT_RUN_ID",
+        "RESOLVED_TRACE_RUN_ID",
+        "auto_dispatch_runtime_replay",
+        "\"auto_dispatch_runtime_replay\": auto_runtime",
+        "-f snapshot_artifact_name=\"${RESOLVED_SNAPSHOT_ARTIFACT_NAME:-}\"",
+    ] {
+        if !workflow.contains(needle) {
+            offenders.push(format!(
+                "factor-evolve-daily-research.yml: missing `{needle}`"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "daily Research OS artifact-resolution guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn hosted_factor_walk_forward_can_dispatch_runtime_replay_request() {
+    let workflow = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "auto_dispatch_runtime_replay",
+        "Dispatch runtime replay request",
+        "runtime_replay_request",
+        "runtime-replay-dispatch.json",
+        "runtime-replay-dispatch.md",
+        "RUNTIME_REPLAY_SHOULD_DISPATCH",
+        "gh workflow run runtime-candidate-replay.yml",
+        "-f runtime_score=\"${RUNTIME_REPLAY_RUNTIME_SCORE}\"",
+        "-f skip_settlement_exits=\"${RUNTIME_REPLAY_SKIP_SETTLEMENT_EXITS}\"",
+        "source_artifact_name",
+        "factor-walk-forward-v2-{os.environ['GITHUB_RUN_ID']}",
+    ] {
+        if !workflow.contains(needle) {
+            offenders.push(format!(
+                "factor-walk-forward-v2-hosted-artifact.yml: missing `{needle}`"
+            ));
+        }
+    }
+
+    let dispatch_index = workflow
+        .find("Dispatch runtime replay request")
+        .unwrap_or(usize::MAX);
+    let upload_index = workflow.find("Upload report artifact").unwrap_or(0);
+    if dispatch_index > upload_index {
+        offenders.push(
+            "factor-walk-forward-v2-hosted-artifact.yml: runtime replay dispatch record must be written before artifact upload"
+                .to_string(),
+        );
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "hosted runtime replay dispatch guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn autofactor_promotion_can_download_runtime_candidate_replay_directly() {
     let workflow = workflow_contents(".github/workflows/autofactor-strategy-promotion.yml");
     let dispatch_inputs = workflow_dispatch_input_names(&workflow);

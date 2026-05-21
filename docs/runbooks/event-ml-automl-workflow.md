@@ -228,6 +228,17 @@ Research-only runs produce walk-forward and alpha-search artifacts for closed
 loop planning; they do not build aggregate candidate replay artifacts, run the
 promotion evaluator, create handoff issues, or edit runtime config.
 
+The daily Research OS workflow can run on schedule. In `run_mode=search`, an
+empty `snapshot_run_id` means "resolve the newest retained full
+`research-snapshot-*` artifact"; it must still contain the feature snapshot
+manifest and quality report or the run fails closed. The same resolver attaches
+the newest retained AutoFactor research trace when available so the Research
+Manager can plan from trace/blocker state instead of scattered markdown. When
+`auto_dispatch_runtime_replay=true`, the hosted walk-forward run may dispatch
+`runtime-candidate-replay.yml` from the closed-loop
+`runtime_replay_request`. That is a read-only replay evidence step, not config
+promotion.
+
 The hosted factor walk-forward sweep can build a per-variant
 `candidate-strategy-replay.json` from the selected runtime-mappable top bucket
 when no external artifact is supplied. That generated artifact has

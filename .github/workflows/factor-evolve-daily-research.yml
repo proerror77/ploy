@@ -1,6 +1,10 @@
 name: FactorEvolve Daily Research
 
 on:
+  schedule:
+    # Research-only scheduled run. Snapshot/trace artifacts are resolved at
+    # runtime; config promotion remains an explicit operator action.
+    - cron: "17 20 * * *"
   workflow_dispatch:
     inputs:
       git_ref:
@@ -45,9 +49,14 @@ on:
         required: true
         type: boolean
         default: false
+      auto_dispatch_runtime_replay:
+        description: "Dispatch runtime-candidate-replay.yml when closed-loop search requests it"
+        required: true
+        type: boolean
+        default: true
 
 concurrency:
-  group: factor-evolve-daily-research-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.run_mode }}
+  group: factor-evolve-daily-research-${{ github.event.inputs.git_ref || 'main' }}-${{ github.event.inputs.run_mode || 'search' }}
   cancel-in-progress: false
 
 permissions:
@@ -69,32 +78,137 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.git_ref }}
+          ref: ${{ github.event.inputs.git_ref || 'main' }}
 
-      - name: Download Research OS trace artifact
-        if: ${{ github.event.inputs.research_trace_run_id != '' }}
+      - name: Resolve daily research inputs
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RESEARCH_TRACE_RUN_ID: ${{ github.event.inputs.research_trace_run_id }}
-          RESEARCH_TRACE_ARTIFACT_NAME: ${{ github.event.inputs.research_trace_artifact_name }}
+          INPUT_GIT_REF: ${{ github.event.inputs.git_ref }}
+          INPUT_SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
+          INPUT_SYMBOLS: ${{ github.event.inputs.symbols }}
+          INPUT_MAX_QUOTE_AGE_SECS: ${{ github.event.inputs.max_quote_age_secs }}
+          INPUT_RESEARCH_BUDGET_JSON: ${{ github.event.inputs.research_budget_json }}
+          INPUT_RESEARCH_TRACE_RUN_ID: ${{ github.event.inputs.research_trace_run_id }}
+          INPUT_RESEARCH_TRACE_ARTIFACT_NAME: ${{ github.event.inputs.research_trace_artifact_name }}
+          INPUT_RUN_MODE: ${{ github.event.inputs.run_mode }}
+          INPUT_CREATE_ISSUE: ${{ github.event.inputs.create_issue }}
+          INPUT_AUTO_DISPATCH_RUNTIME_REPLAY: ${{ github.event.inputs.auto_dispatch_runtime_replay }}
         run: |
           set -euo pipefail
+          mkdir -p artifacts/factor-evolve-daily
+          resolved_env="artifacts/factor-evolve-daily/resolved-inputs.env"
+          : > "${resolved_env}"
+
+          git_ref="${INPUT_GIT_REF:-main}"
+          run_mode="${INPUT_RUN_MODE:-}"
+          if [ -z "${run_mode}" ]; then
+            if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+              run_mode="search"
+            else
+              run_mode="plan_only"
+            fi
+          fi
+          symbols="${INPUT_SYMBOLS:-BTCUSDT,ETHUSDT}"
+          max_quote_age_secs="${INPUT_MAX_QUOTE_AGE_SECS:-2}"
+          research_budget_json="${INPUT_RESEARCH_BUDGET_JSON:-}"
+          if [ -z "${research_budget_json}" ]; then
+            research_budget_json='{"max_candidates_per_day":20,"max_backtests_per_day":4,"max_llm_calls_per_day":1}'
+          fi
+          create_issue="${INPUT_CREATE_ISSUE:-false}"
+          auto_dispatch_runtime_replay="${INPUT_AUTO_DISPATCH_RUNTIME_REPLAY:-true}"
+
+          {
+            echo "FE_GIT_REF=${git_ref}"
+            echo "FE_RUN_MODE=${run_mode}"
+            echo "FE_SYMBOLS=${symbols}"
+            echo "FE_MAX_QUOTE_AGE_SECS=${max_quote_age_secs}"
+            echo "FE_CREATE_ISSUE=${create_issue}"
+            echo "FE_AUTO_DISPATCH_RUNTIME_REPLAY=${auto_dispatch_runtime_replay}"
+          } >> "${resolved_env}"
+          {
+            echo "FE_RESEARCH_BUDGET_JSON<<EOF"
+            echo "${research_budget_json}"
+            echo "EOF"
+          } >> "${GITHUB_ENV}"
+
+          if [ "${run_mode}" = "search" ]; then
+            if [ -n "${INPUT_SNAPSHOT_RUN_ID:-}" ]; then
+              {
+                echo "RESOLVED_SNAPSHOT_FOUND=true"
+                echo "RESOLVED_SNAPSHOT_RUN_ID=${INPUT_SNAPSHOT_RUN_ID}"
+                echo "RESOLVED_SNAPSHOT_ARTIFACT_NAME="
+                echo "RESOLVED_SNAPSHOT_ARTIFACT_ID="
+              } >> "${resolved_env}"
+            else
+              python3 scripts/resolve_github_artifact.py \
+                --artifact-prefix research-snapshot- \
+                --branch "${git_ref}" \
+                --fallback-any-branch \
+                --require manifest.json \
+                --require feature-snapshot-manifest.json \
+                --require quality.md \
+                --output-json artifacts/factor-evolve-daily/resolved-snapshot.json \
+                --github-env "${resolved_env}" \
+                --env-prefix RESOLVED_SNAPSHOT
+            fi
+          else
+            {
+              echo "RESOLVED_SNAPSHOT_FOUND=false"
+              echo "RESOLVED_SNAPSHOT_RUN_ID=${INPUT_SNAPSHOT_RUN_ID:-}"
+              echo "RESOLVED_SNAPSHOT_ARTIFACT_NAME="
+              echo "RESOLVED_SNAPSHOT_ARTIFACT_ID="
+            } >> "${resolved_env}"
+          fi
+
+          if [ -n "${INPUT_RESEARCH_TRACE_RUN_ID:-}" ]; then
+            trace_artifact="${INPUT_RESEARCH_TRACE_ARTIFACT_NAME:-autofactor-strategy-promotion-${INPUT_RESEARCH_TRACE_RUN_ID}}"
+            {
+              echo "RESOLVED_TRACE_FOUND=true"
+              echo "RESOLVED_TRACE_RUN_ID=${INPUT_RESEARCH_TRACE_RUN_ID}"
+              echo "RESOLVED_TRACE_ARTIFACT_NAME=${trace_artifact}"
+              echo "RESOLVED_TRACE_ARTIFACT_ID="
+            } >> "${resolved_env}"
+          else
+            python3 scripts/resolve_github_artifact.py \
+              --artifact-prefix autofactor-strategy-promotion- \
+              --branch "${git_ref}" \
+              --fallback-any-branch \
+              --require autofactor-research-trace.json \
+              --allow-missing \
+              --output-json artifacts/factor-evolve-daily/resolved-research-trace.json \
+              --github-env "${resolved_env}" \
+              --env-prefix RESOLVED_TRACE
+          fi
+
+          cat "${resolved_env}" >> "${GITHUB_ENV}"
+          # shellcheck disable=SC1090
+          . "${resolved_env}"
+          if [ "${FE_RUN_MODE}" = "search" ] && [ "${RESOLVED_SNAPSHOT_FOUND}" != "true" ]; then
+            echo "run_mode=search requires a retained full research snapshot artifact." >&2
+            exit 1
+          fi
+
+      - name: Download Research OS trace artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RESOLVED_TRACE_RUN_ID:-}" ]; then
+            echo "No retained AutoFactor research trace artifact resolved; continuing without trace input."
+            exit 0
+          fi
           mkdir -p artifacts/factor-evolve-daily/research-trace
-          artifact_name="${RESEARCH_TRACE_ARTIFACT_NAME}"
+          artifact_name="${RESOLVED_TRACE_ARTIFACT_NAME:-}"
           if [ -z "${artifact_name}" ]; then
-            artifact_name="autofactor-strategy-promotion-${RESEARCH_TRACE_RUN_ID}"
+            artifact_name="autofactor-strategy-promotion-${RESOLVED_TRACE_RUN_ID}"
           fi
           python3 scripts/download_github_artifact.py \
-            --run-id "${RESEARCH_TRACE_RUN_ID}" \
+            --run-id "${RESOLVED_TRACE_RUN_ID}" \
             --name "${artifact_name}" \
             --output-dir artifacts/factor-evolve-daily/research-trace \
             --require autofactor-research-trace.json
 
       - name: Validate inputs and write planner payload
-        env:
-          RESEARCH_BUDGET_JSON: ${{ github.event.inputs.research_budget_json }}
-          RUN_MODE: ${{ github.event.inputs.run_mode }}
-          SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
         run: |
           set -euo pipefail
           mkdir -p artifacts/factor-evolve-daily
@@ -103,13 +217,13 @@ jobs:
           import os
           from pathlib import Path
 
-          run_mode = os.environ["RUN_MODE"]
+          run_mode = os.environ["FE_RUN_MODE"]
           if run_mode not in {"plan_only", "search", "promote_handoff"}:
               raise SystemExit(f"unsupported run_mode: {run_mode}")
-          if run_mode == "search" and not os.environ.get("SNAPSHOT_RUN_ID", "").strip():
+          if run_mode == "search" and not os.environ.get("RESOLVED_SNAPSHOT_RUN_ID", "").strip():
               raise SystemExit("snapshot_run_id is required when run_mode=search")
 
-          budget = json.loads(os.environ.get("RESEARCH_BUDGET_JSON") or "{}")
+          budget = json.loads(os.environ.get("FE_RESEARCH_BUDGET_JSON") or "{}")
           required = {"max_candidates_per_day", "max_backtests_per_day", "max_llm_calls_per_day"}
           if not isinstance(budget, dict) or not required.issubset(budget):
               raise SystemExit(f"research_budget_json must contain: {', '.join(sorted(required))}")
@@ -150,12 +264,6 @@ jobs:
             "${trace_args[@]}"
 
       - name: Write daily summary
-        env:
-          GIT_REF: ${{ github.event.inputs.git_ref }}
-          RUN_MODE: ${{ github.event.inputs.run_mode }}
-          SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
-          RESEARCH_TRACE_RUN_ID: ${{ github.event.inputs.research_trace_run_id }}
-          SYMBOLS: ${{ github.event.inputs.symbols }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -167,11 +275,14 @@ jobs:
           lines = [
               "# FactorEvolve Daily Research",
               "",
-              f"- Git ref: `{os.environ['GIT_REF']}`",
-              f"- Run mode: `{os.environ['RUN_MODE']}`",
-              f"- Snapshot run: `{os.environ.get('SNAPSHOT_RUN_ID') or 'none'}`",
-              f"- Research trace run: `{os.environ.get('RESEARCH_TRACE_RUN_ID') or 'none'}`",
-              f"- Symbols: `{os.environ.get('SYMBOLS') or 'BTCUSDT,ETHUSDT'}`",
+              f"- Git ref: `{os.environ['FE_GIT_REF']}`",
+              f"- Run mode: `{os.environ['FE_RUN_MODE']}`",
+              f"- Snapshot run: `{os.environ.get('RESOLVED_SNAPSHOT_RUN_ID') or 'none'}`",
+              f"- Snapshot artifact: `{os.environ.get('RESOLVED_SNAPSHOT_ARTIFACT_NAME') or 'default'}`",
+              f"- Research trace run: `{os.environ.get('RESOLVED_TRACE_RUN_ID') or 'none'}`",
+              f"- Research trace artifact: `{os.environ.get('RESOLVED_TRACE_ARTIFACT_NAME') or 'none'}`",
+              f"- Symbols: `{os.environ.get('FE_SYMBOLS') or 'BTCUSDT,ETHUSDT'}`",
+              f"- Auto runtime replay dispatch: `{os.environ.get('FE_AUTO_DISPATCH_RUNTIME_REPLAY') or 'false'}`",
               f"- Plan theme: `{plan['theme']}`",
               f"- Evidence stage: `{plan['evidence_stage']}`",
               f"- Candidate count: `{plan['candidate_count']}`",
@@ -186,24 +297,25 @@ jobs:
           cat artifacts/factor-evolve-daily/summary.md >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Dispatch hosted search
-        if: ${{ github.event.inputs.run_mode == 'search' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          GIT_REF: ${{ github.event.inputs.git_ref }}
-          SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
-          SYMBOLS: ${{ github.event.inputs.symbols }}
-          MAX_QUOTE_AGE_SECS: ${{ github.event.inputs.max_quote_age_secs }}
         run: |
           set -euo pipefail
+          if [ "${FE_RUN_MODE}" != "search" ]; then
+            echo "run_mode=${FE_RUN_MODE}; skipping hosted search dispatch."
+            exit 0
+          fi
           python3 - <<'PY' > artifacts/factor-evolve-daily/hosted-options.json
           import json
           import os
 
-          max_quote_age_secs = os.environ.get("MAX_QUOTE_AGE_SECS", "2").strip() or "2"
+          max_quote_age_secs = os.environ.get("FE_MAX_QUOTE_AGE_SECS", "2").strip() or "2"
+          auto_runtime = str(os.environ.get("FE_AUTO_DISPATCH_RUNTIME_REPLAY", "true")).lower() == "true"
           print(json.dumps({
               "chain_next_run": False,
               "chain_remaining": 0,
               "research_chain_mode": "research_only",
+              "auto_dispatch_runtime_replay": auto_runtime,
               "create_handoff_issue": False,
               "create_config_pr": False,
               "fail_if_blocked": False,
@@ -215,20 +327,24 @@ jobs:
           }, separators=(",", ":")))
           PY
           gh workflow run factor-walk-forward-v2-hosted-artifact.yml \
-            --ref "${GIT_REF}" \
-            -f git_ref="${GIT_REF}" \
-            -f snapshot_run_id="${SNAPSHOT_RUN_ID}" \
+            --ref "${FE_GIT_REF}" \
+            -f git_ref="${FE_GIT_REF}" \
+            -f snapshot_run_id="${RESOLVED_SNAPSHOT_RUN_ID}" \
+            -f snapshot_artifact_name="${RESOLVED_SNAPSHOT_ARTIFACT_NAME:-}" \
             -f start_date=auto \
             -f end_date=auto \
-            -f symbols="${SYMBOLS:-BTCUSDT,ETHUSDT}" \
+            -f symbols="${FE_SYMBOLS:-BTCUSDT,ETHUSDT}" \
             -f options_json="$(cat artifacts/factor-evolve-daily/hosted-options.json)"
-          echo "Dispatched hosted FactorEvolve search from snapshot ${SNAPSHOT_RUN_ID} for ${SYMBOLS:-BTCUSDT,ETHUSDT}." \
+          echo "Dispatched hosted FactorEvolve search from snapshot ${RESOLVED_SNAPSHOT_RUN_ID} for ${FE_SYMBOLS:-BTCUSDT,ETHUSDT}." \
             | tee artifacts/factor-evolve-daily/search-dispatch.txt
 
       - name: Record handoff review boundary
-        if: ${{ github.event.inputs.run_mode == 'promote_handoff' }}
         run: |
           set -euo pipefail
+          if [ "${FE_RUN_MODE}" != "promote_handoff" ]; then
+            echo "run_mode=${FE_RUN_MODE}; skipping handoff review boundary."
+            exit 0
+          fi
           cat > artifacts/factor-evolve-daily/handoff-review-required.md <<'EOF'
           # Handoff Review Required
 
@@ -238,11 +354,14 @@ jobs:
           EOF
 
       - name: Create tracking issue
-        if: ${{ github.event.inputs.create_issue == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if [ "${FE_CREATE_ISSUE}" != "true" ]; then
+            echo "create_issue=${FE_CREATE_ISSUE}; skipping issue creation."
+            exit 0
+          fi
           gh issue create \
             --title "FactorEvolve daily research plan $(date -u +%Y-%m-%d)" \
             --body-file artifacts/factor-evolve-daily/summary.md \

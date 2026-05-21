@@ -86,6 +86,17 @@ does not create handoff issues or config PRs. The old
 candidate-replay/promotion/config bridge remains available only through
 explicit legacy promotion mode and the dedicated promotion workflow.
 
+`factor-evolve-daily-research.yml` now has a scheduled research-only entrypoint.
+When `run_mode=search` and no `snapshot_run_id` is supplied, it resolves the
+newest retained `research-snapshot-*` artifact that still contains
+`manifest.json`, `feature-snapshot-manifest.json`, and `quality.md`; it also
+attaches the newest retained `autofactor-research-trace.json` when one is
+available. The hosted walk-forward workflow can then dispatch
+`runtime-candidate-replay.yml` from `closed-loop-decision.json` when
+`options_json.auto_dispatch_runtime_replay=true`. That replay is still
+research evidence only: it does not edit deployed configs, restart services, or
+create a promotion PR.
+
 The implemented search controller is intentionally bounded. It is currently a
 typed, deterministic formula-search and MCTS-planning layer rather than a
 free-form code generator:
@@ -534,24 +545,30 @@ This command is plan-only evidence. It does not run searches, create PRs,
 deploy services, or resume dry-run/live strategies.
 
 The CI entrypoint for the daily loop is
-`.github/workflows/factor-evolve-daily-research.yml`. Its first version is an
-orchestrator, not a strategy mutator:
+`.github/workflows/factor-evolve-daily-research.yml`. It is an orchestrator, not
+a strategy mutator:
 
 ```text
-typed budget and latest evidence
+typed budget and latest retained evidence
+  -> latest snapshot / trace resolution
   -> factor_evolve_daily_plan
   -> optional hosted artifact search dispatch
+  -> optional runtime-candidate replay dispatch from closed-loop decision
   -> daily plan artifact / optional tracking issue
 ```
 
 `run_mode=plan_only` emits the Research Manager plan only. `run_mode=search`
-requires a retained research snapshot and dispatches the hosted artifact
+uses the supplied `snapshot_run_id` or resolves the newest retained full
+research snapshot automatically, then dispatches the hosted artifact
 walk-forward path with handoff/config mutation disabled. Pass
 `max_quote_age_secs` to match the retained snapshot compile setting; for the
 current compact snapshots the daily workflow defaults this to `2` so the
-hosted walk-forward validator does not reject the snapshot. `run_mode=promote_handoff`
-records that a manual handoff review is required; it does not edit strategy
-configs or touch runtime services.
+hosted walk-forward validator does not reject the snapshot.
+`auto_dispatch_runtime_replay=true` allows the hosted run to execute a
+read-only runtime replay request emitted by the closed-loop classifier. It still
+does not promote a candidate. `run_mode=promote_handoff` records that a manual
+handoff review is required; it does not edit strategy configs or touch runtime
+services.
 
 ## Event-Level Promotion Gate
 
@@ -655,6 +672,13 @@ Current implementation status:
   hosted workflow requires `closed-loop-decision.json` and dispatches only when
   it contains `allow_dispatch=true`; older chain decisions alone cannot trigger
   the next run.
+- Implemented: the daily workflow can resolve the latest retained full research
+  snapshot and Research OS trace artifact, and scheduled research-only runs can
+  dispatch hosted walk-forward without an operator-supplied run id.
+- Implemented: the hosted walk-forward workflow can convert a closed-loop
+  `runtime_replay_request` into a guarded `runtime-candidate-replay.yml`
+  dispatch when `options_json.auto_dispatch_runtime_replay=true`, while keeping
+  config PR and handoff creation behind explicit legacy promotion controls.
 - Implemented: AutoFactor promotion now fail-closes on missing or repeated
   top-bucket event decisions, so dry-run handoff cannot count repeated rows
   from the same event as independent deployable trades.
