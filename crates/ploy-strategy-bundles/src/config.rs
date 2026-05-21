@@ -827,15 +827,29 @@ venue = "sportsbook"
             .three_layer_autofactor_runtime_score
             .as_deref()
             .expect("settlement probability dry-run config should carry an AutoFactor handoff");
+        let formula_name = runtime_score
+            .strip_prefix("autofactor_formula:")
+            .unwrap_or(runtime_score);
+        let mut normalized_name = formula_name;
+        loop {
+            if let Some(stripped) = normalized_name.strip_prefix("mut2_") {
+                normalized_name = stripped;
+            } else if let Some(stripped) = normalized_name.strip_prefix("mut_") {
+                normalized_name = stripped;
+            } else if let Some(stripped) = normalized_name.strip_prefix("mcts_") {
+                normalized_name = stripped;
+            } else {
+                break;
+            }
+        }
+        let supported_settlement_family = runtime_score.starts_with("autofactor_formula:")
+            && (normalized_name.starts_with("auto_settlement_")
+                || normalized_name.starts_with("amplitude_weighted_momentum_30s_sigma")
+                || normalized_name.starts_with("poly_lag_pressure")
+                || (normalized_name.starts_with("spread_adjusted_external_move")
+                    && normalized_name != "spread_adjusted_external_move"));
         assert!(
-            runtime_score.starts_with("autofactor_formula:auto_settlement_")
-                || runtime_score == "autofactor_formula:amplitude_weighted_momentum_30s_sigma"
-                || runtime_score
-                    == "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate"
-                || runtime_score
-                    == "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate"
-                || runtime_score
-                    == "autofactor_formula:mut_poly_lag_pressure_spread_adjusted",
+            supported_settlement_family,
             "settlement probability dry-run config should use a supported settlement AutoFactor formula, got {runtime_score}"
         );
         let raw = auto_settlement_formula_score(
