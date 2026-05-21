@@ -24,13 +24,14 @@ use super::three_layer_model::{
 use super::three_layer_profile::ThreeLayerProfile;
 use crate::strategies::directional::DirectionalConfig;
 use crate::traits::{MarketUpdate, SignalRecord, StrategyDecision, StrategyLogic};
-use ploy_market_contracts::BookLevel;
+use ploy_market_contracts::{runtime_inputs::autofactor_formula_name_blockers, BookLevel};
 use ploy_operator_contracts::Regime;
 
 #[derive(Debug, Clone, Copy)]
 enum SettlementAutofactorEdgeMetric {
     TopQuote,
     Executable,
+    PmExecutable,
     RawFormula,
 }
 
@@ -583,6 +584,9 @@ fn is_settlement_autofactor_runtime_score(runtime_score: &str) -> bool {
         .strip_prefix("autofactor_formula:")
         .unwrap_or(runtime_score);
     let name = normalized_autofactor_formula_name(name);
+    if !autofactor_formula_name_blockers(name).is_empty() {
+        return false;
+    }
     name.starts_with("auto_settlement_full_depth_settlement_edge")
         || name.starts_with("auto_settlement_conservative_settlement_edge")
         || name.starts_with("auto_settlement_model_full_depth_settlement_edge")
@@ -595,6 +599,9 @@ fn is_model_settlement_autofactor_runtime_score(runtime_score: &str) -> bool {
         .strip_prefix("autofactor_formula:")
         .unwrap_or(runtime_score);
     let name = normalized_autofactor_formula_name(name);
+    if !autofactor_formula_name_blockers(name).is_empty() {
+        return false;
+    }
     name.starts_with("auto_settlement_model_full_depth_settlement_edge")
         || name.starts_with("auto_settlement_model_conservative_settlement_edge")
 }
@@ -607,6 +614,9 @@ fn is_predictive_settlement_autofactor_runtime_score(runtime_score: &str) -> boo
 }
 
 fn is_predictive_settlement_autofactor_name(name: &str) -> bool {
+    if !autofactor_formula_name_blockers(name).is_empty() {
+        return false;
+    }
     name.starts_with("amplitude_weighted_momentum_30s_sigma")
         || name.starts_with("poly_lag_pressure")
         || (name.starts_with("spread_adjusted_external_move")
@@ -901,6 +911,15 @@ impl ThreeLayerStrategy {
             "settlement_autofactor_executable_edge_2_to_5pct",
             "settlement_autofactor_executable_edge_ge_5pct",
         ];
+        const PM_EXECUTABLE_EDGE_BUCKETS: [&str; 7] = [
+            "settlement_autofactor_pm_executable_edge_lt_neg5pct",
+            "settlement_autofactor_pm_executable_edge_neg5_to_neg2pct",
+            "settlement_autofactor_pm_executable_edge_neg2_to_0pct",
+            "settlement_autofactor_pm_executable_edge_0_to_1pct",
+            "settlement_autofactor_pm_executable_edge_1_to_2pct",
+            "settlement_autofactor_pm_executable_edge_2_to_5pct",
+            "settlement_autofactor_pm_executable_edge_ge_5pct",
+        ];
         const RAW_FORMULA_BUCKETS: [&str; 7] = [
             "settlement_autofactor_raw_score_lt_neg5pct",
             "settlement_autofactor_raw_score_neg5_to_neg2pct",
@@ -918,6 +937,9 @@ impl ThreeLayerStrategy {
                 }
                 SettlementAutofactorEdgeMetric::Executable => {
                     "settlement_autofactor_executable_edge_nonfinite"
+                }
+                SettlementAutofactorEdgeMetric::PmExecutable => {
+                    "settlement_autofactor_pm_executable_edge_nonfinite"
                 }
                 SettlementAutofactorEdgeMetric::RawFormula => {
                     "settlement_autofactor_raw_score_nonfinite"
@@ -945,6 +967,7 @@ impl ThreeLayerStrategy {
         self.bump(match metric {
             SettlementAutofactorEdgeMetric::TopQuote => TOP_QUOTE_EDGE_BUCKETS[bucket],
             SettlementAutofactorEdgeMetric::Executable => EXECUTABLE_EDGE_BUCKETS[bucket],
+            SettlementAutofactorEdgeMetric::PmExecutable => PM_EXECUTABLE_EDGE_BUCKETS[bucket],
             SettlementAutofactorEdgeMetric::RawFormula => RAW_FORMULA_BUCKETS[bucket],
         });
     }
@@ -1973,6 +1996,10 @@ impl ThreeLayerStrategy {
                             formula_settlement_edge,
                         );
                         self.bump_settlement_autofactor_edge_bucket(
+                            SettlementAutofactorEdgeMetric::PmExecutable,
+                            formula_settlement_edge,
+                        );
+                        self.bump_settlement_autofactor_edge_bucket(
                             SettlementAutofactorEdgeMetric::RawFormula,
                             raw,
                         );
@@ -1986,8 +2013,10 @@ impl ThreeLayerStrategy {
                         }
                         if formula_settlement_edge >= self.config.min_edge {
                             self.bump("settlement_autofactor_executable_edge_pass_min_edge");
+                            self.bump("settlement_autofactor_pm_executable_edge_pass_min_edge");
                         } else {
                             self.bump("settlement_autofactor_executable_edge_fail_min_edge");
+                            self.bump("settlement_autofactor_pm_executable_edge_fail_min_edge");
                         }
                     }
                     (Some(raw), normalized)
@@ -2024,6 +2053,13 @@ impl ThreeLayerStrategy {
             } else {
                 total_score >= self.config.min_entry_score
             };
+            if uses_predictive_settlement_autofactor {
+                if entry_score_passes {
+                    self.bump("settlement_autofactor_predictive_formula_edge_pass_entry_threshold");
+                } else {
+                    self.bump("settlement_autofactor_predictive_formula_edge_fail_entry_threshold");
+                }
+            }
             if !entry_score_passes {
                 self.bump("skip_entry_score");
                 info!(
@@ -4851,6 +4887,10 @@ mod tests {
             diagnostics.get("settlement_autofactor_executable_edge_pass_min_edge"),
             Some(&1)
         );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_pm_executable_edge_pass_min_edge"),
+            Some(&1)
+        );
     }
 
     #[test]
@@ -5045,7 +5085,7 @@ mod tests {
         assert!(is_settlement_autofactor_runtime_score(
             "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted"
         ));
-        assert!(is_settlement_autofactor_runtime_score(
+        assert!(!is_settlement_autofactor_runtime_score(
             "autofactor_formula:mut_poly_lag_pressure_spread_adjusted"
         ));
         assert!(is_settlement_autofactor_runtime_score(
@@ -5200,7 +5240,7 @@ mod tests {
     }
 
     #[test]
-    fn autofactor_composed_model_formula_supports_external_pressure_and_spread() {
+    fn autofactor_composed_model_formula_rejects_research_only_external_pressure() {
         let mut config = test_config();
         config.profile = ThreeLayerProfile::SettlementProbability;
         config.min_edge = 0.02;
@@ -5219,15 +5259,12 @@ mod tests {
             iv_change_1m: 0.0,
         };
 
-        let (raw, score) = autofactor_formula_entry_score(
+        assert!(autofactor_formula_entry_score(
             "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted",
             inputs,
             config.min_edge,
         )
-        .expect("composed settlement model formula should score");
-
-        assert!((raw - 0.75).abs() < 1e-9);
-        assert!(score > 0.0);
+        .is_none());
         assert!(autofactor_formula_entry_score(
             "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_near_strike_near_strike",
             inputs,
@@ -5375,10 +5412,18 @@ mod tests {
             diagnostics.get("settlement_autofactor_formula_evaluations"),
             Some(&1)
         );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_predictive_formula_edge_pass_entry_threshold"),
+            Some(&1)
+        );
+        assert_eq!(
+            diagnostics.get("settlement_autofactor_pm_executable_edge_fail_min_edge"),
+            Some(&1)
+        );
     }
 
     #[test]
-    fn predictive_poly_lag_pressure_formula_uses_quote_age_pressure_and_drift() {
+    fn predictive_poly_lag_pressure_formula_rejects_research_only_pressure_input() {
         let config = test_config();
         let inputs = AutoSettlementFactorInputs {
             settlement_edge: -0.01,
@@ -5394,15 +5439,12 @@ mod tests {
             iv_change_1m: 0.0,
         };
 
-        let (raw, score) = autofactor_formula_entry_score(
+        assert!(autofactor_formula_entry_score(
             "autofactor_formula:mut_poly_lag_pressure_spread_adjusted",
             inputs,
             config.min_edge,
         )
-        .expect("poly lag pressure predictive formula should score finite inputs");
-
-        assert!(raw > 0.0);
-        assert!(score > 0.0);
+        .is_none());
         assert!(autofactor_formula_entry_score(
             "autofactor_formula:mut_poly_lag_pressure_spread_adjusted",
             AutoSettlementFactorInputs {

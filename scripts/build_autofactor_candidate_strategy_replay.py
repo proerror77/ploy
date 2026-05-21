@@ -18,6 +18,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from autofactor_runtime_contract import (
+    load_factor_registry_runtime_contracts,
+    mapping_from_runtime_contract,
+    runtime_contract_for_row,
+)
+
 
 DEFAULT_ALLOWED_TARGETS = {
     "full_depth_settlement_executable_pnl",
@@ -66,6 +72,19 @@ def normalize_formula_name(name: str) -> str:
                 break
         else:
             return name
+
+
+def unsupported_runtime_formula_blocker(name: str) -> str:
+    normalized = normalize_formula_name(name)
+    if name.startswith("llm_"):
+        return "unsupported_runtime_formula_semantics:llm_prefix_not_supported_by_runtime"
+    if normalized.startswith("poly_lag_pressure"):
+        return "unsupported_runtime_formula_semantics:poly_lag_pressure_runtime_input_mismatch"
+    if "external_pressure" in normalized:
+        return "unsupported_runtime_formula_semantics:external_pressure_runtime_input_mismatch"
+    if "iv_change" in normalized:
+        return "unsupported_runtime_formula_semantics:iv_change_runtime_input_missing"
+    return ""
 
 
 def is_settlement_predictive_formula(name: str) -> bool:
@@ -153,6 +172,9 @@ def parse_autofactor_rows(report_text: str) -> list[dict[str, Any]]:
 
 
 def runtime_mapping(name: str) -> dict[str, str]:
+    blocker = unsupported_runtime_formula_blocker(name)
+    if blocker:
+        return {"strategy_profile": "", "runtime_score": "", "blocker": blocker}
     if name in {
         "spread_adjusted_external_move",
         "repricing_gap_side_10s",
@@ -177,6 +199,32 @@ def runtime_mapping(name: str) -> dict[str, str]:
     return {"strategy_profile": "", "runtime_score": ""}
 
 
+def row_runtime_mapping(
+    row: dict[str, Any],
+    *,
+    runtime_contracts: dict[tuple[str, str], dict[str, Any]],
+    require_runtime_contract: bool,
+) -> tuple[dict[str, str], dict[str, Any] | None, list[str]]:
+    name = str(row.get("name", ""))
+    target = str(row.get("target", ""))
+    contract_record = runtime_contract_for_row(
+        runtime_contracts,
+        factor_name=name,
+        target=target,
+    )
+    mapping, runtime_contract, blockers = mapping_from_runtime_contract(
+        contract_record,
+        factor_name=name,
+        target=target,
+        require_runtime_contract=require_runtime_contract,
+    )
+    if mapping:
+        return mapping, runtime_contract, blockers
+    if blockers:
+        return {"strategy_profile": "", "runtime_score": ""}, runtime_contract, blockers
+    return runtime_mapping(name), runtime_contract, []
+
+
 def row_score(row: dict[str, Any]) -> tuple[float, ...]:
     return (
         parse_float(row.get("top_bucket_avg_label", "")),
@@ -191,16 +239,28 @@ def select_candidate(
     *,
     allowed_targets: set[str],
     required_strategy_profile: str,
+    runtime_contracts: dict[tuple[str, str], dict[str, Any]],
+    require_runtime_contract: bool,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     candidates: list[dict[str, Any]] = []
     blockers: list[str] = []
     for row in rows:
-        mapping = runtime_mapping(str(row.get("name", "")))
+        mapping, runtime_contract, contract_blockers = row_runtime_mapping(
+            row,
+            runtime_contracts=runtime_contracts,
+            require_runtime_contract=require_runtime_contract,
+        )
         row_target = str(row.get("target", ""))
         if row_target not in allowed_targets:
             continue
         if row.get("decision") != "candidate" or row.get("reason") != "passed":
             blockers.append(f"not_candidate:{row.get('name')}:{row.get('decision')}:{row.get('reason')}")
+            continue
+        if contract_blockers:
+            blockers.extend(f"{blocker}:{row.get('name')}" for blocker in contract_blockers)
+            continue
+        if mapping.get("blocker"):
+            blockers.append(f"{mapping['blocker']}:{row.get('name')}")
             continue
         if mapping.get("strategy_profile") != required_strategy_profile:
             blockers.append(
@@ -214,6 +274,7 @@ def select_candidate(
             continue
         row = dict(row)
         row["runtime_mapping"] = mapping
+        row["runtime_contract"] = runtime_contract
         candidates.append(row)
     if not candidates:
         return None, blockers or ["no_runtime_mappable_candidate"]
@@ -291,6 +352,7 @@ def build_artifact(
             "target": row.get("target", ""),
             "decision": row.get("decision", ""),
             "reason": row.get("reason", ""),
+            "runtime_contract": row.get("runtime_contract"),
         },
         "decision_contract": {
             "event_level": True,
@@ -356,6 +418,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-json", required=True)
     parser.add_argument("--output-md", default="")
     parser.add_argument("--allowed-target", action="append", default=[])
+    parser.add_argument(
+        "--factor-registry-preview-json",
+        action="append",
+        default=[],
+        help="Alpha-search factor-registry-preview.json with typed runtime contracts. May be repeated.",
+    )
+    parser.add_argument(
+        "--require-runtime-contract",
+        action="store_true",
+        help="Block rows that do not have a matching typed runtime contract.",
+    )
     parser.add_argument("--required-strategy-profile", default="settlement_probability")
     parser.add_argument("--stake-usd", type=float, default=15.0)
     parser.add_argument("--min-trade-count", type=int, default=50)
@@ -374,6 +447,10 @@ def main() -> int:
         rows,
         allowed_targets=allowed_targets,
         required_strategy_profile=args.required_strategy_profile,
+        runtime_contracts=load_factor_registry_runtime_contracts(
+            args.factor_registry_preview_json
+        ),
+        require_runtime_contract=args.require_runtime_contract,
     )
     artifact = build_artifact(
         row,

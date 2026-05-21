@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -159,6 +160,19 @@ def factor_args(
 
 
 def promotion_args(args: argparse.Namespace, report: Path, variant_dir: Path) -> list[str]:
+    source_run_id = os.environ.get("GITHUB_RUN_ID", "local")
+    source_artifact = (
+        os.environ.get("PLOY_FACTOR_WALK_FORWARD_ARTIFACT")
+        or (f"factor-walk-forward-v2-{source_run_id}" if source_run_id != "local" else "")
+    )
+    dataset_window = {
+        "start_ts": args.start_ts,
+        "end_ts": args.end_ts,
+        "symbols": args.symbols,
+        "snapshot_dir": args.snapshot_dir,
+        "stake_usd": args.stake_usd,
+        "variant": json.loads((variant_dir / "variant.json").read_text(encoding="utf-8")),
+    }
     command = [
         sys.executable,
         args.evaluator,
@@ -174,6 +188,20 @@ def promotion_args(args: argparse.Namespace, report: Path, variant_dir: Path) ->
         str(variant_dir / "autofactor-strategy-handoff.json"),
         "--output-handoff-md",
         str(variant_dir / "autofactor-strategy-handoff.md"),
+        "--output-research-trace-json",
+        str(variant_dir / "autofactor-research-trace.json"),
+        "--source-run-id",
+        source_run_id,
+        "--promotion-run-id",
+        os.environ.get("GITHUB_RUN_ID", source_run_id),
+        "--source-artifact",
+        source_artifact,
+        "--git-ref",
+        os.environ.get("GITHUB_REF_NAME", ""),
+        "--dataset-window-json",
+        json.dumps(dataset_window, sort_keys=True),
+        "--candidate-strategy-replay-source",
+        args.candidate_strategy_replay_json or str(variant_dir / "candidate-strategy-replay.json"),
         "--required-strategy-profile",
         args.required_strategy_profile,
     ]
@@ -183,6 +211,10 @@ def promotion_args(args: argparse.Namespace, report: Path, variant_dir: Path) ->
     command.extend(["--candidate-strategy-replay-json", replay_json])
     for target in args.allowed_target:
         command.extend(["--allowed-target", target])
+    for registry_preview in registry_preview_paths(variant_dir):
+        command.extend(["--factor-registry-preview-json", str(registry_preview)])
+    if registry_preview_paths(variant_dir):
+        command.append("--require-runtime-contract")
     return command
 
 
@@ -209,7 +241,18 @@ def candidate_replay_args(
     ]
     for target in args.allowed_target:
         command.extend(["--allowed-target", target])
+    for registry_preview in registry_preview_paths(variant_dir):
+        command.extend(["--factor-registry-preview-json", str(registry_preview)])
+    if registry_preview_paths(variant_dir):
+        command.append("--require-runtime-contract")
     return command
+
+
+def registry_preview_paths(variant_dir: Path) -> list[Path]:
+    alpha_root = variant_dir / "alpha-search"
+    if not alpha_root.exists():
+        return []
+    return sorted(alpha_root.glob("*/factor-registry-preview.json"))
 
 
 def ranked_factor_rows(promotion: dict[str, Any], allowed_targets: set[str]) -> list[dict[str, Any]]:
@@ -295,6 +338,103 @@ def best_factor_by_kind(
     return max(candidates, key=_factor_score)
 
 
+def research_factor_rows(variant_dir: Path, allowed_targets: set[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for registry_preview in registry_preview_paths(variant_dir):
+        payload = json.loads(registry_preview.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            preview_rows = payload.get("entries") or payload.get("factors") or payload.get("rows") or []
+        else:
+            preview_rows = payload
+        if not isinstance(preview_rows, list):
+            continue
+        for row in preview_rows:
+            if not isinstance(row, dict):
+                continue
+            target = str(row.get("target") or "")
+            if target not in allowed_targets:
+                continue
+            metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            contract = (
+                row.get("runtime_contract")
+                if isinstance(row.get("runtime_contract"), dict)
+                else {}
+            )
+            runtime_mapping = {}
+            if contract.get("status") == "supported" and contract.get("runtime_score"):
+                strategy_profile = str(contract.get("strategy_profile") or "")
+                runtime_mapping = {
+                    "strategy_profile": strategy_profile,
+                    "strategy_family": str(contract.get("strategy_family") or strategy_profile),
+                    "runtime_score": str(contract.get("runtime_score") or ""),
+                    "runtime_contract_status": "supported",
+                    "dsl_hash": str(row.get("dsl_hash") or ""),
+                }
+            blockers = [str(item) for item in row.get("blockers") or []]
+            blockers.extend(str(item) for item in contract.get("blockers") or [])
+            rows.append(
+                {
+                    "name": row.get("factor_name") or row.get("name") or metrics.get("factor_name", ""),
+                    "target": target,
+                    "decision": metrics.get("decision") or row.get("status") or "",
+                    "reason": metrics.get("reason") or "",
+                    "rank": metrics.get("rank", 0),
+                    "spearman_ic": metrics.get("spearman_ic"),
+                    "pearson_ic": metrics.get("pearson_ic"),
+                    "icir": metrics.get("icir"),
+                    "positive_window_ratio": metrics.get("positive_window_ratio"),
+                    "symbol_positive_ratio": metrics.get("symbol_positive_ratio"),
+                    "monotonicity": metrics.get("monotonicity_score"),
+                    "n": metrics.get("n"),
+                    "window_count": metrics.get("window_count"),
+                    "top_bucket_n": metrics.get("top_bucket_n"),
+                    "top_bucket_avg_label": metrics.get("top_bucket_avg_label"),
+                    "top_bucket_positive_label_rate": metrics.get("top_bucket_positive_label_rate"),
+                    "top_bucket_full_depth_entry_fill_rate": metrics.get(
+                        "top_bucket_full_depth_entry_fill_rate"
+                    ),
+                    "top_bucket_avg_entry_sweep_slip_bps": metrics.get(
+                        "top_bucket_avg_entry_sweep_slippage_bps"
+                    ),
+                    "top_bucket_avg_entry_sweep_levels": metrics.get(
+                        "top_bucket_avg_entry_sweep_levels"
+                    ),
+                    "complexity": metrics.get("complexity"),
+                    "reward": metrics.get("reward"),
+                    "qualified": False,
+                    "runtime_mapping": runtime_mapping,
+                    "runtime_mappable": bool(runtime_mapping),
+                    "blockers": blockers,
+                    "dsl_hash": row.get("dsl_hash"),
+                    "runtime_contract": contract,
+                }
+            )
+    return rows
+
+
+def best_research_factor_by_kind(
+    variant_dir: Path,
+    allowed_targets: set[str],
+    *,
+    kind: str,
+) -> dict[str, Any] | None:
+    candidates = research_factor_rows(variant_dir, allowed_targets)
+    if kind == "runtime_mappable":
+        candidates = [item for item in candidates if item["runtime_mappable"]]
+    elif kind != "discovery":
+        raise ValueError(f"unknown factor kind: {kind}")
+    if not candidates:
+        return None
+
+    def score(item: dict[str, Any]) -> tuple[float, float, float, float, float]:
+        return (
+            float(item.get("reward") or 0.0),
+            *_factor_score(item),
+        )
+
+    return max(candidates, key=score)
+
+
 def write_markdown(summary: dict[str, Any], path: Path) -> None:
     lines = [
         "# Factor Walk-Forward Sweep",
@@ -335,6 +475,7 @@ def promote_best_variant(best: dict[str, Any] | None, output_dir: Path) -> None:
         "autofactor-strategy-promotion.json",
         "autofactor-strategy-promotion.md",
         "autofactor-factor-registry.json",
+        "autofactor-research-trace.json",
         "autofactor-strategy-handoff.json",
         "autofactor-strategy-handoff.md",
         "candidate-strategy-replay.json",
@@ -399,6 +540,24 @@ def run_variant(
         "variant": variant.values,
     }
     if result.returncode:
+        return item
+
+    if args.research_chain_mode == "research_only":
+        item["decision"] = "research_only"
+        item["qualified_count"] = 0
+        item["promotion_gate_ready"] = False
+        item["best_factor"] = best_research_factor_by_kind(
+            variant_dir,
+            allowed_targets,
+            kind="discovery",
+        )
+        item["best_discovery_factor"] = item["best_factor"]
+        item["best_runtime_mappable_factor"] = best_research_factor_by_kind(
+            variant_dir,
+            allowed_targets,
+            kind="runtime_mappable",
+        )
+        item["best_qualified_strategy"] = None
         return item
 
     if not args.candidate_strategy_replay_json:
@@ -504,6 +663,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allowed-target", action="append", default=[])
     parser.add_argument("--sweep-json", default="")
     parser.add_argument("--cwd", default=".")
+    parser.add_argument(
+        "--research-chain-mode",
+        choices=["research_only", "legacy_promotion"],
+        default="legacy_promotion",
+    )
     parser.add_argument("--fail-if-all-failed", action="store_true")
     parser.add_argument("--fail-if-blocked", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -562,7 +726,11 @@ def main() -> int:
     promote_best_variant(best, output_dir)
     if args.fail_if_all_failed and not completed:
         return 2
-    if args.fail_if_blocked and (not best or best.get("decision") != "qualified"):
+    if (
+        args.fail_if_blocked
+        and args.research_chain_mode != "research_only"
+        and (not best or best.get("decision") != "qualified")
+    ):
         return 3
     return 0
 

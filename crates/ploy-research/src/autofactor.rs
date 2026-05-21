@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 
 use crate::factors::{pearson_ic, spearman_ic};
 use crate::factors_v2::FactorObservationV2;
+use crate::research_os::labels::{
+    label_contract_for_target, target_requires_event_level_accounting, LabelHorizonContract,
+};
 
 const EPS: f64 = 1e-9;
 const MAX_DETERMINISTIC_MUTATION_DEPTH: usize = 2;
@@ -337,6 +340,23 @@ impl AutoFactorV2Target {
         }
     }
 
+    pub fn label_contract(self) -> LabelHorizonContract {
+        label_contract_for_target(self.as_str()).unwrap_or_else(|| {
+            panic!(
+                "missing Research OS label contract for AutoFactor target {}",
+                self.as_str()
+            )
+        })
+    }
+
+    pub fn requires_event_level_accounting(self) -> bool {
+        self.label_contract().event_level()
+    }
+
+    pub fn diagnostic_only(self) -> bool {
+        self.label_contract().diagnostic_only()
+    }
+
     fn label(self, row: &FactorObservationV2) -> f64 {
         match self {
             AutoFactorV2Target::RepricePnl10s => row.label_future_exit_pnl_10s,
@@ -601,6 +621,19 @@ pub fn format_autofactor_reports(reports: &[AutoFactorReport], top_n: usize) -> 
     out.push_str(
         "target labels are side-aligned executable PnL for the requested target; reports are candidate discovery gates, not deploy decisions.\n",
     );
+    if let Some(contract) = reports
+        .first()
+        .and_then(|report| report.target.as_deref())
+        .and_then(label_contract_for_target)
+    {
+        out.push_str(&format!(
+            "label_contract,horizon_id={},accounting={},strategy_lane={},promotion_stage={}\n",
+            contract.horizon_id,
+            contract.accounting_mode.as_str(),
+            contract.strategy_lane.as_str(),
+            contract.promotion_stage
+        ));
+    }
     out.push_str(
         "rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,top_bucket_unique_event_count,top_bucket_max_event_decisions,complexity\n",
     );
@@ -1732,14 +1765,9 @@ fn build_buckets(
 }
 
 fn uses_event_level_decisions(target: Option<&str>) -> bool {
-    matches!(
-        target,
-        Some(
-            "settlement_executable_pnl"
-                | "full_depth_settlement_executable_pnl"
-                | "tradeable_full_depth_settlement_pnl"
-        )
-    )
+    target
+        .map(target_requires_event_level_accounting)
+        .unwrap_or(false)
 }
 
 fn one_decision_per_event(
@@ -2107,6 +2135,30 @@ mod tests {
         )
     }
 
+    #[test]
+    fn autofactor_target_label_contract_marks_settlement_event_level() {
+        let contract = AutoFactorV2Target::FullDepthSettlementExecutablePnl.label_contract();
+
+        assert_eq!(contract.horizon_id, "pm5d_settlement");
+        assert!(
+            AutoFactorV2Target::FullDepthSettlementExecutablePnl.requires_event_level_accounting()
+        );
+        assert!(uses_event_level_decisions(Some(
+            "full_depth_settlement_executable_pnl"
+        )));
+    }
+
+    #[test]
+    fn autofactor_target_label_contract_keeps_repricing_diagnostic() {
+        let contract = AutoFactorV2Target::FullDepthRepricePnl30s.label_contract();
+
+        assert_eq!(contract.horizon_id, "repricing_30s");
+        assert!(AutoFactorV2Target::FullDepthRepricePnl30s.diagnostic_only());
+        assert!(!uses_event_level_decisions(Some(
+            "full_depth_reprice_pnl_30s"
+        )));
+    }
+
     fn synthetic_v2_row(idx: usize) -> FactorObservationV2 {
         let score = (idx % 8) as f64;
         FactorObservationV2 {
@@ -2287,11 +2339,9 @@ mod tests {
     fn evaluates_domain_candidate_with_icir_gate() {
         let (matrix, labels, windows) = synthetic_matrix(24);
         let candidates = domain_seed_candidates(&matrix.input_names());
-        assert!(
-            candidates
-                .iter()
-                .any(|item| item.name == "ofi_l5_depth_norm")
-        );
+        assert!(candidates
+            .iter()
+            .any(|item| item.name == "ofi_l5_depth_norm"));
         let options = AutoFactorOptions {
             min_observations: 20,
             min_window_observations: 6,
@@ -2378,30 +2428,22 @@ mod tests {
             .expect("repricing gap report");
         assert_eq!(repricing_gap.decision, AutoFactorDecision::Candidate);
         assert!(repricing_gap.spearman_ic > 0.95);
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "poly_lag_pressure")
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "amplitude_weighted_momentum_30s_sigma")
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "amplitude_weighted_momentum_30s_vol_gap")
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "mut_spread_adjusted_external_move_pm_lag_gate")
-        );
-        assert!(
-            reports.iter().any(|report| report.name
-                == "mut2_mut_spread_adjusted_external_move_pm_lag_gate_squashed")
-        );
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "poly_lag_pressure"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "amplitude_weighted_momentum_30s_sigma"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "amplitude_weighted_momentum_30s_vol_gap"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "mut_spread_adjusted_external_move_pm_lag_gate"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name
+                == "mut2_mut_spread_adjusted_external_move_pm_lag_gate_squashed"));
     }
 
     #[test]
@@ -2503,15 +2545,13 @@ mod tests {
             report.name
                 == "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality"
         }));
-        assert!(
-            reports.iter().any(|report| report.name
-                == "mut_auto_settlement_model_full_depth_settlement_edge_capacity")
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name.starts_with("mut2_"))
-        );
+        assert!(reports
+            .iter()
+            .any(|report| report.name
+                == "mut_auto_settlement_model_full_depth_settlement_edge_capacity"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name.starts_with("mut2_")));
     }
 
     #[test]
@@ -2667,11 +2707,9 @@ mod tests {
         )
         .expect("reports");
 
-        assert!(
-            reports
-                .iter()
-                .all(|report| !report.name.starts_with("auto_settlement_"))
-        );
+        assert!(reports
+            .iter()
+            .all(|report| !report.name.starts_with("auto_settlement_")));
     }
 
     #[test]
@@ -2689,11 +2727,9 @@ mod tests {
                 .expect("reports");
 
         assert!(!reports.is_empty());
-        assert!(
-            reports
-                .iter()
-                .all(|report| report.target.as_deref() == Some("reprice_pnl_30s"))
-        );
+        assert!(reports
+            .iter()
+            .all(|report| report.target.as_deref() == Some("reprice_pnl_30s")));
 
         let formatted = format_autofactor_reports(&reports, reports.len());
         assert!(formatted.contains("reprice_pnl_30s"));

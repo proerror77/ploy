@@ -1,3 +1,379 @@
+# Research OS Architecture Cutover (2026-05-21)
+
+## Goal
+
+Cut the default FactorEvolve research chain away from the legacy AutoFactor
+promotion/config handoff path, then restore hosted research as a Research OS
+evidence loop.
+
+Evidence stage: `walk_forward / research_os_cutover`.
+
+## Files / Ownership
+
+- `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`
+  - Owner: hosted artifact research defaults and legacy mode switch.
+- `.github/workflows/factor-evolve-daily-research.yml`
+  - Owner: daily Research Manager search dispatch stays research-only.
+- `.github/workflows/factor-walk-forward-v2.yml`
+  - Owner: self-hosted router option allowlist.
+- `scripts/run_factor_walk_forward_sweep.py`
+  - Owner: `research_only` skips aggregate replay and promotion evaluator.
+- `crates/ploy-market-contracts/src/runtime_inputs.rs`
+  - Owner: shared runtime/research input support contract.
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: registry preview `runtime_contract` reads shared input blockers.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer*.rs`
+  - Owner: runtime formula scorer rejects research-only input semantics.
+- `docs/superpowers/plans/2026-05-21-research-os-architecture-cutover.md`
+  - Owner: architecture cutover plan and remaining migration tasks.
+
+## Tasks
+
+- [x] Make hosted/daily FactorEvolve research default to
+      `research_chain_mode=research_only`.
+- [x] Keep old AutoFactor promotion/config behavior behind explicit
+      `legacy_promotion` / dedicated promotion workflow paths.
+- [x] In research-only sweep mode, preserve factor walk-forward and
+      alpha-search artifacts while skipping aggregate replay and promotion.
+- [x] Move runtime input canonicalization to a shared contract crate and make
+      both research registry contracts and runtime scoring consume it.
+- [x] Fail closed in runtime too for `external_pressure`, `iv_change_1m`, and
+      `poly_lag_pressure` until their runtime/research semantics are actually
+      aligned.
+- [x] Land label/horizon, LOB feature snapshot, and Research Manager trace-read
+      cutovers from the plan.
+
+## Review
+
+- 2026-05-21: Added the architecture cutover plan at
+  `docs/superpowers/plans/2026-05-21-research-os-architecture-cutover.md`.
+  The restored default chain is now research-only:
+  snapshot artifact -> factor walk-forward -> alpha-search artifacts ->
+  closed-loop planning/runtime-replay request. Legacy promotion/config handoff
+  remains available only as an explicit compatibility path.
+- 2026-05-21: Added `crates/ploy-market-contracts/src/runtime_inputs.rs` as the
+  shared AutoFactor runtime-input contract. Alpha-search registry preview rows
+  and the three-layer runtime formula scorer now share blocker ids for
+  research-only inputs. This intentionally rolls back earlier permissive runtime
+  scoring for `poly_lag_pressure*` and `*_x_external_pressure*`: they remain
+  research diagnostics until their source surfaces and normalization are truly
+  canonical.
+- 2026-05-21: Validation so far:
+  `python3 -m py_compile scripts/run_factor_walk_forward_sweep.py tests/test_factor_walk_forward_sweep.py`;
+  `python3 -m unittest tests.test_factor_walk_forward_sweep` (`12 tests OK`);
+  YAML parse for hosted/daily/self-hosted factor-walk-forward workflows;
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-input-contract rtk cargo test --locked -p ploy-market-contracts runtime_inputs --lib`;
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-input-contract rtk cargo test --locked -p ploy-research alpha_search --lib`;
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-input-contract rtk cargo test --locked -p ploy-strategy-bundles autofactor_formula --lib`;
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-input-contract rtk cargo test --locked -p ploy-strategy-bundles settlement_autofactor --lib`;
+  and focused `poly_lag` / `external_pressure` runtime scorer tests.
+- 2026-05-21: Final focused cutover validation passed:
+  `python3 -m py_compile` for the touched Python scripts/tests;
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent
+  tests.test_build_runtime_candidate_strategy_replay
+  tests.test_build_autofactor_candidate_strategy_replay
+  tests.test_autofactor_strategy_promotion
+  tests.test_factor_walk_forward_sweep` (`86 tests OK`);
+  YAML parse for AutoFactor promotion, runtime-candidate replay, hosted
+  factor walk-forward, daily research, and self-hosted router workflows;
+  `CARGO_TARGET_DIR=/tmp/ploy-research-os-cutover rtk cargo test --locked
+  --test workflow_security` (`25 tests OK`);
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-input-contract rtk cargo test --locked
+  -p ploy-strategy-bundles
+  settlement_probability_config_carries_autofactor_handoff_score --lib`;
+  and `rtk git diff --check`.
+- 2026-05-21: Finished the remaining architecture cutover plan items.
+  Added canonical Research OS label/horizon contracts for settlement and
+  repricing targets, emitted `label_contract` rows in AutoFactor and factor
+  reports, and kept repricing horizons diagnostic-only by default. Added
+  `feature-snapshot-manifest.json` as a first-class snapshot artifact and made
+  hosted walk-forward require/copy it into `snapshot-provenance/`; alpha-search
+  registry contracts now add `missing_blocks_promotion:surface:*` when a
+  candidate depends on a missing feature surface. Research Manager input now
+  accepts `research_trace_summary`; `factor_evolve_daily_plan` can summarize
+  `autofactor-research-trace.json` into decisions, blockers, runtime replay
+  requests, and rejected families before planning the next research step.
+- 2026-05-21: Completion audit tightened the LOB surface proof: research
+  snapshots now carry `row_counts.lob_snapshots`, quality markdown reports it,
+  and the feature-store manifest marks `binance_lob` present only from that
+  actual LOB snapshot count instead of inferring it from derived observation
+  rows.
+
+# Durable AutoFactor Research Trace (2026-05-21)
+
+## Goal
+
+Make AutoFactor promotion produce a Research OS ingest artifact so factor,
+`dsl_hash`, `ast_json`, typed `runtime_contract`, source run/window, and
+promotion decision are queryable instead of living only in scattered reports.
+
+Evidence stage: `walk_forward / runtime_parity trace plumbing`.
+
+## Files / Ownership
+
+- `scripts/evaluate_autofactor_strategy_promotion.py`
+  - Owner: emit Research OS registry/evaluation/experiment-trace rows.
+- `scripts/run_factor_walk_forward_sweep.py`
+  - Owner: pass source run/window provenance into promotion evaluation.
+- `.github/workflows/autofactor-strategy-promotion.yml`
+  - Owner: upload trace artifact with promotion outputs.
+- Tests under `tests/`
+  - Owner: prove trace contract includes typed runtime contract provenance.
+
+## Tasks
+
+- [x] Add ingest-ready AutoFactor research trace artifact.
+- [x] Wire hosted sweep and promotion workflow provenance into the trace.
+- [x] Add focused tests for `dsl_hash`, `ast_json`, runtime contract, run/window,
+      and promotion decision fields.
+- [x] Run focused Python/workflow validation and diff checks.
+
+## Review
+
+- 2026-05-21: Added `autofactor-research-trace.json` output to the promotion
+  evaluator. The artifact contains Research OS ingest rows for
+  `factor_registry`, `factor_evaluations`, and `experiment_trace`, preserving
+  source run id, promotion run id, source artifact, dataset window, `dsl_hash`,
+  `ast_json`, typed `runtime_contract`, and promotion decision. Rows missing
+  registry DSL provenance are reported as `skipped_registry_rows` instead of
+  being inserted with guessed identities.
+- 2026-05-21: Wired hosted sweep and standalone AutoFactor promotion workflow
+  to emit the trace artifact. Validation passed:
+  `python3 -m py_compile scripts/evaluate_autofactor_strategy_promotion.py
+  scripts/run_factor_walk_forward_sweep.py scripts/autofactor_runtime_contract.py
+  tests/test_autofactor_strategy_promotion.py tests/test_factor_walk_forward_sweep.py`;
+  `python3 -m unittest tests.test_autofactor_strategy_promotion
+  tests.test_factor_walk_forward_sweep` (`41 tests OK`);
+  YAML parse for AutoFactor promotion, runtime-candidate replay, and hosted
+  factor walk-forward workflows; `rtk git diff --check`;
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-trace-target rtk cargo test --locked
+  --test workflow_security autofactor_promotion_can_download_runtime_candidate_replay_directly`;
+  and `CARGO_TARGET_DIR=/tmp/ploy-autofactor-trace-target rtk cargo test
+  --locked --test workflow_security workflow_dispatch_inputs_stay_lintable`.
+
+# Typed AutoFactor Runtime Contract (2026-05-21)
+
+## Goal
+
+Replace name-shaped AutoFactor promotion mapping with an explicit runtime
+contract carried by alpha-search registry artifacts.
+
+Evidence stage: `executable_replay / runtime_parity workflow hardening`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: emit `runtime_contract` with `dsl_hash` / `ast_json` registry rows.
+- `scripts/autofactor_runtime_contract.py`
+  - Owner: shared Python loader for typed runtime contracts.
+- `scripts/evaluate_autofactor_strategy_promotion.py` and
+  `scripts/build_autofactor_candidate_strategy_replay.py`
+  - Owner: prefer typed contracts and fail closed when required contracts are
+    missing or blocked.
+- `.github/workflows/autofactor-strategy-promotion.yml` and
+  `scripts/run_factor_walk_forward_sweep.py`
+  - Owner: pass registry preview artifacts into promotion/replay builders.
+
+## Tasks
+
+- [x] Add typed `runtime_contract` to alpha-search
+      `factor-registry-preview.json`.
+- [x] Make promotion and candidate aggregate replay consume registry contracts.
+- [x] Require runtime contracts automatically when registry previews are
+      present in hosted artifacts.
+- [x] Add regression coverage for custom registry-only mappings, blocked
+      contracts, and missing-contract fail-closed behavior.
+- [x] Run full focused validation for this architecture slice.
+
+## Review
+
+- 2026-05-21: Added a typed runtime-contract layer to alpha-search registry
+  preview rows. The contract records runtime status, strategy profile/family,
+  runtime score, runtime semantics version, AST input names, and blockers.
+  Promotion and aggregate replay now prefer this registry contract over
+  fallback name inference. When a registry preview is present, the hosted sweep
+  and promotion workflow pass `--require-runtime-contract`, so a row with no
+  matching contract cannot be promoted by a name guess.
+- 2026-05-21: Validation passed:
+  YAML parse for AutoFactor promotion, runtime-candidate replay, and hosted
+  factor walk-forward workflows; `rtk git diff --check`; Python compile for
+  the touched scripts/tests; `python3 -m unittest
+  tests.test_alpha_search_closed_loop_agent
+  tests.test_build_runtime_candidate_strategy_replay
+  tests.test_build_autofactor_candidate_strategy_replay
+  tests.test_autofactor_strategy_promotion
+  tests.test_factor_walk_forward_sweep` (`84 tests OK`);
+  workflow security tests for promotion direct replay, runtime replay
+  follow-up, and dispatch input linting; `rtk cargo test --locked -p
+  ploy-research alpha_search --lib`; focused predictive feedback and `mut2_`
+  normalization tests; `rtk cargo test --locked -p ploy-strategy-bundles
+  settlement_autofactor --lib`; predictive AutoFactor runtime-entry edge test;
+  and `rtk cargo test --locked -p ploy-research --features db --example
+  factor_walk_forward_v2`.
+
+# AgentTense Research Flow Hardening (2026-05-21)
+
+## Goal
+
+Use the agent-team review findings to harden the current AutoFactor research
+workflow where typed search, runtime replay, and promotion handoff can still
+drift through weak workflow option validation or manual replay-to-promotion
+handoff.
+
+Evidence stage: `executable_replay / runtime_parity workflow hardening`.
+
+## Files / Ownership
+
+- `.github/workflows/autofactor-strategy-promotion.yml`
+  - Owner: strict `options_json` parsing for direct runtime replay and config
+    handoff controls.
+- `.github/workflows/runtime-candidate-replay.yml`
+  - Owner: publish machine-readable promotion follow-up instructions after a
+    runtime candidate replay.
+- `tests/workflow_security.rs`
+  - Owner: workflow contract regression coverage.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md` and
+  `docs/runbooks/event-ml-automl-workflow.md`
+  - Owner: operator-facing workflow instructions.
+
+## Tasks
+
+- [x] Add strict allowlist and type checks to AutoFactor promotion
+      `options_json`.
+- [x] Make runtime candidate replay publish the exact promotion rerun payload
+      when a factor walk-forward source run is provided.
+- [x] Fail closed on runtime-mapping drift for formula families whose runtime
+      input semantics are not aligned with research DSL.
+- [x] Add workflow security assertions for both contracts.
+- [x] Run YAML, workflow security, and focused regression validation.
+
+## Review
+
+- 2026-05-21: Hardened `autofactor-strategy-promotion.yml` so advanced
+  controls stay inside `options_json` with explicit allowlist validation,
+  boolean validation, and inline `candidate_strategy_replay_json` validation.
+  Inline replay JSON must now be a JSON object or a string that decodes to a
+  JSON object; arrays and arbitrary text fail in the parser step instead of
+  later inside the evaluator.
+- 2026-05-21: Added runtime replay follow-up artifacts:
+  `autofactor-promotion-options.json`,
+  `autofactor-promotion-followup.json`, and
+  `autofactor-promotion-followup.md`. These carry the exact
+  `candidate_strategy_replay_run_id` / artifact-name payload needed to feed a
+  `runtime-candidate-replay-*` artifact back into
+  `autofactor-strategy-promotion.yml`.
+- 2026-05-21: AgentTense mapping review found research/runtime semantic drift
+  for `llm_*`, `poly_lag_pressure*`, `*_x_external_pressure*`, and
+  `*_x_iv_change*`. Promotion and aggregate candidate replay now fail closed
+  for those formula families instead of treating name-shaped matches as runtime
+  executable mappings. Also normalized `mut2_` in alpha-search family matching.
+- 2026-05-21: Validation passed:
+  `ruby -e 'require "yaml"; %w[.github/workflows/autofactor-strategy-promotion.yml .github/workflows/runtime-candidate-replay.yml].each { |p| YAML.load_file(p); puts "yaml ok #{p}" }'`,
+  local extracted-parser behavior checks for promotion `options_json` object,
+  object-string, array, array-string, bad JSON string, unknown key, and bad
+  boolean cases,
+  `git diff --check`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked --test workflow_security autofactor_promotion_can_download_runtime_candidate_replay_directly`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked --test workflow_security runtime_candidate_replay_publishes_autofactor_promotion_followup`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked --test workflow_security workflow_dispatch_inputs_stay_lintable`,
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py scripts/build_runtime_candidate_strategy_replay.py scripts/build_autofactor_candidate_strategy_replay.py scripts/evaluate_autofactor_strategy_promotion.py tests/test_alpha_search_closed_loop_agent.py tests/test_build_runtime_candidate_strategy_replay.py tests/test_build_autofactor_candidate_strategy_replay.py tests/test_autofactor_strategy_promotion.py`,
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent tests.test_build_runtime_candidate_strategy_replay tests.test_build_autofactor_candidate_strategy_replay tests.test_autofactor_strategy_promotion`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-research normalized_factor_key_strips_depth_two_mutation_prefix --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-research predictive_runtime_feedback_does_not_use_pm_edge_counter_as_collapse --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-research alpha_search --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-strategy-bundles settlement_autofactor --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-strategy-bundles predictive_autofactor_runtime_entry_uses_formula_edge_not_pm_fair_edge --lib`,
+  and
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-research --features db --example factor_walk_forward_v2`.
+
+# Predictive AutoFactor Feedback Semantics (2026-05-21)
+
+## Goal
+
+Fix the remaining workflow miswiring where a successful predictive AutoFactor
+runtime replay can still be interpreted as a pass-through collapse by the
+closed-loop agent and alpha-search feedback layer.
+
+Evidence stage: `executable_replay / runtime_parity`.
+
+## Files / Ownership
+
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: closed-loop pass-through feedback and typed prior avoid-list input.
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: MCTS reward/avoidance interpretation of runtime feedback.
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: candidate replay feedback extraction for hosted search.
+- `crates/ploy-strategy-bundles/src/strategies/three_layer.rs`
+  - Owner: runtime diagnostic counters for predictive formula edge vs
+    PM/model settlement edge.
+- `.github/workflows/autofactor-strategy-promotion.yml`
+  - Owner: promotion workflow wiring for direct runtime replay artifacts.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md` and
+  `docs/runbooks/event-ml-automl-workflow.md`
+  - Owner: operator-facing workflow instructions for direct replay handoff.
+- Focused tests under `tests/`
+  - Owner: regression coverage for closed-loop and workflow wiring.
+
+## Tasks
+
+- [x] Review the successful runtime replay and identify the semantic mismatch.
+- [x] Stop closed-loop feedback from treating ready replays as collapse.
+- [x] Split predictive formula edge diagnostics from PM settlement edge
+      diagnostics.
+- [x] Update alpha-search runtime feedback to consume the correct predictive
+      pass-through metric.
+- [x] Allow promotion workflow to download a runtime replay artifact directly.
+- [x] Keep promotion workflow advanced replay/config controls inside
+      `options_json` so `workflow_dispatch` stays under GitHub's 10-input
+      limit.
+- [x] Run focused Python/Rust validation.
+
+## Review
+
+- 2026-05-21: Fixed the false collapse path by making successful candidate
+  strategy replay artifacts terminal for closed-loop pass-through feedback and
+  by teaching both Python and Rust alpha-search feedback that predictive
+  AutoFactor formulas should not use PM/model fair-edge diagnostics as their
+  runtime entry gate. Added runtime diagnostics for
+  `settlement_autofactor_pm_executable_edge_*` and
+  `settlement_autofactor_predictive_formula_edge_*`, and allowed
+  `autofactor-strategy-promotion.yml` to download a
+  `runtime-candidate-replay-*` artifact directly.
+- 2026-05-21: Validation passed:
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py scripts/build_runtime_candidate_strategy_replay.py tests/test_alpha_search_closed_loop_agent.py tests/test_build_runtime_candidate_strategy_replay.py`,
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent tests.test_build_runtime_candidate_strategy_replay`,
+  `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/autofactor-strategy-promotion.yml"); puts "yaml ok"'`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-research predictive_runtime_feedback_does_not_use_pm_edge_counter_as_collapse --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-strategy-bundles predictive_autofactor_runtime_entry_uses_formula_edge_not_pm_fair_edge --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-strategy-bundles settlement_autofactor --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-research --features db --example factor_walk_forward_v2`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked --test workflow_security autofactor_promotion_can_download_runtime_candidate_replay_directly`,
+  `git diff --check`,
+  and promotion evaluator replay with run `26166737954` still returned
+  `decision=qualified`, `qualified=1`, `replay_ready=true`.
+- 2026-05-21: Follow-up review found that adding replay/config controls as
+  first-class `workflow_dispatch` inputs pushed
+  `autofactor-strategy-promotion.yml` over GitHub's 10-input limit. Moved those
+  advanced controls under `options_json` while keeping the direct
+  `runtime-candidate-replay-*` download path. Re-validated the workflow has 6
+  dispatch inputs:
+  `git_ref`, `factor_walk_forward_run_id`, `artifact_name`,
+  `required_strategy_profile`, `allowed_target`, and `options_json`.
+- 2026-05-21: Follow-up validation passed:
+  `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/autofactor-strategy-promotion.yml"); puts "yaml ok"'`,
+  Python YAML dispatch-input check showing 6 inputs,
+  `git diff --check`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked --test workflow_security workflow_dispatch_inputs_stay_lintable`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked --test workflow_security autofactor_promotion_can_download_runtime_candidate_replay_directly`,
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py scripts/build_runtime_candidate_strategy_replay.py tests/test_alpha_search_closed_loop_agent.py tests/test_build_runtime_candidate_strategy_replay.py`,
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent tests.test_build_runtime_candidate_strategy_replay`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-research predictive_runtime_feedback_does_not_use_pm_edge_counter_as_collapse --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-strategy-bundles settlement_autofactor --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-strategy-bundles predictive_autofactor_runtime_entry_uses_formula_edge_not_pm_fair_edge --lib`,
+  and
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-feedback-target rtk cargo test --locked -p ploy-research --features db --example factor_walk_forward_v2`.
+
 # Predictive AutoFactor Runtime Entry Edge (2026-05-20)
 
 ## Goal

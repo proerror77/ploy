@@ -315,6 +315,27 @@ def factor_family(raw: str) -> str:
     return value
 
 
+def is_ready_runtime_replay(replay: dict[str, Any]) -> bool:
+    blockers = replay.get("blocking_risk_flags") or replay.get("blockers") or []
+    if not isinstance(blockers, list):
+        blockers = [blockers]
+    ready = (
+        replay.get("promotion_ready") is True
+        or replay.get("ready") is True
+        or replay.get("status") == "ready"
+    )
+    return bool(ready and not blockers)
+
+
+def is_predictive_settlement_runtime_score(runtime_score: str) -> bool:
+    name = normalized_factor_key(runtime_score)
+    return (
+        name.startswith("amplitude_weighted_momentum_30s_sigma")
+        or name.startswith("poly_lag_pressure")
+        or (name.startswith("spread_adjusted_external_move") and name != "spread_adjusted_external_move")
+    )
+
+
 def configured_direct_passes(counterfactual: dict[str, Any]) -> int | None:
     threshold = str(counterfactual.get("configured_entry_threshold") or "")
     counts = counterfactual.get("direct_pass_counts")
@@ -336,6 +357,8 @@ def runtime_pass_through_feedback(run: dict[str, Any]) -> dict[str, Any]:
     replay = runtime_replay_payload(run)
     if not replay:
         return {}
+    if is_ready_runtime_replay(replay):
+        return {}
     metrics = replay.get("metrics") if isinstance(replay.get("metrics"), dict) else {}
     diagnostics = (
         replay.get("strategy_diagnostics")
@@ -348,6 +371,7 @@ def runtime_pass_through_feedback(run: dict[str, Any]) -> dict[str, Any]:
         else {}
     )
     runtime_score = str(replay.get("runtime_score") or "").strip()
+    uses_predictive_score = is_predictive_settlement_runtime_score(runtime_score)
     formula_evaluations = int(
         as_float(diagnostics.get("settlement_autofactor_formula_evaluations"))
         or as_float(counterfactual.get("formula_evaluations"))
@@ -379,7 +403,11 @@ def runtime_pass_through_feedback(run: dict[str, Any]) -> dict[str, Any]:
         blockers.append(
             f"runtime_entry_pass_through_too_low:{entry_signals}/{direct_passes}<50"
         )
-    if formula_evaluations >= 500 and executable_edge_pass < 50:
+    if (
+        not uses_predictive_score
+        and formula_evaluations >= 500
+        and executable_edge_pass < 50
+    ):
         blockers.append(
             "runtime_executable_edge_pass_min_edge_too_low:"
             f"{executable_edge_pass}/{formula_evaluations}<50"

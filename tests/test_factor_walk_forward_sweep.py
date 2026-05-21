@@ -179,6 +179,56 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         binary.chmod(0o755)
         return binary
 
+    def fake_binary_with_alpha_search(self, tmp: Path) -> Path:
+        binary = tmp / "fake_factor_walk_forward_alpha.py"
+        binary.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "if '--alpha-search-output-dir' in args:\n"
+            "    out = pathlib.Path(args[args.index('--alpha-search-output-dir') + 1]) / 'full_depth_settlement_executable_pnl'\n"
+            "    out.mkdir(parents=True, exist_ok=True)\n"
+            "    registry = [{\n"
+            "        'factor_name': 'auto_settlement_research_os_edge',\n"
+            "        'target': 'full_depth_settlement_executable_pnl',\n"
+            "        'dsl_hash': 'c' * 64,\n"
+            "        'ast_json': {'Input': 'model_full_depth_settlement_edge'},\n"
+            "        'status': 'candidate',\n"
+            "        'blockers': [],\n"
+            "        'runtime_contract': {\n"
+            "            'schema_version': 1,\n"
+            "            'status': 'supported',\n"
+            "            'strategy_profile': 'settlement_probability',\n"
+            "            'strategy_family': 'settlement_probability',\n"
+            "            'runtime_score': 'autofactor_formula:auto_settlement_research_os_edge',\n"
+            "            'runtime_semantics_version': 'three_layer_autofactor_formula_v1',\n"
+            "            'mapping_source': 'test_alpha_search',\n"
+            "            'ast_input_names': ['model_full_depth_settlement_edge'],\n"
+            "            'blockers': [],\n"
+            "        },\n"
+            "        'metrics': {\n"
+            "            'factor_name': 'auto_settlement_research_os_edge',\n"
+            "            'target': 'full_depth_settlement_executable_pnl',\n"
+            "            'decision': 'candidate',\n"
+            "            'reason': 'passed',\n"
+            "            'reward': 2.5,\n"
+            "            'spearman_ic': 0.12,\n"
+            "            'icir': 1.3,\n"
+            "            'positive_window_ratio': 0.8,\n"
+            "            'top_bucket_avg_label': 1.7,\n"
+            "            'top_bucket_full_depth_entry_fill_rate': 0.95,\n"
+            "            'complexity': 3,\n"
+            "        },\n"
+            "    }]\n"
+            "    (out / 'factor-registry-preview.json').write_text(json.dumps(registry), encoding='utf-8')\n"
+            "    (out / 'search-feedback.json').write_text(json.dumps({'candidate_count': 1, 'passed_count': 1, 'best_candidate': 'auto_settlement_research_os_edge', 'best_reward': 2.5}), encoding='utf-8')\n"
+            "    (out / 'mcts-expansion-plan.json').write_text(json.dumps({'selected_nodes': [{'factor_name': 'auto_settlement_research_os_edge'}]}), encoding='utf-8')\n"
+            f"{FAKE_REPORT}\n",
+            encoding="utf-8",
+        )
+        binary.chmod(0o755)
+        return binary
+
     def fake_binary_with_report(self, tmp: Path, report: str) -> Path:
         binary = tmp / "fake_factor_walk_forward.py"
         binary.write_text(
@@ -297,6 +347,39 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             root_replay["blocking_risk_flags"],
         )
         self.assertEqual(root_replay, variant_replay)
+
+    def test_research_only_mode_skips_legacy_promotion(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = self.fake_binary_with_alpha_search(tmp)
+            subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--research-chain-mode",
+                    "research_only",
+                    "--alpha-search-output-dir",
+                    str(tmp / "out" / "alpha-search"),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            summary = json.loads((tmp / "out" / "sweep-summary.json").read_text(encoding="utf-8"))
+            handoff_exists = (tmp / "out" / "autofactor-strategy-handoff.json").exists()
+            replay_exists = (tmp / "out" / "candidate-strategy-replay.json").exists()
+
+        variant = summary["variants"][0]
+        self.assertEqual(variant["decision"], "research_only")
+        self.assertEqual(variant["qualified_count"], 0)
+        self.assertEqual(
+            variant["best_runtime_mappable_factor"]["name"],
+            "auto_settlement_research_os_edge",
+        )
+        self.assertFalse(handoff_exists)
+        self.assertFalse(replay_exists)
 
     def test_promotes_alpha_search_artifacts_from_best_variant(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -445,6 +528,8 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertIn("--factor-name-filter \"${WALK_FACTOR_NAME_FILTER}\"", workflow)
         self.assertIn("--train-window-hours \"${WALK_TRAIN_WINDOW_HOURS}\"", workflow)
         self.assertIn("--candidate-strategy-replay-json", workflow)
+        self.assertIn("--research-chain-mode \"${WALK_RESEARCH_CHAIN_MODE}\"", workflow)
+        self.assertIn('"research_chain_mode":"research_only"', workflow)
 
     def test_alpha_search_prior_and_state_args_pass_through_to_factor_binary(self):
         with tempfile.TemporaryDirectory() as raw_tmp:

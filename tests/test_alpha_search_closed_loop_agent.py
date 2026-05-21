@@ -933,6 +933,57 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                 "auto_settlement_model_full_depth_settlement_edge_x_external_pressure",
             )
 
+    def test_ready_runtime_replay_does_not_generate_pass_through_collapse(self) -> None:
+        replay = {
+            "basis": "runtime_market_update_replay",
+            "promotion_ready": True,
+            "blocking_risk_flags": [],
+            "runtime_score": "autofactor_formula:mut_spread_adjusted_external_move_near_strike",
+            "metrics": {"trade_count": 68, "unique_event_count": 68, "roi": 0.006},
+            "score_counterfactual": {
+                "configured_entry_threshold": "0.25",
+                "depth_fillable": 1873,
+                "direct_pass_counts": {"0.25": 68},
+                "formula_evaluations": 1873,
+            },
+            "strategy_diagnostics": {
+                "entry_signals": 68,
+                "settlement_autofactor_depth_fillable": 1873,
+                "settlement_autofactor_executable_edge_pass_min_edge": 4,
+                "settlement_autofactor_formula_evaluations": 1873,
+            },
+        }
+
+        self.assertEqual(
+            agent.runtime_pass_through_feedback({"candidate_strategy_replay": replay}),
+            {},
+        )
+
+    def test_predictive_runtime_feedback_ignores_pm_executable_edge_counter(self) -> None:
+        replay = {
+            "basis": "runtime_market_update_replay",
+            "promotion_ready": False,
+            "runtime_score": "autofactor_formula:mut_spread_adjusted_external_move_near_strike",
+            "metrics": {"trade_count": 68, "unique_event_count": 68, "roi": 0.006},
+            "score_counterfactual": {
+                "configured_entry_threshold": "0.25",
+                "depth_fillable": 1873,
+                "direct_pass_counts": {"0.25": 68},
+                "formula_evaluations": 1873,
+            },
+            "strategy_diagnostics": {
+                "entry_signals": 68,
+                "settlement_autofactor_depth_fillable": 1873,
+                "settlement_autofactor_executable_edge_pass_min_edge": 4,
+                "settlement_autofactor_formula_evaluations": 1873,
+            },
+        }
+
+        self.assertEqual(
+            agent.runtime_pass_through_feedback({"candidate_strategy_replay": replay}),
+            {},
+        )
+
     def test_zero_direct_signal_collapse_wins_over_unmapped_same_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base_factor = (

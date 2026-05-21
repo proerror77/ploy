@@ -1,5 +1,6 @@
 //! Pure three-layer scoring model shared by runtime and research tools.
 
+use ploy_market_contracts::runtime_inputs::autofactor_formula_name_blockers;
 use ploy_operator_contracts::Regime;
 
 use super::common::fees::crypto_fee_cost;
@@ -131,6 +132,9 @@ pub fn auto_settlement_formula_score(
         .strip_prefix("autofactor_formula:")
         .unwrap_or(runtime_score);
     let normalized_name = normalize_autofactor_formula_name(name);
+    if !autofactor_formula_name_blockers(normalized_name).is_empty() {
+        return None;
+    }
     if let Some(score) = predictive_formula_score(normalized_name, inputs) {
         return score.is_finite().then_some(score);
     }

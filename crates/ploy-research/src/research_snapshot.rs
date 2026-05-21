@@ -8,6 +8,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::research_os::feature_store::{
+    feature_snapshot_manifest_from_research_snapshot, FEATURE_SNAPSHOT_MANIFEST_ARTIFACT,
+};
 use crate::{DeribitFeatureSnapshot, FactorObservation, ResearchPmBookSnapshot};
 
 pub const RESEARCH_SNAPSHOT_SCHEMA_VERSION: &str = "research_snapshot_v1";
@@ -19,6 +22,8 @@ pub struct ResearchSnapshotArtifacts {
     pub pm_book_snapshots_json: String,
     pub quality_markdown: String,
     pub query_timings_json: String,
+    #[serde(default = "default_feature_snapshot_manifest_json")]
+    pub feature_snapshot_manifest_json: String,
     pub observations_parquet: Option<String>,
 }
 
@@ -30,14 +35,21 @@ impl Default for ResearchSnapshotArtifacts {
             pm_book_snapshots_json: "pm_book_snapshots.json".to_string(),
             quality_markdown: "quality.md".to_string(),
             query_timings_json: "query_timings.json".to_string(),
+            feature_snapshot_manifest_json: default_feature_snapshot_manifest_json(),
             observations_parquet: None,
         }
     }
 }
 
+fn default_feature_snapshot_manifest_json() -> String {
+    FEATURE_SNAPSHOT_MANIFEST_ARTIFACT.to_string()
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResearchSnapshotRowCounts {
     pub observations: usize,
+    #[serde(default)]
+    pub lob_snapshots: usize,
     pub deribit_snapshots: usize,
     pub pm_book_snapshots: usize,
 }
@@ -149,11 +161,9 @@ pub fn write_research_snapshot(
     fs::create_dir_all(snapshot_dir)
         .with_context(|| format!("create snapshot dir {}", snapshot_dir.display()))?;
 
-    snapshot.manifest.row_counts = ResearchSnapshotRowCounts {
-        observations: snapshot.observations.len(),
-        deribit_snapshots: snapshot.deribit_snapshots.len(),
-        pm_book_snapshots: snapshot.pm_book_snapshots.len(),
-    };
+    snapshot.manifest.row_counts.observations = snapshot.observations.len();
+    snapshot.manifest.row_counts.deribit_snapshots = snapshot.deribit_snapshots.len();
+    snapshot.manifest.row_counts.pm_book_snapshots = snapshot.pm_book_snapshots.len();
 
     write_json(
         snapshot_dir.join(&snapshot.manifest.artifacts.observations_json),
@@ -189,6 +199,11 @@ pub fn write_research_snapshot(
     write_quality_markdown(
         &snapshot_dir.join(&snapshot.manifest.artifacts.quality_markdown),
         &snapshot.manifest,
+    )?;
+    let feature_manifest = feature_snapshot_manifest_from_research_snapshot(&snapshot.manifest);
+    write_json(
+        snapshot_dir.join(&snapshot.manifest.artifacts.feature_snapshot_manifest_json),
+        &feature_manifest,
     )?;
     write_json(snapshot_dir.join("manifest.json"), &snapshot.manifest)?;
 
@@ -316,7 +331,7 @@ pub async fn build_research_snapshot_from_database(
     pool: &sqlx::PgPool,
     options: ResearchSnapshotBuildOptions,
 ) -> Result<ResearchSnapshot> {
-    use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
+    use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
     use ploy_market_contracts::MarketUpdate;
 
     use crate::{
@@ -436,6 +451,9 @@ pub async fn build_research_snapshot_from_database(
     if observations.is_empty() {
         quality_flags.push("no_factor_observations".to_string());
     }
+    if all_lob_snapshots.is_empty() {
+        quality_flags.push("no_lob_snapshots".to_string());
+    }
     if options.include_deribit && deribit_snapshots.is_empty() {
         quality_flags.push("no_deribit_snapshots".to_string());
     }
@@ -469,6 +487,7 @@ pub async fn build_research_snapshot_from_database(
             artifacts: ResearchSnapshotArtifacts::default(),
             row_counts: ResearchSnapshotRowCounts {
                 observations: observations.len(),
+                lob_snapshots: all_lob_snapshots.len(),
                 deribit_snapshots: deribit_snapshots.len(),
                 pm_book_snapshots: all_pm_book_snapshots.len(),
             },
@@ -629,8 +648,9 @@ fn write_quality_markdown(path: &Path, manifest: &ResearchSnapshotManifest) -> R
         manifest.include_deribit
     ));
     body.push_str(&format!(
-        "- Rows: observations={}, deribit={}, pm_books={}\n",
+        "- Rows: observations={}, lob={}, deribit={}, pm_books={}\n",
         manifest.row_counts.observations,
+        manifest.row_counts.lob_snapshots,
         manifest.row_counts.deribit_snapshots,
         manifest.row_counts.pm_book_snapshots
     ));
@@ -760,6 +780,7 @@ mod tests {
         assert!(exact_subset_result.is_err());
         assert_eq!(loaded.manifest.row_counts.observations, 0);
         assert!(root.join("quality.md").exists());
+        assert!(root.join(FEATURE_SNAPSHOT_MANIFEST_ARTIFACT).exists());
 
         let _ = std::fs::remove_dir_all(root);
     }

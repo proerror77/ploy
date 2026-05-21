@@ -350,6 +350,79 @@ jobs:
           fi
           python3 scripts/build_runtime_candidate_strategy_replay.py "${args[@]}"
 
+      - name: Write AutoFactor promotion follow-up
+        env:
+          RUNTIME_SCORE: ${{ github.event.inputs.runtime_score }}
+          STRATEGY_PROFILE: ${{ github.event.inputs.strategy_profile }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import shlex
+          from pathlib import Path
+
+          run_id = os.environ["GITHUB_RUN_ID"]
+          run_url = (
+              f"{os.environ['GITHUB_SERVER_URL']}/"
+              f"{os.environ['GITHUB_REPOSITORY']}/actions/runs/{run_id}"
+          )
+          artifact_name = f"runtime-candidate-replay-{run_id}"
+          options = {
+              "candidate_strategy_replay_run_id": run_id,
+              "candidate_strategy_replay_artifact_name": artifact_name,
+          }
+          payload = {
+              "kind": "autofactor_promotion_followup",
+              "runtime_candidate_replay_run_id": run_id,
+              "runtime_candidate_replay_artifact_name": artifact_name,
+              "runtime_candidate_replay_url": run_url,
+              "runtime_score": os.environ["RUNTIME_SCORE"],
+              "strategy_profile": os.environ["STRATEGY_PROFILE"],
+              "promotion_options_json": options,
+              "promotion_workflow": "autofactor-strategy-promotion.yml",
+              "requires_factor_walk_forward_run_id": True,
+          }
+          out_dir = Path("artifacts/runtime-replay")
+          out_dir.mkdir(parents=True, exist_ok=True)
+          (out_dir / "autofactor-promotion-options.json").write_text(
+              json.dumps(options, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          (out_dir / "autofactor-promotion-followup.json").write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          command = (
+              "gh workflow run autofactor-strategy-promotion.yml "
+              "-f git_ref=main "
+              "-f factor_walk_forward_run_id=<factor-walk-forward-run-id> "
+              f"-f required_strategy_profile={shlex.quote(os.environ['STRATEGY_PROFILE'])} "
+              "-f allowed_target=full_depth_settlement_executable_pnl "
+              f"-f options_json={shlex.quote(json.dumps(options, separators=(',', ':')))}"
+          )
+          (out_dir / "autofactor-promotion-followup.md").write_text(
+              "\n".join(
+                  [
+                      "# AutoFactor Promotion Follow-Up",
+                      "",
+                      f"- Runtime replay run: `{run_id}`",
+                      f"- Runtime replay artifact: `{artifact_name}`",
+                      f"- Runtime score: `{os.environ['RUNTIME_SCORE']}`",
+                      f"- Strategy profile: `{os.environ['STRATEGY_PROFILE']}`",
+                      "",
+                      "Use this replay artifact as the direct candidate strategy replay input for the source factor walk-forward run:",
+                      "",
+                      "```bash",
+                      command,
+                      "```",
+                      "",
+                  ]
+              ),
+              encoding="utf-8",
+          )
+          PY
+
       - name: Publish summary
         if: always()
         run: |
@@ -361,6 +434,7 @@ jobs:
             echo "- Recording: \`${{ github.event.inputs.recording_path }}\`"
             echo "- Runtime score: \`${{ github.event.inputs.runtime_score }}\`"
             echo "- Artifact: \`runtime-candidate-replay-${{ github.run_id }}\`"
+            echo "- Promotion options artifact: \`autofactor-promotion-options.json\`"
             if [ -f artifacts/runtime-replay/candidate-strategy-replay.json ]; then
               echo ""
               echo '```json'

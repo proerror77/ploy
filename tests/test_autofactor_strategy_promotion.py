@@ -199,14 +199,25 @@ DEFAULT_REPLAY_PAYLOAD = {
 
 
 class AutoFactorStrategyPromotionTests(unittest.TestCase):
-    def run_script(self, report, *extra_args, check=True, replay_payload=DEFAULT_REPLAY_PAYLOAD):
+    def run_script(
+        self,
+        report,
+        *extra_args,
+        check=True,
+        replay_payload=DEFAULT_REPLAY_PAYLOAD,
+        registry_preview=None,
+        require_runtime_contract=False,
+        emit_trace=False,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             report_path = Path(tmp) / "report.txt"
             replay_path = Path(tmp) / "candidate-strategy-replay.json"
+            registry_path = Path(tmp) / "factor-registry-preview.json"
             output_json = Path(tmp) / "promotion.json"
             output_registry = Path(tmp) / "registry.json"
             output_handoff = Path(tmp) / "handoff.json"
             output_handoff_md = Path(tmp) / "handoff.md"
+            output_trace = Path(tmp) / "research-trace.json"
             report_path.write_text(report, encoding="utf-8")
             replay_args = []
             if replay_payload is not None:
@@ -215,6 +226,18 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 replay_args = ["--candidate-strategy-replay-json", str(replay_path)]
+            registry_args = []
+            if registry_preview is not None:
+                registry_path.write_text(
+                    json.dumps(registry_preview, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                registry_args = ["--factor-registry-preview-json", str(registry_path)]
+                if require_runtime_contract:
+                    registry_args.append("--require-runtime-contract")
+            trace_args = []
+            if emit_trace:
+                trace_args = ["--output-research-trace-json", str(output_trace)]
             result = subprocess.run(
                 [
                     sys.executable,
@@ -229,7 +252,9 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                     str(output_handoff),
                     "--output-handoff-md",
                     str(output_handoff_md),
+                    *trace_args,
                     *replay_args,
+                    *registry_args,
                     *extra_args,
                 ],
                 cwd=ROOT,
@@ -241,7 +266,44 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             registry = json.loads(output_registry.read_text(encoding="utf-8"))
             handoff = json.loads(output_handoff.read_text(encoding="utf-8"))
             handoff_md = output_handoff_md.read_text(encoding="utf-8")
+            if emit_trace:
+                trace = json.loads(output_trace.read_text(encoding="utf-8"))
+                return result, payload, registry, handoff, handoff_md, trace
             return result, payload, registry, handoff, handoff_md
+
+    def registry_preview_row(
+        self,
+        name: str,
+        *,
+        target: str = "full_depth_settlement_executable_pnl",
+        status: str = "supported",
+        runtime_score: str | None = None,
+        strategy_profile: str = "settlement_probability",
+        strategy_family: str = "settlement_probability",
+        blockers: list[str] | None = None,
+    ) -> dict:
+        return {
+            "factor_name": name,
+            "target": target,
+            "dsl_hash": "a" * 64,
+            "ast_json": {"Input": "model_full_depth_settlement_edge"},
+            "runtime_contract": {
+                "schema_version": 1,
+                "status": status,
+                "strategy_profile": strategy_profile if status == "supported" else "",
+                "strategy_family": strategy_family if status == "supported" else "",
+                "runtime_score": runtime_score
+                if runtime_score is not None
+                else f"autofactor_formula:{name}",
+                "runtime_semantics_version": "three_layer_autofactor_formula_v1",
+                "mapping_source": "test_registry_preview",
+                "ast_input_names": ["model_full_depth_settlement_edge"],
+                "blockers": blockers or [],
+            },
+            "status": "candidate",
+            "metrics": {},
+            "blockers": [],
+        }
 
     def test_blocks_candidate_when_runtime_profile_is_not_required_profile(self):
         _, payload, registry, handoff, handoff_md = self.run_script(
@@ -311,6 +373,10 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         )
         self.assertFalse(rejected["qualified"])
         self.assertIn("autofactor_not_candidate:reject:nonpositive_rank_ic", rejected["blockers"])
+        self.assertIn(
+            "unsupported_runtime_formula_semantics:external_pressure_runtime_input_mismatch",
+            rejected["blockers"],
+        )
 
     def test_blocks_when_global_entry_sweep_slippage_is_too_high(self):
         _, payload, registry, handoff, handoff_md = self.run_script(
@@ -338,6 +404,124 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertEqual(registry["decision"], "qualified")
         self.assertEqual(handoff["status"], "ready")
         self.assertEqual(payload["execution_quality"]["avg_entry_sweep_slip_bps"], 80.0)
+
+    def test_promotes_custom_factor_only_through_typed_runtime_contract(self):
+        report = """
+# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,top_bucket_unique_event_count,top_bucket_max_event_decisions,complexity
+1,registry_only_runtime_factor,full_depth_settlement_executable_pnl,candidate,passed,529,0.201235,0.117332,4,1.668090,1.0000,2,1.0000,0.7500,106,4.083066,0.6981,1.0000,18.51,1.42,106,1,8
+"""
+        replay = {
+            **DEFAULT_REPLAY_PAYLOAD,
+            "runtime_score": "autofactor_formula:registry_only_runtime_factor",
+        }
+        _, payload, registry, handoff, _ = self.run_script(
+            LOW_SLIPPAGE_HEALTH + READY_GATE + report,
+            replay_payload=replay,
+            registry_preview=[self.registry_preview_row("registry_only_runtime_factor")],
+            require_runtime_contract=True,
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(
+            handoff["strategies"][0]["runtime_score"],
+            "autofactor_formula:registry_only_runtime_factor",
+        )
+        entry = registry["entries"][0]
+        self.assertEqual(entry["runtime_mapping"]["runtime_contract_status"], "supported")
+        self.assertEqual(entry["runtime_contract"]["mapping_source"], "test_registry_preview")
+
+    def test_emits_research_os_trace_with_runtime_contract_provenance(self):
+        report = """
+# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,top_bucket_unique_event_count,top_bucket_max_event_decisions,complexity
+1,registry_only_runtime_factor,full_depth_settlement_executable_pnl,candidate,passed,529,0.201235,0.117332,4,1.668090,1.0000,2,1.0000,0.7500,106,4.083066,0.6981,1.0000,18.51,1.42,106,1,8
+"""
+        replay = {
+            **DEFAULT_REPLAY_PAYLOAD,
+            "runtime_score": "autofactor_formula:registry_only_runtime_factor",
+        }
+        _, payload, registry, handoff, _, trace = self.run_script(
+            LOW_SLIPPAGE_HEALTH + READY_GATE + report,
+            "--source-run-id",
+            "26190000000",
+            "--promotion-run-id",
+            "26190000999",
+            "--source-artifact",
+            "factor-walk-forward-v2-26190000000",
+            "--git-ref",
+            "main",
+            "--dataset-window-json",
+            '{"start_ts":"2026-05-01T00:00:00Z","end_ts":"2026-05-02T00:00:00Z","symbols":"BTCUSDT,ETHUSDT"}',
+            "--candidate-strategy-replay-source",
+            "run:26190000111/runtime-candidate-replay-26190000111",
+            replay_payload=replay,
+            registry_preview=[self.registry_preview_row("registry_only_runtime_factor")],
+            require_runtime_contract=True,
+            emit_trace=True,
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(registry["entries"][0]["dsl_hash"], "a" * 64)
+        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(trace["kind"], "research_os_autofactor_trace")
+        self.assertEqual(trace["promotion_decision"], "qualified")
+        self.assertEqual(trace["source_run_id"], "26190000000")
+        self.assertEqual(trace["promotion_run_id"], "26190000999")
+        self.assertEqual(trace["dataset_window"]["start_ts"], "2026-05-01T00:00:00Z")
+        registry_row = trace["factor_registry_upserts"][0]
+        self.assertEqual(registry_row["dsl_hash"], "a" * 64)
+        self.assertEqual(registry_row["ast_json"], {"Input": "model_full_depth_settlement_edge"})
+        self.assertEqual(
+            registry_row["metadata"]["runtime_contract"]["mapping_source"],
+            "test_registry_preview",
+        )
+        evaluation = trace["factor_evaluations"][0]
+        self.assertEqual(evaluation["run_id"], "26190000000")
+        self.assertTrue(evaluation["passed_gate"])
+        event = trace["experiment_trace"][0]
+        self.assertEqual(event["run_id"], "26190000000")
+        self.assertEqual(len(event["hash_current"]), 64)
+
+    def test_blocks_supported_name_when_typed_runtime_contract_blocks(self):
+        _, payload, registry, handoff, _ = self.run_script(
+            LOW_SLIPPAGE_HEALTH + READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            registry_preview=[
+                self.registry_preview_row(
+                    "auto_settlement_conservative_settlement_edge",
+                    status="blocked",
+                    runtime_score="",
+                    blockers=["runtime_contract_blocked_by_test"],
+                )
+            ],
+            require_runtime_contract=True,
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        first = registry["entries"][0]
+        self.assertIn("runtime_contract_blocked_by_test", first["blockers"])
+        self.assertEqual(first["runtime_mapping"], {})
+
+    def test_require_runtime_contract_blocks_missing_registry_row(self):
+        _, payload, registry, handoff, _ = self.run_script(
+            LOW_SLIPPAGE_HEALTH + READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            registry_preview=[],
+            require_runtime_contract=True,
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        first = registry["entries"][0]
+        self.assertIn(
+            "runtime_contract_missing:auto_settlement_conservative_settlement_edge:"
+            "full_depth_settlement_executable_pnl",
+            first["blockers"],
+        )
 
     def test_uses_top_bucket_execution_quality_before_global_slippage(self):
         _, payload, _, handoff, _ = self.run_script(
@@ -428,7 +612,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             bare_spread["blockers"],
         )
 
-    def test_qualifies_llm_runtime_pass_through_predictive_formula_mutation(self):
+    def test_blocks_llm_runtime_pass_through_predictive_formula_mutation(self):
         runtime_score = (
             "autofactor_formula:"
             "llm_mut_spread_adjusted_external_move_near_strike_runtime_pass_through_add_spread_penalty"
@@ -442,21 +626,18 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             replay_payload=replay,
         )
 
-        self.assertEqual(payload["decision"], "qualified")
-        self.assertEqual(registry["decision"], "qualified")
-        self.assertEqual(handoff["status"], "ready")
-        self.assertEqual(handoff["strategies"][0]["runtime_score"], runtime_score)
-        self.assertEqual(
-            handoff["strategies"][0]["strategy_family"],
-            "predictive_settlement_probability",
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(registry["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        self.assertEqual(handoff["strategies"], [])
+        factor = payload["evaluated_factors"][0]
+        self.assertIn(
+            "unsupported_runtime_formula_semantics:llm_prefix_not_supported_by_runtime",
+            factor["blockers"],
         )
-        self.assertNotIn(
-            "missing_runtime_strategy_mapping",
-            handoff["strategies"][0].get("blockers", []),
-        )
-        self.assertIn("runtime_pass_through_add_spread_penalty", handoff_md)
+        self.assertIn("No dry-run handoff issue or config", handoff_md)
 
-    def test_qualifies_poly_lag_pressure_predictive_formula_mutation(self):
+    def test_blocks_poly_lag_pressure_predictive_formula_mutation(self):
         replay = {
             **DEFAULT_REPLAY_PAYLOAD,
             "runtime_score": "autofactor_formula:mut_poly_lag_pressure_spread_adjusted",
@@ -466,20 +647,17 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             replay_payload=replay,
         )
 
-        self.assertEqual(payload["decision"], "qualified")
-        self.assertEqual(registry["decision"], "qualified")
-        self.assertEqual(handoff["status"], "ready")
-        self.assertEqual(
-            handoff["strategies"][0]["runtime_score"],
-            "autofactor_formula:mut_poly_lag_pressure_spread_adjusted",
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(registry["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        self.assertEqual(handoff["strategies"], [])
+        factor = payload["evaluated_factors"][0]
+        self.assertIn(
+            "unsupported_runtime_formula_semantics:poly_lag_pressure_runtime_input_mismatch",
+            factor["blockers"],
         )
-        self.assertEqual(
-            handoff["strategies"][0]["strategy_family"],
-            "predictive_settlement_probability",
-        )
-        self.assertIn("mut_poly_lag_pressure_spread_adjusted", handoff_md)
 
-    def test_qualifies_composed_settlement_model_formula_mutation(self):
+    def test_blocks_external_pressure_composed_settlement_model_formula_mutation(self):
         runtime_score = (
             "autofactor_formula:"
             "mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted"
@@ -493,17 +671,14 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             replay_payload=replay,
         )
 
-        self.assertEqual(payload["decision"], "qualified")
-        self.assertEqual(registry["decision"], "qualified")
-        self.assertEqual(handoff["status"], "ready")
-        self.assertEqual(handoff["strategies"][0]["runtime_score"], runtime_score)
-        self.assertEqual(
-            handoff["strategies"][0]["strategy_family"],
-            "settlement_probability",
-        )
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(registry["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        self.assertEqual(handoff["strategies"], [])
+        factor = payload["evaluated_factors"][0]
         self.assertIn(
-            "mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted",
-            handoff_md,
+            "unsupported_runtime_formula_semantics:external_pressure_runtime_input_mismatch",
+            factor["blockers"],
         )
 
     def test_qualifies_tradeable_hard_gate_predictive_formula_when_gate_is_ready(self):

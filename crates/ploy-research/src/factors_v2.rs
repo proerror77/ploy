@@ -1,10 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Duration, Utc};
 use ploy_operator_contracts::Regime;
 use serde::{Deserialize, Serialize};
 
 use crate::factors::{pearson_ic, spearman_ic, FactorObservation, ResearchPmBookSnapshot};
+use crate::research_os::labels::label_contract_for_target;
 
 const DEFAULT_STAKE_USD: f64 = 15.0;
 const DEFAULT_TOP_QUANTILE: f64 = 0.2;
@@ -2560,6 +2561,10 @@ pub fn format_repricing_ic_report(report: &RepricingIcReport, top_n: usize) -> S
             continue;
         }
         out.push_str(&format!("\n=== Repricing IC Target Group: {group} ===\n"));
+        push_label_contract_lines_for_targets(
+            &mut out,
+            group_rows.iter().map(|row| row.target.as_str()),
+        );
         out.push_str("target,factor,role,family,layer,n,pearson_ic,spearman_ic,window_count,window_ic_mean,icir,pos_window_ratio,bottom_n,bottom_avg,top_n,top_avg,top_pos_rate,monotonic,avg_entry_ask,avg_pm_spread_bps,entry_fill,exit_fill,bucket_avgs\n");
         for row in group_rows {
             out.push_str(&format!(
@@ -2591,6 +2596,28 @@ pub fn format_repricing_ic_report(report: &RepricingIcReport, top_n: usize) -> S
         }
     }
     out
+}
+
+fn push_label_contract_lines_for_targets<'a, I>(out: &mut String, targets: I)
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut emitted = BTreeSet::new();
+    for target in targets {
+        if !emitted.insert(target) {
+            continue;
+        }
+        if let Some(contract) = label_contract_for_target(target) {
+            out.push_str(&format!(
+                "label_contract,target={},horizon_id={},accounting={},strategy_lane={},promotion_stage={}\n",
+                target,
+                contract.horizon_id,
+                contract.accounting_mode.as_str(),
+                contract.strategy_lane.as_str(),
+                contract.promotion_stage,
+            ));
+        }
+    }
 }
 
 pub fn format_full_depth_execution_matrix_report(
@@ -3303,6 +3330,14 @@ fn best_walk_forward_oos_model(
 pub fn format_settlement_probability_report(report: &SettlementProbabilityReport) -> String {
     let mut out = String::new();
     out.push_str("=== Settlement Probability Report ===\n");
+    push_label_contract_lines_for_targets(
+        &mut out,
+        [
+            "settlement_win",
+            "full_depth_settlement_executable_pnl",
+            "tradeable_full_depth_settlement_pnl",
+        ],
+    );
     out.push_str(&format!(
         "bucket_count={} min_bucket_obs={} top_edge_quantile={:.2} event_surface_min_bucket_obs={} event_surface_shrinkage_obs={}\n",
         report.options.bucket_count,
@@ -3422,6 +3457,14 @@ pub fn format_settlement_probability_walk_forward_report(
 ) -> String {
     let mut out = String::new();
     out.push_str("=== Settlement Probability Walk-Forward Report ===\n");
+    push_label_contract_lines_for_targets(
+        &mut out,
+        [
+            "settlement_win",
+            "full_depth_settlement_executable_pnl",
+            "tradeable_full_depth_settlement_pnl",
+        ],
+    );
     out.push_str(&format!(
         "train_window={} test_window={} step={} min_obs={} probability_min_bucket_obs={} top_edge_quantile={:.2}\n",
         report.options.walk_forward.train_window_label(),
@@ -10175,6 +10218,7 @@ mod tests {
         let text = format_settlement_probability_walk_forward_report(&report);
         assert!(text.contains("Settlement Probability Walk-Forward Report"));
         assert!(text.contains("EventVolSurface and q_final use only the train window"));
+        assert!(text.contains("label_contract,target=settlement_win,horizon_id=pm5d_settlement,accounting=event_level_one_decision,strategy_lane=settlement_probability,promotion_stage=executable_replay_required"));
     }
 
     #[test]
@@ -10233,9 +10277,10 @@ mod tests {
             .windows
             .iter()
             .any(|row| row.model == "q_final_logit_blend"));
-        assert!(report.aggregates.iter().any(|row| {
-            row.model == "q_final_logit_blend" && row.windows >= 1
-        }));
+        assert!(report
+            .aggregates
+            .iter()
+            .any(|row| { row.model == "q_final_logit_blend" && row.windows >= 1 }));
         let text = format_settlement_probability_walk_forward_report(&report);
         assert!(text.contains("train_window=12h test_window=12h step=12h"));
     }
@@ -10424,7 +10469,9 @@ mod tests {
         assert!(deribit_required.gates.iter().any(|gate| {
             gate.gate == "deribit_vol_surface"
                 && !gate.passed
-                && gate.evidence.contains("require_deribit=true include_deribit=false")
+                && gate
+                    .evidence
+                    .contains("require_deribit=true include_deribit=false")
         }));
 
         let text = format_settlement_probability_promotion_gate_report(&deribit_required);
@@ -11321,6 +11368,7 @@ mod tests {
         let text = format_repricing_ic_report(&report, 10);
         assert!(text.contains("=== Repricing IC Target Group: reprice_pnl ==="));
         assert!(text.contains("future_exit_* fields are labels/diagnostics only"));
+        assert!(text.contains("label_contract,target=reprice_pnl_30s,horizon_id=repricing_30s,accounting=row_level_diagnostic,strategy_lane=repricing,promotion_stage=diagnostic_only_until_repricing_runtime_lane"));
     }
 
     #[test]

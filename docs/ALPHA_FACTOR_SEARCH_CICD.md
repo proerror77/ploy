@@ -66,7 +66,7 @@ fill evidence. Binance futures OI, funding, liquidation, basis / mark data, and
 OKX / Bybit LOB remain external-data roadmap gaps; they block promotion only
 when the candidate hypothesis depends on them.
 
-That means the repo can already do:
+The default FactorEvolve CI loop is now research-only:
 
 ```text
 research snapshot
@@ -74,11 +74,17 @@ research snapshot
   -> alpha-search artifact bundle
   -> MCTS expansion plan
   -> optional chained hosted search iteration
-  -> candidate strategy executable replay artifact
-  -> AutoFactor promotion evaluation
-  -> blocked/ready handoff artifact
-  -> optional dry-run config PR
+  -> Research OS trace / closed-loop next action
+  -> runtime replay request when a candidate needs parity evidence
 ```
+
+`factor-walk-forward-v2-hosted-artifact.yml` and
+`factor-evolve-daily-research.yml` default to
+`research_chain_mode=research_only`; in that mode the sweep does not build the
+top-bucket aggregate replay, does not run AutoFactor promotion evaluation, and
+does not create handoff issues or config PRs. The old
+candidate-replay/promotion/config bridge remains available only through
+explicit legacy promotion mode and the dedicated promotion workflow.
 
 The implemented search controller is intentionally bounded. It is currently a
 typed, deterministic formula-search and MCTS-planning layer rather than a
@@ -249,12 +255,42 @@ The existing fail-closed path remains:
 
 ```text
 factor-walk-forward-v2/report.txt
+  + alpha-search/*/factor-registry-preview.json
   + candidate-strategy-replay.json
   -> scripts/evaluate_autofactor_strategy_promotion.py
   -> autofactor-factor-registry.json
   -> autofactor-strategy-handoff.json
   -> optional ready-only handoff issue or config PR
 ```
+
+`factor-registry-preview.json` is now the preferred runtime-mapping source. Each
+row carries `dsl_hash`, `ast_json`, and a typed `runtime_contract` with
+`status`, `strategy_profile`, `strategy_family`, `runtime_score`, AST input
+names, and blockers. When the registry preview is present, the hosted sweep and
+promotion workflow pass `--require-runtime-contract`; rows missing a matching
+contract or carrying a blocked contract stay blocked instead of falling back to
+name-shaped runtime guesses. Name inference remains only for older artifacts
+that predate the registry contract.
+
+`autofactor-strategy-promotion.yml` can now supply that replay JSON either from
+the factor artifact or by downloading a `runtime-candidate-replay-*` artifact
+directly with `options_json.candidate_strategy_replay_run_id`.
+`runtime-candidate-replay.yml` also uploads
+`autofactor-promotion-options.json` and
+`autofactor-promotion-followup.{json,md}` so the replay artifact can be fed
+back into the promotion evaluator without hand-building the `options_json`
+payload.
+
+Promotion mapping must fail closed when runtime scorer semantics are not proven
+to match the research DSL. Current unsupported runtime-promotion families
+include `llm_*`, `poly_lag_pressure*`, `*_x_external_pressure*`, and
+`*_x_iv_change*`. These remain search diagnostics or typed-prior ideas until
+the runtime input surface and formula normalization are source-of-truth
+compatible with research. The shared contract lives in
+`crates/ploy-market-contracts/src/runtime_inputs.rs`; alpha-search registry
+contracts and the runtime formula scorer both consume the same blocker ids, so
+a research-only input cannot be promoted by registry contract while still being
+accepted by runtime scoring.
 
 ## Search-Space Contract
 
@@ -374,7 +410,9 @@ dimension such as capacity, stability, or overfit risk.
   only a clean 24h snapshot is available. Keep these marked as early
   walk-forward evidence, not final promotion-grade history.
 - `autofactor-strategy-promotion.yml` should be used to re-evaluate an existing
-  walk-forward artifact without rerunning search.
+  walk-forward artifact without rerunning search; pass
+  `options_json.candidate_strategy_replay_run_id` when the ready replay artifact
+  lives in a separate `runtime-candidate-replay-*` run.
 - `event-ml-rolling-evidence.yml` is the supervised event-ML lane, not the
   formula-search lane, though it may consume factor registries later.
 

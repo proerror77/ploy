@@ -192,6 +192,10 @@ corresponding output paths are provided:
 - `autofactor-strategy-handoff.md`: a dry-run handoff issue/config draft only
   when the handoff is ready. In blocked runs it explicitly says no dry-run
   handoff issue or config should be created.
+- `autofactor-research-trace.json`: Research OS ingest rows for
+  `factor_registry`, `factor_evaluations`, and `experiment_trace`, including
+  source run/window provenance, `dsl_hash`, `ast_json`, typed
+  `runtime_contract`, and the promotion decision.
 
 Factor Walk-Forward V2 also includes a constrained settlement-native generator
 for the `full_depth_settlement_executable_pnl` target. It automatically expands
@@ -210,6 +214,19 @@ gate. It also does not replace the strategy replay gate: the same runtime score
 must pass historical executable replay before any dry-run handoff issue/config
 is created. Recorded replay parity remains the later dry-run/runtime parity gate
 after dry-run evidence exists.
+Formula families whose runtime inputs are not semantically aligned with the
+research DSL fail closed at promotion. Current examples are `llm_*`,
+`poly_lag_pressure*`, `*_x_external_pressure*`, and `*_x_iv_change*`; treat them
+as diagnostics or prior material until the runtime scorer consumes the same
+inputs and normalization contract. The canonical input/blocker table lives in
+`crates/ploy-market-contracts/src/runtime_inputs.rs`; both alpha-search
+registry contracts and the runtime formula scorer use that shared table.
+
+For hosted FactorEvolve research, keep `research_chain_mode=research_only`
+unless the run is intentionally exercising the legacy promotion/config bridge.
+Research-only runs produce walk-forward and alpha-search artifacts for closed
+loop planning; they do not build aggregate candidate replay artifacts, run the
+promotion evaluator, create handoff issues, or edit runtime config.
 
 The hosted factor walk-forward sweep can build a per-variant
 `candidate-strategy-replay.json` from the selected runtime-mappable top bucket
@@ -245,6 +262,11 @@ This artifact declares `basis=runtime_market_update_replay`. It stays blocked
 when the runtime produced zero orders/fills, lacks official settlement rows,
 lacks one-event-one-decision evidence, lacks confirmed full-depth entry
 accounting, or fails trade-count/fill-rate/PnL thresholds.
+The workflow also uploads `autofactor-promotion-options.json` and
+`autofactor-promotion-followup.{json,md}`. Use that options JSON as the
+`options_json` value when re-running `autofactor-strategy-promotion.yml` for
+the source factor walk-forward run; the only remaining placeholder is the
+factor walk-forward run id.
 
 For an existing Factor Walk-Forward V2 artifact, use the hosted GitHub workflow
 instead of waiting for the self-hosted research runner:
@@ -254,18 +276,21 @@ gh workflow run autofactor-strategy-promotion.yml \
   -f git_ref=main \
   -f factor_walk_forward_run_id=<run-id> \
   -f required_strategy_profile=settlement_probability \
-  -f allowed_target=full_depth_settlement_executable_pnl
+  -f allowed_target=full_depth_settlement_executable_pnl \
+  -f options_json='{"candidate_strategy_replay_run_id":"<runtime-replay-run-id>"}'
 ```
 
 This downloads `factor-walk-forward-v2-<run-id>`, runs the same evaluator on
 `report.txt`, automatically uses `candidate-strategy-replay.json` or
 `autofactor-candidate-strategy-replay.json` when the source artifact contains
-one, uploads `autofactor-strategy-promotion-<run-id>` artifacts, and can
-optionally comment on a research issue. If no candidate strategy replay artifact
-is present, the handoff stays blocked by design.
+one, or downloads `runtime-candidate-replay-<runtime-replay-run-id>` directly
+when `options_json.candidate_strategy_replay_run_id` is supplied. It uploads
+`autofactor-strategy-promotion-<run-id>` artifacts and can optionally comment on
+a research issue. If no candidate strategy replay artifact is present, the
+handoff stays blocked by design.
 
-The hosted workflow also has a fail-closed `create_handoff_issue` input. Leave
-it `false` for diagnostics. When set to `true`, the workflow creates a dry-run
+The hosted workflow also has a fail-closed `options_json.create_handoff_issue`
+flag. Leave it `false` for diagnostics. When set to `true`, the workflow creates a dry-run
 handoff issue only if `autofactor-strategy-handoff.json` reports
 `status=ready`; blocked handoffs are logged and skipped.
 
@@ -278,8 +303,7 @@ gh workflow run autofactor-strategy-promotion.yml \
   -f factor_walk_forward_run_id=<run-id> \
   -f required_strategy_profile=settlement_probability \
   -f allowed_target=full_depth_settlement_executable_pnl \
-  -f create_config_pr=true \
-  -f strategy_config=config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml
+  -f options_json='{"candidate_strategy_replay_run_id":"<runtime-replay-run-id>","create_config_pr":true,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"}'
 ```
 
 `create_config_pr=true` is intentionally PR-only. It reads the ready handoff
@@ -325,7 +349,17 @@ within the GitHub Actions 10-input limit. Defaults are
 `required_strategy_profile=settlement_probability`,
 `allowed_target=full_depth_settlement_executable_pnl`,
 `create_handoff_issue=false`, `create_config_pr=false`, and
-`fail_if_blocked=false`. The GitHub-hosted artifact workflow defaults
+`fail_if_blocked=false`. Unknown `options_json` keys and non-boolean handoff
+flags fail closed instead of silently falling back to defaults. Inline
+`candidate_strategy_replay_json` must be a JSON object or a string that decodes
+to a JSON object, not an array or arbitrary text. The
+promotion path also consumes alpha-search
+`factor-registry-preview.json` when it is present. That preview carries the
+candidate `dsl_hash`, `ast_json`, and typed `runtime_contract`; hosted sweep and
+promotion jobs require the contract when the preview exists, so a candidate
+cannot be promoted by name inference alone.
+The
+GitHub-hosted artifact workflow defaults
 `report_suite=core`, which keeps the walk-forward report, full-depth execution
 matrices, settlement-probability reports, PRD promotion gate, and AutoFactor
 mining needed for handoff while skipping slower diagnostic-only sections. Pass
@@ -349,8 +383,9 @@ gh workflow run factor-walk-forward-v2-hosted-artifact.yml \
 This keeps the full chain on GitHub-hosted runners after snapshot creation:
 snapshot artifact -> hosted walk-forward -> promotion evaluator -> ready
 handoff -> CI-gated config PR. The promotion evaluator still requires a
-candidate strategy replay artifact inside the source artifact before the
-handoff can be ready. The generated PR updates only
+candidate strategy replay artifact, either embedded in the factor artifact or
+downloaded directly from a runtime replay run, before the handoff can be ready.
+The generated PR updates only
 `three_layer_autofactor_runtime_score`; deployment remains a separate explicit
 dry-run step from `main`.
 

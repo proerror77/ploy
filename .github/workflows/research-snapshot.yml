@@ -393,6 +393,7 @@ jobs:
             exit "${compile_status}"
           fi
           test -s artifacts/research-snapshot/manifest.json
+          test -s artifacts/research-snapshot/feature-snapshot-manifest.json
           test -s artifacts/research-snapshot/quality.md
 
       - name: Cleanup remote snapshot workspace
@@ -445,7 +446,7 @@ jobs:
           set -euo pipefail
           rm -rf artifacts/research-snapshot-provenance
           mkdir -p artifacts/research-snapshot-provenance
-          for file in manifest.json quality.md data-gap-audit.md data-gap-audit.json compile.log compile-status.txt; do
+          for file in manifest.json feature-snapshot-manifest.json quality.md data-gap-audit.md data-gap-audit.json compile.log compile-status.txt; do
             if [ -f "artifacts/research-snapshot/${file}" ]; then
               cp "artifacts/research-snapshot/${file}" artifacts/research-snapshot-provenance/
             fi

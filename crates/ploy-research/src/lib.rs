@@ -12,8 +12,8 @@ pub mod factors_new;
 pub mod factors_v2;
 #[cfg(any(feature = "ml", feature = "rl"))]
 pub mod model;
-pub mod replay;
 pub mod orderbook;
+pub mod replay;
 pub mod research_os;
 pub mod research_snapshot;
 pub mod signal;
@@ -85,7 +85,8 @@ pub fn crate_marker() -> &'static str {
 // factor registry uses the same type internally, but does not re-export its own
 // `factors_new::Regime` alias.
 pub use alpha_search::{
-    read_mcts_search_state, write_alpha_search_artifacts, write_alpha_search_artifacts_with_state,
+    read_mcts_search_state, write_alpha_search_artifacts,
+    write_alpha_search_artifacts_with_feature_snapshot, write_alpha_search_artifacts_with_state,
     write_alpha_search_artifacts_with_state_and_runtime_feedback, AlphaSearchArtifactError,
     AlphaSearchArtifactSummary, AlphaSearchRuntimeFeedback, MctsSearchStateArtifact,
     MctsSearchStateNode,

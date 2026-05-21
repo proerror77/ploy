@@ -23,6 +23,14 @@ on:
         description: "Research budget JSON"
         required: false
         default: '{"max_candidates_per_day":20,"max_backtests_per_day":4,"max_llm_calls_per_day":1}'
+      research_trace_run_id:
+        description: "Optional AutoFactor promotion run id containing autofactor-research-trace.json"
+        required: false
+        default: ""
+      research_trace_artifact_name:
+        description: "Optional AutoFactor trace artifact name"
+        required: false
+        default: ""
       run_mode:
         description: "Daily loop mode"
         required: true
@@ -63,6 +71,25 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
+      - name: Download Research OS trace artifact
+        if: ${{ github.event.inputs.research_trace_run_id != '' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RESEARCH_TRACE_RUN_ID: ${{ github.event.inputs.research_trace_run_id }}
+          RESEARCH_TRACE_ARTIFACT_NAME: ${{ github.event.inputs.research_trace_artifact_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/factor-evolve-daily/research-trace
+          artifact_name="${RESEARCH_TRACE_ARTIFACT_NAME}"
+          if [ -z "${artifact_name}" ]; then
+            artifact_name="autofactor-strategy-promotion-${RESEARCH_TRACE_RUN_ID}"
+          fi
+          python3 scripts/download_github_artifact.py \
+            --run-id "${RESEARCH_TRACE_RUN_ID}" \
+            --name "${artifact_name}" \
+            --output-dir artifacts/factor-evolve-daily/research-trace \
+            --require autofactor-research-trace.json
+
       - name: Validate inputs and write planner payload
         env:
           RESEARCH_BUDGET_JSON: ${{ github.event.inputs.research_budget_json }}
@@ -101,6 +128,7 @@ jobs:
                   "stale_source_count": 0,
                   "missing_blocks_promotion": [],
               },
+              "research_trace_summary": {},
               "research_budget": budget,
           }
           Path("artifacts/factor-evolve-daily/research-manager-input.json").write_text(
@@ -112,15 +140,21 @@ jobs:
       - name: Build daily plan
         run: |
           set -euo pipefail
+          trace_args=()
+          if [ -s artifacts/factor-evolve-daily/research-trace/autofactor-research-trace.json ]; then
+            trace_args+=(artifacts/factor-evolve-daily/research-trace/autofactor-research-trace.json)
+          fi
           cargo run --locked -p ploy-research --example factor_evolve_daily_plan -- \
             artifacts/factor-evolve-daily/research-manager-input.json \
-            artifacts/factor-evolve-daily/research-manager-plan.json
+            artifacts/factor-evolve-daily/research-manager-plan.json \
+            "${trace_args[@]}"
 
       - name: Write daily summary
         env:
           GIT_REF: ${{ github.event.inputs.git_ref }}
           RUN_MODE: ${{ github.event.inputs.run_mode }}
           SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
+          RESEARCH_TRACE_RUN_ID: ${{ github.event.inputs.research_trace_run_id }}
           SYMBOLS: ${{ github.event.inputs.symbols }}
         run: |
           set -euo pipefail
@@ -136,6 +170,7 @@ jobs:
               f"- Git ref: `{os.environ['GIT_REF']}`",
               f"- Run mode: `{os.environ['RUN_MODE']}`",
               f"- Snapshot run: `{os.environ.get('SNAPSHOT_RUN_ID') or 'none'}`",
+              f"- Research trace run: `{os.environ.get('RESEARCH_TRACE_RUN_ID') or 'none'}`",
               f"- Symbols: `{os.environ.get('SYMBOLS') or 'BTCUSDT,ETHUSDT'}`",
               f"- Plan theme: `{plan['theme']}`",
               f"- Evidence stage: `{plan['evidence_stage']}`",
@@ -168,7 +203,9 @@ jobs:
           print(json.dumps({
               "chain_next_run": False,
               "chain_remaining": 0,
+              "research_chain_mode": "research_only",
               "create_handoff_issue": False,
+              "create_config_pr": False,
               "fail_if_blocked": False,
               "data_quality_mode": "event_complete",
               "max_quote_age_secs": max_quote_age_secs,

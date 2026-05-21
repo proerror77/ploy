@@ -92,6 +92,14 @@ def score_counterfactual(diagnostics: dict[str, Any]) -> dict[str, Any]:
         "formula_evaluations": formula_evaluations,
         "depth_fillable": int_metric(diagnostics, "settlement_autofactor_depth_fillable"),
         "entry_score_skips": int_metric(diagnostics, "skip_entry_score"),
+        "predictive_formula_entry_threshold_passes": int_metric(
+            diagnostics,
+            "settlement_autofactor_predictive_formula_edge_pass_entry_threshold",
+        ),
+        "predictive_formula_entry_threshold_fails": int_metric(
+            diagnostics,
+            "settlement_autofactor_predictive_formula_edge_fail_entry_threshold",
+        ),
         "configured_entry_threshold": "0.25",
         "direct_pass_counts": direct,
         "reverse_direction_pass_counts": reverse,

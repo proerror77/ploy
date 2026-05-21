@@ -4,6 +4,7 @@ pub mod events;
 pub mod family;
 pub mod feed;
 pub mod instrument;
+pub mod runtime_inputs;
 pub mod venue;
 
 pub use events::{

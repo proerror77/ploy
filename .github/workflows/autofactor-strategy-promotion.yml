@@ -22,26 +22,10 @@ on:
         description: "Allowed AutoFactor executable target"
         required: false
         default: "full_depth_settlement_executable_pnl"
-      issue_number:
-        description: "Optional issue number for the promotion summary"
+      options_json:
+        description: "Advanced options JSON: replay artifact/json, issue/config PR, and fail-if-blocked flags"
         required: false
-        default: ""
-      create_handoff_issue:
-        description: "Create a dry-run handoff issue when autofactor-strategy-handoff.json is ready"
-        required: false
-        default: "false"
-      create_config_pr:
-        description: "Create a dry-run config PR from a ready handoff"
-        required: false
-        default: "false"
-      strategy_config:
-        description: "Strategy config path updated by create_config_pr"
-        required: false
-        default: "config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"
-      fail_if_blocked:
-        description: "Fail workflow when no AutoFactor strategy qualifies"
-        required: false
-        default: "false"
+        default: "{}"
 
 permissions:
   contents: write
@@ -57,6 +41,115 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.git_ref }}
+
+      - name: Parse promotion options
+        env:
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/promotion-options
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw = os.environ.get("OPTIONS_JSON") or "{}"
+          try:
+              options = json.loads(raw)
+          except json.JSONDecodeError as error:
+              raise SystemExit(f"options_json is not valid JSON: {error}") from error
+          if not isinstance(options, dict):
+              raise SystemExit("options_json must decode to an object")
+
+          defaults = {
+              "candidate_strategy_replay_run_id": "",
+              "candidate_strategy_replay_artifact_name": "",
+              "candidate_strategy_replay_json": "",
+              "issue_number": "",
+              "create_handoff_issue": "false",
+              "create_config_pr": "false",
+              "strategy_config": "config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+              "fail_if_blocked": "false",
+          }
+          unknown = sorted(set(options) - set(defaults))
+          if unknown:
+              raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
+          bool_keys = {"create_handoff_issue", "create_config_pr", "fail_if_blocked"}
+
+          def option_text(key: str, default: str = "") -> str:
+              value = options.get(key, default)
+              if isinstance(value, bool):
+                  return "true" if value else "false"
+              if value is None:
+                  return ""
+              if isinstance(value, (int, float)):
+                  return str(value)
+              if not isinstance(value, str):
+                  raise SystemExit(f"options_json.{key} must be a string, number, boolean, or null")
+              return value
+
+          values = {}
+          for key, default in defaults.items():
+              if key == "candidate_strategy_replay_json":
+                  values[key] = options.get(key, default)
+                  continue
+              values[key] = option_text(key, default)
+              if key in bool_keys and values[key].lower() not in {"true", "false"}:
+                  raise SystemExit(f"options_json.{key} must be boolean")
+              if key in bool_keys:
+                  values[key] = values[key].lower()
+
+          env = {
+              "CANDIDATE_STRATEGY_REPLAY_RUN_ID": values["candidate_strategy_replay_run_id"],
+              "CANDIDATE_STRATEGY_REPLAY_ARTIFACT_NAME": values["candidate_strategy_replay_artifact_name"],
+              "ISSUE_NUMBER": values["issue_number"],
+              "CREATE_HANDOFF_ISSUE": values["create_handoff_issue"],
+              "CREATE_CONFIG_PR": values["create_config_pr"],
+              "STRATEGY_CONFIG": values["strategy_config"],
+              "FAIL_IF_BLOCKED": values["fail_if_blocked"],
+          }
+
+          run_id = env["CANDIDATE_STRATEGY_REPLAY_RUN_ID"]
+          if ":" in run_id and not env["CANDIDATE_STRATEGY_REPLAY_ARTIFACT_NAME"]:
+              run_id, artifact_name = run_id.split(":", 1)
+              if not run_id or not artifact_name:
+                  raise SystemExit("candidate_strategy_replay_run_id must be <run-id>:<artifact-name>")
+              env["CANDIDATE_STRATEGY_REPLAY_RUN_ID"] = run_id
+              env["CANDIDATE_STRATEGY_REPLAY_ARTIFACT_NAME"] = artifact_name
+
+          replay_json = values["candidate_strategy_replay_json"]
+          if replay_json not in (None, ""):
+              if isinstance(replay_json, dict):
+                  replay_payload = json.dumps(replay_json, separators=(",", ":"))
+              elif isinstance(replay_json, str):
+                  try:
+                      decoded_replay = json.loads(replay_json)
+                  except json.JSONDecodeError as error:
+                      raise SystemExit(
+                          f"options_json.candidate_strategy_replay_json is not valid JSON: {error}"
+                      ) from error
+                  if not isinstance(decoded_replay, dict):
+                      raise SystemExit(
+                          "options_json.candidate_strategy_replay_json must decode to a JSON object"
+                      )
+                  replay_payload = json.dumps(decoded_replay, separators=(",", ":"))
+              else:
+                  raise SystemExit("options_json.candidate_strategy_replay_json must be a JSON object or JSON object string")
+              replay_path = Path("artifacts/promotion-options/candidate-strategy-replay.json")
+              replay_path.write_text(replay_payload.rstrip() + "\n", encoding="utf-8")
+              env["CANDIDATE_STRATEGY_REPLAY_INLINE_PATH"] = str(replay_path)
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              for key, value in env.items():
+                  if "\n" in value or "\r" in value:
+                      raise SystemExit(f"options_json produced multiline environment value for {key}")
+                  handle.write(f"{key}={value}\n")
+
+          Path("artifacts/promotion-options/options.json").write_text(
+              json.dumps(options, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
 
       - name: Download factor walk-forward artifact
         env:
@@ -79,16 +172,64 @@ jobs:
             exit 2
           fi
           replay_path="$(find artifacts/source \( -name 'candidate-strategy-replay.json' -o -name 'autofactor-candidate-strategy-replay.json' \) -print -quit)"
+          registry_preview_path="$(find artifacts/source -name 'factor-registry-preview.json' -print -quit)"
           {
             echo "REPORT_PATH=${report_path}"
             echo "CANDIDATE_STRATEGY_REPLAY_PATH=${replay_path}"
+            echo "FACTOR_REGISTRY_PREVIEW_PATH=${registry_preview_path}"
             echo "ARTIFACT_NAME=${artifact_name}"
+          } >> "$GITHUB_ENV"
+
+      - name: Download candidate strategy replay artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${CANDIDATE_STRATEGY_REPLAY_INLINE_PATH:-}" ]; then
+            {
+              echo "CANDIDATE_STRATEGY_REPLAY_PATH=${CANDIDATE_STRATEGY_REPLAY_INLINE_PATH}"
+              echo "CANDIDATE_STRATEGY_REPLAY_SOURCE=inline_json"
+            } >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if [ -z "${CANDIDATE_STRATEGY_REPLAY_RUN_ID}" ]; then
+            echo "No direct candidate strategy replay artifact download requested."
+            echo "CANDIDATE_STRATEGY_REPLAY_SOURCE=${CANDIDATE_STRATEGY_REPLAY_PATH:-embedded_or_missing}" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          artifact_name="${CANDIDATE_STRATEGY_REPLAY_ARTIFACT_NAME}"
+          if [ -z "${artifact_name}" ]; then
+            artifact_name="runtime-candidate-replay-${CANDIDATE_STRATEGY_REPLAY_RUN_ID}"
+          fi
+          rm -rf artifacts/candidate-strategy-replay-direct
+          mkdir -p artifacts/candidate-strategy-replay-direct
+          gh run download "${CANDIDATE_STRATEGY_REPLAY_RUN_ID}" \
+            --name "${artifact_name}" \
+            --dir artifacts/candidate-strategy-replay-direct
+          replay_path="$(find artifacts/candidate-strategy-replay-direct \( -name 'candidate-strategy-replay.json' -o -name 'autofactor-candidate-strategy-replay.json' \) -print -quit)"
+          if [ -z "${replay_path}" ]; then
+            echo "Unable to find candidate-strategy-replay.json in ${artifact_name}" >&2
+            find artifacts/candidate-strategy-replay-direct -maxdepth 4 -type f -print >&2
+            exit 2
+          fi
+          {
+            echo "CANDIDATE_STRATEGY_REPLAY_PATH=${replay_path}"
+            echo "CANDIDATE_STRATEGY_REPLAY_SOURCE=run:${CANDIDATE_STRATEGY_REPLAY_RUN_ID}/${artifact_name}"
           } >> "$GITHUB_ENV"
 
       - name: Evaluate AutoFactor strategy promotion
         run: |
           set -euo pipefail
           mkdir -p artifacts/autofactor-strategy-promotion
+          dataset_window_json="$(SOURCE_RUN_ID="${{ github.event.inputs.factor_walk_forward_run_id }}" python3 - <<'PY'
+          import json
+          import os
+          print(json.dumps({
+              "source_run_id": os.environ.get("SOURCE_RUN_ID", ""),
+              "source_artifact": os.environ.get("ARTIFACT_NAME", ""),
+          }, sort_keys=True))
+          PY
+          )"
           args=(
             --report "${REPORT_PATH}"
             --output-json artifacts/autofactor-strategy-promotion/autofactor-strategy-promotion.json
@@ -96,13 +237,24 @@ jobs:
             --output-registry-json artifacts/autofactor-strategy-promotion/autofactor-factor-registry.json
             --output-handoff-json artifacts/autofactor-strategy-promotion/autofactor-strategy-handoff.json
             --output-handoff-md artifacts/autofactor-strategy-promotion/autofactor-strategy-handoff.md
+            --output-research-trace-json artifacts/autofactor-strategy-promotion/autofactor-research-trace.json
+            --source-run-id "${{ github.event.inputs.factor_walk_forward_run_id }}"
+            --promotion-run-id "${GITHUB_RUN_ID}"
+            --source-artifact "${ARTIFACT_NAME:-}"
+            --git-ref "${{ github.event.inputs.git_ref }}"
+            --dataset-window-json "${dataset_window_json}"
+            --candidate-strategy-replay-source "${CANDIDATE_STRATEGY_REPLAY_SOURCE:-unknown}"
             --required-strategy-profile "${{ github.event.inputs.required_strategy_profile }}"
             --allowed-target "${{ github.event.inputs.allowed_target }}"
           )
           if [ -n "${CANDIDATE_STRATEGY_REPLAY_PATH:-}" ]; then
             args+=(--candidate-strategy-replay-json "${CANDIDATE_STRATEGY_REPLAY_PATH}")
           fi
-          if [ "${{ github.event.inputs.fail_if_blocked }}" = "true" ]; then
+          if [ -n "${FACTOR_REGISTRY_PREVIEW_PATH:-}" ]; then
+            args+=(--factor-registry-preview-json "${FACTOR_REGISTRY_PREVIEW_PATH}")
+            args+=(--require-runtime-contract)
+          fi
+          if [ "${FAIL_IF_BLOCKED}" = "true" ]; then
             args+=(--fail-if-blocked)
           fi
           python3 scripts/evaluate_autofactor_strategy_promotion.py "${args[@]}" \
@@ -117,6 +269,7 @@ jobs:
             echo "- Source run: \`${{ github.event.inputs.factor_walk_forward_run_id }}\`"
             echo "- Source artifact: \`${ARTIFACT_NAME:-unknown}\`"
             echo "- Candidate strategy replay artifact: \`${CANDIDATE_STRATEGY_REPLAY_PATH:-missing}\`"
+            echo "- Candidate strategy replay source: \`${CANDIDATE_STRATEGY_REPLAY_SOURCE:-unknown}\`"
             echo "- Required strategy profile: \`${{ github.event.inputs.required_strategy_profile }}\`"
             echo "- Allowed target: \`${{ github.event.inputs.allowed_target }}\`"
             echo ""
@@ -142,7 +295,7 @@ jobs:
         with:
           script: |
             const fs = require("fs");
-            const issueNumberRaw = "${{ github.event.inputs.issue_number }}";
+            const issueNumberRaw = process.env.ISSUE_NUMBER || "";
             if (!issueNumberRaw) {
               core.info("No issue_number provided; skipping issue comment.");
               return;
@@ -174,7 +327,6 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          CREATE_HANDOFF_ISSUE: ${{ github.event.inputs.create_handoff_issue }}
         run: |
           set -euo pipefail
           if [ "${CREATE_HANDOFF_ISSUE}" != "true" ]; then
@@ -206,8 +358,6 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          CREATE_CONFIG_PR: ${{ github.event.inputs.create_config_pr }}
-          STRATEGY_CONFIG: ${{ github.event.inputs.strategy_config }}
           BASE_REF: ${{ github.event.inputs.git_ref }}
         run: |
           set -euo pipefail

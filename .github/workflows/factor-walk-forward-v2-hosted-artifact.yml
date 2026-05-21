@@ -31,9 +31,9 @@ on:
         required: true
         default: "15"
       options_json:
-        description: "Advanced options JSON: walk windows, factor filters, event-complete gates, replay parity, promotion gate, optional issue/config handoff"
+        description: "Advanced options JSON: walk windows, factor filters, event-complete gates, research chain mode, replay parity, and optional legacy promotion"
         required: false
-        default: '{"train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":"","observation_sample_secs":"","max_quote_age_secs":"","top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","candidate_strategy_replay_json":"","candidate_strategy_replay_run_id":"","candidate_strategy_replay_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":"","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
+        default: '{"research_chain_mode":"research_only","train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":"","observation_sample_secs":"","max_quote_age_secs":"","top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","candidate_strategy_replay_json":"","candidate_strategy_replay_run_id":"","candidate_strategy_replay_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":"","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
       sweep_json:
         description: "Optional JSON array of walk-forward option overrides to run in one job after one download/build"
         required: false
@@ -76,6 +76,7 @@ jobs:
 
           defaults = {
               "train_window_days": "2",
+              "research_chain_mode": "research_only",
               "train_window_hours": "",
               "test_window_days": "1",
               "test_window_hours": "",
@@ -119,6 +120,7 @@ jobs:
           }
           bool_keys = {"chain_next_run", "create_handoff_issue", "create_config_pr", "fail_if_blocked", "require_deribit"}
           choices = {
+              "research_chain_mode": {"research_only", "legacy_promotion"},
               "report_suite": {"core", "full"},
               "data_quality_mode": {"strict_continuous", "event_complete"},
           }
@@ -159,6 +161,15 @@ jobs:
               values["candidate_strategy_replay_run_id"] = run_id
               values["candidate_strategy_replay_artifact_name"] = artifact_name
 
+          legacy_only_keys = {"create_handoff_issue", "create_config_pr", "fail_if_blocked"}
+          if values["research_chain_mode"] == "research_only":
+              enabled = sorted(key for key in legacy_only_keys if values[key] == "true")
+              if enabled:
+                  raise SystemExit(
+                      "research_only mode cannot enable legacy promotion/config controls: "
+                      + ", ".join(enabled)
+                  )
+
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
               for key, value in values.items():
                   if "\n" in value:
@@ -183,6 +194,7 @@ jobs:
             --name "${artifact_name}" \
             --output-dir artifacts/research-snapshot \
             --require manifest.json \
+            --require feature-snapshot-manifest.json \
             --require quality.md; then
             echo "Downloaded research snapshot artifact ${artifact_name}."
           else
@@ -193,6 +205,7 @@ jobs:
               --strip-prefix research-snapshot \
               --output-dir artifacts/research-snapshot \
               --require manifest.json \
+              --require feature-snapshot-manifest.json \
               --require quality.md \
             || python3 scripts/download_github_artifact.py \
               --run-id "${SNAPSHOT_RUN_ID}" \
@@ -200,6 +213,7 @@ jobs:
               --strip-prefix research-snapshot \
               --output-dir artifacts/research-snapshot \
               --require manifest.json \
+              --require feature-snapshot-manifest.json \
               --require quality.md
           fi
 
@@ -219,6 +233,7 @@ jobs:
               artifacts.get("deribit_snapshots_json", "deribit_snapshots.json"),
               artifacts.get("pm_book_snapshots_json", "pm_book_snapshots.json"),
               artifacts.get("quality_markdown", "quality.md"),
+              artifacts.get("feature_snapshot_manifest_json", "feature-snapshot-manifest.json"),
           ]
           missing = [path for path in required if not path or not (root / path).exists()]
           if missing:
@@ -437,6 +452,7 @@ jobs:
             --min-event-complete-events "${WALK_MIN_EVENT_COMPLETE_EVENTS}"
             --min-event-complete-rows "${WALK_MIN_EVENT_COMPLETE_ROWS}"
             --min-promotion-entry-fill-rate "${WALK_MIN_PROMOTION_ENTRY_FILL_RATE}"
+            --research-chain-mode "${WALK_RESEARCH_CHAIN_MODE}"
             --required-strategy-profile "${WALK_REQUIRED_STRATEGY_PROFILE}"
             --allowed-target "${WALK_ALLOWED_TARGET}"
             --sweep-json "${SWEEP_JSON}"
@@ -601,6 +617,7 @@ jobs:
             echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
             echo "- Data quality mode: ${WALK_DATA_QUALITY_MODE}"
             echo "- Report suite: ${WALK_REPORT_SUITE}"
+            echo "- Research chain mode: ${WALK_RESEARCH_CHAIN_MODE}"
             echo "- Required strategy profile: ${WALK_REQUIRED_STRATEGY_PROFILE}"
             echo "- Allowed target: ${WALK_ALLOWED_TARGET}"
             echo "- Factor filter: ${WALK_FACTOR_NAME_FILTER:-<none>}"
@@ -648,7 +665,7 @@ jobs:
             echo "runner=ubuntu-latest"
             echo "source=snapshot_artifact"
           } > artifacts/factor-walk-forward-v2-upload/snapshot-provenance/source.txt
-          for file in manifest.json quality.md data-gap-audit.md data-gap-audit.json; do
+          for file in manifest.json feature-snapshot-manifest.json quality.md data-gap-audit.md data-gap-audit.json; do
             if [ -f "artifacts/research-snapshot/${file}" ]; then
               cp "artifacts/research-snapshot/${file}" \
                 "artifacts/factor-walk-forward-v2-upload/snapshot-provenance/${file}"

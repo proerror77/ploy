@@ -9,9 +9,13 @@ fn workflow_contents(relative_path: &str) -> String {
 }
 
 fn workflow_dispatch_input_count(content: &str) -> usize {
+    workflow_dispatch_input_names(content).len()
+}
+
+fn workflow_dispatch_input_names(content: &str) -> Vec<String> {
     let mut in_inputs = false;
     let mut base_indent = 0usize;
-    let mut count = 0usize;
+    let mut names = Vec::new();
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -29,12 +33,12 @@ fn workflow_dispatch_input_count(content: &str) -> usize {
                 break;
             }
             if indent == base_indent + 2 && trimmed.ends_with(':') {
-                count += 1;
+                names.push(trimmed.trim_end_matches(':').to_string());
             }
         }
     }
 
-    count
+    names
 }
 
 #[test]
@@ -113,6 +117,8 @@ fn research_snapshot_preserves_empty_timestamp_args_over_ssh() {
         "\"${SNAPSHOT_END_TS:-${empty_arg}}\"",
         "if [ \"${start_ts}\" = \"__ploy_empty__\" ]; then",
         "if [ \"${end_ts}\" = \"__ploy_empty__\" ]; then",
+        "test -s artifacts/research-snapshot/feature-snapshot-manifest.json",
+        "manifest.json feature-snapshot-manifest.json quality.md",
     ] {
         if !workflow.contains(needle) {
             offenders.push(format!("research-snapshot.yml: missing `{needle}`"));
@@ -133,8 +139,15 @@ fn factor_evolve_daily_search_passes_snapshot_quote_age() {
 
     for needle in [
         "max_quote_age_secs:",
+        "research_trace_run_id:",
+        "research_trace_artifact_name:",
+        "Download Research OS trace artifact",
+        "--require autofactor-research-trace.json",
+        "research_trace_summary",
         "MAX_QUOTE_AGE_SECS: ${{ github.event.inputs.max_quote_age_secs }}",
         "\"max_quote_age_secs\": max_quote_age_secs",
+        "\"research_chain_mode\": \"research_only\"",
+        "\"create_config_pr\": False",
         "-f options_json=\"$(cat artifacts/factor-evolve-daily/hosted-options.json)\"",
     ] {
         if !workflow.contains(needle) {
@@ -544,6 +557,14 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
         "--require candidate-strategy-replay.json",
         "artifacts/candidate-strategy-replay/candidate-strategy-replay.json",
         "--candidate-strategy-replay-json",
+        "research_chain_mode",
+        "\"research_chain_mode\":\"research_only\"",
+        "--research-chain-mode \"${WALK_RESEARCH_CHAIN_MODE}\"",
+        "legacy_only_keys = {\"create_handoff_issue\", \"create_config_pr\", \"fail_if_blocked\"}",
+        "research_only mode cannot enable legacy promotion/config controls",
+        "--require feature-snapshot-manifest.json",
+        "feature_snapshot_manifest_json",
+        "manifest.json feature-snapshot-manifest.json quality.md data-gap-audit.md data-gap-audit.json",
     ] {
         if !hosted.contains(needle) {
             offenders.push(format!(
@@ -581,6 +602,7 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
         "candidate_strategy_replay_json",
         "candidate_strategy_replay_run_id",
         "candidate_strategy_replay_artifact_name",
+        "research_chain_mode",
     ] {
         if !route_allowlist.contains(needle) {
             offenders.push(format!(
@@ -592,6 +614,134 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
     assert!(
         offenders.is_empty(),
         "hosted factor walk-forward candidate replay feedback guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn autofactor_promotion_can_download_runtime_candidate_replay_directly() {
+    let workflow = workflow_contents(".github/workflows/autofactor-strategy-promotion.yml");
+    let dispatch_inputs = workflow_dispatch_input_names(&workflow);
+    let mut offenders = Vec::new();
+
+    for expected in [
+        "git_ref",
+        "factor_walk_forward_run_id",
+        "artifact_name",
+        "required_strategy_profile",
+        "allowed_target",
+        "options_json",
+    ] {
+        if !dispatch_inputs.iter().any(|input| input == expected) {
+            offenders.push(format!(
+                "autofactor-strategy-promotion.yml: workflow_dispatch inputs missing `{expected}`"
+            ));
+        }
+    }
+
+    for unexpected in [
+        "candidate_strategy_replay_run_id",
+        "candidate_strategy_replay_artifact_name",
+        "candidate_strategy_replay_json",
+        "issue_number",
+        "create_handoff_issue",
+        "create_config_pr",
+        "strategy_config",
+        "fail_if_blocked",
+    ] {
+        if dispatch_inputs.iter().any(|input| input == unexpected) {
+            offenders.push(format!(
+                "autofactor-strategy-promotion.yml: `{unexpected}` must stay inside options_json, not as a top-level workflow_dispatch input"
+            ));
+        }
+    }
+
+    if dispatch_inputs.len() > 10 {
+        offenders.push(format!(
+            "autofactor-strategy-promotion.yml: workflow_dispatch has {} inputs; direct replay options must stay in options_json",
+            dispatch_inputs.len()
+        ));
+    }
+
+    for needle in [
+        "OPTIONS_JSON: ${{ github.event.inputs.options_json }}",
+        "Parse promotion options",
+        "unknown options_json keys",
+        "bool_keys = {\"create_handoff_issue\", \"create_config_pr\", \"fail_if_blocked\"}",
+        "options_json.{key} must be boolean",
+        "options_json.candidate_strategy_replay_json is not valid JSON",
+        "options_json.candidate_strategy_replay_json must decode to a JSON object",
+        "options_json.candidate_strategy_replay_json must be a JSON object or JSON object string",
+        "candidate_strategy_replay_run_id",
+        "candidate_strategy_replay_artifact_name",
+        "candidate_strategy_replay_json",
+        "candidate_strategy_replay_run_id must be <run-id>:<artifact-name>",
+        "CANDIDATE_STRATEGY_REPLAY_INLINE_PATH",
+        "artifacts/promotion-options/candidate-strategy-replay.json",
+        "Download candidate strategy replay artifact",
+        "runtime-candidate-replay-${CANDIDATE_STRATEGY_REPLAY_RUN_ID}",
+        "artifacts/candidate-strategy-replay-direct",
+        "candidate-strategy-replay.json",
+        "--candidate-strategy-replay-json",
+        "CANDIDATE_STRATEGY_REPLAY_SOURCE",
+        "FACTOR_REGISTRY_PREVIEW_PATH",
+        "factor-registry-preview.json",
+        "--factor-registry-preview-json",
+        "--require-runtime-contract",
+        "--output-research-trace-json",
+        "autofactor-research-trace.json",
+        "--source-run-id",
+        "--promotion-run-id",
+        "--dataset-window-json",
+        "--candidate-strategy-replay-source",
+    ] {
+        if !workflow.contains(needle) {
+            offenders.push(format!(
+                "autofactor-strategy-promotion.yml: missing `{needle}`"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "autofactor promotion direct runtime replay guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn runtime_candidate_replay_publishes_autofactor_promotion_followup() {
+    let workflow = workflow_contents(".github/workflows/runtime-candidate-replay.yml");
+    let dispatch_inputs = workflow_dispatch_input_names(&workflow);
+    let mut offenders = Vec::new();
+
+    if dispatch_inputs.len() > 10 {
+        offenders.push(format!(
+            "runtime-candidate-replay.yml: workflow_dispatch has {} inputs; follow-up metadata must not add top-level inputs",
+            dispatch_inputs.len()
+        ));
+    }
+
+    for needle in [
+        "Write AutoFactor promotion follow-up",
+        "autofactor-promotion-options.json",
+        "autofactor-promotion-followup.json",
+        "autofactor-promotion-followup.md",
+        "\"candidate_strategy_replay_run_id\": run_id",
+        "\"candidate_strategy_replay_artifact_name\": artifact_name",
+        "\"requires_factor_walk_forward_run_id\": True",
+        "gh workflow run autofactor-strategy-promotion.yml",
+        "-f factor_walk_forward_run_id=<factor-walk-forward-run-id>",
+        "runtime-candidate-replay-${{ github.run_id }}",
+    ] {
+        if !workflow.contains(needle) {
+            offenders.push(format!("runtime-candidate-replay.yml: missing `{needle}`"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "runtime candidate replay promotion follow-up guard failed:\n{}",
         offenders.join("\n")
     );
 }

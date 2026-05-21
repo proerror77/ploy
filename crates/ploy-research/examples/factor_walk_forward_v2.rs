@@ -5,16 +5,12 @@
 //! scores executable PnL after PM CLOB fillability.
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
+use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
 use ploy_market_contracts::MarketUpdate;
+use ploy_research::research_os::feature_store::{
+    feature_snapshot_manifest_from_research_snapshot, FeatureSnapshotManifest,
+};
 use ploy_research::{
-    AlphaSearchRuntimeFeedback, AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options,
-    FactorObservation, FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
-    FillabilityReviewOptions, FullDepthExecutionMatrixOptions, LiquidityGateV1Options,
-    LiquidityGatedAlphaV1Options, LlmPriorSpec, MetaLabelWalkForwardOptions, RepricingIcOptions,
-    ResearchSnapshotRequest, SettlementProbabilityDataQualityMode,
-    SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
-    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
     autofactor_matrix_from_v2, build_factor_observations_v2_with_deribit_and_pm_books,
     build_factor_observations_with_lob_sampled, build_factor_stability_report,
     build_full_depth_execution_matrix, build_settlement_probability_promotion_gate_report,
@@ -33,7 +29,14 @@ use ploy_research::{
     walk_forward_factor_combo_v1_with_deribit_and_pm_books,
     walk_forward_factors_v2_with_deribit_and_pm_books,
     walk_forward_meta_label_v1_with_deribit_and_pm_books,
-    write_alpha_search_artifacts_with_state_and_runtime_feedback,
+    write_alpha_search_artifacts_with_feature_snapshot, AlphaSearchRuntimeFeedback,
+    AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options, FactorObservation,
+    FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
+    FillabilityReviewOptions, FullDepthExecutionMatrixOptions, LiquidityGateV1Options,
+    LiquidityGatedAlphaV1Options, LlmPriorSpec, MetaLabelWalkForwardOptions, RepricingIcOptions,
+    ResearchSnapshotRequest, SettlementProbabilityDataQualityMode,
+    SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
+    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashSet;
@@ -271,6 +274,25 @@ fn runtime_feedback_from_candidate_replay(path: &str) -> Option<AlphaSearchRunti
         .unwrap_or_else(|err| panic!("read candidate strategy replay JSON {path} failed: {err}"));
     let json: serde_json::Value = serde_json::from_str(&raw)
         .unwrap_or_else(|err| panic!("parse candidate strategy replay JSON {path} failed: {err}"));
+    let blockers_present = json
+        .get("blocking_risk_flags")
+        .or_else(|| json.get("blockers"))
+        .and_then(serde_json::Value::as_array)
+        .map(|items| !items.is_empty())
+        .unwrap_or(false);
+    let ready = json
+        .get("promotion_ready")
+        .or_else(|| json.get("ready"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        || json
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(|status| status == "ready")
+            .unwrap_or(false);
+    if ready && !blockers_present {
+        return None;
+    }
     let runtime_score = json
         .get("runtime_score")
         .and_then(serde_json::Value::as_str)
@@ -333,6 +355,10 @@ fn runtime_feedback_from_candidate_replay(path: &str) -> Option<AlphaSearchRunti
         executable_edge_pass_min_edge: metric(
             "settlement_autofactor_executable_edge_pass_min_edge",
         ),
+        predictive_formula_entry_threshold_passes: metric(
+            "settlement_autofactor_predictive_formula_edge_pass_entry_threshold",
+        )
+        .max(direct_passes),
     })
 }
 
@@ -469,6 +495,7 @@ async fn main() {
         std::process::exit(2);
     }
     let mut snapshot_provenance: Option<String> = None;
+    let mut feature_manifest: Option<FeatureSnapshotManifest> = None;
     let snapshot_data_audit_status: Option<String>;
     let include_deribit: bool;
     let (observations, deribit_snapshots, all_pm_book_snapshots): (
@@ -517,6 +544,9 @@ async fn main() {
             .snapshot_hash
             .as_deref()
             .unwrap_or("<missing>");
+        feature_manifest = Some(feature_snapshot_manifest_from_research_snapshot(
+            &snapshot.manifest,
+        ));
         eprintln!(
             "snapshot: schema={} hash={} generated_at={} observations={} deribit={} pm_books={} load_ms={}",
             snapshot.manifest.schema_version,
@@ -530,7 +560,7 @@ async fn main() {
         snapshot_data_audit_status = snapshot.manifest.data_audit_status.clone();
         include_deribit = snapshot.manifest.include_deribit;
         snapshot_provenance = Some(format!(
-            "# Snapshot\nsnapshot_schema={}\nsnapshot_hash={}\nsnapshot_generated_at={}\nsnapshot_optimizer_data_dir={}\nsnapshot_data_requirements={}\nsnapshot_data_audit_status={}\nsnapshot_data_audit_report={}\nsnapshot_include_deribit={}\n",
+            "# Snapshot\nsnapshot_schema={}\nsnapshot_hash={}\nsnapshot_generated_at={}\nsnapshot_optimizer_data_dir={}\nsnapshot_data_requirements={}\nsnapshot_data_audit_status={}\nsnapshot_data_audit_report={}\nsnapshot_include_deribit={}\nsnapshot_feature_manifest={}\n",
             snapshot.manifest.schema_version,
             snapshot_hash,
             snapshot.manifest.generated_at,
@@ -554,7 +584,8 @@ async fn main() {
                 .data_audit_report
                 .as_deref()
                 .unwrap_or("<not-recorded>"),
-            snapshot.manifest.include_deribit
+            snapshot.manifest.include_deribit,
+            snapshot.manifest.artifacts.feature_snapshot_manifest_json,
         ));
         let requested_symbol_set: HashSet<&str> = symbols.iter().map(String::as_str).collect();
         let mut observations: Vec<FactorObservation> = snapshot
@@ -875,11 +906,12 @@ async fn main() {
         .and_then(runtime_feedback_from_candidate_replay);
     if let Some(feedback) = runtime_feedback.as_ref() {
         eprintln!(
-            "alpha search runtime feedback loaded: runtime_score={} entry_signals={} direct_passes={} executable_edge_pass_min_edge={} formula_evaluations={}",
+            "alpha search runtime feedback loaded: runtime_score={} entry_signals={} direct_passes={} executable_edge_pass_min_edge={} predictive_formula_entry_threshold_passes={} formula_evaluations={}",
             feedback.runtime_score,
             feedback.entry_signals,
             feedback.direct_passes_at_configured_threshold,
             feedback.executable_edge_pass_min_edge,
+            feedback.predictive_formula_entry_threshold_passes,
             feedback.formula_evaluations
         );
     }
@@ -912,7 +944,7 @@ async fn main() {
                     alpha_search_output_dir.as_deref(),
                     alpha_search_input_names.as_ref(),
                 ) {
-                    match write_alpha_search_artifacts_with_state_and_runtime_feedback(
+                    match write_alpha_search_artifacts_with_feature_snapshot(
                         output_dir,
                         target.as_str(),
                         input_names,
@@ -921,6 +953,7 @@ async fn main() {
                         mcts_state.as_ref(),
                         runtime_feedback.as_ref(),
                         llm_prior.as_ref(),
+                        feature_manifest.as_ref(),
                     ) {
                         Ok(summary) => eprintln!(
                             "alpha search artifacts written target={} candidates={} rejected={} best={} dir={}",

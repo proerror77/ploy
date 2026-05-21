@@ -29,16 +29,29 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+import uuid
+
+from autofactor_runtime_contract import (
+    load_factor_registry_runtime_contracts,
+    mapping_from_runtime_contract,
+    runtime_contract_for_row,
+)
 
 
 DEFAULT_ALLOWED_TARGETS = (
     "full_depth_settlement_executable_pnl",
     "tradeable_full_depth_settlement_pnl",
 )
+RESEARCH_OS_NAMESPACE = uuid.UUID("04764f29-a8e5-5421-b27c-96716ef08e5c")
+TRACE_EVENT_TYPE = "autofactor_strategy_promotion_evaluated"
+TRACE_AGENT_NAME = "autofactor_strategy_promotion"
+TRACE_EVIDENCE_STAGE = "walk_forward/runtime_parity"
 
 SETTLEMENT_RUNTIME_MAPPING = {
     "strategy_profile": "settlement_probability",
@@ -242,6 +255,8 @@ class EvaluatedFactor:
     qualified: bool
     blockers: list[str]
     runtime_mapping: dict[str, str] | None
+    runtime_contract: dict[str, Any] | None = None
+    registry_record: dict[str, Any] | None = None
 
 
 def factor_metrics(row: AutoFactorRow) -> dict[str, Any]:
@@ -558,6 +573,19 @@ def normalize_formula_name(name: str) -> str:
             return name
 
 
+def unsupported_runtime_formula_blocker(name: str) -> str:
+    normalized = normalize_formula_name(name)
+    if name.startswith("llm_"):
+        return "unsupported_runtime_formula_semantics:llm_prefix_not_supported_by_runtime"
+    if normalized.startswith("poly_lag_pressure"):
+        return "unsupported_runtime_formula_semantics:poly_lag_pressure_runtime_input_mismatch"
+    if "external_pressure" in normalized:
+        return "unsupported_runtime_formula_semantics:external_pressure_runtime_input_mismatch"
+    if "iv_change" in normalized:
+        return "unsupported_runtime_formula_semantics:iv_change_runtime_input_missing"
+    return ""
+
+
 def settlement_formula_suffix_supported(suffix: str) -> bool:
     if not suffix:
         return True
@@ -604,6 +632,8 @@ def is_settlement_formula(name: str) -> bool:
 
 
 def inferred_runtime_mapping(name: str) -> dict[str, str] | None:
+    if unsupported_runtime_formula_blocker(name):
+        return None
     normalized = normalize_formula_name(name)
     if normalized == "spread_adjusted_external_move":
         return None
@@ -697,6 +727,8 @@ def evaluate(
     allowed_targets: tuple[str, ...],
     required_strategy_profile: str,
     runtime_mappings: dict[str, dict[str, str]],
+    runtime_contracts: dict[tuple[str, str], dict[str, Any]] | None,
+    require_runtime_contract: bool,
     min_factor_n: int,
     min_top_bucket_n: int,
     min_top_bucket_entry_fill_rate: float,
@@ -714,7 +746,22 @@ def evaluate(
 
     for row in rows:
         blockers: list[str] = []
-        mapping = runtime_mappings.get(row.name) or inferred_runtime_mapping(row.name)
+        contract_record = runtime_contract_for_row(
+            runtime_contracts or {},
+            factor_name=row.name,
+            target=row.target,
+        )
+        mapping, runtime_contract, contract_blockers = mapping_from_runtime_contract(
+            contract_record,
+            factor_name=row.name,
+            target=row.target,
+            require_runtime_contract=require_runtime_contract,
+        )
+        semantic_blocker = ""
+        if not contract_record and not contract_blockers:
+            semantic_blocker = unsupported_runtime_formula_blocker(row.name)
+        if not mapping and not semantic_blocker and not contract_blockers:
+            mapping = runtime_mappings.get(row.name) or inferred_runtime_mapping(row.name)
         formula_specific = is_autofactor_formula(mapping)
         suppress_global_fillability = (
             formula_specific
@@ -742,6 +789,9 @@ def evaluate(
             blockers.append("target_not_allowed")
         if row.decision != "candidate" or row.reason != "passed":
             blockers.append(f"autofactor_not_candidate:{row.decision}:{row.reason}")
+        blockers.extend(contract_blockers)
+        if semantic_blocker:
+            blockers.append(semantic_blocker)
         if row.n < min_factor_n:
             blockers.append(f"factor_sample_too_small:{row.n}<{min_factor_n}")
         if row.top_bucket_n < min_top_bucket_n:
@@ -799,6 +849,8 @@ def evaluate(
                 qualified=not blockers,
                 blockers=blockers,
                 runtime_mapping=mapping,
+                runtime_contract=runtime_contract,
+                registry_record=contract_record,
             )
         )
 
@@ -826,6 +878,8 @@ def evaluate(
             {
                 "factor": asdict(item.factor),
                 "runtime_mapping": item.runtime_mapping,
+                "runtime_contract": item.runtime_contract,
+                "registry_record": item.registry_record,
             }
             for item in qualified
         ],
@@ -835,6 +889,8 @@ def evaluate(
                 "qualified": item.qualified,
                 "blockers": item.blockers,
                 "runtime_mapping": item.runtime_mapping,
+                "runtime_contract": item.runtime_contract,
+                "registry_record": item.registry_record,
             }
             for item in evaluated
         ],
@@ -846,15 +902,19 @@ def build_factor_registry(result: dict[str, Any]) -> dict[str, Any]:
     for item in result["evaluated_factors"]:
         factor = item["factor"]
         mapping = item["runtime_mapping"] or {}
+        registry_record = item.get("registry_record") or {}
         entries.append(
             {
                 "name": factor["name"],
                 "target": factor["target"],
+                "dsl_hash": registry_record.get("dsl_hash") or mapping.get("dsl_hash", ""),
+                "ast_json": registry_record.get("ast_json"),
                 "status": "qualified" if item["qualified"] else "blocked",
                 "autofactor_decision": factor["decision"],
                 "autofactor_reason": factor["reason"],
                 "blockers": item["blockers"],
                 "runtime_mapping": mapping,
+                "runtime_contract": item.get("runtime_contract"),
                 "metrics": factor_metrics(AutoFactorRow(**factor)),
             }
         )
@@ -883,6 +943,7 @@ def build_strategy_handoff(result: dict[str, Any]) -> dict[str, Any]:
                 "strategy_profile": mapping.get("strategy_profile", ""),
                 "strategy_family": mapping.get("strategy_family", ""),
                 "runtime_score": mapping.get("runtime_score", ""),
+                "runtime_contract": item.get("runtime_contract"),
                 "promotion_status": "ready_for_dry_run_handoff",
                 "metrics": factor_metrics(AutoFactorRow(**factor)),
             }
@@ -902,6 +963,267 @@ def build_strategy_handoff(result: dict[str, Any]) -> dict[str, Any]:
         "blocked_factor_count": sum(
             1 for item in result["evaluated_factors"] if not item["qualified"]
         ),
+    }
+
+
+def load_json_object_arg(raw: str) -> dict[str, Any]:
+    if not raw:
+        return {}
+    stripped = raw.strip()
+    if stripped[:1] in {"{", "["}:
+        payload = json.loads(stripped)
+    else:
+        payload = json.loads(Path(raw).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("JSON argument must decode to an object")
+    return payload
+
+
+def stable_uuid(*parts: Any) -> str:
+    payload = json.dumps(parts, sort_keys=True, separators=(",", ":"), default=str)
+    return str(uuid.uuid5(RESEARCH_OS_NAMESPACE, payload))
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def research_trace_hash(
+    *,
+    hash_prev: str,
+    run_id: str,
+    event_type: str,
+    agent_name: str,
+    input_json: dict[str, Any],
+    output_json: dict[str, Any],
+) -> str:
+    pieces = [
+        hash_prev,
+        run_id,
+        event_type,
+        agent_name,
+        canonical_json(input_json),
+        canonical_json(output_json),
+    ]
+    return hashlib.sha256("\n".join(pieces).encode("utf-8")).hexdigest()
+
+
+def lifecycle_status(item: dict[str, Any]) -> str:
+    return "candidate" if item["qualified"] else "evaluated"
+
+
+def research_factor_family(item: dict[str, Any]) -> str:
+    mapping = item.get("runtime_mapping") or {}
+    contract = item.get("runtime_contract") or {}
+    return (
+        mapping.get("strategy_family")
+        or contract.get("strategy_family")
+        or mapping.get("strategy_profile")
+        or "autofactor"
+    )
+
+
+def factor_registry_row(
+    item: dict[str, Any],
+    *,
+    source_run_id: str,
+    promotion_run_id: str,
+    dataset_window: dict[str, Any],
+) -> dict[str, Any] | None:
+    factor = item["factor"]
+    mapping = item.get("runtime_mapping") or {}
+    registry_record = item.get("registry_record") or {}
+    dsl_hash = registry_record.get("dsl_hash") or mapping.get("dsl_hash") or ""
+    ast_json = registry_record.get("ast_json")
+    if not dsl_hash or ast_json is None:
+        return None
+    factor_id = stable_uuid("factor_registry", dsl_hash)
+    metadata = {
+        "source": "autofactor_strategy_promotion",
+        "source_run_id": source_run_id,
+        "promotion_run_id": promotion_run_id,
+        "promotion_decision": "qualified" if item["qualified"] else "blocked",
+        "blockers": item.get("blockers") or [],
+        "runtime_mapping": mapping,
+        "runtime_contract": item.get("runtime_contract"),
+        "metrics": factor_metrics(AutoFactorRow(**factor)),
+        "dataset_window": dataset_window,
+    }
+    return {
+        "factor_id": factor_id,
+        "factor_name": factor["name"],
+        "factor_family": research_factor_family(item),
+        "status": lifecycle_status(item),
+        "hypothesis": f"AutoFactor candidate for {factor['target']}",
+        "economic_logic": research_factor_family(item),
+        "dsl_source": canonical_json(ast_json),
+        "dsl_hash": dsl_hash,
+        "ast_json": ast_json,
+        "target": factor["target"],
+        "horizon": str(dataset_window.get("horizon") or "pm5d"),
+        "created_by_agent": TRACE_AGENT_NAME,
+        "metadata": metadata,
+    }
+
+
+def factor_evaluation_row(
+    item: dict[str, Any],
+    registry_row: dict[str, Any],
+    *,
+    source_run_id: str,
+    data_snapshot_id: str,
+) -> dict[str, Any]:
+    factor = item["factor"]
+    metrics = factor_metrics(AutoFactorRow(**factor))
+    blockers = item.get("blockers") or []
+    return {
+        "eval_id": stable_uuid(
+            "factor_evaluation",
+            source_run_id,
+            registry_row["factor_id"],
+            factor["target"],
+        ),
+        "factor_id": registry_row["factor_id"],
+        "run_id": source_run_id,
+        "data_snapshot_id": data_snapshot_id,
+        "evaluator_version": "autofactor_strategy_promotion_v1",
+        "train_ic": None,
+        "valid_ic": metrics["spearman_ic"],
+        "test_ic": None,
+        "oos_ic": None,
+        "rank_ic": metrics["spearman_ic"],
+        "icir": metrics["icir"],
+        "sharpe_gross": None,
+        "sharpe_net": None,
+        "max_drawdown": None,
+        "turnover": None,
+        "poly_ev": metrics["top_bucket_avg_label"],
+        "poly_avg_fill": metrics["top_bucket_full_depth_entry_fill_rate"],
+        "poly_slippage": metrics["top_bucket_avg_entry_sweep_slip_bps"],
+        "poly_exit_capacity": None,
+        "reward_total": None,
+        "passed_gate": bool(item["qualified"]),
+        "rejection_reason": ";".join(blockers) if blockers else None,
+        "metrics_json": {
+            **metrics,
+            "promotion_decision": "qualified" if item["qualified"] else "blocked",
+            "runtime_mapping": item.get("runtime_mapping") or {},
+            "runtime_contract": item.get("runtime_contract"),
+            "blockers": blockers,
+        },
+    }
+
+
+def build_research_trace(
+    result: dict[str, Any],
+    *,
+    source_run_id: str,
+    promotion_run_id: str,
+    source_artifact: str,
+    git_ref: str,
+    dataset_window: dict[str, Any],
+    candidate_strategy_replay_source: str,
+    trace_prev_hash: str,
+) -> dict[str, Any]:
+    source_run_id = source_run_id or promotion_run_id or "local"
+    promotion_run_id = promotion_run_id or source_run_id
+    data_snapshot_id = (
+        str(dataset_window.get("snapshot_run_id") or "")
+        or str(dataset_window.get("snapshot_id") or "")
+        or source_artifact
+        or f"factor_walk_forward_run:{source_run_id}"
+    )
+
+    registry_rows = []
+    evaluation_rows = []
+    skipped_rows = []
+    for item in result["evaluated_factors"]:
+        row = factor_registry_row(
+            item,
+            source_run_id=source_run_id,
+            promotion_run_id=promotion_run_id,
+            dataset_window=dataset_window,
+        )
+        if row is None:
+            skipped_rows.append(
+                {
+                    "name": item["factor"]["name"],
+                    "target": item["factor"]["target"],
+                    "reason": "missing_dsl_hash_or_ast_json",
+                }
+            )
+            continue
+        registry_rows.append(row)
+        evaluation_rows.append(
+            factor_evaluation_row(
+                item,
+                row,
+                source_run_id=source_run_id,
+                data_snapshot_id=data_snapshot_id,
+            )
+        )
+
+    trace_input = {
+        "source_run_id": source_run_id,
+        "promotion_run_id": promotion_run_id,
+        "source_artifact": source_artifact,
+        "git_ref": git_ref,
+        "dataset_window": dataset_window,
+        "required_strategy_profile": result["required_strategy_profile"],
+        "allowed_targets": result["allowed_targets"],
+        "candidate_strategy_replay_source": candidate_strategy_replay_source,
+    }
+    trace_output = {
+        "decision": result["decision"],
+        "qualified_count": len(result["qualified_strategies"]),
+        "evaluated_count": len(result["evaluated_factors"]),
+        "blocked_count": sum(
+            1 for item in result["evaluated_factors"] if not item["qualified"]
+        ),
+        "promotion_gate": result["promotion_gate"],
+        "qualified_strategies": result["qualified_strategies"],
+        "skipped_registry_rows": skipped_rows,
+    }
+    hash_current = research_trace_hash(
+        hash_prev=trace_prev_hash,
+        run_id=source_run_id,
+        event_type=TRACE_EVENT_TYPE,
+        agent_name=TRACE_AGENT_NAME,
+        input_json=trace_input,
+        output_json=trace_output,
+    )
+    trace_event = {
+        "trace_id": stable_uuid(
+            "experiment_trace",
+            source_run_id,
+            promotion_run_id,
+            TRACE_EVENT_TYPE,
+            hash_current,
+        ),
+        "run_id": source_run_id,
+        "parent_trace_id": None,
+        "event_type": TRACE_EVENT_TYPE,
+        "agent_name": TRACE_AGENT_NAME,
+        "input_json": trace_input,
+        "output_json": trace_output,
+        "hash_prev": trace_prev_hash or None,
+        "hash_current": hash_current,
+    }
+    return {
+        "schema_version": 1,
+        "kind": "research_os_autofactor_trace",
+        "evidence_stage": TRACE_EVIDENCE_STAGE,
+        "promotion_decision": result["decision"],
+        "source_run_id": source_run_id,
+        "promotion_run_id": promotion_run_id,
+        "source_artifact": source_artifact,
+        "git_ref": git_ref,
+        "dataset_window": dataset_window,
+        "data_snapshot_id": data_snapshot_id,
+        "factor_registry_upserts": registry_rows,
+        "factor_evaluations": evaluation_rows,
+        "experiment_trace": [trace_event],
+        "skipped_registry_rows": skipped_rows,
     }
 
 
@@ -1054,7 +1376,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-registry-json", default="")
     parser.add_argument("--output-handoff-json", default="")
     parser.add_argument("--output-handoff-md", default="")
+    parser.add_argument("--output-research-trace-json", default="")
     parser.add_argument("--runtime-mapping-json", default="")
+    parser.add_argument(
+        "--factor-registry-preview-json",
+        action="append",
+        default=[],
+        help="Alpha-search factor-registry-preview.json with typed runtime contracts. May be repeated.",
+    )
+    parser.add_argument(
+        "--require-runtime-contract",
+        action="store_true",
+        help="Block rows that do not have a matching typed runtime contract.",
+    )
     parser.add_argument(
         "--candidate-strategy-replay-json",
         default="",
@@ -1067,6 +1401,13 @@ def parse_args() -> argparse.Namespace:
         help="Allowed AutoFactor target. May be repeated.",
     )
     parser.add_argument("--required-strategy-profile", default="settlement_probability")
+    parser.add_argument("--source-run-id", default="")
+    parser.add_argument("--promotion-run-id", default="")
+    parser.add_argument("--source-artifact", default="")
+    parser.add_argument("--git-ref", default="")
+    parser.add_argument("--dataset-window-json", default="")
+    parser.add_argument("--candidate-strategy-replay-source", default="")
+    parser.add_argument("--trace-prev-hash", default="")
     parser.add_argument("--fail-if-blocked", action="store_true")
     parser.add_argument("--min-factor-n", type=int, default=100)
     parser.add_argument("--min-top-bucket-n", type=int, default=50)
@@ -1092,6 +1433,10 @@ def main() -> int:
         allowed_targets=allowed_targets,
         required_strategy_profile=args.required_strategy_profile,
         runtime_mappings=load_runtime_mappings(args.runtime_mapping_json or None),
+        runtime_contracts=load_factor_registry_runtime_contracts(
+            args.factor_registry_preview_json
+        ),
+        require_runtime_contract=args.require_runtime_contract,
         min_factor_n=args.min_factor_n,
         min_top_bucket_n=args.min_top_bucket_n,
         min_top_bucket_entry_fill_rate=args.min_top_bucket_entry_fill_rate,
@@ -1130,6 +1475,27 @@ def main() -> int:
         output = Path(args.output_handoff_md)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(render_handoff_markdown(handoff), encoding="utf-8")
+    if args.output_research_trace_json:
+        output = Path(args.output_research_trace_json)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(
+                build_research_trace(
+                    result,
+                    source_run_id=args.source_run_id,
+                    promotion_run_id=args.promotion_run_id or os.environ.get("GITHUB_RUN_ID", ""),
+                    source_artifact=args.source_artifact,
+                    git_ref=args.git_ref or os.environ.get("GITHUB_REF_NAME", ""),
+                    dataset_window=load_json_object_arg(args.dataset_window_json),
+                    candidate_strategy_replay_source=args.candidate_strategy_replay_source,
+                    trace_prev_hash=args.trace_prev_hash,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["decision"] == "qualified" or not args.fail_if_blocked else 3

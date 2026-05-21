@@ -190,6 +190,8 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
                         "settlement_autofactor_formula_evaluations": 20,
                         "settlement_autofactor_depth_fillable": 18,
                         "skip_entry_score": 18,
+                        "settlement_autofactor_predictive_formula_edge_pass_entry_threshold": 2,
+                        "settlement_autofactor_predictive_formula_edge_fail_entry_threshold": 16,
                         "settlement_autofactor_predictive_score_ge_005": 12,
                         "settlement_autofactor_predictive_score_ge_010": 8,
                         "settlement_autofactor_predictive_score_ge_015": 3,
@@ -217,6 +219,8 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         self.assertEqual(counterfactual["formula_evaluations"], 20)
         self.assertEqual(counterfactual["depth_fillable"], 18)
         self.assertEqual(counterfactual["entry_score_skips"], 18)
+        self.assertEqual(counterfactual["predictive_formula_entry_threshold_passes"], 2)
+        self.assertEqual(counterfactual["predictive_formula_entry_threshold_fails"], 16)
         self.assertEqual(counterfactual["direct_pass_counts"]["0.15"], 3)
         self.assertEqual(counterfactual["direct_pass_counts"]["0.25"], 0)
         self.assertEqual(counterfactual["reverse_direction_pass_counts"]["0.10"], 1)
