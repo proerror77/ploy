@@ -508,7 +508,13 @@ pub fn evaluate_named_factor(
         .collect::<Vec<_>>();
     let monotonicity_score = monotonicity_score(&bucket_avg_labels);
     let bottom = buckets.first();
-    let top = buckets.last();
+    let event_level_top = event_level_bucket_summary(
+        buckets.last(),
+        &scored,
+        event_ids,
+        matrix.column("full_depth_entry_fillable_gate"),
+    );
+    let top = event_level_top.as_ref().or_else(|| buckets.last());
     let (top_bucket_unique_event_count, top_bucket_max_event_decisions) =
         top_bucket_event_decision_stats(top, event_ids);
     let complexity = factor.expr.complexity();
@@ -1656,31 +1662,75 @@ fn build_buckets(
             let end = ((bucket_idx + 1) * sorted.len() / bucket_count).min(sorted.len());
             (start < end).then(|| {
                 let slice = &sorted[start..end];
-                BucketSummary {
-                    n: slice.len(),
-                    avg_label: finite_mean(slice.iter().map(|(_, _, label)| *label)),
-                    positive_label_rate: ratio(
-                        slice.iter().filter(|(_, _, label)| *label > 0.0).count(),
-                        slice.len(),
-                    ),
-                    full_depth_entry_fill_rate: full_depth_entry_fillable
-                        .map(|values| {
-                            ratio(
-                                slice
-                                    .iter()
-                                    .filter(|(idx, _, _)| {
-                                        values.get(*idx).copied().unwrap_or(0.0) > 0.5
-                                    })
-                                    .count(),
-                                slice.len(),
-                            )
-                        })
-                        .unwrap_or(f64::NAN),
-                    indexes: slice.iter().map(|(idx, _, _)| *idx).collect(),
-                }
+                summarize_bucket_slice(slice, full_depth_entry_fillable)
             })
         })
         .collect()
+}
+
+fn summarize_bucket_slice(
+    slice: &[(usize, f64, f64)],
+    full_depth_entry_fillable: Option<&[f64]>,
+) -> BucketSummary {
+    BucketSummary {
+        n: slice.len(),
+        avg_label: finite_mean(slice.iter().map(|(_, _, label)| *label)),
+        positive_label_rate: ratio(
+            slice.iter().filter(|(_, _, label)| *label > 0.0).count(),
+            slice.len(),
+        ),
+        full_depth_entry_fill_rate: full_depth_entry_fillable
+            .map(|values| {
+                ratio(
+                    slice
+                        .iter()
+                        .filter(|(idx, _, _)| values.get(*idx).copied().unwrap_or(0.0) > 0.5)
+                        .count(),
+                    slice.len(),
+                )
+            })
+            .unwrap_or(f64::NAN),
+        indexes: slice.iter().map(|(idx, _, _)| *idx).collect(),
+    }
+}
+
+fn event_level_bucket_summary(
+    bucket: Option<&BucketSummary>,
+    scored: &[(usize, f64, f64)],
+    event_ids: &[String],
+    full_depth_entry_fillable: Option<&[f64]>,
+) -> Option<BucketSummary> {
+    let bucket = bucket?;
+    if event_ids.is_empty() {
+        return Some(bucket.clone());
+    }
+    let by_index = scored
+        .iter()
+        .map(|(idx, score, label)| (*idx, (*score, *label)))
+        .collect::<BTreeMap<_, _>>();
+    let mut by_event: BTreeMap<&str, (usize, f64, f64)> = BTreeMap::new();
+    for idx in &bucket.indexes {
+        let Some(event_id) = event_ids.get(*idx) else {
+            continue;
+        };
+        let Some((score, label)) = by_index.get(idx).copied() else {
+            continue;
+        };
+        by_event
+            .entry(event_id.as_str())
+            .and_modify(|current| {
+                if score > current.1 {
+                    *current = (*idx, score, label);
+                }
+            })
+            .or_insert((*idx, score, label));
+    }
+    let selected = by_event.into_values().collect::<Vec<_>>();
+    if selected.is_empty() {
+        None
+    } else {
+        Some(summarize_bucket_slice(&selected, full_depth_entry_fillable))
+    }
 }
 
 fn top_bucket_event_decision_stats(
@@ -2446,6 +2496,56 @@ mod tests {
         assert_eq!(reports[0].decision, AutoFactorDecision::Watchlist);
         assert_eq!(reports[0].reason, "low_top_bucket_fillability");
         assert_eq!(reports[0].top_bucket_full_depth_entry_fill_rate, 0.0);
+    }
+
+    #[test]
+    fn autofactor_top_bucket_metrics_are_event_level_when_event_ids_are_available() {
+        let rows = 100;
+        let mut columns = BTreeMap::new();
+        columns.insert(
+            "score".to_string(),
+            (0..rows).map(|idx| idx as f64).collect::<Vec<_>>(),
+        );
+        columns.insert(
+            "full_depth_entry_fillable_gate".to_string(),
+            vec![1.0; rows],
+        );
+        let matrix = AutoFactorMatrix::new(columns).expect("matrix");
+        let labels = (0..rows).map(|idx| idx as f64).collect::<Vec<_>>();
+        let windows = (0..rows)
+            .map(|idx| format!("w{}", idx / 20))
+            .collect::<Vec<_>>();
+        let symbols = vec!["BTCUSDT".to_string(); rows];
+        let event_ids = (0..rows)
+            .map(|idx| format!("event-{}", idx / 2))
+            .collect::<Vec<_>>();
+        let options = AutoFactorOptions {
+            min_window_observations: 10,
+            min_icir: 0.0,
+            ..Default::default()
+        };
+
+        let report = evaluate_named_factor(
+            &NamedFactorExpr {
+                name: "score".to_string(),
+                target: Some("tradeable_full_depth_settlement_pnl".to_string()),
+                expr: input("score"),
+                notes: vec![],
+            },
+            &matrix,
+            &labels,
+            &windows,
+            &symbols,
+            &event_ids,
+            &options,
+        )
+        .expect("report");
+
+        assert_eq!(report.top_bucket_n, 10);
+        assert_eq!(report.top_bucket_unique_event_count, 10);
+        assert_eq!(report.top_bucket_max_event_decisions, 1);
+        assert_eq!(report.top_bucket_full_depth_entry_fill_rate, 1.0);
+        assert!((report.top_bucket_avg_label - 90.0).abs() < 1e-9);
     }
 
     #[test]
