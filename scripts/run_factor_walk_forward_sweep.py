@@ -87,6 +87,19 @@ def load_sweep(raw: str, base: dict[str, str]) -> list[Variant]:
     return parsed
 
 
+def apply_snapshot_bound_sampling_defaults(base: dict[str, str], snapshot_dir: str) -> None:
+    manifest_path = Path(snapshot_dir) / "manifest.json"
+    if not manifest_path.exists():
+        return
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for key in ["lob_sample_secs", "observation_sample_secs", "max_quote_age_secs"]:
+        if base.get(key):
+            continue
+        value = manifest.get(key)
+        if value is not None:
+            base[key] = str(value)
+
+
 def factor_args(
     args: argparse.Namespace,
     variant: Variant,
@@ -463,6 +476,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     base = {key: getattr(args, key) for key in sorted(SWEEP_KEYS - {"label"})}
+    apply_snapshot_bound_sampling_defaults(base, args.snapshot_dir)
     variants = load_sweep(args.sweep_json, base)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
