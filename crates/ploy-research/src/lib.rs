@@ -69,8 +69,8 @@ pub use research_snapshot::{build_research_snapshot_from_database, ResearchSnaps
 pub use research_snapshot::{
     load_research_snapshot, validate_snapshot_request, validate_snapshot_request_coverage,
     write_research_snapshot, ResearchSnapshot, ResearchSnapshotArtifacts, ResearchSnapshotManifest,
-    ResearchSnapshotPhaseTiming, ResearchSnapshotRequest, ResearchSnapshotRowCounts,
-    RESEARCH_SNAPSHOT_SCHEMA_VERSION,
+    ResearchSnapshotPhaseTiming, ResearchSnapshotPmBookSource, ResearchSnapshotRequest,
+    ResearchSnapshotRowCounts, RESEARCH_SNAPSHOT_SCHEMA_VERSION,
 };
 
 pub const CRATE_MARKER: &str = "ploy-research";

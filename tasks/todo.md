@@ -1,3 +1,54 @@
+# PM Book Archive Snapshot Repair (2026-05-22)
+
+## Goal
+
+Repair research snapshot PM full-depth book loading so historical windows do
+not lose executable depth after hot `clob_orderbook_snapshots` rows are archived.
+
+Evidence stage: `execution_quality`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/research_snapshot.rs`
+  - Owner: PM book source metadata, archive fallback/merge, quality flags, and
+    manifest output.
+- `crates/ploy-research/examples/research_snapshot_compile.rs`
+  - Owner: archive-dir CLI/env wiring for tango snapshot compilation.
+- `tasks/todo.md`
+  - Owner: session tracking and data-integrity evidence.
+
+## Tasks
+
+- [x] Confirm raw WS full-depth data is high-frequency in hot table and archive.
+- [x] Add archived parquet PM book recovery to research snapshot compilation.
+- [x] Record PM book raw source/cadence metadata in snapshot manifest.
+- [x] Add focused tests and run validation.
+- [ ] Push PR, rerun snapshot, and invalidate old `$15 fillability=0.1282`
+      evidence.
+
+## Review
+
+- 2026-05-22: Root cause confirmed on tango-1-1. The collector is WS-based with
+  `PLOY_QUOTE_COLLECTOR_SNAPSHOT_SAMPLE_MS=0`; recent hot-table data has
+  `95,746` full-depth rows in 60 minutes, average ~44 bid/ask levels, and
+  collector logs show `books_received` ~= `snapshots_inserted` with
+  `dropped_books=0`. The 2026-05-18/19 raw data has already moved from hot
+  Postgres into `/opt/ploy/data/lake/orderbook_snapshots`; archive manifests
+  show `2,826,448` rows for 2026-05-18 and `2,873,102` for 2026-05-19,
+  `full_fidelity=true`. The stale low fillability came from research snapshot
+  sampling/retention mismatch, not from sparse raw WS data.
+- 2026-05-22: Implemented PM book archive recovery for research snapshots.
+  `research_snapshot_compile` now defaults `pm_book_archive_dir` to
+  `/opt/ploy/data/lake/orderbook_snapshots` and the snapshot builder merges
+  hot Postgres sampled rows with full-fidelity archive parquet sampled rows.
+  The manifest now records `pm_book_source` counts/status and flags archive
+  misconfigurations. Validation passed:
+  `cargo test --locked -p ploy-research research_snapshot --lib`,
+  `cargo test --locked -p ploy-research --features db research_snapshot --lib`,
+  `cargo build --locked -p ploy-research --example research_snapshot_compile --features db`,
+  remote DuckDB syntax probe against the 2026-05-19 hour=23 archive, and
+  `rtk git diff --check`.
+
 # AutoFactor Candidate Fillability Gate Repair (2026-05-22)
 
 ## Goal

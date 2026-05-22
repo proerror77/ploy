@@ -91,9 +91,14 @@ async fn main() -> anyhow::Result<()> {
     let data_audit_status = flag_value(&args, "--data-audit-status");
     let data_audit_report = flag_value(&args, "--data-audit-report");
     let include_deribit = !flag_present(&args, "--skip-deribit");
+    let pm_book_archive_dir = flag_value(&args, "--pm-book-archive-dir")
+        .or_else(|| std::env::var("PLOY_CLOB_BOOK_ARCHIVE_DIR").ok())
+        .or_else(|| Some("/opt/ploy/data/lake/orderbook_snapshots".to_string()))
+        .filter(|raw| !raw.trim().is_empty())
+        .map(PathBuf::from);
 
     eprintln!(
-        "research_snapshot_compile: {} -> {} for {:?}, stake_usd={:.2}, output={}, data_requirements={}, include_deribit={}, pm_book_sample_secs={}",
+        "research_snapshot_compile: {} -> {} for {:?}, stake_usd={:.2}, output={}, data_requirements={}, include_deribit={}, pm_book_sample_secs={}, pm_book_archive_dir={}",
         start,
         end,
         symbols,
@@ -101,7 +106,11 @@ async fn main() -> anyhow::Result<()> {
         output_dir.display(),
         data_requirements.join(","),
         include_deribit,
-        pm_book_sample_secs
+        pm_book_sample_secs,
+        pm_book_archive_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<not-configured>".to_string())
     );
 
     let pool = PgPoolOptions::new()
@@ -128,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
             data_audit_status,
             data_audit_report,
             include_deribit,
+            pm_book_archive_dir,
         },
     )
     .await?;

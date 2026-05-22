@@ -1020,6 +1020,14 @@ fn book_levels_from_json(levels: &Value, descending: bool) -> Vec<ResearchPmBook
 }
 
 #[cfg(feature = "db")]
+pub(crate) fn research_pm_book_levels_from_json(
+    levels: &Value,
+    descending: bool,
+) -> Vec<ResearchPmBookLevel> {
+    book_levels_from_json(levels, descending)
+}
+
+#[cfg(feature = "db")]
 fn depth_band(bids: &Value, asks: &Value, mid_price: f64, pct_range: f64) -> (f64, f64) {
     if !mid_price.is_finite() || mid_price <= 0.0 {
         return (f64::NAN, f64::NAN);
