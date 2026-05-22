@@ -237,6 +237,86 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         self.assertIn("## Score Counterfactual", markdown)
         self.assertIn("| `0.15` | `3` | `0` |", markdown)
 
+    def test_counterfactual_uses_configured_entry_threshold(self):
+        payload, _ = self.run_script(
+            {
+                "result": {
+                    "updates_processed": 1000,
+                    "intents_submitted": 0,
+                    "strategy_diagnostics": {
+                        "settlement_autofactor_formula_evaluations": 20,
+                        "settlement_autofactor_predictive_score_ge_005": 12,
+                        "settlement_autofactor_predictive_score_ge_010": 8,
+                        "settlement_autofactor_predictive_score_ge_015": 3,
+                        "settlement_autofactor_predictive_score_ge_025": 0,
+                        "settlement_autofactor_predictive_reverse_score_ge_005": 14,
+                        "settlement_autofactor_predictive_reverse_score_ge_010": 10,
+                        "settlement_autofactor_predictive_reverse_score_ge_015": 4,
+                        "settlement_autofactor_predictive_reverse_score_ge_025": 0,
+                    },
+                },
+                "runtime_evidence": {
+                    "basis": "trading_runtime_snapshot",
+                    "events": [],
+                    "orders": [],
+                    "fills": [],
+                    "intents": [],
+                },
+            },
+            "--full-depth-entry",
+            "--configured-entry-threshold",
+            "0.15",
+            "--min-trade-count",
+            "2",
+        )
+
+        counterfactual = payload["score_counterfactual"]
+        self.assertEqual(counterfactual["configured_entry_threshold"], "0.15")
+        self.assertEqual(
+            counterfactual["diagnosis"],
+            "reverse_direction_stronger_at_configured_threshold",
+        )
+
+    def test_rejects_unknown_counterfactual_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            runtime_json = tmp_path / "runtime-eval.json"
+            output_json = tmp_path / "candidate-strategy-replay.json"
+            runtime_json.write_text(
+                json.dumps(
+                    {
+                        "result": {
+                            "strategy_diagnostics": {
+                                "settlement_autofactor_formula_evaluations": 1,
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--runtime-evaluation-json",
+                    str(runtime_json),
+                    "--runtime-score",
+                    "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                    "--output-json",
+                    str(output_json),
+                    "--configured-entry-threshold",
+                    "0.20",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "--configured-entry-threshold must be one of",
+                completed.stderr + completed.stdout,
+            )
+
     def test_blocks_open_settlement_and_unconfirmed_depth(self):
         payload, _ = self.run_script(
             runtime_eval_payload(settled=False),

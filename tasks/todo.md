@@ -95,6 +95,24 @@ Evidence stage: `walk_forward / runtime_parity`.
   Runtime scoring now supports multiple `_select_*_ge_*` gates in one formula
   name so this candidate can be replayed instead of getting stuck at research
   artifact selection.
+- 2026-05-22: Runtime candidate replay run `26262036674` improved but still did
+  not pass promotion gates for
+  `autofactor_formula:mcts_mcts_spread_adjusted_external_move_select_entry_price_quality_ge_025_select_entry_capacity_ge_025`.
+  It processed `1037301` updates, emitted `18` trades on `18` unique events,
+  had fill rate `1.0`, total PnL `11.28650819509724`, and ROI
+  `0.04180188220406385`; blockers were `trade_count_too_small:18<20` and
+  `official_settlement_missing:17<18`. The counterfactual still reported
+  `reverse_direction_stronger_at_configured_threshold`, with direct/reverse
+  pass counts `18/35` at threshold `0.25`, `42/64` at `0.15`, `51/79` at
+  `0.10`, and `76/94` at `0.05`.
+- 2026-05-22: Follow-up code lets `runtime-candidate-replay.yml` override
+  `three_layer_min_entry_score` through fail-closed `options_json` values
+  `0.05`, `0.10`, `0.15`, or `0.25`, and records the configured threshold in
+  the candidate replay artifact. This is a diagnostic replay knob only; it does
+  not mutate the remote dry-run config. If lower-threshold replay still fails or
+  shows worse ROI, stop iterating the `external_move` family and switch the next
+  search to settlement-native runtime-mappable formulas such as
+  `auto_settlement_model_conservative_settlement_edge*`.
 
 # Predictive AutoFactor Runtime Entry Edge (2026-05-20)
 

@@ -40,7 +40,7 @@ on:
         required: false
         default: "0"
       options_json:
-        description: "Advanced options JSON: full_depth_entry, skip_settlement_exits"
+        description: "Advanced options JSON: full_depth_entry, skip_settlement_exits, three_layer_min_entry_score"
         required: false
         default: '{"full_depth_entry":true,"skip_settlement_exits":false}'
 concurrency:
@@ -76,12 +76,16 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          from decimal import Decimal, InvalidOperation
 
           defaults = {
               "full_depth_entry": "true",
               "skip_settlement_exits": "false",
+              "three_layer_min_entry_score": "",
           }
-          bool_keys = set(defaults)
+          bool_keys = {"full_depth_entry", "skip_settlement_exits"}
+          threshold_keys = {"three_layer_min_entry_score"}
+          allowed_thresholds = {Decimal("0.05"), Decimal("0.10"), Decimal("0.15"), Decimal("0.25")}
           raw = os.environ.get("OPTIONS_JSON", "").strip()
           data = json.loads(raw) if raw else {}
           if not isinstance(data, dict):
@@ -99,10 +103,26 @@ jobs:
                       values[key] = str(value).lower()
                   else:
                       raise SystemExit(f"options_json value for {key} must be boolean")
+              elif key in threshold_keys:
+                  if value in (None, ""):
+                      values[key] = ""
+                      continue
+                  try:
+                      threshold = Decimal(str(value))
+                  except (InvalidOperation, ValueError):
+                      raise SystemExit(f"options_json value for {key} must be decimal") from None
+                  if threshold not in allowed_thresholds:
+                      allowed = ", ".join(str(item) for item in sorted(allowed_thresholds))
+                      raise SystemExit(f"options_json value for {key} must be one of: {allowed}")
+                  values[key] = format(threshold, "f")
 
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
               handle.write(f"REPLAY_FULL_DEPTH_ENTRY={values['full_depth_entry']}\n")
               handle.write(f"REPLAY_SKIP_SETTLEMENT_EXITS={values['skip_settlement_exits']}\n")
+              handle.write(
+                  "REPLAY_THREE_LAYER_MIN_ENTRY_SCORE="
+                  f"{values['three_layer_min_entry_score']}\n"
+              )
           print(
               "resolved runtime replay options: "
               + ", ".join(f"{key}={value}" for key, value in sorted(values.items()))
@@ -173,6 +193,7 @@ jobs:
           RECORDING_PATH: ${{ github.event.inputs.recording_path }}
           RUNTIME_SCORE: ${{ github.event.inputs.runtime_score }}
           SKIP_SETTLEMENT_EXITS: ${{ env.REPLAY_SKIP_SETTLEMENT_EXITS }}
+          MIN_ENTRY_SCORE_OVERRIDE: ${{ env.REPLAY_THREE_LAYER_MIN_ENTRY_SCORE }}
           REMOTE_DIR: /opt/ploy/tmp/runtime-candidate-replay-${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -198,7 +219,8 @@ jobs:
             "${RECORDING_PATH}" \
             "${REMOTE_DIR}" \
             "${RUNTIME_SCORE}" \
-            "${SKIP_SETTLEMENT_EXITS}" <<'EOF'
+            "${SKIP_SETTLEMENT_EXITS}" \
+            "${MIN_ENTRY_SCORE_OVERRIDE}" <<'EOF'
           set -euo pipefail
           deployment_id="$1"
           config_path="$2"
@@ -206,6 +228,7 @@ jobs:
           remote_dir="$4"
           runtime_score="$5"
           skip_settlement_exits="$6"
+          min_entry_score_override="$7"
           case "${skip_settlement_exits}" in
             true|false) ;;
             *) echo "skip_settlement_exits must be true or false" >&2; exit 1 ;;
@@ -287,11 +310,11 @@ jobs:
           test -s "${enriched_recording}"
 
           replay_config="${remote_dir}/replay.toml"
-          python3 - "${config_path}" "${enriched_recording}" "${replay_config}" "${runtime_score}" "${skip_settlement_exits}" <<'PY'
+          python3 - "${config_path}" "${enriched_recording}" "${replay_config}" "${runtime_score}" "${skip_settlement_exits}" "${min_entry_score_override}" <<'PY'
           import json
           import sys
 
-          src, recording, dst, runtime_score, skip_settlement_exits = sys.argv[1:]
+          src, recording, dst, runtime_score, skip_settlement_exits, min_entry_score_override = sys.argv[1:]
           if not runtime_score:
               raise SystemExit("runtime_score is required")
           if "\n" in runtime_score or "\r" in runtime_score:
@@ -299,6 +322,7 @@ jobs:
           lines = []
           inserted_replay_path = False
           wrote_runtime_score = False
+          wrote_min_entry_score = False
           source_lines = open(src, encoding="utf-8").read().splitlines()
           has_runtime_score = any(
               line.strip().startswith("three_layer_autofactor_runtime_score")
@@ -326,6 +350,10 @@ jobs:
                   lines.append(runtime_score_line)
                   wrote_runtime_score = True
                   continue
+              if min_entry_score_override and stripped.startswith("three_layer_min_entry_score"):
+                  lines.append(f"three_layer_min_entry_score = {min_entry_score_override}")
+                  wrote_min_entry_score = True
+                  continue
               lines.append(raw)
               if stripped.startswith("strategy_profile") and not has_runtime_score:
                   lines.append(runtime_score_line)
@@ -334,6 +362,8 @@ jobs:
               raise SystemExit("runtime mode line not found in source config")
           if not wrote_runtime_score:
               raise SystemExit("strategy_profile/runtime score location not found in source config")
+          if min_entry_score_override and not wrote_min_entry_score:
+              raise SystemExit("three_layer_min_entry_score override requested but source config has no three_layer_min_entry_score line")
           with open(dst, "w", encoding="utf-8") as handle:
               handle.write("\n".join(lines) + "\n")
           PY
@@ -365,6 +395,7 @@ jobs:
           MIN_FILL_RATE: ${{ github.event.inputs.min_fill_rate }}
           MIN_ROI: ${{ github.event.inputs.min_roi }}
           FULL_DEPTH_ENTRY: ${{ env.REPLAY_FULL_DEPTH_ENTRY }}
+          CONFIGURED_ENTRY_THRESHOLD: ${{ env.REPLAY_THREE_LAYER_MIN_ENTRY_SCORE || '0.25' }}
         run: |
           set -euo pipefail
           args=(
@@ -374,6 +405,7 @@ jobs:
             --min-trade-count "${MIN_TRADE_COUNT}"
             --min-fill-rate "${MIN_FILL_RATE}"
             --min-roi "${MIN_ROI}"
+            --configured-entry-threshold "${CONFIGURED_ENTRY_THRESHOLD}"
             --evidence "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             --output-json artifacts/runtime-replay/candidate-strategy-replay.json
             --output-md artifacts/runtime-replay/candidate-strategy-replay.md
