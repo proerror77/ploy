@@ -25,6 +25,7 @@ Evidence stage: `execution_quality`.
 - [x] Add focused tests and run validation.
 - [x] Fix archived PM book DuckDB execution to avoid OS argv length limits.
 - [x] Bound archived PM book DuckDB scans to one parquet hour per query.
+- [x] Accept DuckDB archived timestamps with compact timezone offsets.
 - [ ] Push PR, deploy, rerun snapshot, and invalidate old `$15 fillability=0.1282`
       evidence.
 
@@ -59,6 +60,10 @@ Evidence stage: `execution_quality`.
   `cargo test --locked -p ploy-research --features db research_snapshot --lib`,
   and
   `cargo build --locked -p ploy-research --example research_snapshot_compile --features db`.
+- 2026-05-22: The bounded 6-hour smoke run no longer pinned tango; it failed
+  quickly on timestamp parsing because DuckDB emitted an archived
+  `TIMESTAMPTZ` value with compact `+08` offset instead of `+08:00`. The
+  timestamp parser now accepts both forms before falling back to RFC3339.
 - 2026-05-22: A follow-up 1-day snapshot run crossed the argv limit but then
   pinned tango while scanning the full archived day in one DuckDB query; the run
   was canceled and tango was rebooted. The archive loader now executes one
