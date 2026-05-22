@@ -408,8 +408,25 @@ struct PmBookTokenWindow {
 
 #[cfg(feature = "db")]
 fn parse_duckdb_timestamptz(raw: &str) -> Result<DateTime<Utc>> {
+    let compact_hour_offset = raw
+        .len()
+        .checked_sub(3)
+        .and_then(|idx| raw.get(idx..))
+        .filter(|suffix| {
+            let bytes = suffix.as_bytes();
+            matches!(bytes.first(), Some(b'+') | Some(b'-'))
+                && bytes.get(1).is_some_and(u8::is_ascii_digit)
+                && bytes.get(2).is_some_and(u8::is_ascii_digit)
+        })
+        .map(|_| format!("{raw}:00"));
     DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f%:z")
         .or_else(|_| DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f%z"))
+        .or_else(|_| {
+            compact_hour_offset
+                .as_deref()
+                .map(|normalized| DateTime::parse_from_str(normalized, "%Y-%m-%d %H:%M:%S%.f%:z"))
+                .unwrap_or_else(|| DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f%:z"))
+        })
         .or_else(|_| DateTime::parse_from_rfc3339(raw))
         .map(|ts| ts.with_timezone(&Utc))
         .with_context(|| format!("parse duckdb timestamp {raw:?}"))
@@ -1343,6 +1360,15 @@ mod tests {
             hours,
             vec![("2026-05-19".to_string(), 0), ("2026-05-19".to_string(), 1)]
         );
+    }
+
+    #[cfg(feature = "db")]
+    #[test]
+    fn parse_duckdb_timestamptz_accepts_compact_hour_offset() {
+        let parsed = parse_duckdb_timestamptz("2026-05-19 06:55:13.870644+08")
+            .expect("compact offset timestamp");
+
+        assert_eq!(parsed.to_rfc3339(), "2026-05-18T22:55:13.870644+00:00");
     }
 
     #[cfg(feature = "db")]
