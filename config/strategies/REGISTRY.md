@@ -92,7 +92,7 @@ numeric ID used as filename prefix.
 | `02-pm5d-threelayer.obi-hard-dryrun.toml` | **UNIFIED** | Snapshot-profile dry-run candidate; profile `obi_hard` with hard OBI confirmation |
 | `02-pm5d-threelayer.continuation-soft-dryrun.toml` | **UNIFIED** | Holistic snapshot-profile dry-run candidate; profile `continuation_soft` |
 | `02-pm5d-threelayer.repricing-momentum-dryrun.toml` | **UNIFIED** | BTC/ETH/SOL-only full-depth dry-run candidate; profile `repricing_momentum` |
-| `02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml` | **UNIFIED** | BTC/ETH-only AutoFactor PRD dry-run handoff candidate; profile `settlement_probability`, runtime score `auto_settlement_conservative_settlement_edge` |
+| `02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml` | **UNIFIED** | BTC/ETH-only AutoFactor dry-run handoff candidate; profile `settlement_probability`, runtime score `mcts_mcts_spread_adjusted_external_move_select_entry_price_quality_ge_025_select_entry_capacity_ge_025`, entry score `0.10` |
 
 ### S03 — Pattern Memory
 | File | Format | Notes |

@@ -71,6 +71,21 @@ class StrategyConfigContractTests(unittest.TestCase):
         )
         self.assertGreaterEqual(deployment_limit, expected_exposure)
 
+    def test_settlement_probability_dryrun_uses_reviewed_autofactor_candidate(self) -> None:
+        strategy = tomllib.loads(
+            (
+                STRATEGY_DIR
+                / "02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"
+            ).read_text()
+        )["strategy"]
+
+        self.assertEqual(strategy["three_layer_strategy_profile"], "settlement_probability")
+        self.assertEqual(
+            strategy["three_layer_autofactor_runtime_score"],
+            "autofactor_formula:mcts_mcts_spread_adjusted_external_move_select_entry_price_quality_ge_025_select_entry_capacity_ge_025",
+        )
+        self.assertEqual(Decimal(str(strategy["three_layer_min_entry_score"])), Decimal("0.10"))
+
 
 if __name__ == "__main__":
     unittest.main()

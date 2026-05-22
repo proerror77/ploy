@@ -1,8 +1,8 @@
 # Three-layer settlement-probability dry-run config
-# PRD gate run 25369614389, snapshot 25367212009 / 69e259f6b4469392.
-# Dry-run handoff candidate only: BTC/ETH passed current full-depth,
-# conservative, OOS, symbol-holdout, anti-overfit, and recorded replay parity
-# gates. This is not a live config.
+# Runtime replay gate run 26263054204 selected the current AutoFactor
+# candidate on the BTC/ETH settlement-probability recording with 39/39
+# official settlements, one decision per event, fill_rate=1.0, and ROI=0.1317.
+# Dry-run handoff candidate only. This is not a live config.
 
 [runtime]
 strategy_variant = "three_layer"
@@ -39,8 +39,8 @@ max_daily_trades = 50
 allowed_window_secs = [300, 900]
 
 three_layer_strategy_profile = "settlement_probability"
-three_layer_autofactor_runtime_score = "autofactor_formula:mut_spread_adjusted_external_move_near_strike"
-three_layer_min_entry_score = 0.25
+three_layer_autofactor_runtime_score = "autofactor_formula:mcts_mcts_spread_adjusted_external_move_select_entry_price_quality_ge_025_select_entry_capacity_ge_025"
+three_layer_min_entry_score = 0.10
 three_layer_min_direction_prob = 0.56
 three_layer_min_distance_over_sigma = 0.30
 three_layer_min_confirmation_score = 0.0
