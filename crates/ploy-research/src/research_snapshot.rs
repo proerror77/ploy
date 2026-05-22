@@ -2,6 +2,8 @@ use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "db")]
+use std::process::Command;
+#[cfg(feature = "db")]
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -49,6 +51,17 @@ pub struct ResearchSnapshotPhaseTiming {
     pub rows: Option<usize>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResearchSnapshotPmBookSource {
+    pub hot_postgres_sampled_rows: usize,
+    pub archive_sampled_rows: usize,
+    pub archive_manifest_rows: usize,
+    pub archive_files: usize,
+    pub merged_sampled_rows: usize,
+    pub archive_dir: Option<String>,
+    pub archive_status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResearchSnapshotManifest {
     pub schema_version: String,
@@ -81,6 +94,8 @@ pub struct ResearchSnapshotManifest {
     pub row_counts: ResearchSnapshotRowCounts,
     pub phase_timings: Vec<ResearchSnapshotPhaseTiming>,
     pub quality_flags: Vec<String>,
+    #[serde(default)]
+    pub pm_book_source: ResearchSnapshotPmBookSource,
 }
 
 fn default_include_deribit() -> bool {
@@ -309,6 +324,7 @@ pub struct ResearchSnapshotBuildOptions {
     pub data_audit_status: Option<String>,
     pub data_audit_report: Option<String>,
     pub include_deribit: bool,
+    pub pm_book_archive_dir: Option<PathBuf>,
 }
 
 fn research_snapshot_quality_flags(
@@ -318,6 +334,7 @@ fn research_snapshot_quality_flags(
     include_deribit: bool,
     pm_book_sample_secs: i32,
     max_quote_age_secs: i64,
+    pm_book_source: &ResearchSnapshotPmBookSource,
 ) -> Vec<String> {
     let mut quality_flags = Vec::new();
     if observation_count == 0 {
@@ -334,7 +351,217 @@ fn research_snapshot_quality_flags(
             "pm_book_sample_secs_gt_max_quote_age:{pm_book_sample_secs}>{max_quote_age_secs}"
         ));
     }
+    if pm_book_source.archive_status == "archive_configured_no_candidate_files" {
+        quality_flags.push("pm_book_archive_configured_no_candidate_files".to_string());
+    }
+    if pm_book_source.archive_manifest_rows > 0 && pm_book_source.archive_sampled_rows == 0 {
+        quality_flags.push("pm_book_archive_manifest_rows_but_no_sampled_rows".to_string());
+    }
     quality_flags
+}
+
+#[cfg(feature = "db")]
+#[derive(Debug)]
+struct ArchivedPmBookLoad {
+    snapshots: Vec<ResearchPmBookSnapshot>,
+    manifest_rows: usize,
+    files: usize,
+    status: String,
+}
+
+#[cfg(feature = "db")]
+#[derive(Debug, Deserialize)]
+struct ArchiveManifest {
+    #[serde(default)]
+    row_count: usize,
+}
+
+#[cfg(feature = "db")]
+#[derive(Debug, Deserialize)]
+struct ArchivePmBookRow {
+    event_id: Option<String>,
+    token_id: String,
+    side: Option<String>,
+    received_at: String,
+    bids: String,
+    asks: String,
+}
+
+#[cfg(feature = "db")]
+fn parse_duckdb_timestamptz(raw: &str) -> Result<DateTime<Utc>> {
+    DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f%:z")
+        .or_else(|_| DateTime::parse_from_rfc3339(raw))
+        .map(|ts| ts.with_timezone(&Utc))
+        .with_context(|| format!("parse duckdb timestamp {raw:?}"))
+}
+
+#[cfg(feature = "db")]
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(feature = "db")]
+fn archive_date_dirs(start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut day = (start + chrono::Duration::hours(8)).date_naive();
+    let end_day = (end + chrono::Duration::hours(8)).date_naive();
+    while day <= end_day {
+        out.push(day.format("%Y-%m-%d").to_string());
+        day = day
+            .succ_opt()
+            .expect("advancing archive date should stay in supported range");
+    }
+    out
+}
+
+#[cfg(feature = "db")]
+fn candidate_archive_files(
+    archive_dir: &Path,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<(Vec<PathBuf>, usize)> {
+    let mut files = Vec::new();
+    let mut manifest_rows = 0usize;
+    for date in archive_date_dirs(start, end) {
+        for hour in 0..24 {
+            let hour_dir = archive_dir.join(format!("date={date}/hour={hour:02}"));
+            let parquet = hour_dir.join("snapshots.parquet");
+            if !parquet.exists() {
+                continue;
+            }
+            let manifest = hour_dir.join("manifest.json");
+            if manifest.exists() {
+                let parsed: ArchiveManifest = read_json(manifest)?;
+                manifest_rows = manifest_rows.saturating_add(parsed.row_count);
+            }
+            files.push(parquet);
+        }
+    }
+    Ok((files, manifest_rows))
+}
+
+#[cfg(feature = "db")]
+fn load_archived_pm_book_snapshots_sampled(
+    archive_dir: &Path,
+    symbols: &[String],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    sample_every_secs: i32,
+) -> Result<ArchivedPmBookLoad> {
+    let (files, manifest_rows) = candidate_archive_files(archive_dir, start, end)?;
+    if files.is_empty() {
+        return Ok(ArchivedPmBookLoad {
+            snapshots: Vec::new(),
+            manifest_rows,
+            files: 0,
+            status: "archive_configured_no_candidate_files".to_string(),
+        });
+    }
+
+    let file_list = files
+        .iter()
+        .map(|path| sql_string_literal(&path.display().to_string()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let symbol_list = symbols
+        .iter()
+        .map(|symbol| sql_string_literal(&symbol.to_uppercase()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sample_every_secs = sample_every_secs.max(1);
+    let start_literal = sql_string_literal(&start.to_rfc3339());
+    let end_literal = sql_string_literal(&end.to_rfc3339());
+    let sql = format!(
+        r#"
+WITH raw AS (
+  SELECT
+    json_extract_string(context, '$.slug') AS event_id,
+    token_id,
+    upper(json_extract_string(context, '$.side')) AS side,
+    received_at,
+    bids,
+    asks,
+    floor(epoch(received_at) / {sample_every_secs}) AS bucket
+  FROM read_parquet([{file_list}])
+  WHERE received_at >= TIMESTAMPTZ {start_literal}
+    AND received_at < TIMESTAMPTZ {end_literal}
+    AND upper(json_extract_string(context, '$.symbol')) IN ({symbol_list})
+),
+ranked AS (
+  SELECT
+    event_id,
+    token_id,
+    side,
+    received_at,
+    bids,
+    asks,
+    row_number() OVER (
+      PARTITION BY token_id, bucket
+      ORDER BY received_at DESC
+    ) AS rn
+  FROM raw
+)
+SELECT event_id, token_id, side, received_at, bids, asks
+FROM ranked
+WHERE rn = 1
+ORDER BY received_at
+"#
+    );
+
+    let output = Command::new("duckdb")
+        .arg("-json")
+        .arg("-c")
+        .arg(sql)
+        .output()
+        .context("run duckdb for archived PM book snapshots")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "duckdb archived PM book load failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let rows: Vec<ArchivePmBookRow> = serde_json::from_slice(&output.stdout)
+        .context("parse duckdb archived PM book JSON rows")?;
+    let snapshots = rows
+        .into_iter()
+        .map(|row| {
+            let ts = parse_duckdb_timestamptz(&row.received_at)?;
+            let bids: serde_json::Value = serde_json::from_str(&row.bids)
+                .with_context(|| format!("parse archived bids JSON for {}", row.token_id))?;
+            let asks: serde_json::Value = serde_json::from_str(&row.asks)
+                .with_context(|| format!("parse archived asks JSON for {}", row.token_id))?;
+            Ok(ResearchPmBookSnapshot {
+                event_id: row.event_id.unwrap_or_default(),
+                token_id: row.token_id,
+                side: row.side.unwrap_or_default(),
+                ts,
+                bids: crate::factors::research_pm_book_levels_from_json(&bids, true),
+                asks: crate::factors::research_pm_book_levels_from_json(&asks, false),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(ArchivedPmBookLoad {
+        snapshots,
+        manifest_rows,
+        files: files.len(),
+        status: "archive_loaded".to_string(),
+    })
+}
+
+#[cfg(feature = "db")]
+fn merge_pm_book_snapshots(
+    mut hot_rows: Vec<ResearchPmBookSnapshot>,
+    archive_rows: Vec<ResearchPmBookSnapshot>,
+) -> Vec<ResearchPmBookSnapshot> {
+    hot_rows.extend(archive_rows);
+    hot_rows.sort_by(|a, b| {
+        (a.ts, &a.event_id, &a.token_id, &a.side).cmp(&(b.ts, &b.event_id, &b.token_id, &b.side))
+    });
+    hot_rows.dedup_by(|a, b| {
+        a.ts == b.ts && a.event_id == b.event_id && a.token_id == b.token_id && a.side == b.side
+    });
+    hot_rows
 }
 
 #[cfg(feature = "db")]
@@ -394,7 +621,7 @@ pub async fn build_research_snapshot_from_database(
 
     let started = Instant::now();
     let pm_book_sample_secs = options.pm_book_sample_secs.max(1);
-    let all_pm_book_snapshots = load_research_pm_book_snapshots_sampled(
+    let hot_pm_book_snapshots = load_research_pm_book_snapshots_sampled(
         pool,
         &options.symbols,
         history_start,
@@ -404,8 +631,55 @@ pub async fn build_research_snapshot_from_database(
     .await
     .context("load PM book snapshots")?;
     phase_timings.push(ResearchSnapshotPhaseTiming {
-        phase: "pm_book_snapshots".to_string(),
+        phase: "pm_book_snapshots_hot_postgres".to_string(),
         elapsed_ms: started.elapsed().as_millis(),
+        rows: Some(hot_pm_book_snapshots.len()),
+    });
+
+    let mut pm_book_source = ResearchSnapshotPmBookSource {
+        hot_postgres_sampled_rows: hot_pm_book_snapshots.len(),
+        archive_dir: options
+            .pm_book_archive_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        archive_status: "archive_not_configured".to_string(),
+        ..Default::default()
+    };
+    let archived_pm_book_snapshots =
+        if let Some(archive_dir) = options.pm_book_archive_dir.as_deref() {
+            let started = Instant::now();
+            let archived = load_archived_pm_book_snapshots_sampled(
+                archive_dir,
+                &options.symbols,
+                history_start,
+                options.end,
+                pm_book_sample_secs,
+            )
+            .with_context(|| {
+                format!(
+                    "load archived PM book snapshots from {}",
+                    archive_dir.display()
+                )
+            })?;
+            pm_book_source.archive_sampled_rows = archived.snapshots.len();
+            pm_book_source.archive_manifest_rows = archived.manifest_rows;
+            pm_book_source.archive_files = archived.files;
+            pm_book_source.archive_status = archived.status;
+            phase_timings.push(ResearchSnapshotPhaseTiming {
+                phase: "pm_book_snapshots_archive".to_string(),
+                elapsed_ms: started.elapsed().as_millis(),
+                rows: Some(archived.snapshots.len()),
+            });
+            archived.snapshots
+        } else {
+            Vec::new()
+        };
+    let all_pm_book_snapshots =
+        merge_pm_book_snapshots(hot_pm_book_snapshots, archived_pm_book_snapshots);
+    pm_book_source.merged_sampled_rows = all_pm_book_snapshots.len();
+    phase_timings.push(ResearchSnapshotPhaseTiming {
+        phase: "pm_book_snapshots_merged".to_string(),
+        elapsed_ms: 0,
         rows: Some(all_pm_book_snapshots.len()),
     });
 
@@ -465,6 +739,7 @@ pub async fn build_research_snapshot_from_database(
         options.include_deribit,
         pm_book_sample_secs,
         options.max_quote_age_secs,
+        &pm_book_source,
     );
 
     Ok(ResearchSnapshot {
@@ -498,6 +773,7 @@ pub async fn build_research_snapshot_from_database(
             },
             phase_timings,
             quality_flags,
+            pm_book_source,
         },
         observations,
         deribit_snapshots,
@@ -556,6 +832,24 @@ fn compute_snapshot_hash(
     );
     update(&mut hash, manifest.data_requirements.join(",").as_bytes());
     update(&mut hash, manifest.include_deribit.to_string().as_bytes());
+    update(&mut hash, manifest.pm_book_source.archive_status.as_bytes());
+    update(
+        &mut hash,
+        manifest
+            .pm_book_source
+            .archive_dir
+            .as_deref()
+            .unwrap_or("")
+            .as_bytes(),
+    );
+    update(
+        &mut hash,
+        manifest
+            .pm_book_source
+            .archive_manifest_rows
+            .to_string()
+            .as_bytes(),
+    );
     update(
         &mut hash,
         manifest
@@ -659,6 +953,20 @@ fn write_quality_markdown(path: &Path, manifest: &ResearchSnapshotManifest) -> R
         manifest.row_counts.pm_book_snapshots
     ));
     body.push_str(&format!(
+        "- PM book source: hot_postgres_sampled_rows={}, archive_sampled_rows={}, archive_manifest_rows={}, archive_files={}, merged_sampled_rows={}, archive_status=`{}` archive_dir=`{}`\n",
+        manifest.pm_book_source.hot_postgres_sampled_rows,
+        manifest.pm_book_source.archive_sampled_rows,
+        manifest.pm_book_source.archive_manifest_rows,
+        manifest.pm_book_source.archive_files,
+        manifest.pm_book_source.merged_sampled_rows,
+        manifest.pm_book_source.archive_status,
+        manifest
+            .pm_book_source
+            .archive_dir
+            .as_deref()
+            .unwrap_or("<not-configured>")
+    ));
+    body.push_str(&format!(
         "- Official settlement required: `{}`\n",
         manifest.require_official_settlement
     ));
@@ -729,6 +1037,7 @@ mod tests {
                     rows: Some(0),
                 }],
                 quality_flags: vec![],
+                pm_book_source: ResearchSnapshotPmBookSource::default(),
             },
             observations: vec![],
             deribit_snapshots: vec![],
@@ -790,19 +1099,53 @@ mod tests {
 
     #[test]
     fn quality_flags_sparse_pm_book_sampling_against_quote_age() {
-        let flags = research_snapshot_quality_flags(100, 0, 10, false, 300, 30);
+        let flags = research_snapshot_quality_flags(
+            100,
+            0,
+            10,
+            false,
+            300,
+            30,
+            &ResearchSnapshotPmBookSource::default(),
+        );
 
-        assert!(flags.contains(
-            &"pm_book_sample_secs_gt_max_quote_age:300>30".to_string()
-        ));
+        assert!(flags.contains(&"pm_book_sample_secs_gt_max_quote_age:300>30".to_string()));
         assert!(!flags.contains(&"no_factor_observations".to_string()));
         assert!(!flags.contains(&"no_pm_book_snapshots".to_string()));
     }
 
     #[test]
     fn quality_flags_accepts_pm_book_sampling_within_quote_age() {
-        let flags = research_snapshot_quality_flags(100, 0, 10, false, 30, 30);
+        let flags = research_snapshot_quality_flags(
+            100,
+            0,
+            10,
+            false,
+            30,
+            30,
+            &ResearchSnapshotPmBookSource::default(),
+        );
 
         assert!(flags.is_empty());
+    }
+
+    #[test]
+    fn quality_flags_archive_manifest_without_sampled_rows() {
+        let flags = research_snapshot_quality_flags(
+            100,
+            0,
+            0,
+            false,
+            30,
+            30,
+            &ResearchSnapshotPmBookSource {
+                archive_manifest_rows: 1000,
+                archive_status: "archive_loaded".to_string(),
+                ..Default::default()
+            },
+        );
+
+        assert!(flags.contains(&"no_pm_book_snapshots".to_string()));
+        assert!(flags.contains(&"pm_book_archive_manifest_rows_but_no_sampled_rows".to_string()));
     }
 }
