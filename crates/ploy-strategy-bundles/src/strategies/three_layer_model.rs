@@ -129,6 +129,24 @@ pub fn auto_settlement_formula_score(
     let name = runtime_score
         .strip_prefix("autofactor_formula:")
         .unwrap_or(runtime_score);
+    if is_legacy_mcts_spread_adjusted_external_move(name) {
+        if selected_feature_below_gate(
+            name,
+            "entry_price_quality",
+            auto_settlement_entry_price_quality_score(inputs.entry_price),
+        ) || selected_feature_below_gate(
+            name,
+            "entry_capacity",
+            auto_settlement_entry_capacity_score(inputs.entry_capacity_ratio),
+        ) {
+            return None;
+        }
+        let score = spread_adjusted_external_move_score(
+            inputs.drift_30s * inputs.direction_sign,
+            inputs.side_spread,
+        );
+        return score.is_finite().then_some(score);
+    }
     if let Some(base_name) = name.strip_suffix("_full_depth_entry_gate") {
         if !inputs.entry_capacity_ratio.is_finite() || inputs.entry_capacity_ratio < 1.0 {
             return None;
@@ -227,6 +245,42 @@ pub fn auto_settlement_formula_score(
         _ => return None,
     }
     score.is_finite().then_some(score)
+}
+
+fn is_legacy_mcts_spread_adjusted_external_move(name: &str) -> bool {
+    name.starts_with("mcts_") && name.contains("spread_adjusted_external_move")
+}
+
+fn selected_feature_below_gate(name: &str, feature: &str, value: f64) -> bool {
+    let Some(threshold) = selected_feature_gate(name, feature) else {
+        return false;
+    };
+    !value.is_finite() || value < threshold
+}
+
+fn selected_feature_gate(name: &str, feature: &str) -> Option<f64> {
+    let marker = format!("select_{feature}_ge_");
+    let start = name.find(&marker)? + marker.len();
+    let suffix = &name[start..];
+    let end = suffix.find("_select_").unwrap_or(suffix.len());
+    let raw = &suffix[..end];
+    if raw.len() > 1 && raw.starts_with('0') && raw.chars().all(|ch| ch.is_ascii_digit()) {
+        return format!("0.{}", &raw[1..]).parse().ok();
+    }
+    raw.replace('_', ".").parse().ok()
+}
+
+pub fn autofactor_formula_uses_spread_adjusted_external_move(runtime_score: &str) -> bool {
+    let name = runtime_score
+        .strip_prefix("autofactor_formula:")
+        .unwrap_or(runtime_score);
+    let base_name = name
+        .strip_prefix("mut_")
+        .unwrap_or(name)
+        .strip_suffix("_full_depth_entry_gate")
+        .unwrap_or_else(|| name.strip_prefix("mut_").unwrap_or(name));
+    base_name == "spread_adjusted_external_move"
+        || is_legacy_mcts_spread_adjusted_external_move(name)
 }
 
 /// Normal CDF approximation (Abramowitz & Stegun).

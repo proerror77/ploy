@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use ploy_trading::{
     FillRecord, IntentPurpose, OrderLedger, OrderState, PositionLedger, TradeSide, TradingIntent,
 };
-use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use super::common::event::EventWindow;
 use super::common::fees::crypto_fee_cost;
 use super::common::quote::QuoteState;
 use super::event_ml_model::{
-    self, is_event_ml_runtime_score, EventMlModelContract, EventMlModelError,
+    self, EventMlModelContract, EventMlModelError, is_event_ml_runtime_score,
 };
 use super::three_layer_model::{
     self, AutoSettlementFactorInputs, BookConfirmationInputs, EntryScoreInputs,
@@ -553,7 +553,7 @@ fn autofactor_formula_entry_score(
         .strip_suffix("_full_depth_entry_gate")
         .unwrap_or_else(|| formula_name.strip_prefix("mut_").unwrap_or(formula_name));
     let (threshold, scale) = if base_formula_name == "amplitude_weighted_momentum_30s_sigma"
-        || base_formula_name == "spread_adjusted_external_move"
+        || three_layer_model::autofactor_formula_uses_spread_adjusted_external_move(runtime_score)
     {
         (0.0, 0.02)
     } else {
@@ -3702,6 +3702,50 @@ mod tests {
         .expect("hard-gated spread-adjusted predictive formula should score fillable rows");
         assert!(spread_raw > raw);
         assert!(spread_score > score);
+    }
+
+    #[test]
+    fn predictive_autofactor_formula_supports_deployed_legacy_mcts_gate() {
+        let config = test_config();
+        let runtime_score = concat!(
+            "autofactor_formula:",
+            "mcts_mcts_spread_adjusted_external_move",
+            "_select_entry_price_quality_ge_025",
+            "_select_entry_capacity_ge_025"
+        );
+        let fillable = AutoSettlementFactorInputs {
+            settlement_edge: -0.01,
+            entry_price: 0.48,
+            distance_over_sigma: 0.20,
+            direction_sign: 1.0,
+            drift_30s: 0.006,
+            sigma_horizon: 4.0,
+            entry_capacity_ratio: 1.20,
+            side_spread: 0.03,
+            external_pressure: 0.0,
+            iv_change_1m: 0.0,
+        };
+        let (raw, score) = autofactor_formula_entry_score(runtime_score, fillable, config.min_edge)
+            .expect("deployed legacy MCTS score should remain replayable");
+        assert!(raw > 0.0);
+        assert!(score > config.min_entry_score);
+
+        let low_price_quality = AutoSettlementFactorInputs {
+            entry_price: 0.02,
+            ..fillable
+        };
+        assert!(
+            autofactor_formula_entry_score(runtime_score, low_price_quality, config.min_edge)
+                .is_none()
+        );
+
+        let low_capacity = AutoSettlementFactorInputs {
+            entry_capacity_ratio: 0.10,
+            ..fillable
+        };
+        assert!(
+            autofactor_formula_entry_score(runtime_score, low_capacity, config.min_edge).is_none()
+        );
     }
 
     #[test]

@@ -11,17 +11,19 @@ pub(crate) async fn run_replay_entry(
     config: &FullConfig,
     strategy: Box<dyn StrategyLogic>,
     runtime_config: RuntimeModeConfig,
+    deployment_id: Option<String>,
 ) -> (
     ploy_strategy_bundles::RuntimeResult,
     ploy_trading::TradingRuntimeSnapshot,
 ) {
-    run_replay(config, strategy, runtime_config).await
+    run_replay(config, strategy, runtime_config, deployment_id).await
 }
 
 async fn run_replay(
     config: &FullConfig,
     strategy: Box<dyn StrategyLogic>,
     runtime_config: RuntimeModeConfig,
+    deployment_id: Option<String>,
 ) -> (
     ploy_strategy_bundles::RuntimeResult,
     ploy_trading::TradingRuntimeSnapshot,
@@ -46,6 +48,9 @@ async fn run_replay(
     let executor = SimulatedExecutor::new(config.sim_executor_config());
     let recorder: Box<dyn Recorder> = Box::new(NullRecorder);
     let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, runtime_config);
+    if let Some(deployment_id) = deployment_id {
+        runtime = runtime.with_deployment_id(deployment_id);
+    }
     let result = runtime.run().await;
     let snapshot = runtime.trading().snapshot(&BTreeMap::new());
     (result, snapshot)

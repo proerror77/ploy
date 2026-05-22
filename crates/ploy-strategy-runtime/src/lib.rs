@@ -85,7 +85,15 @@ pub async fn run_strategy_with_deployment_id_and_output(
         RuntimeMode::Backtest => {
             run_backtest_entry(&config, &symbols, strategy, runtime_config.clone()).await
         }
-        RuntimeMode::Replay => run_replay_entry(&config, strategy, runtime_config.clone()).await,
+        RuntimeMode::Replay => {
+            run_replay_entry(
+                &config,
+                strategy,
+                runtime_config.clone(),
+                deployment_id.clone(),
+            )
+            .await
+        }
         RuntimeMode::Live | RuntimeMode::DryRun => {
             run_live_or_dry_run_entry(
                 &config,
@@ -165,6 +173,7 @@ fn write_strategy_evaluation(
             "net_pnl": result.pnl.net_pnl(),
             "risk": &result.risk,
             "elapsed_secs": result.elapsed_secs,
+            "strategy_diagnostics": &result.strategy_diagnostics,
         },
         "cashflow": {
             "buy_shares": cashflow.buy_shares,
@@ -488,6 +497,7 @@ async fn run_replay_entry(
     _config: &FullConfig,
     _strategy: Box<dyn StrategyLogic>,
     _runtime_config: RuntimeModeConfig,
+    _deployment_id: Option<String>,
 ) -> (
     ploy_strategy_bundles::RuntimeResult,
     ploy_trading::TradingRuntimeSnapshot,
