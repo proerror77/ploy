@@ -1,3 +1,46 @@
+# Bayesian Settlement AutoFactor Lane (2026-05-22)
+
+## Goal
+
+Add row-local Bayesian settlement-probability factors to the PM5D AutoFactor
+matrix so short-window research can test probability-fusion and disagreement
+signals instead of only external-move families.
+
+Evidence stage: `factor_attribution`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: AutoFactor matrix columns, Bayesian seed/generated candidates, and
+    focused regression tests.
+- `tasks/todo.md`
+  - Owner: session tracking and evidence summary.
+
+## Tasks
+
+- [x] Confirm repo semantic contract and event-ML AutoML workflow gates.
+- [x] Keep Bayesian probability features row-local and exclude event-surface
+      empirical fitting from the AutoFactor matrix.
+- [x] Add Bayesian prior/external/posterior/edge/disagreement/confidence
+      columns and discovery candidates.
+- [x] Run focused validation and diff checks.
+- [x] Commit, push, open PR #586, and update issue #585 with
+      factor-attribution evidence.
+
+## Review
+
+- 2026-05-22: Added row-local Bayesian AutoFactor columns for market midpoint
+  prior, external LOB/vol probability, logit posterior, executable edge,
+  full-depth/conservative edge, disagreement, confidence, entropy, and
+  confidence-weighted/disagreement interactions. Event-surface empirical
+  fitting stays out of the matrix to avoid leakage; this slice is
+  factor-attribution only.
+- 2026-05-22: Focused validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-bayes-factors /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research autofactor --lib`
+  with `18 passed, 101 filtered out`, plus `rtk git diff --check`.
+- 2026-05-22: Committed and pushed `feat/bayesian-settlement-factors`, opened
+  PR #586, and commented on issue #585.
+
 # Short-Window Strategy Discovery Repair (2026-05-22)
 
 ## Goal
