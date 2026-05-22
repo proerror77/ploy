@@ -259,12 +259,28 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertIn("full_depth_entry_gate", handoff_md)
 
     def test_hard_gate_predictive_formula_waives_global_fillability_not_replay_parity(self):
-        _, payload, _, handoff, _ = self.run_script(
+        _, payload, _, handoff, handoff_md = self.run_script(
             HARD_GATE_REPLAY_BLOCKED_GATE + AUTOFACTOR_TRADEABLE_HARD_GATE_REPORT
         )
 
         self.assertEqual(payload["decision"], "blocked")
         self.assertEqual(handoff["status"], "blocked")
+        self.assertFalse(payload["candidate_scoped_promotion_gate"]["ready"])
+        replay_blocker = (
+            "recorded_replay_parity: "
+            "replay_parity_json=artifacts/replay-parity/parity-evaluation.json "
+            "runtime_ready=true event_ready=false blocking_flags=<none> "
+            "advisory_flags=<none> decision=continue"
+        )
+        self.assertEqual(
+            payload["candidate_scoped_promotion_gate"]["blocked_gates"],
+            [replay_blocker],
+        )
+        self.assertIn(
+            "global_full_depth_entry_fillability: global_full_depth_entry_fill_rate=0.1458 min_required=0.3000",
+            payload["candidate_scoped_promotion_gate"]["diagnostic_blocked_gates"],
+        )
+        self.assertIn("Candidate-scoped global blockers", handoff_md)
         first = payload["evaluated_factors"][0]
         self.assertFalse(first["qualified"])
         self.assertNotIn(
@@ -288,6 +304,16 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertEqual(payload["decision"], "qualified")
         self.assertEqual(registry["decision"], "qualified")
         self.assertEqual(handoff["status"], "ready")
+        self.assertTrue(payload["candidate_scoped_promotion_gate"]["ready"])
+        self.assertEqual(payload["candidate_scoped_promotion_gate"]["blocked_gates"], [])
+        self.assertIn(
+            "global_full_depth_entry_fillability: global_full_depth_entry_fill_rate=0.1458 min_required=0.3000",
+            payload["candidate_scoped_promotion_gate"]["diagnostic_blocked_gates"],
+        )
+        self.assertIn(
+            "full_depth_settlement_edge: no non-naive model reaches positive settlement edge",
+            payload["candidate_scoped_promotion_gate"]["diagnostic_blocked_gates"],
+        )
         first = payload["evaluated_factors"][0]
         self.assertTrue(first["qualified"])
         self.assertEqual(first["blockers"], [])

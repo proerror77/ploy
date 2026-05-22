@@ -213,6 +213,8 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertEqual(summary["completed_count"], 2)
         self.assertEqual(summary["variants"][0]["decision"], "qualified")
         self.assertEqual(summary["variants"][0]["qualified_count"], 1)
+        self.assertTrue(summary["variants"][0]["candidate_scoped_promotion_gate_ready"])
+        self.assertEqual(summary["variants"][0]["candidate_scoped_promotion_blockers"], [])
         self.assertIn("auto_settlement_conservative_settlement_edge", summary_md)
 
     def test_promotes_alpha_search_artifacts_from_best_variant(self):

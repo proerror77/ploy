@@ -4,7 +4,7 @@
 This is intentionally stricter than the AutoFactor IC/ICIR candidate gate.
 An AutoFactor row is only a qualified strategy when:
 
-1. all global settlement PRD promotion gates are ready;
+1. hard global settlement PRD promotion gates are ready;
 2. the row is a `candidate` with reason `passed`;
 3. the target is one of the allowed executable targets; and
 4. the factor has an explicit runtime strategy-profile mapping.
@@ -380,6 +380,23 @@ def global_gate_blockers(
     return []
 
 
+def effective_global_blockers(evaluated: list[EvaluatedFactor]) -> list[str]:
+    """Return the global gates that actually block candidate-scoped handoff."""
+    blockers: list[str] = []
+    prefix = "global_promotion_gate_not_ready:"
+    for item in evaluated:
+        factor = item.factor
+        if factor.decision != "candidate" or factor.reason != "passed":
+            continue
+        for blocker in item.blockers:
+            if not blocker.startswith(prefix):
+                continue
+            gate = blocker[len(prefix) :]
+            if gate not in blockers:
+                blockers.append(gate)
+    return blockers
+
+
 def evaluate(
     report_text: str,
     *,
@@ -464,6 +481,7 @@ def evaluate(
         )
 
     qualified = [item for item in evaluated if item.qualified]
+    candidate_scoped_global_blockers = effective_global_blockers(evaluated)
     return {
         "schema_version": 1,
         "decision": "qualified" if qualified else "blocked",
@@ -476,6 +494,11 @@ def evaluate(
             "window_count": min_window_count,
         },
         "promotion_gate": asdict(gate),
+        "candidate_scoped_promotion_gate": {
+            "ready": not candidate_scoped_global_blockers,
+            "blocked_gates": candidate_scoped_global_blockers,
+            "diagnostic_blocked_gates": gate.blocked_gates,
+        },
         "qualified_strategies": [
             {
                 "factor": asdict(item.factor),
@@ -519,6 +542,7 @@ def build_factor_registry(result: dict[str, Any]) -> dict[str, Any]:
         "required_strategy_profile": result["required_strategy_profile"],
         "allowed_targets": result["allowed_targets"],
         "promotion_gate": result["promotion_gate"],
+        "candidate_scoped_promotion_gate": result["candidate_scoped_promotion_gate"],
         "entries": entries,
     }
 
@@ -548,6 +572,7 @@ def build_strategy_handoff(result: dict[str, Any]) -> dict[str, Any]:
         "required_strategy_profile": result["required_strategy_profile"],
         "allowed_targets": result["allowed_targets"],
         "promotion_gate": result["promotion_gate"],
+        "candidate_scoped_promotion_gate": result["candidate_scoped_promotion_gate"],
         "strategies": strategies,
         "blocked_factor_count": sum(
             1 for item in result["evaluated_factors"] if not item["qualified"]
@@ -566,9 +591,14 @@ def render_handoff_markdown(handoff: dict[str, Any]) -> str:
         "",
     ]
     if handoff["status"] != "ready":
+        scoped_gate = handoff.get("candidate_scoped_promotion_gate", {})
+        scoped_blockers = scoped_gate.get("blocked_gates") or []
         lines.extend(
             [
                 "No dry-run handoff issue or config should be created from this artifact.",
+                "",
+                "Candidate-scoped global blockers: "
+                + ("; ".join(scoped_blockers) if scoped_blockers else "`none`"),
                 "",
                 f"Blocked factor count: `{handoff['blocked_factor_count']}`",
                 "",
@@ -650,6 +680,18 @@ def render_markdown(result: dict[str, Any]) -> str:
         "",
         f"- Ready: `{str(result['promotion_gate']['ready']).lower()}`",
         f"- Evidence: `{result['promotion_gate']['evidence']}`",
+        "- Candidate-scoped global blockers: "
+        + (
+            "; ".join(result["candidate_scoped_promotion_gate"]["blocked_gates"])
+            if result["candidate_scoped_promotion_gate"]["blocked_gates"]
+            else "`none`"
+        ),
+        "- Diagnostic global blockers: "
+        + (
+            "; ".join(result["candidate_scoped_promotion_gate"]["diagnostic_blocked_gates"])
+            if result["candidate_scoped_promotion_gate"]["diagnostic_blocked_gates"]
+            else "`none`"
+        ),
         "",
         "## Qualified Strategies",
         "",

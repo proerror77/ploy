@@ -403,6 +403,16 @@ def run_variant(
     item["decision"] = promotion.get("decision")
     item["qualified_count"] = len(promotion.get("qualified_strategies") or [])
     item["promotion_gate_ready"] = bool((promotion.get("promotion_gate") or {}).get("ready"))
+    item["candidate_scoped_promotion_gate_ready"] = bool(
+        (promotion.get("candidate_scoped_promotion_gate") or {}).get(
+            "ready",
+            (promotion.get("promotion_gate") or {}).get("ready"),
+        )
+    )
+    item["candidate_scoped_promotion_blockers"] = (
+        (promotion.get("candidate_scoped_promotion_gate") or {}).get("blocked_gates")
+        or []
+    )
     item["best_factor"] = best_factor(promotion, allowed_targets)
     item["best_discovery_factor"] = best_factor_by_kind(
         promotion,
