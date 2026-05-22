@@ -344,6 +344,12 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
         self.assertIn("tradeable_full_depth_settlement_pnl", workflow)
+        self.assertIn('"lob_sample_secs":""', workflow)
+        self.assertIn('"observation_sample_secs":""', workflow)
+        self.assertIn('"max_quote_age_secs":""', workflow)
+        self.assertIn('"lob_sample_secs": ""', workflow)
+        self.assertIn('"observation_sample_secs": ""', workflow)
+        self.assertIn('"max_quote_age_secs": ""', workflow)
         self.assertIn("--sweep-json \"${SWEEP_JSON}\"", workflow)
         self.assertIn("--factor-name-filter \"${WALK_FACTOR_NAME_FILTER}\"", workflow)
         self.assertIn("--train-window-hours \"${WALK_TRAIN_WINDOW_HOURS}\"", workflow)
