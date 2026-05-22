@@ -7,7 +7,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{DeribitFeatureSnapshot, FactorObservation, ResearchPmBookSnapshot};
@@ -57,6 +57,8 @@ pub struct ResearchSnapshotPmBookSource {
     pub archive_sampled_rows: usize,
     pub archive_manifest_rows: usize,
     pub archive_files: usize,
+    #[serde(default)]
+    pub archive_token_windows: usize,
     pub merged_sampled_rows: usize,
     pub archive_dir: Option<String>,
     pub archive_status: String,
@@ -354,6 +356,9 @@ fn research_snapshot_quality_flags(
     if pm_book_source.archive_status == "archive_configured_no_candidate_files" {
         quality_flags.push("pm_book_archive_configured_no_candidate_files".to_string());
     }
+    if pm_book_source.archive_status == "archive_configured_no_token_windows" {
+        quality_flags.push("pm_book_archive_configured_no_token_windows".to_string());
+    }
     if pm_book_source.archive_manifest_rows > 0 && pm_book_source.archive_sampled_rows == 0 {
         quality_flags.push("pm_book_archive_manifest_rows_but_no_sampled_rows".to_string());
     }
@@ -366,8 +371,12 @@ struct ArchivedPmBookLoad {
     snapshots: Vec<ResearchPmBookSnapshot>,
     manifest_rows: usize,
     files: usize,
+    token_windows: usize,
     status: String,
 }
+
+#[cfg(feature = "db")]
+const MAX_ARCHIVED_PM_BOOK_SAMPLED_ROWS: usize = 250_000;
 
 #[cfg(feature = "db")]
 #[derive(Debug, Deserialize)]
@@ -388,6 +397,16 @@ struct ArchivePmBookRow {
 }
 
 #[cfg(feature = "db")]
+#[derive(Debug, Clone)]
+struct PmBookTokenWindow {
+    market_slug: String,
+    token_id: String,
+    side: String,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+}
+
+#[cfg(feature = "db")]
 fn parse_duckdb_timestamptz(raw: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f%:z")
         .or_else(|_| DateTime::parse_from_rfc3339(raw))
@@ -401,15 +420,24 @@ fn sql_string_literal(value: &str) -> String {
 }
 
 #[cfg(feature = "db")]
-fn archive_date_dirs(start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<String> {
+fn archive_hour_dirs(start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<(String, u32)> {
     let mut out = Vec::new();
-    let mut day = (start + chrono::Duration::hours(8)).date_naive();
-    let end_day = (end + chrono::Duration::hours(8)).date_naive();
-    while day <= end_day {
-        out.push(day.format("%Y-%m-%d").to_string());
-        day = day
-            .succ_opt()
-            .expect("advancing archive date should stay in supported range");
+    if end <= start {
+        return out;
+    }
+    let local_start = start + chrono::Duration::hours(8);
+    let local_end = end + chrono::Duration::hours(8) - chrono::Duration::microseconds(1);
+    let mut hour = local_start
+        .date_naive()
+        .and_hms_opt(local_start.hour(), 0, 0)
+        .expect("valid local archive start hour");
+    let end_hour = local_end
+        .date_naive()
+        .and_hms_opt(local_end.hour(), 0, 0)
+        .expect("valid local archive end hour");
+    while hour <= end_hour {
+        out.push((hour.date().format("%Y-%m-%d").to_string(), hour.hour()));
+        hour += chrono::Duration::hours(1);
     }
     out
 }
@@ -422,28 +450,100 @@ fn candidate_archive_files(
 ) -> Result<(Vec<PathBuf>, usize)> {
     let mut files = Vec::new();
     let mut manifest_rows = 0usize;
-    for date in archive_date_dirs(start, end) {
-        for hour in 0..24 {
-            let hour_dir = archive_dir.join(format!("date={date}/hour={hour:02}"));
-            let parquet = hour_dir.join("snapshots.parquet");
-            if !parquet.exists() {
-                continue;
-            }
-            let manifest = hour_dir.join("manifest.json");
-            if manifest.exists() {
-                let parsed: ArchiveManifest = read_json(manifest)?;
-                manifest_rows = manifest_rows.saturating_add(parsed.row_count);
-            }
-            files.push(parquet);
+    for (date, hour) in archive_hour_dirs(start, end) {
+        let hour_dir = archive_dir.join(format!("date={date}/hour={hour:02}"));
+        let parquet = hour_dir.join("snapshots.parquet");
+        if !parquet.exists() {
+            continue;
         }
+        let manifest = hour_dir.join("manifest.json");
+        if manifest.exists() {
+            let parsed: ArchiveManifest = read_json(manifest)?;
+            manifest_rows = manifest_rows.saturating_add(parsed.row_count);
+        }
+        files.push(parquet);
     }
     Ok((files, manifest_rows))
 }
 
 #[cfg(feature = "db")]
+async fn load_pm_book_token_windows(
+    pool: &sqlx::PgPool,
+    symbols: &[String],
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    sample_every_secs: i32,
+) -> Result<Vec<PmBookTokenWindow>, sqlx::Error> {
+    sqlx::query_as::<_, (String, String, String, DateTime<Utc>, DateTime<Utc>)>(
+        r#"
+        SELECT DISTINCT
+            m.market_slug,
+            trim(both '"' from token.value::text) AS token_id,
+            CASE token.ordinality WHEN 1 THEN 'UP' ELSE 'DOWN' END AS side,
+            GREATEST(
+                $2::timestamptz,
+                COALESCE(m.start_time, $2::timestamptz)
+                    - make_interval(secs => $4::int)
+            ) AS window_start,
+            LEAST(
+                $3::timestamptz,
+                COALESCE(m.end_time, $3::timestamptz)
+                    + make_interval(secs => $4::int)
+            ) AS window_end
+        FROM pm_market_metadata m
+        CROSS JOIN LATERAL jsonb_array_elements(
+            (m.raw_market->'markets'->0->>'clobTokenIds')::jsonb
+        ) WITH ORDINALITY AS token(value, ordinality)
+        WHERE m.symbol = ANY($1)
+          AND m.end_time >= $2
+          AND m.start_time <= $3
+          AND m.raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
+        ORDER BY market_slug, side
+        "#,
+    )
+    .bind(symbols)
+    .bind(start)
+    .bind(end)
+    .bind(sample_every_secs.max(1))
+    .fetch_all(pool)
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(
+                |(market_slug, token_id, side, window_start, window_end)| PmBookTokenWindow {
+                    market_slug,
+                    token_id,
+                    side,
+                    window_start,
+                    window_end,
+                },
+            )
+            .collect()
+    })
+}
+
+#[cfg(feature = "db")]
+fn archive_token_window_values_sql(windows: &[PmBookTokenWindow]) -> String {
+    windows
+        .iter()
+        .map(|window| {
+            format!(
+                "({}, {}, {}, TIMESTAMPTZ {}, TIMESTAMPTZ {})",
+                sql_string_literal(&window.market_slug),
+                sql_string_literal(&window.token_id),
+                sql_string_literal(&window.side),
+                sql_string_literal(&window.window_start.to_rfc3339()),
+                sql_string_literal(&window.window_end.to_rfc3339())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[cfg(feature = "db")]
 fn load_archived_pm_book_snapshots_sampled(
     archive_dir: &Path,
-    symbols: &[String],
+    token_windows: &[PmBookTokenWindow],
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     sample_every_secs: i32,
@@ -454,7 +554,17 @@ fn load_archived_pm_book_snapshots_sampled(
             snapshots: Vec::new(),
             manifest_rows,
             files: 0,
+            token_windows: token_windows.len(),
             status: "archive_configured_no_candidate_files".to_string(),
+        });
+    }
+    if token_windows.is_empty() {
+        return Ok(ArchivedPmBookLoad {
+            snapshots: Vec::new(),
+            manifest_rows,
+            files: files.len(),
+            token_windows: 0,
+            status: "archive_configured_no_token_windows".to_string(),
         });
     }
 
@@ -463,29 +573,32 @@ fn load_archived_pm_book_snapshots_sampled(
         .map(|path| sql_string_literal(&path.display().to_string()))
         .collect::<Vec<_>>()
         .join(",");
-    let symbol_list = symbols
-        .iter()
-        .map(|symbol| sql_string_literal(&symbol.to_uppercase()))
-        .collect::<Vec<_>>()
-        .join(",");
+    let token_window_values = archive_token_window_values_sql(token_windows);
     let sample_every_secs = sample_every_secs.max(1);
     let start_literal = sql_string_literal(&start.to_rfc3339());
     let end_literal = sql_string_literal(&end.to_rfc3339());
+    let row_limit = MAX_ARCHIVED_PM_BOOK_SAMPLED_ROWS + 1;
     let sql = format!(
         r#"
-WITH raw AS (
+WITH token_map(event_id, token_id, side, window_start, window_end) AS (
+  VALUES {token_window_values}
+),
+raw AS (
   SELECT
-    json_extract_string(context, '$.slug') AS event_id,
-    token_id,
-    upper(json_extract_string(context, '$.side')) AS side,
-    received_at,
-    bids,
-    asks,
-    floor(epoch(received_at) / {sample_every_secs}) AS bucket
-  FROM read_parquet([{file_list}])
-  WHERE received_at >= TIMESTAMPTZ {start_literal}
-    AND received_at < TIMESTAMPTZ {end_literal}
-    AND upper(json_extract_string(context, '$.symbol')) IN ({symbol_list})
+    t.event_id,
+    t.token_id,
+    t.side,
+    o.received_at,
+    o.bids,
+    o.asks,
+    floor(epoch(o.received_at) / {sample_every_secs}) AS bucket
+  FROM read_parquet([{file_list}]) o
+  JOIN token_map t
+    ON o.token_id = t.token_id
+   AND o.received_at >= t.window_start
+   AND o.received_at < t.window_end
+  WHERE o.received_at >= TIMESTAMPTZ {start_literal}
+    AND o.received_at < TIMESTAMPTZ {end_literal}
 ),
 ranked AS (
   SELECT
@@ -505,6 +618,7 @@ SELECT event_id, token_id, side, received_at, bids, asks
 FROM ranked
 WHERE rn = 1
 ORDER BY received_at
+LIMIT {row_limit}
 "#
     );
 
@@ -522,6 +636,13 @@ ORDER BY received_at
     }
     let rows: Vec<ArchivePmBookRow> = serde_json::from_slice(&output.stdout)
         .context("parse duckdb archived PM book JSON rows")?;
+    if rows.len() > MAX_ARCHIVED_PM_BOOK_SAMPLED_ROWS {
+        anyhow::bail!(
+            "archived PM book sampled rows exceeded safety limit {} for {} token windows; narrow the window or raise pm_book_sample_secs",
+            MAX_ARCHIVED_PM_BOOK_SAMPLED_ROWS,
+            token_windows.len()
+        );
+    }
     let snapshots = rows
         .into_iter()
         .map(|row| {
@@ -545,6 +666,7 @@ ORDER BY received_at
         snapshots,
         manifest_rows,
         files: files.len(),
+        token_windows: token_windows.len(),
         status: "archive_loaded".to_string(),
     })
 }
@@ -569,7 +691,7 @@ pub async fn build_research_snapshot_from_database(
     pool: &sqlx::PgPool,
     options: ResearchSnapshotBuildOptions,
 ) -> Result<ResearchSnapshot> {
-    use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
+    use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
     use ploy_market_contracts::MarketUpdate;
 
     use crate::{
@@ -648,9 +770,26 @@ pub async fn build_research_snapshot_from_database(
     let archived_pm_book_snapshots =
         if let Some(archive_dir) = options.pm_book_archive_dir.as_deref() {
             let started = Instant::now();
+            let token_windows = load_pm_book_token_windows(
+                pool,
+                &options.symbols,
+                history_start,
+                options.end,
+                pm_book_sample_secs,
+            )
+            .await
+            .context("load PM book token windows for archive snapshot")?;
+            pm_book_source.archive_token_windows = token_windows.len();
+            phase_timings.push(ResearchSnapshotPhaseTiming {
+                phase: "pm_book_archive_token_windows".to_string(),
+                elapsed_ms: started.elapsed().as_millis(),
+                rows: Some(token_windows.len()),
+            });
+
+            let started = Instant::now();
             let archived = load_archived_pm_book_snapshots_sampled(
                 archive_dir,
-                &options.symbols,
+                &token_windows,
                 history_start,
                 options.end,
                 pm_book_sample_secs,
@@ -664,6 +803,7 @@ pub async fn build_research_snapshot_from_database(
             pm_book_source.archive_sampled_rows = archived.snapshots.len();
             pm_book_source.archive_manifest_rows = archived.manifest_rows;
             pm_book_source.archive_files = archived.files;
+            pm_book_source.archive_token_windows = archived.token_windows;
             pm_book_source.archive_status = archived.status;
             phase_timings.push(ResearchSnapshotPhaseTiming {
                 phase: "pm_book_snapshots_archive".to_string(),
@@ -853,6 +993,14 @@ fn compute_snapshot_hash(
     update(
         &mut hash,
         manifest
+            .pm_book_source
+            .archive_token_windows
+            .to_string()
+            .as_bytes(),
+    );
+    update(
+        &mut hash,
+        manifest
             .data_audit_status
             .as_deref()
             .unwrap_or("")
@@ -953,11 +1101,12 @@ fn write_quality_markdown(path: &Path, manifest: &ResearchSnapshotManifest) -> R
         manifest.row_counts.pm_book_snapshots
     ));
     body.push_str(&format!(
-        "- PM book source: hot_postgres_sampled_rows={}, archive_sampled_rows={}, archive_manifest_rows={}, archive_files={}, merged_sampled_rows={}, archive_status=`{}` archive_dir=`{}`\n",
+        "- PM book source: hot_postgres_sampled_rows={}, archive_sampled_rows={}, archive_manifest_rows={}, archive_files={}, archive_token_windows={}, merged_sampled_rows={}, archive_status=`{}` archive_dir=`{}`\n",
         manifest.pm_book_source.hot_postgres_sampled_rows,
         manifest.pm_book_source.archive_sampled_rows,
         manifest.pm_book_source.archive_manifest_rows,
         manifest.pm_book_source.archive_files,
+        manifest.pm_book_source.archive_token_windows,
         manifest.pm_book_source.merged_sampled_rows,
         manifest.pm_book_source.archive_status,
         manifest
@@ -1147,5 +1296,37 @@ mod tests {
 
         assert!(flags.contains(&"no_pm_book_snapshots".to_string()));
         assert!(flags.contains(&"pm_book_archive_manifest_rows_but_no_sampled_rows".to_string()));
+    }
+
+    #[cfg(feature = "db")]
+    #[test]
+    fn archive_hour_dirs_only_includes_overlapping_local_hours() {
+        let start = "2026-05-18T16:30:00Z".parse::<DateTime<Utc>>().unwrap();
+        let end = "2026-05-18T18:00:00Z".parse::<DateTime<Utc>>().unwrap();
+
+        let hours = archive_hour_dirs(start, end);
+
+        assert_eq!(
+            hours,
+            vec![("2026-05-19".to_string(), 0), ("2026-05-19".to_string(), 1)]
+        );
+    }
+
+    #[cfg(feature = "db")]
+    #[test]
+    fn archive_token_window_values_sql_quotes_contract_fields() {
+        let windows = vec![PmBookTokenWindow {
+            market_slug: "btc-up's-test".to_string(),
+            token_id: "123".to_string(),
+            side: "UP".to_string(),
+            window_start: "2026-05-18T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+            window_end: "2026-05-18T00:05:00Z".parse::<DateTime<Utc>>().unwrap(),
+        }];
+
+        let sql = archive_token_window_values_sql(&windows);
+
+        assert!(sql.contains("'btc-up''s-test'"));
+        assert!(sql.contains("TIMESTAMPTZ '2026-05-18T00:00:00+00:00'"));
+        assert!(sql.contains("TIMESTAMPTZ '2026-05-18T00:05:00+00:00'"));
     }
 }
