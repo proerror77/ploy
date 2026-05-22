@@ -409,6 +409,7 @@ struct PmBookTokenWindow {
 #[cfg(feature = "db")]
 fn parse_duckdb_timestamptz(raw: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f%:z")
+        .or_else(|_| DateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f%z"))
         .or_else(|_| DateTime::parse_from_rfc3339(raw))
         .map(|ts| ts.with_timezone(&Utc))
         .with_context(|| format!("parse duckdb timestamp {raw:?}"))
