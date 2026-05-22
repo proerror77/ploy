@@ -609,6 +609,15 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
 }
 
 #[test]
+fn runtime_candidate_replay_allows_empty_entry_score_override() {
+    let workflow = workflow_contents(".github/workflows/runtime-candidate-replay.yml");
+    assert!(
+        workflow.contains("min_entry_score_override=\"${7:-}\""),
+        "runtime-candidate-replay.yml must tolerate an omitted three_layer_min_entry_score override"
+    );
+}
+
+#[test]
 fn tango_deploy_keeps_pm5d_live_paused() {
     let workflow = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
     let cloud_assist = workflow_contents("scripts/ci/deploy_tango_cloud_assist.py");
