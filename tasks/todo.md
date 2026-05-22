@@ -113,6 +113,15 @@ Evidence stage: `walk_forward / runtime_parity`.
   shows worse ROI, stop iterating the `external_move` family and switch the next
   search to settlement-native runtime-mappable formulas such as
   `auto_settlement_model_conservative_settlement_edge*`.
+- 2026-05-22: Threshold diagnostic replay run `26262423629` with
+  `three_layer_min_entry_score=0.15` materially improved runtime evidence for
+  the same multi-selector formula: `35` trades on `35` unique events, fill rate
+  `1.0`, total PnL `42.00878575784524`, and ROI `0.08001673477684808`. It still
+  is not promotion-ready because official settlement was available for only
+  `34/35` traded events. The counterfactual remained
+  `reverse_direction_stronger_at_configured_threshold`, with direct/reverse pass
+  counts `35/59` at `0.15`; run `26262629518` is testing `0.10` to determine
+  whether the extra pass-through improves or dilutes realized EV.
 
 # Predictive AutoFactor Runtime Entry Edge (2026-05-20)
 
