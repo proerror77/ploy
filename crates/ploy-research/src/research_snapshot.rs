@@ -622,12 +622,21 @@ LIMIT {row_limit}
 "#
     );
 
+    let sql_path = std::env::temp_dir().join(format!(
+        "ploy-archive-pm-books-{}-{}.sql",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::write(&sql_path, sql)
+        .with_context(|| format!("write DuckDB archive query {}", sql_path.display()))?;
+    let sql_file = File::open(&sql_path)
+        .with_context(|| format!("open DuckDB archive query {}", sql_path.display()))?;
     let output = Command::new("duckdb")
         .arg("-json")
-        .arg("-c")
-        .arg(sql)
+        .stdin(sql_file)
         .output()
         .context("run duckdb for archived PM book snapshots")?;
+    let _ = fs::remove_file(&sql_path);
     if !output.status.success() {
         anyhow::bail!(
             "duckdb archived PM book load failed: {}",

@@ -23,7 +23,8 @@ Evidence stage: `execution_quality`.
 - [x] Add archived parquet PM book recovery to research snapshot compilation.
 - [x] Record PM book raw source/cadence metadata in snapshot manifest.
 - [x] Add focused tests and run validation.
-- [ ] Push PR, rerun snapshot, and invalidate old `$15 fillability=0.1282`
+- [x] Fix archived PM book DuckDB execution to avoid OS argv length limits.
+- [ ] Push PR, deploy, rerun snapshot, and invalidate old `$15 fillability=0.1282`
       evidence.
 
 ## Review
@@ -48,6 +49,15 @@ Evidence stage: `execution_quality`.
   `cargo build --locked -p ploy-research --example research_snapshot_compile --features db`,
   remote DuckDB syntax probe against the 2026-05-19 hour=23 archive, and
   `rtk git diff --check`.
+- 2026-05-22: First post-deploy 1-day snapshot run reached archive loading but
+  failed because the DuckDB SQL was passed through `duckdb -c` and exceeded the
+  OS argument-length limit. The loader now writes the generated SQL to a
+  temporary file and streams it through DuckDB stdin, preserving the same query
+  semantics while allowing large token/window contracts. Validation passed:
+  `rtk git diff --check`,
+  `cargo test --locked -p ploy-research --features db research_snapshot --lib`,
+  and
+  `cargo build --locked -p ploy-research --example research_snapshot_compile --features db`.
 
 # AutoFactor Candidate Fillability Gate Repair (2026-05-22)
 
