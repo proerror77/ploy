@@ -11,7 +11,7 @@ use crate::factors_v2::FactorObservationV2;
 
 const EPS: f64 = 1e-9;
 const MAX_DETERMINISTIC_MUTATION_DEPTH: usize = 2;
-const MAX_DETERMINISTIC_MUTATION_CANDIDATES: usize = 160;
+const MAX_DETERMINISTIC_MUTATION_CANDIDATES: usize = 1024;
 const SELECTOR_GATE_THRESHOLDS: [f64; 3] = [0.25, 0.50, 0.75];
 const SELECTOR_GATE_FEATURES: [&str; 4] = [
     "near_strike_score",
@@ -744,6 +744,61 @@ pub fn autofactor_matrix_from_v2(
             )
         },
     );
+    insert_column(&mut columns, "bayes_market_prior_prob", rows, |row| {
+        bayes_market_prior_prob(row).unwrap_or(f64::NAN)
+    });
+    insert_column(&mut columns, "bayes_external_prob", rows, |row| {
+        bayes_external_prob(row).unwrap_or(f64::NAN)
+    });
+    insert_column(&mut columns, "bayes_posterior_prob", rows, |row| {
+        bayes_posterior_prob(row).unwrap_or(f64::NAN)
+    });
+    insert_column(&mut columns, "bayes_edge", rows, |row| {
+        bayes_edge(row, row.entry_ask)
+    });
+    insert_column(&mut columns, "bayes_full_depth_edge", rows, |row| {
+        bayes_edge(row, row.entry_sweep_avg_price_15u)
+    });
+    insert_column(&mut columns, "bayes_conservative_edge", rows, |row| {
+        bayes_edge(row, row.conservative_entry_sweep_avg_price_15u)
+    });
+    insert_column(&mut columns, "bayes_disagreement", rows, |row| {
+        bayes_disagreement(row)
+    });
+    insert_column(&mut columns, "bayes_confidence", rows, |row| {
+        bayes_confidence(row)
+    });
+    insert_column(&mut columns, "bayes_entropy", rows, |row| {
+        bayes_entropy(row)
+    });
+    insert_column(
+        &mut columns,
+        "bayes_confidence_weighted_edge",
+        rows,
+        |row| finite_product(bayes_edge(row, row.entry_ask), bayes_confidence(row)),
+    );
+    insert_column(
+        &mut columns,
+        "bayes_full_depth_confidence_weighted_edge",
+        rows,
+        |row| {
+            finite_product(
+                bayes_edge(row, row.entry_sweep_avg_price_15u),
+                bayes_confidence(row),
+            )
+        },
+    );
+    insert_column(
+        &mut columns,
+        "bayes_disagreement_x_entry_price_quality",
+        rows,
+        |row| {
+            finite_product(
+                bayes_disagreement(row),
+                entry_price_quality_score(row.entry_ask),
+            )
+        },
+    );
     insert_column(&mut columns, "entry_capacity_score", rows, |row| {
         if row.entry_capacity_ratio.is_finite() {
             (row.entry_capacity_ratio / 3.0).clamp(0.0, 1.0)
@@ -876,6 +931,269 @@ fn settlement_edge(probability: f64, entry_price: f64) -> f64 {
     }
 }
 
+fn valid_bayes_probability(value: f64) -> bool {
+    value.is_finite() && value > 0.0 && value < 1.0
+}
+
+fn clamp_bayes_probability(value: f64) -> f64 {
+    value.clamp(1e-6, 1.0 - 1e-6)
+}
+
+fn probability_logit(value: f64) -> f64 {
+    let q = clamp_bayes_probability(value);
+    (q / (1.0 - q)).ln()
+}
+
+fn inverse_logit(value: f64) -> f64 {
+    if value >= 0.0 {
+        let z = (-value).exp();
+        1.0 / (1.0 + z)
+    } else {
+        let z = value.exp();
+        z / (1.0 + z)
+    }
+}
+
+fn add_bayes_probability_component(
+    logit_sum: &mut f64,
+    total_weight: &mut f64,
+    probability: Option<f64>,
+    weight: f64,
+) {
+    let Some(q) = probability.filter(|value| valid_bayes_probability(*value)) else {
+        return;
+    };
+    if weight <= 0.0 {
+        return;
+    }
+    *logit_sum += probability_logit(q) * weight;
+    *total_weight += weight;
+}
+
+fn bayes_market_prior_prob(row: &FactorObservationV2) -> Option<f64> {
+    if valid_pm_price(row.entry_ask) && valid_pm_price(row.exit_bid) {
+        Some((row.entry_ask + row.exit_bid) * 0.5)
+    } else {
+        None
+    }
+}
+
+fn bayes_external_prob(row: &FactorObservationV2) -> Option<f64> {
+    if !row.side_distance_over_sigma.is_finite() {
+        return None;
+    }
+    let base_z = row.side_distance_over_sigma;
+    let drift_z = bayes_lob_drift_z(row);
+    let vol_adjusted_z = bayes_volatility_adjusted_distance_z(row);
+    let z = match (drift_z.is_finite(), vol_adjusted_z.is_finite()) {
+        (true, true) => vol_adjusted_z + drift_z,
+        (true, false) => base_z + drift_z,
+        (false, true) => vol_adjusted_z,
+        (false, false) => base_z,
+    };
+    Some(normal_cdf(z))
+}
+
+fn bayes_posterior_prob(row: &FactorObservationV2) -> Option<f64> {
+    let mut logit_sum = 0.0;
+    let mut total_weight = 0.0;
+    add_bayes_probability_component(
+        &mut logit_sum,
+        &mut total_weight,
+        bayes_market_prior_prob(row),
+        0.55,
+    );
+    add_bayes_probability_component(
+        &mut logit_sum,
+        &mut total_weight,
+        bayes_external_prob(row),
+        0.45,
+    );
+    if total_weight <= EPS {
+        None
+    } else {
+        Some(inverse_logit(logit_sum / total_weight))
+    }
+}
+
+fn bayes_edge(row: &FactorObservationV2, entry_price: f64) -> f64 {
+    let Some(probability) = bayes_posterior_prob(row).filter(|q| valid_bayes_probability(*q))
+    else {
+        return f64::NAN;
+    };
+    settlement_edge(probability, entry_price)
+}
+
+fn bayes_disagreement(row: &FactorObservationV2) -> f64 {
+    let Some(posterior) = bayes_posterior_prob(row) else {
+        return f64::NAN;
+    };
+    let Some(prior) = bayes_market_prior_prob(row) else {
+        return f64::NAN;
+    };
+    posterior - prior
+}
+
+fn bayes_confidence(row: &FactorObservationV2) -> f64 {
+    let Some(posterior) = bayes_posterior_prob(row) else {
+        return f64::NAN;
+    };
+    let mut score = 0.0;
+    let mut weight = 0.0;
+    add_confidence_component(
+        &mut score,
+        &mut weight,
+        1.0 - bayes_entropy_from_probability(posterior),
+        0.25,
+    );
+    if row.pm_lag_secs.is_finite() && row.pm_lag_secs >= 0.0 {
+        add_confidence_component(
+            &mut score,
+            &mut weight,
+            1.0 / (1.0 + row.pm_lag_secs / 5.0),
+            0.20,
+        );
+    }
+    if row.pm_spread_bps.is_finite() && row.pm_spread_bps >= 0.0 {
+        add_confidence_component(
+            &mut score,
+            &mut weight,
+            1.0 - (row.pm_spread_bps / 2_000.0).clamp(0.0, 1.0),
+            0.15,
+        );
+    }
+    if row.entry_capacity_ratio.is_finite() && row.entry_capacity_ratio >= 0.0 {
+        add_confidence_component(
+            &mut score,
+            &mut weight,
+            (row.entry_capacity_ratio / 3.0).clamp(0.0, 1.0),
+            0.20,
+        );
+    }
+    if let Some(prior) = bayes_market_prior_prob(row) {
+        add_confidence_component(
+            &mut score,
+            &mut weight,
+            1.0 - ((posterior - prior).abs() / 0.50).clamp(0.0, 1.0),
+            0.20,
+        );
+    }
+    if weight <= EPS {
+        f64::NAN
+    } else {
+        (score / weight).clamp(0.0, 1.0)
+    }
+}
+
+fn add_confidence_component(score: &mut f64, weight: &mut f64, value: f64, component_weight: f64) {
+    if value.is_finite() && component_weight > 0.0 {
+        *score += value.clamp(0.0, 1.0) * component_weight;
+        *weight += component_weight;
+    }
+}
+
+fn bayes_entropy(row: &FactorObservationV2) -> f64 {
+    bayes_posterior_prob(row)
+        .map(bayes_entropy_from_probability)
+        .unwrap_or(f64::NAN)
+}
+
+fn bayes_entropy_from_probability(probability: f64) -> f64 {
+    if !valid_bayes_probability(probability) {
+        return f64::NAN;
+    }
+    let q = clamp_bayes_probability(probability);
+    (-(q * q.ln()) - ((1.0 - q) * (1.0 - q).ln())) / std::f64::consts::LN_2
+}
+
+fn bayes_lob_drift_z(row: &FactorObservationV2) -> f64 {
+    let mut score = 0.0;
+    let mut weight = 0.0;
+    add_finite_component(
+        &mut score,
+        &mut weight,
+        row.obi_10 * row.side.multiplier(),
+        0.20,
+    );
+    add_finite_component(
+        &mut score,
+        &mut weight,
+        row.depth_imbalance * row.side.multiplier(),
+        0.15,
+    );
+    add_finite_component(
+        &mut score,
+        &mut weight,
+        row.microprice_offset_bps * row.side.multiplier() / 5.0,
+        0.15,
+    );
+    add_finite_component(&mut score, &mut weight, row.obi_persistence_30s_side, 0.20);
+    add_finite_component(
+        &mut score,
+        &mut weight,
+        row.microprice_momentum_30s_side / 5.0,
+        0.10,
+    );
+    add_finite_component(
+        &mut score,
+        &mut weight,
+        row.cex_signed_volume_ratio_30s * row.side.multiplier(),
+        0.20,
+    );
+    add_finite_component(&mut score, &mut weight, row.cex_breakout_volume_side, 0.15);
+    if weight <= EPS {
+        f64::NAN
+    } else {
+        (score / weight).tanh() * 0.35
+    }
+}
+
+fn bayes_volatility_adjusted_distance_z(row: &FactorObservationV2) -> f64 {
+    if !row.side_distance_over_sigma.is_finite() {
+        return f64::NAN;
+    }
+    let mut vol_shock = 0.0f64;
+    if row.vol_gap.is_finite() {
+        vol_shock = vol_shock.max(row.vol_gap);
+    }
+    if row.deribit_iv_gap_horizon.is_finite() {
+        vol_shock = vol_shock.max(row.deribit_iv_gap_horizon);
+    }
+    if row.deribit_iv_change_60s.is_finite() {
+        vol_shock = vol_shock.max(row.deribit_iv_change_60s.abs() * 0.5);
+    }
+    let denominator = 1.0 + vol_shock.max(0.0).clamp(0.0, 2.0);
+    row.side_distance_over_sigma / denominator
+}
+
+fn add_finite_component(score: &mut f64, weight: &mut f64, value: f64, component_weight: f64) {
+    if value.is_finite() && component_weight > 0.0 {
+        *score += value.clamp(-5.0, 5.0) * component_weight;
+        *weight += component_weight;
+    }
+}
+
+fn normal_cdf(x: f64) -> f64 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let z = x.abs() / std::f64::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.3275911 * z);
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let erf = sign * (1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-z * z).exp());
+    0.5 * (1.0 + erf)
+}
+
+fn finite_product(lhs: f64, rhs: f64) -> f64 {
+    if lhs.is_finite() && rhs.is_finite() {
+        lhs * rhs
+    } else {
+        f64::NAN
+    }
+}
+
 pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactorExpr> {
     let mut out = Vec::new();
     if input_names.contains("repricing_gap_side_10s") {
@@ -892,6 +1210,38 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             expr: input("side_fair_edge"),
             target: Some("settlement_executable_pnl".to_string()),
             notes: vec!["Settlement fair probability minus executable ask and fee.".to_string()],
+        });
+    }
+    if input_names.contains("bayes_edge") {
+        out.push(NamedFactorExpr {
+            name: "bayes_settlement_edge".to_string(),
+            expr: input("bayes_edge"),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec![
+                "Row-local Bayesian posterior probability minus executable ask and fee."
+                    .to_string(),
+            ],
+        });
+    }
+    if input_names.contains("bayes_confidence_weighted_edge") {
+        out.push(NamedFactorExpr {
+            name: "bayes_confidence_weighted_edge".to_string(),
+            expr: input("bayes_confidence_weighted_edge"),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec![
+                "Bayesian settlement edge weighted by quote, capacity, agreement, and probability quality."
+                    .to_string(),
+            ],
+        });
+    }
+    if input_names.contains("bayes_disagreement") {
+        out.push(NamedFactorExpr {
+            name: "bayes_market_external_disagreement".to_string(),
+            expr: input("bayes_disagreement"),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec![
+                "Posterior settlement probability minus Polymarket midpoint prior.".to_string(),
+            ],
         });
     }
     if has_all(input_names, &["ofi_l5", "depth_top5"]) {
@@ -1036,6 +1386,13 @@ fn domain_candidates_for_target_with_guidance(
         out.extend(settlement_native_generated_candidates(input_names));
     }
     out.extend(deterministic_mutation_candidates(input_names, &out, target));
+    if matches!(
+        target,
+        AutoFactorV2Target::FullDepthSettlementExecutablePnl
+            | AutoFactorV2Target::TradeableFullDepthSettlementPnl
+    ) {
+        out.extend(bayes_settlement_generated_candidates(input_names));
+    }
     if !mcts_selected_factor_names.is_empty() {
         let selected = out
             .iter()
@@ -1561,6 +1918,35 @@ fn settlement_native_generated_candidates(input_names: &BTreeSet<String>) -> Vec
                 "Settlement edge interacted with short implied-volatility change.",
             );
         }
+    }
+    out
+}
+
+fn bayes_settlement_generated_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactorExpr> {
+    let mut out = Vec::new();
+    if input_names.contains("bayes_full_depth_edge") {
+        push_generated(
+            &mut out,
+            "auto_settlement_bayes_full_depth_edge".to_string(),
+            input("bayes_full_depth_edge"),
+            "Full-depth row-local Bayesian posterior q minus entry sweep price and fee.",
+        );
+    }
+    if input_names.contains("bayes_conservative_edge") {
+        push_generated(
+            &mut out,
+            "auto_settlement_bayes_conservative_edge".to_string(),
+            input("bayes_conservative_edge"),
+            "Conservative row-local Bayesian posterior q minus entry sweep price and fee.",
+        );
+    }
+    if input_names.contains("bayes_full_depth_confidence_weighted_edge") {
+        push_generated(
+            &mut out,
+            "auto_settlement_bayes_full_depth_confidence_weighted_edge".to_string(),
+            input("bayes_full_depth_confidence_weighted_edge"),
+            "Full-depth Bayesian edge weighted by row-local quote and execution confidence.",
+        );
     }
     out
 }
@@ -2291,6 +2677,58 @@ mod tests {
     }
 
     #[test]
+    fn autofactor_matrix_exports_row_local_bayes_factors() {
+        let rows = vec![synthetic_v2_row(7)];
+        let matrix = autofactor_matrix_from_v2(&rows).expect("matrix");
+
+        let prior = matrix.column("bayes_market_prior_prob").expect("prior")[0];
+        let external = matrix.column("bayes_external_prob").expect("external")[0];
+        let posterior = matrix.column("bayes_posterior_prob").expect("posterior")[0];
+        let edge = matrix.column("bayes_edge").expect("edge")[0];
+        let full_depth_edge = matrix
+            .column("bayes_full_depth_edge")
+            .expect("full depth edge")[0];
+        let confidence = matrix.column("bayes_confidence").expect("confidence")[0];
+        let entropy = matrix.column("bayes_entropy").expect("entropy")[0];
+        let weighted_edge = matrix
+            .column("bayes_confidence_weighted_edge")
+            .expect("weighted edge")[0];
+        let disagreement = matrix.column("bayes_disagreement").expect("disagreement")[0];
+
+        assert!((prior - 0.49).abs() < 1e-9);
+        assert!(external > prior);
+        assert!(posterior > prior);
+        assert!((edge - (posterior - 0.50 - pm_fee_cost(0.50))).abs() < 1e-9);
+        assert!((full_depth_edge - edge).abs() < 1e-9);
+        assert!(confidence > 0.0 && confidence <= 1.0);
+        assert!(entropy > 0.0 && entropy <= 1.0);
+        assert!((weighted_edge - edge * confidence).abs() < 1e-9);
+        assert!((disagreement - (posterior - prior)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bayes_factor_invalid_pm_price_returns_nan_not_zero() {
+        let mut rows = vec![synthetic_v2_row(7)];
+        rows[0].entry_ask = 1.0;
+        rows[0].entry_sweep_avg_price_15u = 1.0;
+        rows[0].conservative_entry_sweep_avg_price_15u = 1.0;
+        let matrix = autofactor_matrix_from_v2(&rows).expect("matrix");
+
+        assert!(matrix.column("bayes_market_prior_prob").expect("prior")[0].is_nan());
+        assert!(matrix.column("bayes_edge").expect("edge")[0].is_nan());
+        assert!(matrix
+            .column("bayes_full_depth_edge")
+            .expect("full depth edge")[0]
+            .is_nan());
+        assert!(matrix
+            .column("bayes_conservative_edge")
+            .expect("conservative edge")[0]
+            .is_nan());
+        assert!(matrix.column("bayes_external_prob").expect("external")[0].is_finite());
+        assert!(matrix.column("bayes_posterior_prob").expect("posterior")[0].is_finite());
+    }
+
+    #[test]
     fn evaluates_safe_expression_series() {
         let mut columns = BTreeMap::new();
         columns.insert("a".to_string(), vec![2.0, 4.0, f64::NAN]);
@@ -2328,11 +2766,9 @@ mod tests {
     fn evaluates_domain_candidate_with_icir_gate() {
         let (matrix, labels, windows) = synthetic_matrix(24);
         let candidates = domain_seed_candidates(&matrix.input_names());
-        assert!(
-            candidates
-                .iter()
-                .any(|item| item.name == "ofi_l5_depth_norm")
-        );
+        assert!(candidates
+            .iter()
+            .any(|item| item.name == "ofi_l5_depth_norm"));
         let options = AutoFactorOptions {
             min_observations: 20,
             min_window_observations: 6,
@@ -2419,30 +2855,22 @@ mod tests {
             .expect("repricing gap report");
         assert_eq!(repricing_gap.decision, AutoFactorDecision::Candidate);
         assert!(repricing_gap.spearman_ic > 0.95);
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "poly_lag_pressure")
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "amplitude_weighted_momentum_30s_sigma")
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "amplitude_weighted_momentum_30s_vol_gap")
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "mut_spread_adjusted_external_move_pm_lag_gate")
-        );
-        assert!(
-            reports.iter().any(|report| report.name
-                == "mut2_mut_spread_adjusted_external_move_pm_lag_gate_squashed")
-        );
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "poly_lag_pressure"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "amplitude_weighted_momentum_30s_sigma"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "amplitude_weighted_momentum_30s_vol_gap"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "mut_spread_adjusted_external_move_pm_lag_gate"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name
+                == "mut2_mut_spread_adjusted_external_move_pm_lag_gate_squashed"));
     }
 
     #[test]
@@ -2544,15 +2972,19 @@ mod tests {
             report.name
                 == "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality"
         }));
-        assert!(
-            reports.iter().any(|report| report.name
-                == "mut_auto_settlement_model_full_depth_settlement_edge_capacity")
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name.starts_with("mut2_"))
-        );
+        assert!(reports
+            .iter()
+            .any(|report| report.name
+                == "mut_auto_settlement_model_full_depth_settlement_edge_capacity"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "auto_settlement_bayes_full_depth_edge"));
+        assert!(reports.iter().any(
+            |report| report.name == "auto_settlement_bayes_full_depth_confidence_weighted_edge"
+        ));
+        assert!(reports
+            .iter()
+            .any(|report| report.name.starts_with("mut2_")));
     }
 
     #[test]
@@ -2743,11 +3175,9 @@ mod tests {
         )
         .expect("reports");
 
-        assert!(
-            reports
-                .iter()
-                .all(|report| !report.name.starts_with("auto_settlement_"))
-        );
+        assert!(reports
+            .iter()
+            .all(|report| !report.name.starts_with("auto_settlement_")));
     }
 
     #[test]
@@ -2765,11 +3195,9 @@ mod tests {
                 .expect("reports");
 
         assert!(!reports.is_empty());
-        assert!(
-            reports
-                .iter()
-                .all(|report| report.target.as_deref() == Some("reprice_pnl_30s"))
-        );
+        assert!(reports
+            .iter()
+            .all(|report| report.target.as_deref() == Some("reprice_pnl_30s")));
 
         let formatted = format_autofactor_reports(&reports, reports.len());
         assert!(formatted.contains("reprice_pnl_30s"));
