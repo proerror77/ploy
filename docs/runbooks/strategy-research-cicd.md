@@ -69,12 +69,16 @@ closed dry-run rows when available, and falls back to current open rows when a
 fresh recording has not yet accumulated closed events. The workflow records the resolved window in the workflow summary, issue comment, and
 `resolved-window.json` artifact. Manual timestamps remain supported for
 reproducing a known incident window or an older research issue.
-The workflow is read-only evidence generation: it builds `new-ploy-runner` on
-the GitHub runner from the requested workflow ref, copies that temporary binary
-to the replay scratch directory on `tango-1-1`, and uses a temporary replay
-config plus report/database reads. It does not deploy artifacts, restart
-services, replace `/opt/ploy/bin/ploy-runner`, or enable live orders. Its
-`approval_environment` input therefore defaults to
+The workflow is read-only evidence generation. `runner_source=deployed` is the
+default because runtime parity should compare the deployed dry-run report with
+the deployed `/opt/ploy/bin/ploy-runner` on the same host. Use
+`runner_source=workflow_ref` only as the branch-regression mode: it builds
+`new-ploy-runner` on the GitHub runner from the requested workflow ref, copies
+that temporary binary to the replay scratch directory on `tango-1-1`, and
+compares that branch binary against the deployed config/recording. Both modes
+use a temporary replay config plus report/database reads. The workflow does not
+deploy artifacts, restart services, replace `/opt/ploy/bin/ploy-runner`, or
+enable live orders. Its `approval_environment` input therefore defaults to
 `tango-1-1-build-only` so parity checks can run without the protected live
 deploy approval gate. Use `approval_environment=tango-1-1` only when an operator
 explicitly wants the protected environment approval for an incident replay.

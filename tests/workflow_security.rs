@@ -264,12 +264,23 @@ fn recorded_replay_parity_supports_auto_window() {
     for needle in [
         "approval_environment:",
         "default: \"tango-1-1-build-only\"",
+        "runner_source:",
+        "Runner binary source: deployed for runtime parity, workflow_ref for branch regression",
+        "default: \"deployed\"",
+        "- \"deployed\"",
+        "- \"workflow_ref\"",
         "Build replay runner from workflow ref",
+        "if: ${{ github.event.inputs.runner_source == 'workflow_ref' }}",
         "--features new-ploy-runner/full",
         "-p new-ploy-runner",
         "target/${PLATFORM_TARGET}/release/new-ploy-runner",
         "tango-1-1:\"${REMOTE_DIR}/ploy-runner\"",
-        "timeout 600 \"${remote_dir}/ploy-runner\" run",
+        "RUNNER_SOURCE",
+        "runner_source must be deployed or workflow_ref",
+        "runner_path=\"/opt/ploy/bin/ploy-runner\"",
+        "runner_path=\"${remote_dir}/ploy-runner\"",
+        "timeout 600 \"${runner_path}\" run",
+        "Runner source",
         "skip_settlement_exits:",
         "Skip settlement exits for entry-only dry-run parity",
         "SKIP_SETTLEMENT_EXITS",
@@ -313,8 +324,9 @@ fn recorded_replay_parity_supports_auto_window() {
         }
     }
     for needle in [
-        "builds `new-ploy-runner` on\n",
-        "does not deploy artifacts, restart\nservices, replace `/opt/ploy/bin/ploy-runner`, or enable live orders",
+        "`runner_source=deployed` is the\ndefault",
+        "`runner_source=workflow_ref` only as the branch-regression mode",
+        "does not\ndeploy artifacts, restart services, replace `/opt/ploy/bin/ploy-runner`, or\nenable live orders",
     ] {
         if !runbook.contains(needle) {
             offenders.push(format!(

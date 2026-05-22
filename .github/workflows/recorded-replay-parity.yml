@@ -43,9 +43,17 @@ on:
         options:
           - "true"
           - "false"
+      runner_source:
+        description: "Runner binary source: deployed for runtime parity, workflow_ref for branch regression"
+        required: false
+        default: "deployed"
+        type: choice
+        options:
+          - "deployed"
+          - "workflow_ref"
 
 concurrency:
-  group: recorded-replay-parity-${{ github.event.inputs.deployment_id }}-${{ github.event.inputs.since }}-${{ github.event.inputs.until }}
+  group: recorded-replay-parity-${{ github.event.inputs.deployment_id }}-${{ github.event.inputs.since }}-${{ github.event.inputs.until }}-${{ github.event.inputs.runner_source }}
   cancel-in-progress: false
 
 permissions:
@@ -69,6 +77,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Build replay runner from workflow ref
+        if: ${{ github.event.inputs.runner_source == 'workflow_ref' }}
         run: |
           set -euo pipefail
           cargo build --release --locked \
@@ -133,6 +142,7 @@ jobs:
           SINCE: ${{ github.event.inputs.since }}
           UNTIL: ${{ github.event.inputs.until }}
           SKIP_SETTLEMENT_EXITS: ${{ github.event.inputs.skip_settlement_exits }}
+          RUNNER_SOURCE: ${{ github.event.inputs.runner_source }}
           REMOTE_DIR: /opt/ploy/tmp/recorded-replay-parity-${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -142,8 +152,14 @@ jobs:
           set -euo pipefail
           mkdir -p "$1"
           EOF
-          scp "target/${PLATFORM_TARGET}/release/new-ploy-runner" \
-            tango-1-1:"${REMOTE_DIR}/ploy-runner"
+          case "${RUNNER_SOURCE}" in
+            deployed) ;;
+            workflow_ref)
+              scp "target/${PLATFORM_TARGET}/release/new-ploy-runner" \
+                tango-1-1:"${REMOTE_DIR}/ploy-runner"
+              ;;
+            *) echo "runner_source must be deployed or workflow_ref" >&2; exit 1 ;;
+          esac
           scp scripts/enrich_recording_official_settlement.py \
             tango-1-1:"${REMOTE_DIR}/enrich_recording_official_settlement.py"
           scp scripts/enrich_replay_runtime_evidence.py \
@@ -163,7 +179,8 @@ jobs:
             "${REMOTE_DIR}" \
             "${SINCE}" \
             "${UNTIL}" \
-            "${SKIP_SETTLEMENT_EXITS}" <<'EOF'
+            "${SKIP_SETTLEMENT_EXITS}" \
+            "${RUNNER_SOURCE}" <<'EOF'
           set -euo pipefail
           deployment_id="$1"
           config_path="$2"
@@ -172,14 +189,25 @@ jobs:
           since_ts="$5"
           until_ts="$6"
           skip_settlement_exits="$7"
+          runner_source="$8"
           case "${skip_settlement_exits}" in
             true|false) ;;
             *) echo "skip_settlement_exits must be true or false" >&2; exit 1 ;;
           esac
+          case "${runner_source}" in
+            deployed|workflow_ref) ;;
+            *) echo "runner_source must be deployed or workflow_ref" >&2; exit 1 ;;
+          esac
+          runner_path="/opt/ploy/bin/ploy-runner"
+          if [ "${runner_source}" = "workflow_ref" ]; then
+            runner_path="${remote_dir}/ploy-runner"
+          fi
 
           mkdir -p "${remote_dir}"
-          chmod +x "${remote_dir}/ploy-runner"
-          test -x "${remote_dir}/ploy-runner"
+          if [ "${runner_source}" = "workflow_ref" ]; then
+            chmod +x "${runner_path}"
+          fi
+          test -x "${runner_path}"
           test -r "${config_path}"
           test -r "${recording_path}"
           test -r "${remote_dir}/enrich_recording_official_settlement.py"
@@ -341,7 +369,7 @@ jobs:
               handle.write("\n".join(lines) + "\n")
           PY
 
-          timeout 600 "${remote_dir}/ploy-runner" run \
+          timeout 600 "${runner_path}" run \
             --config "${replay_config}" \
             --deployment-id "${deployment_id}" \
             --output-json "${remote_dir}/replay-evaluation.json"
@@ -411,6 +439,7 @@ jobs:
             echo "- Deployment: \`${{ github.event.inputs.deployment_id }}\`"
             echo "- Config: \`${{ github.event.inputs.config_path }}\`"
             echo "- Recording: \`${{ github.event.inputs.recording_path }}\`"
+            echo "- Runner source: \`${{ github.event.inputs.runner_source }}\`"
             echo "- Requested window: \`${{ github.event.inputs.since }} -> ${{ github.event.inputs.until }}\`"
             echo "- Resolved window: \`${resolved_since} -> ${resolved_until}\`"
             echo "- Window mode: \`${resolved_mode}\`"
@@ -488,6 +517,7 @@ jobs:
               `- Deployment: \`${{ github.event.inputs.deployment_id }}\``,
               `- Config: \`${{ github.event.inputs.config_path }}\``,
               `- Recording: \`${{ github.event.inputs.recording_path }}\``,
+              `- Runner source: \`${{ github.event.inputs.runner_source }}\``,
               `- Requested window: \`${{ github.event.inputs.since }} -> ${{ github.event.inputs.until }}\``,
               `- Resolved window: \`${resolvedWindow.since} -> ${resolvedWindow.until}\``,
               `- Window mode: \`${resolvedWindow.mode || "manual"}\``,
