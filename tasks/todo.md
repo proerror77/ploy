@@ -24,6 +24,7 @@ Evidence stage: `execution_quality`.
 - [x] Record PM book raw source/cadence metadata in snapshot manifest.
 - [x] Add focused tests and run validation.
 - [x] Fix archived PM book DuckDB execution to avoid OS argv length limits.
+- [x] Bound archived PM book DuckDB scans to one parquet hour per query.
 - [ ] Push PR, deploy, rerun snapshot, and invalidate old `$15 fillability=0.1282`
       evidence.
 
@@ -54,6 +55,16 @@ Evidence stage: `execution_quality`.
   OS argument-length limit. The loader now writes the generated SQL to a
   temporary file and streams it through DuckDB stdin, preserving the same query
   semantics while allowing large token/window contracts. Validation passed:
+  `rtk git diff --check`,
+  `cargo test --locked -p ploy-research --features db research_snapshot --lib`,
+  and
+  `cargo build --locked -p ploy-research --example research_snapshot_compile --features db`.
+- 2026-05-22: A follow-up 1-day snapshot run crossed the argv limit but then
+  pinned tango while scanning the full archived day in one DuckDB query; the run
+  was canceled and tango was rebooted. The archive loader now executes one
+  bounded DuckDB query per hourly parquet file, limits DuckDB to one thread and
+  a 1024MB memory budget, and ranks sampled rows before joining bids/asks JSON
+  back in. Validation passed:
   `rtk git diff --check`,
   `cargo test --locked -p ploy-research --features db research_snapshot --lib`,
   and

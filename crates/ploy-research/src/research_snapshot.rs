@@ -568,31 +568,39 @@ fn load_archived_pm_book_snapshots_sampled(
         });
     }
 
-    let file_list = files
-        .iter()
-        .map(|path| sql_string_literal(&path.display().to_string()))
-        .collect::<Vec<_>>()
-        .join(",");
     let token_window_values = archive_token_window_values_sql(token_windows);
     let sample_every_secs = sample_every_secs.max(1);
     let start_literal = sql_string_literal(&start.to_rfc3339());
     let end_literal = sql_string_literal(&end.to_rfc3339());
-    let row_limit = MAX_ARCHIVED_PM_BOOK_SAMPLED_ROWS + 1;
-    let sql = format!(
-        r#"
+    let duckdb_temp_dir_literal = sql_string_literal(
+        &std::env::temp_dir()
+            .join("ploy-duckdb")
+            .display()
+            .to_string(),
+    );
+    let mut rows = Vec::new();
+
+    for file in &files {
+        let row_limit = MAX_ARCHIVED_PM_BOOK_SAMPLED_ROWS
+            .saturating_sub(rows.len())
+            .saturating_add(1);
+        let file_literal = sql_string_literal(&file.display().to_string());
+        let sql = format!(
+            r#"
+SET threads = 1;
+SET memory_limit = '1024MB';
+SET temp_directory = {duckdb_temp_dir_literal};
 WITH token_map(event_id, token_id, side, window_start, window_end) AS (
   VALUES {token_window_values}
 ),
-raw AS (
+raw_keys AS (
   SELECT
     t.event_id,
     t.token_id,
     t.side,
     o.received_at,
-    o.bids,
-    o.asks,
     floor(epoch(o.received_at) / {sample_every_secs}) AS bucket
-  FROM read_parquet([{file_list}]) o
+  FROM read_parquet({file_literal}) o
   JOIN token_map t
     ON o.token_id = t.token_id
    AND o.received_at >= t.window_start
@@ -606,52 +614,38 @@ ranked AS (
     token_id,
     side,
     received_at,
-    bids,
-    asks,
     row_number() OVER (
       PARTITION BY token_id, bucket
       ORDER BY received_at DESC
     ) AS rn
-  FROM raw
+  FROM raw_keys
 )
-SELECT event_id, token_id, side, received_at, bids, asks
-FROM ranked
-WHERE rn = 1
-ORDER BY received_at
+SELECT
+  r.event_id,
+  r.token_id,
+  r.side,
+  r.received_at,
+  o.bids,
+  o.asks
+FROM ranked r
+JOIN read_parquet({file_literal}) o
+  ON o.token_id = r.token_id
+ AND o.received_at = r.received_at
+WHERE r.rn = 1
+ORDER BY r.received_at
 LIMIT {row_limit}
 "#
-    );
+        );
+        rows.extend(run_duckdb_archive_pm_book_query(sql)?);
+        if rows.len() > MAX_ARCHIVED_PM_BOOK_SAMPLED_ROWS {
+            anyhow::bail!(
+                "archived PM book sampled rows exceeded safety limit {} for {} token windows; narrow the window or raise pm_book_sample_secs",
+                MAX_ARCHIVED_PM_BOOK_SAMPLED_ROWS,
+                token_windows.len()
+            );
+        }
+    }
 
-    let sql_path = std::env::temp_dir().join(format!(
-        "ploy-archive-pm-books-{}-{}.sql",
-        std::process::id(),
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    ));
-    fs::write(&sql_path, sql)
-        .with_context(|| format!("write DuckDB archive query {}", sql_path.display()))?;
-    let sql_file = File::open(&sql_path)
-        .with_context(|| format!("open DuckDB archive query {}", sql_path.display()))?;
-    let output = Command::new("duckdb")
-        .arg("-json")
-        .stdin(sql_file)
-        .output()
-        .context("run duckdb for archived PM book snapshots")?;
-    let _ = fs::remove_file(&sql_path);
-    if !output.status.success() {
-        anyhow::bail!(
-            "duckdb archived PM book load failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let rows: Vec<ArchivePmBookRow> = serde_json::from_slice(&output.stdout)
-        .context("parse duckdb archived PM book JSON rows")?;
-    if rows.len() > MAX_ARCHIVED_PM_BOOK_SAMPLED_ROWS {
-        anyhow::bail!(
-            "archived PM book sampled rows exceeded safety limit {} for {} token windows; narrow the window or raise pm_book_sample_secs",
-            MAX_ARCHIVED_PM_BOOK_SAMPLED_ROWS,
-            token_windows.len()
-        );
-    }
     let snapshots = rows
         .into_iter()
         .map(|row| {
@@ -678,6 +672,35 @@ LIMIT {row_limit}
         token_windows: token_windows.len(),
         status: "archive_loaded".to_string(),
     })
+}
+
+#[cfg(feature = "db")]
+fn run_duckdb_archive_pm_book_query(sql: String) -> Result<Vec<ArchivePmBookRow>> {
+    let duckdb_temp_dir = std::env::temp_dir().join("ploy-duckdb");
+    fs::create_dir_all(&duckdb_temp_dir)
+        .with_context(|| format!("create DuckDB temp dir {}", duckdb_temp_dir.display()))?;
+    let sql_path = duckdb_temp_dir.join(format!(
+        "archive-pm-books-{}-{}.sql",
+        std::process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::write(&sql_path, sql)
+        .with_context(|| format!("write DuckDB archive query {}", sql_path.display()))?;
+    let sql_file = File::open(&sql_path)
+        .with_context(|| format!("open DuckDB archive query {}", sql_path.display()))?;
+    let output = Command::new("duckdb")
+        .arg("-json")
+        .stdin(sql_file)
+        .output()
+        .context("run duckdb for archived PM book snapshots")?;
+    let _ = fs::remove_file(&sql_path);
+    if !output.status.success() {
+        anyhow::bail!(
+            "duckdb archived PM book load failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("parse duckdb archived PM book JSON rows")
 }
 
 #[cfg(feature = "db")]
