@@ -21,7 +21,7 @@ Evidence stage: `executable_replay` plumbing for `runtime_market_update_replay`.
 - [x] Reproduce runtime candidate replay failure as empty `$7` under `set -u`.
 - [x] Make `three_layer_min_entry_score` override optional in the remote script.
 - [x] Run focused validation.
-- [ ] Commit, push, merge, and rerun runtime replay.
+- [x] Commit, push, merge, and rerun runtime replay.
 
 ## Review
 
@@ -34,6 +34,13 @@ Evidence stage: `executable_replay` plumbing for `runtime_market_update_replay`.
   `.github/workflows/runtime-candidate-replay.yml`,
   `CARGO_TARGET_DIR=/tmp/ploy-workflow-security rtk cargo test --locked --test workflow_security runtime_candidate_replay_allows_empty_entry_score_override`,
   and `rtk git diff --check`.
+- 2026-05-23: PR #600 merged to `main` as `8dbeafcc`. Runtime candidate replay
+  rerun `26306734877` succeeded with `basis=runtime_market_update_replay` for
+  `autofactor_formula:mut_spread_adjusted_external_move_select_entry_price_quality_ge_050`.
+  It proved the runtime can emit decision-grade evidence (`50` trades, `50`
+  unique events, `entry_fill_rate=1.0`, one decision per event), but blocked
+  promotion because runtime replay ROI was negative:
+  `roi=-0.03889562973253067`, `total_pnl=-29.171722299398`.
 
 # Settlement Probability PRD Gate Snapshot Contract (2026-05-23)
 
@@ -63,7 +70,7 @@ evidence is supplied.
 - [x] Leave snapshot-bound sampling options empty for retained snapshot runs.
 - [x] Keep legacy snapshot builds on explicit 30-second sampling defaults.
 - [x] Run focused validation.
-- [ ] Commit, push, merge, and rerun the PRD gate from `main`.
+- [x] Commit, push, merge, and rerun the PRD gate from `main`.
 
 ## Review
 
@@ -80,6 +87,22 @@ evidence is supplied.
   `python3 -m py_compile scripts/run_settlement_probability_prd_gate.py tests/test_settlement_probability_prd_gate.py`,
   dry-run dispatch payload inspection confirming blank snapshot-bound sampling
   fields for snapshot `26285446382`, and `rtk git diff --check`.
+- 2026-05-23: PR #599 merged to `main` as `d3b90e87`. Settlement PRD gate run
+  `26306064735` then dispatched hosted walk-forward run `26306072430`, which
+  succeeded from snapshot `26285446382` with manifest-resolved
+  `lob_sample_secs=120`, `observation_sample_secs=120`, and
+  `max_quote_age_secs=120`. The plumbing blocker is gone. The gate correctly
+  stayed blocked: `ready_for_dry_run_handoff=false`,
+  `replay_parity_ready=true`, event-complete rows `1790`, but
+  `global_full_depth_entry_fill_rate=0.0787 < 0.3000`, no non-naive model had
+  positive top-edge full-depth or conservative settlement PnL, no symbol
+  holdout passed, and OOS positive-window ratio was below `0.60`.
+- 2026-05-23: Final hosted promotion run `26307092561` consumed both the
+  replay parity artifact `26301157711:recorded-replay-parity-26301157711` and
+  runtime candidate replay artifact
+  `26306734877:runtime-candidate-replay-26306734877`. Artifact chaining is now
+  working end to end. The final promotion decision remains `blocked` with the
+  runtime replay blocker `roi_too_low:-0.038896<0.000000`.
 
 # PM Book Archive Snapshot Repair (2026-05-22)
 
