@@ -60,10 +60,11 @@ Evidence stage: `execution_quality`.
   `cargo test --locked -p ploy-research --features db research_snapshot --lib`,
   and
   `cargo build --locked -p ploy-research --example research_snapshot_compile --features db`.
-- 2026-05-22: The bounded 6-hour smoke run no longer pinned tango; it failed
-  quickly on timestamp parsing because DuckDB emitted an archived
-  `TIMESTAMPTZ` value with compact `+08` offset instead of `+08:00`. The
-  timestamp parser now accepts both forms before falling back to RFC3339.
+- 2026-05-22: The bounded 6-hour smoke runs no longer pinned tango; they failed
+  quickly on timestamp parsing because DuckDB emitted archived `TIMESTAMPTZ`
+  values with compact `+08` offsets instead of `+08:00` or `+0800`. The
+  timestamp parser now normalizes bare-hour offsets before falling back to
+  other accepted forms.
 - 2026-05-22: A follow-up 1-day snapshot run crossed the argv limit but then
   pinned tango while scanning the full archived day in one DuckDB query; the run
   was canceled and tango was rebooted. The archive loader now executes one
