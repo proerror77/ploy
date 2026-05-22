@@ -303,9 +303,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--min-event-complete-events", default="20")
     parser.add_argument("--min-event-complete-rows", default="40")
-    parser.add_argument("--lob-sample-secs", default="30")
-    parser.add_argument("--observation-sample-secs", default="30")
-    parser.add_argument("--max-quote-age-secs", default="30")
+    parser.add_argument(
+        "--lob-sample-secs",
+        default="",
+        help="Override LOB sampling seconds; empty inherits an existing snapshot manifest or uses 30 for new snapshots",
+    )
+    parser.add_argument(
+        "--observation-sample-secs",
+        default="",
+        help="Override observation sampling seconds; empty inherits an existing snapshot manifest or uses 30 for new snapshots",
+    )
+    parser.add_argument(
+        "--max-quote-age-secs",
+        default="",
+        help="Override quote-age seconds; empty inherits an existing snapshot manifest or uses 30 for new snapshots",
+    )
     parser.add_argument("--train-window-days", default="2")
     parser.add_argument("--test-window-days", default="1")
     parser.add_argument("--step-days", default="1")
@@ -341,9 +353,9 @@ def main() -> int:
         )
     else:
         snapshot_options = {
-            "lob_sample_secs": int(args.lob_sample_secs),
-            "observation_sample_secs": int(args.observation_sample_secs),
-            "max_quote_age_secs": int(args.max_quote_age_secs),
+            "lob_sample_secs": int(args.lob_sample_secs or "30"),
+            "observation_sample_secs": int(args.observation_sample_secs or "30"),
+            "max_quote_age_secs": int(args.max_quote_age_secs or "30"),
             "optimizer_data_dir": "/tmp/ploy-parquet",
             "data_profile": "pm5d-vol",
             "custom_required_sources": "",
@@ -410,9 +422,11 @@ def main() -> int:
         "train_window_days": int(args.train_window_days),
         "test_window_days": int(args.test_window_days),
         "step_days": int(args.step_days),
-        "lob_sample_secs": int(args.lob_sample_secs),
-        "observation_sample_secs": int(args.observation_sample_secs),
-        "max_quote_age_secs": int(args.max_quote_age_secs),
+        "lob_sample_secs": int(args.lob_sample_secs) if args.lob_sample_secs else "",
+        "observation_sample_secs": (
+            int(args.observation_sample_secs) if args.observation_sample_secs else ""
+        ),
+        "max_quote_age_secs": int(args.max_quote_age_secs) if args.max_quote_age_secs else "",
         "top_n": int(args.top_n),
         "min_observations": int(args.min_observations),
         "top_quantile": float(args.top_quantile),
