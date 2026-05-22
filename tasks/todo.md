@@ -1,3 +1,55 @@
+# Bayesian Calibration Audit (2026-05-22)
+
+## Goal
+
+Audit and repair the row-local Bayesian settlement probability features after
+the first Bayesian-only hosted sweep showed negative rank IC and no runtime-
+worthy candidates.
+
+Evidence stage: `factor_attribution`.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: row-local calibrated Bayesian probability columns, seeds, generated
+    candidates, and focused tests.
+- `tasks/todo.md`
+  - Owner: session tracking and hosted evidence summary.
+
+## Tasks
+
+- [x] Confirm project semantics and event-ML workflow gates.
+- [x] Audit current Bayesian formula against existing settlement-probability
+      model helpers.
+- [x] Add model-calibrated Bayesian columns and focused tests.
+- [x] Run local validation.
+- [x] Push PR #587 and run hosted model-calibrated bayes-only sweep.
+- [x] Add explicit Bayesian reversal hypotheses after calibrated posterior
+      still rejected.
+- [x] Run local validation.
+- [ ] Push updated PR, rerun hosted bayes-only sweep, and update issue #585.
+
+## Review
+
+- 2026-05-22: Current Bayesian posterior used only PM midpoint and
+  distance/LOB/vol probability. Added model-calibrated Bayesian columns that
+  require decision-time `side_model_prob` and blend it with PM midpoint and
+  external probability in logit space. This is still row-local factor
+  attribution, not runtime promotion.
+- 2026-05-22: Focused validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-bayes-calibration /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research autofactor --lib`
+  with `19 passed, 101 filtered out`, plus `rtk git diff --check`.
+- 2026-05-22: Hosted calibrated bayes-only sweep `26267367690` still rejected
+  all Bayesian rows. Best row remained
+  `mut_bayes_market_external_disagreement_spread_adjusted` with Spearman IC
+  `-0.070588`, positive-window ratio `0.375`, and top-bucket label
+  `-3.582503`; model-calibrated rows did not improve the family. Next
+  correction is explicit reversal hypotheses, not runtime mapping.
+- 2026-05-22: Added explicit Bayesian reversal seeds/generated candidates and
+  focused validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-bayes-calibration /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research autofactor --lib`
+  with `20 passed, 101 filtered out`, plus `rtk git diff --check`.
+
 # Bayesian Settlement AutoFactor Lane (2026-05-22)
 
 ## Goal
