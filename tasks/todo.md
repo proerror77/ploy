@@ -122,6 +122,21 @@ Evidence stage: `walk_forward / runtime_parity`.
   `reverse_direction_stronger_at_configured_threshold`, with direct/reverse pass
   counts `35/59` at `0.15`; run `26262629518` is testing `0.10` to determine
   whether the extra pass-through improves or dilutes realized EV.
+- 2026-05-22: Threshold replay run `26262629518` with
+  `three_layer_min_entry_score=0.10` improved further to `39` trades, fill rate
+  `1.0`, total PnL `56.87549434398724`, and ROI `0.09722306725467904`, but was
+  still blocked by `official_settlement_missing:38<39`. The lower-bound
+  threshold run `26262853743` with `three_layer_min_entry_score=0.05` produced
+  more trades (`46`) but negative ROI `-0.010946529804138783`, so `0.05` is too
+  loose for this candidate.
+- 2026-05-22: Re-running the `0.10` threshold after settlement freshness caught
+  up produced promotion-ready executable replay run `26263054204`:
+  `39` trades on `39` unique events, one decision per event, fill rate `1.0`,
+  official settlement `39/39`, total PnL `77.06391934398724`, ROI
+  `0.13173319545980725`, and no blocking flags. This is the first short-window
+  runtime replay artifact in this loop that passes the current pre-dry-run
+  executable replay gates; next work should be a separate implementation issue
+  or PR for a dry-run candidate config rather than expanding this tooling PR.
 
 # Predictive AutoFactor Runtime Entry Edge (2026-05-20)
 
