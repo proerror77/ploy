@@ -311,6 +311,32 @@ pub struct ResearchSnapshotBuildOptions {
     pub include_deribit: bool,
 }
 
+fn research_snapshot_quality_flags(
+    observation_count: usize,
+    deribit_snapshot_count: usize,
+    pm_book_snapshot_count: usize,
+    include_deribit: bool,
+    pm_book_sample_secs: i32,
+    max_quote_age_secs: i64,
+) -> Vec<String> {
+    let mut quality_flags = Vec::new();
+    if observation_count == 0 {
+        quality_flags.push("no_factor_observations".to_string());
+    }
+    if include_deribit && deribit_snapshot_count == 0 {
+        quality_flags.push("no_deribit_snapshots".to_string());
+    }
+    if pm_book_snapshot_count == 0 {
+        quality_flags.push("no_pm_book_snapshots".to_string());
+    }
+    if i64::from(pm_book_sample_secs.max(1)) > max_quote_age_secs.max(1) {
+        quality_flags.push(format!(
+            "pm_book_sample_secs_gt_max_quote_age:{pm_book_sample_secs}>{max_quote_age_secs}"
+        ));
+    }
+    quality_flags
+}
+
 #[cfg(feature = "db")]
 pub async fn build_research_snapshot_from_database(
     pool: &sqlx::PgPool,
@@ -432,16 +458,14 @@ pub async fn build_research_snapshot_from_database(
         rows: Some(observations.len()),
     });
 
-    let mut quality_flags = Vec::new();
-    if observations.is_empty() {
-        quality_flags.push("no_factor_observations".to_string());
-    }
-    if options.include_deribit && deribit_snapshots.is_empty() {
-        quality_flags.push("no_deribit_snapshots".to_string());
-    }
-    if all_pm_book_snapshots.is_empty() {
-        quality_flags.push("no_pm_book_snapshots".to_string());
-    }
+    let quality_flags = research_snapshot_quality_flags(
+        observations.len(),
+        deribit_snapshots.len(),
+        all_pm_book_snapshots.len(),
+        options.include_deribit,
+        pm_book_sample_secs,
+        options.max_quote_age_secs,
+    );
 
     Ok(ResearchSnapshot {
         manifest: ResearchSnapshotManifest {
@@ -762,5 +786,23 @@ mod tests {
         assert!(root.join("quality.md").exists());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn quality_flags_sparse_pm_book_sampling_against_quote_age() {
+        let flags = research_snapshot_quality_flags(100, 0, 10, false, 300, 30);
+
+        assert!(flags.contains(
+            &"pm_book_sample_secs_gt_max_quote_age:300>30".to_string()
+        ));
+        assert!(!flags.contains(&"no_factor_observations".to_string()));
+        assert!(!flags.contains(&"no_pm_book_snapshots".to_string()));
+    }
+
+    #[test]
+    fn quality_flags_accepts_pm_book_sampling_within_quote_age() {
+        let flags = research_snapshot_quality_flags(100, 0, 10, false, 30, 30);
+
+        assert!(flags.is_empty());
     }
 }
