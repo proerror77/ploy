@@ -753,6 +753,9 @@ pub fn autofactor_matrix_from_v2(
     insert_column(&mut columns, "bayes_posterior_prob", rows, |row| {
         bayes_posterior_prob(row).unwrap_or(f64::NAN)
     });
+    insert_column(&mut columns, "bayes_model_calibrated_prob", rows, |row| {
+        bayes_model_calibrated_prob(row).unwrap_or(f64::NAN)
+    });
     insert_column(&mut columns, "bayes_edge", rows, |row| {
         bayes_edge(row, row.entry_ask)
     });
@@ -762,14 +765,32 @@ pub fn autofactor_matrix_from_v2(
     insert_column(&mut columns, "bayes_conservative_edge", rows, |row| {
         bayes_edge(row, row.conservative_entry_sweep_avg_price_15u)
     });
+    insert_column(&mut columns, "bayes_model_calibrated_edge", rows, |row| {
+        bayes_model_calibrated_edge(row, row.entry_ask)
+    });
+    insert_column(&mut columns, "bayes_model_full_depth_edge", rows, |row| {
+        bayes_model_calibrated_edge(row, row.entry_sweep_avg_price_15u)
+    });
+    insert_column(&mut columns, "bayes_model_conservative_edge", rows, |row| {
+        bayes_model_calibrated_edge(row, row.conservative_entry_sweep_avg_price_15u)
+    });
     insert_column(&mut columns, "bayes_disagreement", rows, |row| {
         bayes_disagreement(row)
+    });
+    insert_column(&mut columns, "bayes_model_disagreement", rows, |row| {
+        bayes_model_disagreement(row)
     });
     insert_column(&mut columns, "bayes_confidence", rows, |row| {
         bayes_confidence(row)
     });
+    insert_column(&mut columns, "bayes_model_confidence", rows, |row| {
+        bayes_model_confidence(row)
+    });
     insert_column(&mut columns, "bayes_entropy", rows, |row| {
         bayes_entropy(row)
+    });
+    insert_column(&mut columns, "bayes_model_entropy", rows, |row| {
+        bayes_model_entropy(row)
     });
     insert_column(
         &mut columns,
@@ -790,11 +811,44 @@ pub fn autofactor_matrix_from_v2(
     );
     insert_column(
         &mut columns,
+        "bayes_model_confidence_weighted_edge",
+        rows,
+        |row| {
+            finite_product(
+                bayes_model_calibrated_edge(row, row.entry_ask),
+                bayes_model_confidence(row),
+            )
+        },
+    );
+    insert_column(
+        &mut columns,
+        "bayes_model_full_depth_confidence_weighted_edge",
+        rows,
+        |row| {
+            finite_product(
+                bayes_model_calibrated_edge(row, row.entry_sweep_avg_price_15u),
+                bayes_model_confidence(row),
+            )
+        },
+    );
+    insert_column(
+        &mut columns,
         "bayes_disagreement_x_entry_price_quality",
         rows,
         |row| {
             finite_product(
                 bayes_disagreement(row),
+                entry_price_quality_score(row.entry_ask),
+            )
+        },
+    );
+    insert_column(
+        &mut columns,
+        "bayes_model_disagreement_x_entry_price_quality",
+        rows,
+        |row| {
+            finite_product(
+                bayes_model_disagreement(row),
                 entry_price_quality_score(row.entry_ask),
             )
         },
@@ -1016,8 +1070,48 @@ fn bayes_posterior_prob(row: &FactorObservationV2) -> Option<f64> {
     }
 }
 
+fn bayes_model_calibrated_prob(row: &FactorObservationV2) -> Option<f64> {
+    if !valid_bayes_probability(row.side_model_prob) {
+        return None;
+    }
+    let mut logit_sum = 0.0;
+    let mut total_weight = 0.0;
+    add_bayes_probability_component(
+        &mut logit_sum,
+        &mut total_weight,
+        bayes_market_prior_prob(row),
+        0.30,
+    );
+    add_bayes_probability_component(
+        &mut logit_sum,
+        &mut total_weight,
+        Some(row.side_model_prob),
+        0.50,
+    );
+    add_bayes_probability_component(
+        &mut logit_sum,
+        &mut total_weight,
+        bayes_external_prob(row),
+        0.20,
+    );
+    if total_weight <= EPS {
+        None
+    } else {
+        Some(inverse_logit(logit_sum / total_weight))
+    }
+}
+
 fn bayes_edge(row: &FactorObservationV2, entry_price: f64) -> f64 {
     let Some(probability) = bayes_posterior_prob(row).filter(|q| valid_bayes_probability(*q))
+    else {
+        return f64::NAN;
+    };
+    settlement_edge(probability, entry_price)
+}
+
+fn bayes_model_calibrated_edge(row: &FactorObservationV2, entry_price: f64) -> f64 {
+    let Some(probability) =
+        bayes_model_calibrated_prob(row).filter(|q| valid_bayes_probability(*q))
     else {
         return f64::NAN;
     };
@@ -1034,10 +1128,31 @@ fn bayes_disagreement(row: &FactorObservationV2) -> f64 {
     posterior - prior
 }
 
+fn bayes_model_disagreement(row: &FactorObservationV2) -> f64 {
+    let Some(posterior) = bayes_model_calibrated_prob(row) else {
+        return f64::NAN;
+    };
+    let Some(prior) = bayes_market_prior_prob(row) else {
+        return f64::NAN;
+    };
+    posterior - prior
+}
+
 fn bayes_confidence(row: &FactorObservationV2) -> f64 {
     let Some(posterior) = bayes_posterior_prob(row) else {
         return f64::NAN;
     };
+    bayes_probability_confidence(row, posterior)
+}
+
+fn bayes_model_confidence(row: &FactorObservationV2) -> f64 {
+    let Some(posterior) = bayes_model_calibrated_prob(row) else {
+        return f64::NAN;
+    };
+    bayes_probability_confidence(row, posterior)
+}
+
+fn bayes_probability_confidence(row: &FactorObservationV2, posterior: f64) -> f64 {
     let mut score = 0.0;
     let mut weight = 0.0;
     add_confidence_component(
@@ -1094,6 +1209,12 @@ fn add_confidence_component(score: &mut f64, weight: &mut f64, value: f64, compo
 
 fn bayes_entropy(row: &FactorObservationV2) -> f64 {
     bayes_posterior_prob(row)
+        .map(bayes_entropy_from_probability)
+        .unwrap_or(f64::NAN)
+}
+
+fn bayes_model_entropy(row: &FactorObservationV2) -> f64 {
+    bayes_model_calibrated_prob(row)
         .map(bayes_entropy_from_probability)
         .unwrap_or(f64::NAN)
 }
@@ -1222,6 +1343,15 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                     .to_string(),
             ],
         });
+        out.push(NamedFactorExpr {
+            name: "bayes_contrarian_settlement_edge".to_string(),
+            expr: negate(input("bayes_edge")),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec![
+                "Contrarian Bayesian settlement edge for windows where raw posterior ranks backwards."
+                    .to_string(),
+            ],
+        });
     }
     if input_names.contains("bayes_confidence_weighted_edge") {
         out.push(NamedFactorExpr {
@@ -1233,6 +1363,54 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                     .to_string(),
             ],
         });
+        out.push(NamedFactorExpr {
+            name: "bayes_contrarian_confidence_weighted_edge".to_string(),
+            expr: negate(input("bayes_confidence_weighted_edge")),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec![
+                "Contrarian confidence-weighted Bayesian edge for explicitly testing reversed calibration."
+                    .to_string(),
+            ],
+        });
+    }
+    if input_names.contains("bayes_model_calibrated_edge") {
+        out.push(NamedFactorExpr {
+            name: "bayes_model_calibrated_edge".to_string(),
+            expr: input("bayes_model_calibrated_edge"),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec![
+                "Bayesian settlement edge calibrated by decision-time side_model_prob.".to_string(),
+            ],
+        });
+        out.push(NamedFactorExpr {
+            name: "bayes_model_contrarian_calibrated_edge".to_string(),
+            expr: negate(input("bayes_model_calibrated_edge")),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec![
+                "Contrarian model-calibrated Bayesian edge for testing reversed posterior ranking."
+                    .to_string(),
+            ],
+        });
+    }
+    if input_names.contains("bayes_model_confidence_weighted_edge") {
+        out.push(NamedFactorExpr {
+            name: "bayes_model_confidence_weighted_edge".to_string(),
+            expr: input("bayes_model_confidence_weighted_edge"),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec![
+                "Model-calibrated Bayesian settlement edge weighted by row-local quote and execution confidence."
+                    .to_string(),
+            ],
+        });
+        out.push(NamedFactorExpr {
+            name: "bayes_model_contrarian_confidence_weighted_edge".to_string(),
+            expr: negate(input("bayes_model_confidence_weighted_edge")),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec![
+                "Contrarian model-calibrated confidence-weighted edge for reversed-calibration diagnostics."
+                    .to_string(),
+            ],
+        });
     }
     if input_names.contains("bayes_disagreement") {
         out.push(NamedFactorExpr {
@@ -1241,6 +1419,33 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             target: Some("settlement_executable_pnl".to_string()),
             notes: vec![
                 "Posterior settlement probability minus Polymarket midpoint prior.".to_string(),
+            ],
+        });
+        out.push(NamedFactorExpr {
+            name: "bayes_market_external_reversal".to_string(),
+            expr: negate(input("bayes_disagreement")),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec![
+                "Contrarian posterior-minus-market disagreement for testing mean-reverting probability residuals."
+                    .to_string(),
+            ],
+        });
+    }
+    if input_names.contains("bayes_model_disagreement") {
+        out.push(NamedFactorExpr {
+            name: "bayes_model_market_disagreement".to_string(),
+            expr: input("bayes_model_disagreement"),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec![
+                "Model-calibrated Bayesian posterior minus Polymarket midpoint prior.".to_string(),
+            ],
+        });
+        out.push(NamedFactorExpr {
+            name: "bayes_model_market_reversal".to_string(),
+            expr: negate(input("bayes_model_disagreement")),
+            target: Some("settlement_executable_pnl".to_string()),
+            notes: vec![
+                "Contrarian model-calibrated posterior-minus-market disagreement.".to_string(),
             ],
         });
     }
@@ -1931,6 +2136,12 @@ fn bayes_settlement_generated_candidates(input_names: &BTreeSet<String>) -> Vec<
             input("bayes_full_depth_edge"),
             "Full-depth row-local Bayesian posterior q minus entry sweep price and fee.",
         );
+        push_generated(
+            &mut out,
+            "auto_settlement_bayes_contrarian_full_depth_edge".to_string(),
+            negate(input("bayes_full_depth_edge")),
+            "Contrarian full-depth Bayesian edge for testing reversed posterior ranking.",
+        );
     }
     if input_names.contains("bayes_conservative_edge") {
         push_generated(
@@ -1939,6 +2150,12 @@ fn bayes_settlement_generated_candidates(input_names: &BTreeSet<String>) -> Vec<
             input("bayes_conservative_edge"),
             "Conservative row-local Bayesian posterior q minus entry sweep price and fee.",
         );
+        push_generated(
+            &mut out,
+            "auto_settlement_bayes_contrarian_conservative_edge".to_string(),
+            negate(input("bayes_conservative_edge")),
+            "Contrarian conservative Bayesian edge for testing reversed posterior ranking.",
+        );
     }
     if input_names.contains("bayes_full_depth_confidence_weighted_edge") {
         push_generated(
@@ -1946,6 +2163,54 @@ fn bayes_settlement_generated_candidates(input_names: &BTreeSet<String>) -> Vec<
             "auto_settlement_bayes_full_depth_confidence_weighted_edge".to_string(),
             input("bayes_full_depth_confidence_weighted_edge"),
             "Full-depth Bayesian edge weighted by row-local quote and execution confidence.",
+        );
+        push_generated(
+            &mut out,
+            "auto_settlement_bayes_contrarian_full_depth_confidence_weighted_edge".to_string(),
+            negate(input("bayes_full_depth_confidence_weighted_edge")),
+            "Contrarian full-depth Bayesian edge weighted by row-local quote and execution confidence.",
+        );
+    }
+    if input_names.contains("bayes_model_full_depth_edge") {
+        push_generated(
+            &mut out,
+            "auto_settlement_bayes_model_full_depth_edge".to_string(),
+            input("bayes_model_full_depth_edge"),
+            "Full-depth model-calibrated Bayesian posterior q minus entry sweep price and fee.",
+        );
+        push_generated(
+            &mut out,
+            "auto_settlement_bayes_model_contrarian_full_depth_edge".to_string(),
+            negate(input("bayes_model_full_depth_edge")),
+            "Contrarian full-depth model-calibrated Bayesian edge.",
+        );
+    }
+    if input_names.contains("bayes_model_conservative_edge") {
+        push_generated(
+            &mut out,
+            "auto_settlement_bayes_model_conservative_edge".to_string(),
+            input("bayes_model_conservative_edge"),
+            "Conservative model-calibrated Bayesian posterior q minus entry sweep price and fee.",
+        );
+        push_generated(
+            &mut out,
+            "auto_settlement_bayes_model_contrarian_conservative_edge".to_string(),
+            negate(input("bayes_model_conservative_edge")),
+            "Contrarian conservative model-calibrated Bayesian edge.",
+        );
+    }
+    if input_names.contains("bayes_model_full_depth_confidence_weighted_edge") {
+        push_generated(
+            &mut out,
+            "auto_settlement_bayes_model_full_depth_confidence_weighted_edge".to_string(),
+            input("bayes_model_full_depth_confidence_weighted_edge"),
+            "Full-depth model-calibrated Bayesian edge weighted by row-local quote and execution confidence.",
+        );
+        push_generated(
+            &mut out,
+            "auto_settlement_bayes_model_contrarian_full_depth_confidence_weighted_edge".to_string(),
+            negate(input("bayes_model_full_depth_confidence_weighted_edge")),
+            "Contrarian full-depth model-calibrated Bayesian edge weighted by row-local quote and execution confidence.",
         );
     }
     out
@@ -2440,6 +2705,10 @@ fn mul(lhs: FactorExpr, rhs: FactorExpr) -> FactorExpr {
     FactorExpr::Mul(Box::new(lhs), Box::new(rhs))
 }
 
+fn negate(expr: FactorExpr) -> FactorExpr {
+    mul(FactorExpr::Const(-1.0), expr)
+}
+
 fn gate(expr: FactorExpr, gate: FactorExpr, min: f64) -> FactorExpr {
     FactorExpr::Gate {
         expr: Box::new(expr),
@@ -2684,26 +2953,91 @@ mod tests {
         let prior = matrix.column("bayes_market_prior_prob").expect("prior")[0];
         let external = matrix.column("bayes_external_prob").expect("external")[0];
         let posterior = matrix.column("bayes_posterior_prob").expect("posterior")[0];
+        let model_calibrated = matrix
+            .column("bayes_model_calibrated_prob")
+            .expect("model calibrated")[0];
         let edge = matrix.column("bayes_edge").expect("edge")[0];
         let full_depth_edge = matrix
             .column("bayes_full_depth_edge")
             .expect("full depth edge")[0];
+        let model_edge = matrix
+            .column("bayes_model_calibrated_edge")
+            .expect("model edge")[0];
+        let model_full_depth_edge = matrix
+            .column("bayes_model_full_depth_edge")
+            .expect("model full depth edge")[0];
         let confidence = matrix.column("bayes_confidence").expect("confidence")[0];
+        let model_confidence = matrix
+            .column("bayes_model_confidence")
+            .expect("model confidence")[0];
         let entropy = matrix.column("bayes_entropy").expect("entropy")[0];
+        let model_entropy = matrix.column("bayes_model_entropy").expect("model entropy")[0];
         let weighted_edge = matrix
             .column("bayes_confidence_weighted_edge")
             .expect("weighted edge")[0];
+        let model_weighted_edge = matrix
+            .column("bayes_model_confidence_weighted_edge")
+            .expect("model weighted edge")[0];
         let disagreement = matrix.column("bayes_disagreement").expect("disagreement")[0];
+        let model_disagreement = matrix
+            .column("bayes_model_disagreement")
+            .expect("model disagreement")[0];
 
         assert!((prior - 0.49).abs() < 1e-9);
         assert!(external > prior);
         assert!(posterior > prior);
+        assert!(model_calibrated > prior);
+        assert!(model_calibrated.is_finite());
         assert!((edge - (posterior - 0.50 - pm_fee_cost(0.50))).abs() < 1e-9);
         assert!((full_depth_edge - edge).abs() < 1e-9);
+        assert!((model_edge - (model_calibrated - 0.50 - pm_fee_cost(0.50))).abs() < 1e-9);
+        assert!((model_full_depth_edge - model_edge).abs() < 1e-9);
         assert!(confidence > 0.0 && confidence <= 1.0);
+        assert!(model_confidence > 0.0 && model_confidence <= 1.0);
         assert!(entropy > 0.0 && entropy <= 1.0);
+        assert!(model_entropy > 0.0 && model_entropy <= 1.0);
         assert!((weighted_edge - edge * confidence).abs() < 1e-9);
+        assert!((model_weighted_edge - model_edge * model_confidence).abs() < 1e-9);
         assert!((disagreement - (posterior - prior)).abs() < 1e-9);
+        assert!((model_disagreement - (model_calibrated - prior)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn model_calibrated_bayes_requires_decision_time_model_probability() {
+        let mut rows = vec![synthetic_v2_row(7)];
+        rows[0].side_model_prob = f64::NAN;
+        let matrix = autofactor_matrix_from_v2(&rows).expect("matrix");
+
+        assert!(matrix.column("bayes_posterior_prob").expect("posterior")[0].is_finite());
+        assert!(matrix
+            .column("bayes_model_calibrated_prob")
+            .expect("model calibrated")[0]
+            .is_nan());
+        assert!(matrix
+            .column("bayes_model_calibrated_edge")
+            .expect("model edge")[0]
+            .is_nan());
+    }
+
+    #[test]
+    fn bayes_candidates_include_explicit_reversal_hypotheses() {
+        let rows = (0..8).map(synthetic_v2_row).collect::<Vec<_>>();
+        let matrix = autofactor_matrix_from_v2(&rows).expect("matrix");
+        let seeds = domain_seed_candidates(&matrix.input_names());
+        assert!(seeds
+            .iter()
+            .any(|candidate| candidate.name == "bayes_contrarian_settlement_edge"));
+        assert!(seeds
+            .iter()
+            .any(|candidate| candidate.name == "bayes_model_market_reversal"));
+
+        let generated = bayes_settlement_generated_candidates(&matrix.input_names());
+        assert!(generated.iter().any(|candidate| {
+            candidate.name == "auto_settlement_bayes_contrarian_full_depth_edge"
+        }));
+        assert!(generated.iter().any(|candidate| {
+            candidate.name == "auto_settlement_bayes_model_contrarian_full_depth_edge"
+        }));
     }
 
     #[test]
@@ -2982,6 +3316,12 @@ mod tests {
         assert!(reports.iter().any(
             |report| report.name == "auto_settlement_bayes_full_depth_confidence_weighted_edge"
         ));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "auto_settlement_bayes_model_full_depth_edge"));
+        assert!(reports.iter().any(|report| {
+            report.name == "auto_settlement_bayes_model_full_depth_confidence_weighted_edge"
+        }));
         assert!(reports
             .iter()
             .any(|report| report.name.starts_with("mut2_")));
