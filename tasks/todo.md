@@ -27,7 +27,7 @@ Evidence stage: `factor_attribution`.
 - [x] Add explicit Bayesian reversal hypotheses after calibrated posterior
       still rejected.
 - [x] Run local validation.
-- [ ] Push updated PR, rerun hosted bayes-only sweep, and update issue #585.
+- [x] Push updated PR, rerun hosted bayes-only sweep, and update issue #585.
 
 ## Review
 
@@ -49,6 +49,20 @@ Evidence stage: `factor_attribution`.
   focused validation passed:
   `CARGO_TARGET_DIR=/tmp/ploy-bayes-calibration /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research autofactor --lib`
   with `20 passed, 101 filtered out`, plus `rtk git diff --check`.
+- 2026-05-22: Hosted reversal bayes-only sweep `26267599097` completed on
+  `research/bayes-calibration-audit` for snapshot `26135455846`,
+  `BTCUSDT,ETHUSDT`, 1d/2d windows. Both variants stayed blocked for dry-run
+  handoff: promotion gate was not ready, global full-depth entry fillability
+  was `0.1282 < 0.3000`, candidate replay was aggregate
+  `factor_walk_forward_top_bucket_aggregate` rather than
+  `runtime_market_update_replay`, and no qualified strategy was emitted. The
+  best allowed-target discovery row was
+  `mut_bayes_model_contrarian_confidence_weighted_edge_select_entry_price_quality_ge_050`
+  with Spearman IC `0.115785`, ICIR `1.305048`, positive-window ratio `1.0`,
+  top-bucket label `2.338923`, top-bucket fill rate `1.0`, and `241`
+  top-bucket rows. Decision: keep the calibrated/reversal Bayesian research
+  surface as factor-attribution tooling, but do not promote Bayesian runtime
+  replay or dry-run config from this evidence.
 
 # Bayesian Settlement AutoFactor Lane (2026-05-22)
 
