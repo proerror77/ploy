@@ -483,7 +483,7 @@ jobs:
           BASE_REF: ${{ github.event.inputs.git_ref }}
         run: |
           set -euo pipefail
-          if [ "${WALK_CREATE_CONFIG_PR}" != "true" ]; then
+          if [ "${WALK_CREATE_CONFIG_PR:-false}" != "true" ]; then
             echo "create_config_pr is not true; skipping config PR creation."
             exit 0
           fi
@@ -654,7 +654,7 @@ jobs:
                 "artifacts/factor-walk-forward-v2-upload/snapshot-provenance/${file}"
             fi
           done
-          candidate_strategy_replay_json="${WALK_CANDIDATE_STRATEGY_REPLAY_JSON}"
+          candidate_strategy_replay_json="${WALK_CANDIDATE_STRATEGY_REPLAY_JSON:-}"
           if [ -z "${candidate_strategy_replay_json}" ] && [ -f artifacts/candidate-strategy-replay/candidate-strategy-replay.json ]; then
             candidate_strategy_replay_json="artifacts/candidate-strategy-replay/candidate-strategy-replay.json"
           fi
@@ -948,7 +948,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ "${WALK_CREATE_HANDOFF_ISSUE}" != "true" ]; then
+          if [ "${WALK_CREATE_HANDOFF_ISSUE:-false}" != "true" ]; then
             echo "create_handoff_issue is not true; skipping handoff issue creation."
             exit 0
           fi
