@@ -5551,6 +5551,21 @@ mod tests {
             config.min_edge,
         )
         .is_some());
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mcts_mcts_spread_adjusted_external_move_select_entry_price_quality_ge_025_select_entry_capacity_ge_025",
+            near,
+            config.min_edge,
+        )
+        .is_some());
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mcts_mcts_spread_adjusted_external_move_select_entry_price_quality_ge_025_select_entry_capacity_ge_025",
+            AutoSettlementFactorInputs {
+                entry_capacity_ratio: 0.01,
+                ..near
+            },
+            config.min_edge,
+        )
+        .is_none());
     }
 
     #[test]

@@ -89,6 +89,12 @@ Evidence stage: `walk_forward / runtime_parity`.
   those LLM suffixes to supported `spread_adjusted` and
   `full_depth_entry_gate` semantics and allows selector gates to be followed by
   additional mutations.
+- 2026-05-22: Prior-feedback run `26261893965` moved the best runtime-mappable
+  candidate to
+  `mcts_mcts_spread_adjusted_external_move_select_entry_price_quality_ge_025_select_entry_capacity_ge_025`.
+  Runtime scoring now supports multiple `_select_*_ge_*` gates in one formula
+  name so this candidate can be replayed instead of getting stuck at research
+  artifact selection.
 
 # Predictive AutoFactor Runtime Entry Edge (2026-05-20)
 

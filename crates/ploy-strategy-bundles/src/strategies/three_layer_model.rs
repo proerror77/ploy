@@ -402,33 +402,36 @@ fn apply_predictive_selector_gate(
     suffix: &str,
     inputs: AutoSettlementFactorInputs,
 ) -> Option<String> {
-    let Some((remaining, selector)) = suffix.split_once("_select_") else {
-        return Some(suffix.to_string());
-    };
-    let (feature, raw_threshold, trailing_suffix) = parse_selector_gate(selector)?;
-    let threshold = parse_selector_threshold(raw_threshold)?;
-    let gate_score = match feature {
-        "near_strike" => {
-            auto_settlement_near_strike_score(inputs.distance_over_sigma, inputs.direction_sign)
-        }
-        "entry_price_quality" => auto_settlement_entry_price_quality_score(inputs.entry_price),
-        "entry_capacity" => auto_settlement_entry_capacity_score(inputs.entry_capacity_ratio),
-        "full_depth_entry" => {
-            if !inputs.entry_capacity_ratio.is_finite() {
-                return None;
+    let mut remaining_suffix = suffix.to_string();
+    while let Some((remaining, selector)) = remaining_suffix.split_once("_select_") {
+        let remaining = remaining.to_string();
+        let selector = selector.to_string();
+        let (feature, raw_threshold, trailing_suffix) = parse_selector_gate(&selector)?;
+        let threshold = parse_selector_threshold(raw_threshold)?;
+        let gate_score = match feature {
+            "near_strike" => {
+                auto_settlement_near_strike_score(inputs.distance_over_sigma, inputs.direction_sign)
             }
-            if inputs.entry_capacity_ratio >= 1.0 {
-                1.0
-            } else {
-                0.0
+            "entry_price_quality" => auto_settlement_entry_price_quality_score(inputs.entry_price),
+            "entry_capacity" => auto_settlement_entry_capacity_score(inputs.entry_capacity_ratio),
+            "full_depth_entry" => {
+                if !inputs.entry_capacity_ratio.is_finite() {
+                    return None;
+                }
+                if inputs.entry_capacity_ratio >= 1.0 {
+                    1.0
+                } else {
+                    0.0
+                }
             }
+            _ => return None,
+        };
+        if !gate_score.is_finite() || gate_score < threshold {
+            return None;
         }
-        _ => return None,
-    };
-    if !gate_score.is_finite() || gate_score < threshold {
-        return None;
+        remaining_suffix = format!("{remaining}{trailing_suffix}");
     }
-    Some(format!("{remaining}{trailing_suffix}"))
+    Some(remaining_suffix)
 }
 
 fn parse_selector_gate(selector: &str) -> Option<(&'static str, &str, String)> {
