@@ -457,6 +457,41 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertIn("--test-window-hours", captured)
         self.assertIn("--step-hours", captured)
 
+    def test_empty_snapshot_bound_sampling_args_are_omitted(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = tmp / "capture_factor_args.py"
+            capture = tmp / "captured_args.json"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                f"open({str(capture)!r}, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+                f"{FAKE_REPORT}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+            args = self.base_args(tmp, binary)
+            for flag in [
+                "--lob-sample-secs",
+                "--observation-sample-secs",
+                "--max-quote-age-secs",
+            ]:
+                args[args.index(flag) + 1] = ""
+
+            subprocess.run(
+                args,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            captured = json.loads(capture.read_text(encoding="utf-8"))
+
+        self.assertNotIn("--lob-sample-secs", captured)
+        self.assertNotIn("--observation-sample-secs", captured)
+        self.assertNotIn("--max-quote-age-secs", captured)
+
     def test_promotion_entry_fill_rate_arg_passes_through_to_factor_binary(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

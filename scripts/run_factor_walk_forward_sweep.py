@@ -112,12 +112,6 @@ def factor_args(
         values["test_window_days"],
         "--step-days",
         values["step_days"],
-        "--lob-sample-secs",
-        values["lob_sample_secs"],
-        "--observation-sample-secs",
-        values["observation_sample_secs"],
-        "--max-quote-age-secs",
-        values["max_quote_age_secs"],
         "--min-observations",
         values["min_observations"],
         "--top-quantile",
@@ -135,6 +129,13 @@ def factor_args(
         "--min-promotion-entry-fill-rate",
         values["min_promotion_entry_fill_rate"],
     ]
+    for key, flag in [
+        ("lob_sample_secs", "--lob-sample-secs"),
+        ("observation_sample_secs", "--observation-sample-secs"),
+        ("max_quote_age_secs", "--max-quote-age-secs"),
+    ]:
+        if values.get(key):
+            command.extend([flag, values[key]])
     if values.get("train_window_hours"):
         command.extend(["--train-window-hours", values["train_window_hours"]])
     if values.get("test_window_hours"):
