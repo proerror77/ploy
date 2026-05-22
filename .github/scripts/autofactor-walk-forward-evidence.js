@@ -22,6 +22,36 @@ function stringifyBlockers(blockers, limit = 3) {
   return `${shown.join("; ")}${suffix}`;
 }
 
+function blockerOutcome(blockers) {
+  const values = Array.isArray(blockers) ? blockers : [];
+  const blockerText = values.join(" ").toLowerCase();
+
+  if (blockerText.includes("data_quality") || blockerText.includes("deribit")) {
+    return {
+      decision: "fix-data",
+      reason: stringifyBlockers(values),
+    };
+  }
+  if (
+    blockerText.includes("replay") ||
+    blockerText.includes("runtime") ||
+    blockerText.includes("mapping") ||
+    blockerText.includes("parity")
+  ) {
+    return {
+      decision: "fix-runtime",
+      reason: stringifyBlockers(values),
+    };
+  }
+  if (values.length > 0) {
+    return {
+      decision: "revise",
+      reason: stringifyBlockers(values),
+    };
+  }
+  return null;
+}
+
 function decisionFromArtifacts({ promotion, handoff }) {
   if (!promotion && !handoff) {
     return {
@@ -37,28 +67,8 @@ function decisionFromArtifacts({ promotion, handoff }) {
     };
   }
 
-  const gate = (handoff && handoff.promotion_gate) || (promotion && promotion.promotion_gate) || {};
-  const blockedGates = Array.isArray(gate.blocked_gates) ? gate.blocked_gates : [];
-  const blockerText = blockedGates.join(" ").toLowerCase();
-
-  if (blockerText.includes("data_quality") || blockerText.includes("deribit")) {
-    return {
-      decision: "fix-data",
-      reason: stringifyBlockers(blockedGates),
-    };
-  }
-  if (blockerText.includes("replay") || blockerText.includes("runtime") || blockerText.includes("parity")) {
-    return {
-      decision: "fix-runtime",
-      reason: stringifyBlockers(blockedGates),
-    };
-  }
-  if (blockedGates.length > 0) {
-    return {
-      decision: "revise",
-      reason: stringifyBlockers(blockedGates),
-    };
-  }
+  const blockerDecision = blockerOutcome(actionableBlockers({ handoff, promotion }));
+  if (blockerDecision) return blockerDecision;
 
   if (promotion && promotion.decision === "blocked") {
     return {
@@ -86,6 +96,33 @@ function topStrategies(handoff, limit = 3) {
   });
 }
 
+function bestEvaluatedFactor(promotion) {
+  const evaluated = promotion && Array.isArray(promotion.evaluated_factors)
+    ? promotion.evaluated_factors
+    : [];
+  if (evaluated.length === 0) return null;
+
+  const minimums = promotion.minimums || {};
+  const minFill = Number(minimums.top_bucket_full_depth_entry_fill_rate ?? 0.30);
+  const candidates = evaluated
+    .filter((item) => item && item.factor)
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+      const leftFactor = left.item.factor || {};
+      const rightFactor = right.item.factor || {};
+      return Number(Boolean(right.item.qualified)) - Number(Boolean(left.item.qualified))
+        || Number(rightFactor.decision === "candidate" && rightFactor.reason === "passed")
+          - Number(leftFactor.decision === "candidate" && leftFactor.reason === "passed")
+        || Number((rightFactor.top_bucket_full_depth_entry_fill_rate ?? 0) >= minFill)
+          - Number((leftFactor.top_bucket_full_depth_entry_fill_rate ?? 0) >= minFill)
+        || Number(rightFactor.top_bucket_avg_label ?? -Infinity)
+          - Number(leftFactor.top_bucket_avg_label ?? -Infinity)
+        || Number(rightFactor.icir ?? -Infinity) - Number(leftFactor.icir ?? -Infinity)
+        || left.index - right.index;
+    });
+  return candidates.length > 0 ? candidates[0].item : null;
+}
+
 function actionableBlockers({ handoff, promotion }) {
   const gate = (handoff && handoff.promotion_gate) || (promotion && promotion.promotion_gate) || {};
   const blockedGates = Array.isArray(gate.blocked_gates) ? gate.blocked_gates : [];
@@ -94,6 +131,27 @@ function actionableBlockers({ handoff, promotion }) {
       const value = String(item || "");
       return !value.startsWith("symbol_holdout:") && !value.startsWith("walk_forward_oos:");
     });
+  }
+  const gateText = blockedGates.join(" ").toLowerCase();
+  if (gateText.includes("data_quality") || gateText.includes("deribit")) {
+    return blockedGates;
+  }
+  const best = bestEvaluatedFactor(promotion);
+  if (best && best.factor) {
+    const minimums = promotion.minimums || {};
+    const minFill = Number(minimums.top_bucket_full_depth_entry_fill_rate ?? 0.30);
+    const fillRate = Number(best.factor.top_bucket_full_depth_entry_fill_rate);
+    const hasCandidateFillability = Number.isFinite(fillRate) && fillRate >= minFill;
+    const candidateBlockers = Array.isArray(best.blockers) ? best.blockers.filter(Boolean) : [];
+    if (hasCandidateFillability && candidateBlockers.length > 0) {
+      const scopedBlockers = candidateBlockers.filter((item) => {
+        const value = String(item || "");
+        return value !== "promotion_gate_not_ready"
+          && !value.startsWith("global_promotion_gate_not_ready:global_full_depth_entry_fillability:")
+          && !value.startsWith("global_full_depth_entry_fillability:");
+      });
+      if (scopedBlockers.length > 0) return scopedBlockers;
+    }
   }
   return blockedGates;
 }

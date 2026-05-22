@@ -1,3 +1,49 @@
+# AutoFactor Candidate Fillability Gate Repair (2026-05-22)
+
+## Goal
+
+Stop treating global full-depth fillability as the primary actionable blocker
+for selector/formula AutoFactor candidates when candidate top-bucket and later
+runtime replay fillability are the relevant execution surfaces.
+
+Evidence stage: `factor_attribution` -> `executable_replay` gate hygiene.
+
+## Files / Ownership
+
+- `.github/scripts/autofactor-walk-forward-evidence.js`
+  - Owner: issue/comment evidence summary and actionable blocker selection.
+- `tests/test_autofactor_walk_forward_evidence_js.py`
+  - Owner: regression coverage for low global fillability but high
+    candidate-scoped fillability.
+- `tasks/todo.md`
+  - Owner: session tracking and decision notes.
+
+## Tasks
+
+- [x] Confirm project semantics and identify the fillability blocker source.
+- [x] Make evidence summaries prefer candidate-scoped blockers when present.
+- [x] Add regression tests for global-low/candidate-fillable evidence.
+- [x] Run focused tests and diff checks.
+
+## Review
+
+- 2026-05-22: Root cause hypothesis: `global_full_depth_entry_fillability`
+  comes from `DataHealthReport::full_depth_entry_fill_rate()` over all
+  observation rows. It is useful data-health context, but it is too broad for
+  selector/formula candidates whose top bucket can have
+  `top_bucket_full_depth_entry_fill_rate=1.0`. Strategy promotion should still
+  require candidate top-bucket fillability and true
+  `runtime_market_update_replay` fill rate, not lower the threshold.
+- 2026-05-22: Fixed AutoFactor issue/comment evidence to prefer
+  candidate-scoped blockers when global data quality is otherwise acceptable
+  and the candidate top bucket passes the configured fillability floor. This
+  keeps low global fillability visible in machine artifacts but routes the next
+  action toward missing runtime mapping / missing runtime replay instead of a
+  misleading global-fillability-only blocker. Validation passed:
+  `python3 -m unittest tests/test_autofactor_walk_forward_evidence_js.py` and
+  `rtk git diff --check`. `rtk pytest ...` could not run in this worktree
+  because the `pytest` executable is not installed.
+
 # Bayesian Calibration Audit (2026-05-22)
 
 ## Goal
