@@ -56,6 +56,23 @@ Evidence stage: `walk_forward / runtime_parity`.
   selector/combo candidates as typed runtime contracts with acceptance criteria
   attached to issue #581, because the weakness is strategy selection and
   executable gating, not another single-factor mutation.
+- 2026-05-22: PR #582 run `26260888380` validated the new selector search on
+  snapshot `26135455846` for `BTCUSDT,ETHUSDT`. The best
+  `full_depth_settlement_executable_pnl` candidate was
+  `mut_spread_adjusted_external_move_select_near_strike_ge_075` with `n=1226`,
+  ICIR `2.161689`, positive-window ratio `1.0`, top-bucket label `3.060470`,
+  top-bucket fill rate `1.0`, `246` unique events, and max event decisions `1`.
+  It remains blocked from promotion until runtime MarketUpdate replay proves the
+  same selector scorer.
+- 2026-05-22: Follow-up code teaches the candidate replay builder and sweep
+  summary to prefer selector-quality candidates over raw top-bucket PnL, and
+  teaches the runtime predictive AutoFactor scorer to execute
+  `_select_<feature>_ge_<threshold>` gates. Local replay-builder verification
+  now selects
+  `autofactor_formula:mut_spread_adjusted_external_move_select_near_strike_ge_075`
+  from the run artifact, with aggregate `246` trades, fill rate `1.0`, total PnL
+  `752.87562`, and ROI `0.204031`; this is still an aggregate artifact, not a
+  promotion.
 
 # Predictive AutoFactor Runtime Entry Edge (2026-05-20)
 

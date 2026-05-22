@@ -178,11 +178,14 @@ def runtime_mapping(name: str) -> dict[str, str]:
 
 
 def row_score(row: dict[str, Any]) -> tuple[float, ...]:
+    rank = parse_int(row.get("rank", ""), default=10_000)
     return (
-        parse_float(row.get("top_bucket_avg_label", "")),
         parse_float(row.get("icir", "")),
         parse_float(row.get("positive_window_ratio", "")),
+        parse_float(row.get("symbol_positive_ratio", "")),
         parse_float(row.get("spearman_ic", "")),
+        -float(rank),
+        parse_float(row.get("top_bucket_avg_label", "")),
     )
 
 

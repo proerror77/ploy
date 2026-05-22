@@ -342,6 +342,10 @@ fn predictive_formula_score(name: &str, inputs: AutoSettlementFactorInputs) -> O
     if suffix.is_empty() {
         return Some(score);
     }
+    let suffix = apply_predictive_selector_gate(suffix, inputs)?;
+    if suffix.is_empty() {
+        return Some(score);
+    }
     for mutation in suffix.strip_prefix('_')?.split('_') {
         match mutation {
             "squashed" => score = score.tanh(),
@@ -377,6 +381,48 @@ fn predictive_formula_score(name: &str, inputs: AutoSettlementFactorInputs) -> O
         }
     }
     Some(score)
+}
+
+fn apply_predictive_selector_gate<'a>(
+    suffix: &'a str,
+    inputs: AutoSettlementFactorInputs,
+) -> Option<&'a str> {
+    let Some((remaining, selector)) = suffix.split_once("_select_") else {
+        return Some(suffix);
+    };
+    let (feature, raw_threshold) = selector.rsplit_once("_ge_")?;
+    let threshold = parse_selector_threshold(raw_threshold)?;
+    let gate_score = match feature {
+        "near_strike" => {
+            auto_settlement_near_strike_score(inputs.distance_over_sigma, inputs.direction_sign)
+        }
+        "entry_price_quality" => auto_settlement_entry_price_quality_score(inputs.entry_price),
+        "entry_capacity" => auto_settlement_entry_capacity_score(inputs.entry_capacity_ratio),
+        "full_depth_entry" => {
+            if !inputs.entry_capacity_ratio.is_finite() {
+                return None;
+            }
+            if inputs.entry_capacity_ratio >= 1.0 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        _ => return None,
+    };
+    if !gate_score.is_finite() || gate_score < threshold {
+        return None;
+    }
+    Some(remaining)
+}
+
+fn parse_selector_threshold(raw: &str) -> Option<f64> {
+    let threshold = if raw.contains('.') {
+        raw.parse().ok()?
+    } else {
+        raw.parse::<f64>().ok()? / 100.0
+    };
+    (threshold.is_finite() && (0.0..=1.0).contains(&threshold)).then_some(threshold)
 }
 
 /// Normal CDF approximation (Abramowitz & Stegun).

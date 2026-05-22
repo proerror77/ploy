@@ -5478,6 +5478,58 @@ mod tests {
     }
 
     #[test]
+    fn predictive_autofactor_formula_supports_selector_threshold_gate() {
+        let config = test_config();
+        let near = AutoSettlementFactorInputs {
+            settlement_edge: -0.01,
+            entry_price: 0.48,
+            distance_over_sigma: 0.20,
+            direction_sign: 1.0,
+            drift_30s: 0.006,
+            sigma_horizon: 4.0,
+            entry_capacity_ratio: 1.20,
+            side_spread: 0.03,
+            external_pressure: 0.0,
+            pm_lag_secs: 0.0,
+            iv_change_1m: 0.0,
+        };
+        let far = AutoSettlementFactorInputs {
+            distance_over_sigma: 4.0,
+            ..near
+        };
+
+        let (raw, score) = autofactor_formula_entry_score(
+            "autofactor_formula:mut_spread_adjusted_external_move_select_near_strike_ge_075",
+            near,
+            config.min_edge,
+        )
+        .expect("selector-gated predictive formula should score rows passing the selector");
+        assert!(raw > 0.0);
+        assert!(score > 0.0);
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mut_spread_adjusted_external_move_select_near_strike_ge_075",
+            far,
+            config.min_edge,
+        )
+        .is_none());
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mut_spread_adjusted_external_move_select_entry_price_quality_ge_075",
+            near,
+            config.min_edge,
+        )
+        .is_some());
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mut_spread_adjusted_external_move_select_entry_capacity_ge_075",
+            AutoSettlementFactorInputs {
+                entry_capacity_ratio: 0.10,
+                ..near
+            },
+            config.min_edge,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn edge_score_returns_continuous_value() {
         let config = test_config();
         // ask=0.35 → fee≈0.00455, edge=0.55-0.35-0.00455≈0.195 → edge_score≈1.95 clamped to 1.0

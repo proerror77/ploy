@@ -134,6 +134,30 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
             "mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
         )
 
+    def test_prefers_selector_gate_candidate_over_higher_top_bucket_label(self):
+        report = """=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=false stake_usd=15.00 min_entry_fill_rate=0.3000 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=100 event_complete_rows=200 replay_parity_ready=false
+gate,passed,evidence
+recorded_replay_parity,false,post-dry-run gate pending
+
+# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_avg_entry_sweep_slip_bps,top_bucket_avg_entry_sweep_levels,top_bucket_unique_event_count,top_bucket_max_event_decisions,complexity
+1,mut_spread_adjusted_external_move_select_near_strike_ge_075,full_depth_settlement_executable_pnl,candidate,passed,1226,0.072616,0.051222,8,2.161689,1.0000,2,1.0000,0.7500,246,3.060470,0.6707,1.0000,12.32,1.46,246,1,7
+2,mut_spread_adjusted_external_move_spread_adjusted,full_depth_settlement_executable_pnl,candidate,passed,1249,0.140001,0.082941,8,0.994307,0.8750,2,1.0000,0.7500,250,3.369123,0.7080,1.0000,11.41,1.41,250,1,9
+"""
+        payload, _ = self.run_script(report)
+
+        self.assertEqual(
+            payload["runtime_score"],
+            "autofactor_formula:mut_spread_adjusted_external_move_select_near_strike_ge_075",
+        )
+        self.assertEqual(
+            payload["source_factor"]["name"],
+            "mut_spread_adjusted_external_move_select_near_strike_ge_075",
+        )
+
     def test_selects_llm_runtime_pass_through_predictive_formula_mutation(self):
         payload, _ = self.run_script(AUTOFACTOR_LLM_RUNTIME_PASS_THROUGH_MUTATION_REPORT)
 

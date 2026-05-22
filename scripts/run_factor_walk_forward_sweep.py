@@ -254,12 +254,18 @@ def ranked_factor_rows(promotion: dict[str, Any], allowed_targets: set[str]) -> 
     return rows
 
 
-def _factor_score(item: dict[str, Any]) -> tuple[float, float, float, float]:
+def _factor_score(item: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+    try:
+        rank = float(item.get("rank") or 10_000)
+    except (TypeError, ValueError):
+        rank = 10_000.0
     return (
         1.0 if item["decision"] == "candidate" and item["reason"] == "passed" else 0.0,
         float(item.get("positive_window_ratio") or 0.0),
         float(item.get("symbol_positive_ratio") or 0.0),
+        float(item.get("icir") or 0.0),
         float(item.get("spearman_ic") or 0.0),
+        -rank,
     )
 
 
