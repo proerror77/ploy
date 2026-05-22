@@ -1,3 +1,49 @@
+# Settlement Probability PRD Gate Snapshot Contract (2026-05-23)
+
+## Goal
+
+Keep the settlement-probability PRD gate aligned with retained full research
+snapshot manifests instead of overriding snapshot-bound sampling fields with
+legacy defaults.
+
+Evidence stage: `walk_forward` gate orchestration after `runtime_parity`
+evidence is supplied.
+
+## Files / Ownership
+
+- `scripts/run_settlement_probability_prd_gate.py`
+  - Owner: PRD gate orchestration and hosted walk-forward options.
+- `tests/test_settlement_probability_prd_gate.py`
+  - Owner: regression coverage for existing-snapshot vs legacy-snapshot
+    sampling defaults.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Confirm project semantics and event ML workflow gates.
+- [x] Reproduce the hosted failure as a snapshot contract mismatch.
+- [x] Leave snapshot-bound sampling options empty for retained snapshot runs.
+- [x] Keep legacy snapshot builds on explicit 30-second sampling defaults.
+- [x] Run focused validation.
+- [ ] Commit, push, merge, and rerun the PRD gate from `main`.
+
+## Review
+
+- 2026-05-23: The retained full snapshot `26285446382` was compiled with
+  `lob_sample_secs=120`, `observation_sample_secs=120`, and
+  `max_quote_age_secs=120`. The PRD gate helper was still sending `30` for
+  those fields, causing hosted factor walk-forward run `26305481049` to fail
+  closed before strategy evaluation. The fix keeps those options blank when an
+  existing snapshot is supplied so the hosted workflow can resolve them from
+  `artifacts/research-snapshot/manifest.json`; legacy snapshot creation still
+  materializes the historical 30-second defaults.
+- 2026-05-23: Focused validation passed:
+  `python3 -m unittest discover -s tests -p 'test_settlement_probability_prd_gate.py'`,
+  `python3 -m py_compile scripts/run_settlement_probability_prd_gate.py tests/test_settlement_probability_prd_gate.py`,
+  dry-run dispatch payload inspection confirming blank snapshot-bound sampling
+  fields for snapshot `26285446382`, and `rtk git diff --check`.
+
 # PM Book Archive Snapshot Repair (2026-05-22)
 
 ## Goal
