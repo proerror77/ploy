@@ -1,3 +1,40 @@
+# Runtime Candidate Replay Empty Override Repair (2026-05-23)
+
+## Goal
+
+Let runtime candidate replay run with the deployed config's current
+`three_layer_min_entry_score` when no diagnostic override is requested.
+
+Evidence stage: `executable_replay` plumbing for `runtime_market_update_replay`.
+
+## Files / Ownership
+
+- `.github/workflows/runtime-candidate-replay.yml`
+  - Owner: remote replay invocation and optional entry-score override handling.
+- `tests/workflow_security.rs`
+  - Owner: workflow contract regression guard.
+- `tasks/todo.md`
+  - Owner: session tracking and rerun evidence.
+
+## Tasks
+
+- [x] Reproduce runtime candidate replay failure as empty `$7` under `set -u`.
+- [x] Make `three_layer_min_entry_score` override optional in the remote script.
+- [x] Run focused validation.
+- [ ] Commit, push, merge, and rerun runtime replay.
+
+## Review
+
+- 2026-05-23: Runtime candidate replay run `26306267258` failed before strategy
+  replay with `/bin/bash: line 8: $7: unbound variable`. The requested replay
+  did not pass a `three_layer_min_entry_score` override, so the workflow should
+  keep the deployed config's existing threshold. The remote script now reads
+  `${7:-}` to preserve strict mode while treating the override as optional.
+- 2026-05-23: Focused validation passed: YAML parse for
+  `.github/workflows/runtime-candidate-replay.yml`,
+  `CARGO_TARGET_DIR=/tmp/ploy-workflow-security rtk cargo test --locked --test workflow_security runtime_candidate_replay_allows_empty_entry_score_override`,
+  and `rtk git diff --check`.
+
 # Settlement Probability PRD Gate Snapshot Contract (2026-05-23)
 
 ## Goal

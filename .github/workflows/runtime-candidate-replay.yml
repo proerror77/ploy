@@ -228,7 +228,7 @@ jobs:
           remote_dir="$4"
           runtime_score="$5"
           skip_settlement_exits="$6"
-          min_entry_score_override="$7"
+          min_entry_score_override="${7:-}"
           case "${skip_settlement_exits}" in
             true|false) ;;
             *) echo "skip_settlement_exits must be true or false" >&2; exit 1 ;;
