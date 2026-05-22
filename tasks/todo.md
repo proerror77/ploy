@@ -1,3 +1,62 @@
+# Short-Window Strategy Discovery Repair (2026-05-22)
+
+## Goal
+
+Improve PM5D short-window strategy discovery after the initial 1d/2d AutoFactor
+run showed that single-factor discovery over-selected external-move variants and
+did not reliably translate into positive runtime replay EV.
+
+Evidence stage: `walk_forward / runtime_parity`.
+
+## Files / Ownership
+
+- `.github/workflows/runtime-candidate-replay.yml`
+  - Owner: let runtime replay evidence attach to the active research issue.
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs` and
+  `crates/ploy-research/src/factors_v2.rs`
+  - Owner: inspect existing selector/combo discovery path before adding more
+    search machinery.
+- `tasks/todo.md`
+  - Owner: current session tracking and evidence summary.
+
+## Tasks
+
+- [x] Record that the first short-window replay batch rejected
+      `mut_spread_adjusted_external_move_full_depth_entry_gate` despite perfect
+      fill rate because runtime replay ROI was negative.
+- [x] Add a caller-provided issue number to `runtime-candidate-replay.yml`
+      while preserving the existing #538 default and GitHub's dispatch input
+      limit.
+- [x] Run short-window `report_suite=full` selector/combo evidence against issue
+      #581.
+- [x] Add bounded AutoFactor selector/threshold discovery mutations without
+      relaxing promotion gates.
+- [x] Decide whether the next implementation should promote a combo/selector
+      artifact into a typed runtime contract, or only tune thresholds around
+      the positive but sparse `near_strike` baseline.
+
+## Review
+
+- 2026-05-22: Runtime replay comparators from issue #581 showed:
+  `mut_spread_adjusted_external_move_full_depth_entry_gate` had 28 trades,
+  fill rate `1.0`, and ROI `-0.005590`; `mut_spread_adjusted_external_move_near_strike`
+  had 8 trades, fill rate `1.0`, and ROI `0.060188`; and
+  `mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted` emitted no trades
+  at configured thresholds. This makes the next search a selector/threshold
+  problem, not a simple "pick the highest IC single factor" problem.
+- 2026-05-22: Hosted full-report runs `26260172640` and `26260179765` exposed
+  the existing `Combo V1` selector path that earlier `report_suite=core` runs
+  skipped. The 1d combo diagnostic had 1 positive window, total test PnL
+  `1165.1388`, fill rate `0.8768`, and avg component count `12`. The 2d combo
+  diagnostic had 3 windows, positive-window ratio `0.6667`, total test PnL
+  `1511.9387`, and one negative test window. This is promising but still
+  diagnostic-only until a typed selector runtime contract and replay path exist.
+- 2026-05-22: Decision: do not promote the sparse `near_strike` runtime replay
+  result by threshold tuning alone. The next research slice should validate
+  selector/combo candidates as typed runtime contracts with acceptance criteria
+  attached to issue #581, because the weakness is strategy selection and
+  executable gating, not another single-factor mutation.
+
 # Predictive AutoFactor Runtime Entry Edge (2026-05-20)
 
 ## Goal

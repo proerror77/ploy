@@ -145,8 +145,18 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         self.assertEqual(payload["metrics"]["settlement_event_count"], 2)
         self.assertEqual(payload["metrics"]["entry_fill_rate"], 1.0)
         self.assertGreater(payload["metrics"]["roi"], 0)
+        self.assertEqual(
+            payload["acceptance_criteria"],
+            {
+                "full_depth_entry": True,
+                "min_fill_rate": 0.3,
+                "min_roi": 0.0,
+                "min_trade_count": 2,
+            },
+        )
         self.assertEqual(payload["blocking_risk_flags"], [])
         self.assertIn("Promotion ready: `true`", markdown)
+        self.assertIn("## Acceptance Criteria", markdown)
 
     def test_blocks_zero_intent_runtime_replay_with_diagnostics(self):
         payload, _ = self.run_script(
@@ -362,6 +372,33 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         self.assertEqual(artifact["metrics"]["settlement_event_count"], 2)
         self.assertEqual(artifact["metrics"]["total_pnl"], 12.0)
         self.assertEqual(artifact["metrics"]["entry_fill_rate"], 1.0)
+
+    def test_invalid_decimal_gate_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            runtime_json = tmp_path / "runtime-eval.json"
+            output_json = tmp_path / "candidate-strategy-replay.json"
+            runtime_json.write_text(json.dumps(runtime_eval_payload()), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--runtime-evaluation-json",
+                    str(runtime_json),
+                    "--runtime-score",
+                    "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                    "--output-json",
+                    str(output_json),
+                    "--min-roi",
+                    "not-a-decimal",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--min-roi must be a decimal value", result.stderr)
 
 
 if __name__ == "__main__":

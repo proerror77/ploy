@@ -23,6 +23,10 @@ on:
         description: "Expected strategy profile"
         required: true
         default: "settlement_probability"
+      issue_number:
+        description: "GitHub issue to receive replay evidence comments; defaults to the runtime evidence issue"
+        required: false
+        default: "538"
       min_trade_count:
         description: "Minimum filled entry trades required"
         required: false
@@ -35,22 +39,10 @@ on:
         description: "Minimum replay ROI required"
         required: false
         default: "0"
-      full_depth_entry:
-        description: "Confirm this replay config uses full-depth executable entry accounting"
+      options_json:
+        description: "Advanced options JSON: full_depth_entry, skip_settlement_exits"
         required: false
-        default: "true"
-        type: choice
-        options:
-          - "true"
-          - "false"
-      skip_settlement_exits:
-        description: "Skip settlement exits while replaying; false is required for settlement PnL evidence"
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "true"
-          - "false"
+        default: '{"full_depth_entry":true,"skip_settlement_exits":false}'
 concurrency:
   group: runtime-candidate-replay-${{ github.event.inputs.deployment_id }}-${{ github.event.inputs.runtime_score }}
   cancel-in-progress: false
@@ -63,7 +55,7 @@ env:
   CARGO_TERM_COLOR: always
   PLATFORM_TARGET: x86_64-unknown-linux-gnu
   DEPLOY_HOST: ${{ secrets.TANGO_1_1_HOST }}
-  REPLAY_EVIDENCE_ISSUE: "538"
+  REPLAY_EVIDENCE_ISSUE: ${{ github.event.inputs.issue_number || '538' }}
 
 jobs:
   runtime-candidate-replay:
@@ -75,6 +67,47 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Parse advanced options
+        env:
+          OPTIONS_JSON: ${{ github.event.inputs.options_json }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+
+          defaults = {
+              "full_depth_entry": "true",
+              "skip_settlement_exits": "false",
+          }
+          bool_keys = set(defaults)
+          raw = os.environ.get("OPTIONS_JSON", "").strip()
+          data = json.loads(raw) if raw else {}
+          if not isinstance(data, dict):
+              raise SystemExit("options_json must be a JSON object")
+          unknown = sorted(set(data) - set(defaults))
+          if unknown:
+              raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
+
+          values = dict(defaults)
+          for key, value in data.items():
+              if key in bool_keys:
+                  if isinstance(value, bool):
+                      values[key] = "true" if value else "false"
+                  elif str(value).lower() in {"true", "false"}:
+                      values[key] = str(value).lower()
+                  else:
+                      raise SystemExit(f"options_json value for {key} must be boolean")
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write(f"REPLAY_FULL_DEPTH_ENTRY={values['full_depth_entry']}\n")
+              handle.write(f"REPLAY_SKIP_SETTLEMENT_EXITS={values['skip_settlement_exits']}\n")
+          print(
+              "resolved runtime replay options: "
+              + ", ".join(f"{key}={value}" for key, value in sorted(values.items()))
+          )
+          PY
 
       - name: Build replay runner from workflow ref
         run: |
@@ -139,7 +172,7 @@ jobs:
           CONFIG_PATH: ${{ github.event.inputs.config_path }}
           RECORDING_PATH: ${{ github.event.inputs.recording_path }}
           RUNTIME_SCORE: ${{ github.event.inputs.runtime_score }}
-          SKIP_SETTLEMENT_EXITS: ${{ github.event.inputs.skip_settlement_exits }}
+          SKIP_SETTLEMENT_EXITS: ${{ env.REPLAY_SKIP_SETTLEMENT_EXITS }}
           REMOTE_DIR: /opt/ploy/tmp/runtime-candidate-replay-${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -331,7 +364,7 @@ jobs:
           MIN_TRADE_COUNT: ${{ github.event.inputs.min_trade_count }}
           MIN_FILL_RATE: ${{ github.event.inputs.min_fill_rate }}
           MIN_ROI: ${{ github.event.inputs.min_roi }}
-          FULL_DEPTH_ENTRY: ${{ github.event.inputs.full_depth_entry }}
+          FULL_DEPTH_ENTRY: ${{ env.REPLAY_FULL_DEPTH_ENTRY }}
         run: |
           set -euo pipefail
           args=(
@@ -385,6 +418,9 @@ jobs:
           script: |
             const fs = require("fs");
             const issue_number = Number(process.env.REPLAY_EVIDENCE_ISSUE);
+            if (!Number.isInteger(issue_number) || issue_number <= 0) {
+              throw new Error(`REPLAY_EVIDENCE_ISSUE must be a positive integer, got ${process.env.REPLAY_EVIDENCE_ISSUE}`);
+            }
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
             let ready = false;
             let metrics = {};

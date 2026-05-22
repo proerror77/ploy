@@ -35,6 +35,16 @@ def decimal_value(raw: Any, default: Decimal = Decimal("0")) -> Decimal:
         return default
 
 
+def decimal_arg(raw: Any, name: str) -> Decimal:
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        raise SystemExit(f"{name} must be a decimal value: {raw!r}") from None
+    if not value.is_finite():
+        raise SystemExit(f"{name} must be finite: {raw!r}")
+    return value
+
+
 def is_closed_settlement(raw: Any) -> bool:
     if raw is None:
         return False
@@ -253,6 +263,12 @@ def build_artifact(
             "full_depth_entry": full_depth_entry,
             "stake_usd": float(stake_usd),
         },
+        "acceptance_criteria": {
+            "min_trade_count": min_trade_count,
+            "min_fill_rate": float(min_fill_rate),
+            "min_roi": float(min_roi),
+            "full_depth_entry": full_depth_entry,
+        },
         "metrics": {
             "updates_processed": int(result.get("updates_processed") or 0),
             "intents_submitted": intent_count,
@@ -293,9 +309,19 @@ def render_markdown(artifact: dict[str, Any]) -> str:
         f"- Total PnL: `{metrics.get('total_pnl')}`",
         f"- ROI: `{metrics.get('roi')}`",
         "",
-        "## Blocking Risk Flags",
+        "## Acceptance Criteria",
         "",
     ]
+    criteria = artifact.get("acceptance_criteria") or {}
+    for key in ("min_trade_count", "min_fill_rate", "min_roi", "full_depth_entry"):
+        lines.append(f"- {key}: `{criteria.get(key)}`")
+    lines.extend(
+        [
+            "",
+            "## Blocking Risk Flags",
+            "",
+        ]
+    )
     lines.extend(f"- `{flag}`" for flag in flags) if flags else lines.append("- `<none>`")
     counterfactual = artifact.get("score_counterfactual")
     if isinstance(counterfactual, dict):
@@ -345,11 +371,11 @@ def main() -> int:
         runtime_eval,
         runtime_score=args.runtime_score,
         strategy_profile=args.strategy_profile,
-        stake_usd=decimal_value(args.stake_usd),
+        stake_usd=decimal_arg(args.stake_usd, "--stake-usd"),
         full_depth_entry=args.full_depth_entry,
         min_trade_count=args.min_trade_count,
-        min_fill_rate=decimal_value(args.min_fill_rate),
-        min_roi=decimal_value(args.min_roi),
+        min_fill_rate=decimal_arg(args.min_fill_rate, "--min-fill-rate"),
+        min_roi=decimal_arg(args.min_roi, "--min-roi"),
         evidence=args.evidence or str(runtime_path),
     )
     output_json = Path(args.output_json)

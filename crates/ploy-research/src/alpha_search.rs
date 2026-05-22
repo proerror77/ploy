@@ -388,6 +388,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
                 "RollingMean",
                 "RollingStd",
                 "ZScore",
+                "Gate",
             ],
             limits: SearchLimits {
                 min_observations: options.min_observations,
