@@ -26,7 +26,7 @@ on:
       options_json:
         description: "Advanced options JSON: optional start_ts/end_ts, sampling, optimizer_data_dir, data_profile, audit gate, and optional full snapshot upload"
         required: false
-        default: '{"start_ts":"","end_ts":"","lob_sample_secs":30,"pm_book_sample_secs":300,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":"","upload_full_snapshot":true}'
+        default: '{"start_ts":"","end_ts":"","lob_sample_secs":30,"pm_book_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":"","upload_full_snapshot":true}'
 
 concurrency:
   group: research-snapshot-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}-${{ github.event.inputs.symbols }}
@@ -69,7 +69,7 @@ jobs:
               "start_ts": "",
               "end_ts": "",
               "lob_sample_secs": "30",
-              "pm_book_sample_secs": "300",
+              "pm_book_sample_secs": "30",
               "observation_sample_secs": "30",
               "max_quote_age_secs": "30",
               "optimizer_data_dir": "/tmp/ploy-parquet",
