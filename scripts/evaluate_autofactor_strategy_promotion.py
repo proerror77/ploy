@@ -11,8 +11,10 @@ An AutoFactor row is only a qualified strategy when:
 
 For `autofactor_formula:*` runtime scores, the PRD model-specific
 `symbol_holdout` and `walk_forward_oos` gates are replaced by formula-level
-symbol/window stability from the AutoFactor row. Data quality, Deribit,
-execution-depth, calibration, and replay-parity gates remain global blockers.
+symbol/window stability from the AutoFactor row. For the tradeable settlement
+target, global price-first edge/fillability diagnostics are also replaced by
+candidate-scoped top-bucket fillability and PnL labels. Data quality, Deribit,
+calibration, and replay-parity gates remain global blockers.
 
 The current PM5D/PM15D settlement PRD should not silently promote a good
 repricing factor into the settlement strategy lane.
@@ -28,9 +30,11 @@ from pathlib import Path
 from typing import Any
 
 
+PRICE_FIRST_SETTLEMENT_TARGET = "full_depth_settlement_executable_pnl"
+TRADEABLE_SETTLEMENT_TARGET = "tradeable_full_depth_settlement_pnl"
+
 DEFAULT_ALLOWED_TARGETS = (
-    "full_depth_settlement_executable_pnl",
-    "tradeable_full_depth_settlement_pnl",
+    TRADEABLE_SETTLEMENT_TARGET,
 )
 
 SETTLEMENT_RUNTIME_MAPPING = {
@@ -332,6 +336,12 @@ MODEL_SPECIFIC_PRD_GATE_PREFIXES = (
     "walk_forward_oos:",
 )
 
+PRICE_FIRST_PRD_GATE_PREFIXES = (
+    "global_full_depth_entry_fillability:",
+    "full_depth_settlement_edge:",
+    "conservative_settlement_edge:",
+)
+
 
 def is_autofactor_formula(mapping: dict[str, str] | None) -> bool:
     if not mapping:
@@ -339,23 +349,31 @@ def is_autofactor_formula(mapping: dict[str, str] | None) -> bool:
     return mapping.get("runtime_score", "").startswith("autofactor_formula:")
 
 
+def is_fillability_first_target(target: str) -> bool:
+    return target == TRADEABLE_SETTLEMENT_TARGET
+
+
 def global_gate_blockers(
-    gate: PromotionGate, *, formula_specific: bool, hard_entry_gated: bool
+    gate: PromotionGate,
+    *,
+    formula_specific: bool,
+    hard_entry_gated: bool,
+    fillability_first_target: bool,
 ) -> list[str]:
     if gate.ready:
         return []
-    if not formula_specific and not hard_entry_gated:
+    if not formula_specific and not hard_entry_gated and not fillability_first_target:
         return ["promotion_gate_not_ready"]
     blockers = [
         item
         for item in gate.blocked_gates
         if not item.startswith(MODEL_SPECIFIC_PRD_GATE_PREFIXES)
     ]
-    if hard_entry_gated:
+    if hard_entry_gated or fillability_first_target:
         blockers = [
             item
             for item in blockers
-            if not item.startswith("global_full_depth_entry_fillability:")
+            if not item.startswith(PRICE_FIRST_PRD_GATE_PREFIXES)
         ]
     if blockers:
         return [f"global_promotion_gate_not_ready:{item}" for item in blockers]
@@ -382,11 +400,13 @@ def evaluate(
         mapping = runtime_mappings.get(row.name)
         formula_specific = is_autofactor_formula(mapping)
         hard_entry_gated = row.name.endswith("_full_depth_entry_gate")
+        fillability_first_target = is_fillability_first_target(row.target)
         blockers.extend(
             global_gate_blockers(
                 gate,
                 formula_specific=formula_specific,
                 hard_entry_gated=hard_entry_gated,
+                fillability_first_target=fillability_first_target,
             )
         )
         if row.target not in allowed_targets:

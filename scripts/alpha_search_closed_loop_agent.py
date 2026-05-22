@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_TARGET = "full_depth_settlement_executable_pnl"
+DEFAULT_TARGET = "tradeable_full_depth_settlement_pnl"
 RUN_ID_RE = re.compile(r"(\d{8,})")
 
 ALLOWED_MUTATIONS = {

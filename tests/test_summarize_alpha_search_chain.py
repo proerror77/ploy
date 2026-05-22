@@ -27,7 +27,7 @@ class AlphaSearchChainSummaryTest(unittest.TestCase):
     ) -> Path:
         artifact = root / f"factor-walk-forward-v2-{run_id}"
         inner = artifact / "factor-walk-forward-v2"
-        target = "full_depth_settlement_executable_pnl"
+        target = "tradeable_full_depth_settlement_pnl"
         write_json(
             inner / "alpha-search" / target / "search-feedback.json",
             {

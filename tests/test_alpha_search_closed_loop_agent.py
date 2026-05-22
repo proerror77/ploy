@@ -27,7 +27,7 @@ def artifact(
     promotion: dict | None = None,
     write_feedback: bool = True,
 ) -> Path:
-    target = "full_depth_settlement_executable_pnl"
+    target = "tradeable_full_depth_settlement_pnl"
     factor_root = root / "factor-walk-forward-v2"
     alpha_root = factor_root / "alpha-search" / target
     if write_feedback:

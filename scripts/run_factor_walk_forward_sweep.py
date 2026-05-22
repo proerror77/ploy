@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_ALLOWED_TARGET = "tradeable_full_depth_settlement_pnl"
+
 SWEEP_KEYS = {
     "label",
     "train_window_days",
@@ -222,9 +224,11 @@ def ranked_factor_rows(promotion: dict[str, Any], allowed_targets: set[str]) -> 
     return rows
 
 
-def _factor_score(item: dict[str, Any]) -> tuple[float, float, float, float]:
+def _factor_score(item: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
     return (
         1.0 if item["decision"] == "candidate" and item["reason"] == "passed" else 0.0,
+        float(item.get("top_bucket_full_depth_entry_fill_rate") or 0.0),
+        float(item.get("top_bucket_avg_label") or 0.0),
         float(item.get("positive_window_ratio") or 0.0),
         float(item.get("symbol_positive_ratio") or 0.0),
         float(item.get("spearman_ic") or 0.0),
@@ -236,7 +240,7 @@ def best_factor(promotion: dict[str, Any], allowed_targets: set[str]) -> dict[st
     if not candidates:
         return None
 
-    def score(item: dict[str, Any]) -> tuple[float, float, float, float, float]:
+    def score(item: dict[str, Any]) -> tuple[float, float, float, float, float, float, float]:
         return (
             1.0 if item["qualified"] else 0.0,
             *_factor_score(item),
@@ -461,7 +465,7 @@ def main() -> int:
     variants = load_sweep(args.sweep_json, base)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    allowed_targets = set(args.allowed_target or ["full_depth_settlement_executable_pnl"])
+    allowed_targets = set(args.allowed_target or [DEFAULT_ALLOWED_TARGET])
 
     if args.dry_run:
         summary = {

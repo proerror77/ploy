@@ -160,8 +160,8 @@ The evaluator requires all of the following:
 
 - the surrounding PRD promotion gate reports `ready_for_dry_run_handoff=true`;
 - the AutoFactor row has `decision=candidate` and `reason=passed`;
-- the target is an allowed executable target, defaulting to
-  `full_depth_settlement_executable_pnl`;
+- the target is an allowed executable target, defaulting to the fillability-first
+  `tradeable_full_depth_settlement_pnl`;
 - the factor has an explicit runtime strategy-profile mapping; and
 - the runtime profile matches the requested promotion lane, defaulting to
   `settlement_probability`.
@@ -184,10 +184,14 @@ corresponding output paths are provided:
   when the handoff is ready. In blocked runs it explicitly says no dry-run
   handoff issue or config should be created.
 
-Factor Walk-Forward V2 also includes a constrained settlement-native generator
-for the `full_depth_settlement_executable_pnl` target. It automatically expands
-full-depth and conservative settlement edge primitives into `auto_settlement_*`
-formula candidates with near-strike, capacity, spread, external-pressure, and
+Factor Walk-Forward V2 also includes constrained settlement-native generators
+for the fillability-first `tradeable_full_depth_settlement_pnl` target and the
+diagnostic `full_depth_settlement_executable_pnl` target. The tradeable target
+scores unfillable settled rows as zero before ranking price edge, so discovery
+starts from executable top-bucket fillability instead of finding a price pattern
+first and checking fill rate after the fact. The generators expand full-depth
+and conservative settlement edge primitives into `auto_settlement_*` formula
+candidates with near-strike, capacity, spread, external-pressure, and
 short-IV-change interactions. These rows are still discovery evidence only:
 they must pass the same promotion evaluator and runtime mapping gates before
 becoming a dry-run handoff.
@@ -206,7 +210,7 @@ gh workflow run autofactor-strategy-promotion.yml \
   -f git_ref=main \
   -f factor_walk_forward_run_id=<run-id> \
   -f required_strategy_profile=settlement_probability \
-  -f allowed_target=full_depth_settlement_executable_pnl
+  -f allowed_target=tradeable_full_depth_settlement_pnl
 ```
 
 This downloads `factor-walk-forward-v2-<run-id>`, runs the same evaluator on
@@ -226,7 +230,7 @@ gh workflow run autofactor-strategy-promotion.yml \
   -f git_ref=main \
   -f factor_walk_forward_run_id=<run-id> \
   -f required_strategy_profile=settlement_probability \
-  -f allowed_target=full_depth_settlement_executable_pnl \
+  -f allowed_target=tradeable_full_depth_settlement_pnl \
   -f create_config_pr=true \
   -f strategy_config=config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml
 ```
@@ -272,7 +276,7 @@ diagnostics.
 Advanced promotion and issue-handoff controls live in `options_json` to stay
 within the GitHub Actions 10-input limit. Defaults are
 `required_strategy_profile=settlement_probability`,
-`allowed_target=full_depth_settlement_executable_pnl`,
+`allowed_target=tradeable_full_depth_settlement_pnl`,
 `create_handoff_issue=false`, `create_config_pr=false`, and
 `fail_if_blocked=false`. The GitHub-hosted artifact workflow defaults
 `report_suite=core`, which keeps the walk-forward report, full-depth execution

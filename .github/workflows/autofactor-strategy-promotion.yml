@@ -21,7 +21,7 @@ on:
       allowed_target:
         description: "Allowed AutoFactor executable target"
         required: false
-        default: "full_depth_settlement_executable_pnl"
+        default: "tradeable_full_depth_settlement_pnl"
       issue_number:
         description: "Optional issue number for the promotion summary"
         required: false

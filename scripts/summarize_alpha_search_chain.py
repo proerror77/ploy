@@ -52,7 +52,7 @@ def selected_factor(plan: Any) -> str | None:
 
 def summarize_artifact(path: Path) -> dict[str, Any]:
     root = artifact_root(path)
-    target = "full_depth_settlement_executable_pnl"
+    target = "tradeable_full_depth_settlement_pnl"
     feedback = optional_json(root / "alpha-search" / target / "search-feedback.json") or {}
     plan = optional_json(root / "alpha-search" / target / "mcts-expansion-plan.json") or {}
     handoff = optional_json(root / "autofactor-strategy-handoff.json") or {}

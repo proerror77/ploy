@@ -43,6 +43,19 @@ global_full_depth_entry_fillability,false,global_full_depth_entry_fill_rate=0.14
 recorded_replay_parity,false,replay_parity_json=artifacts/replay-parity/parity-evaluation.json runtime_ready=true event_ready=false blocking_flags=<none> advisory_flags=<none> decision=continue
 """
 
+PRICE_FIRST_MODEL_EDGE_BLOCKED_GATE = """=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=false stake_usd=15.00 min_entry_fill_rate=0.3000 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=739 event_complete_rows=2846 replay_parity_ready=true
+gate,passed,evidence
+data_quality,true,mode=event_complete event_complete_events=739 event_complete_rows=2846
+deribit_vol_surface,true,require_deribit=false include_deribit=false
+recorded_replay_parity,true,blocking_flags=<none>
+global_full_depth_entry_fillability,false,global_full_depth_entry_fill_rate=0.1458 min_required=0.3000
+full_depth_settlement_edge,false,no non-naive model reaches positive settlement edge
+conservative_settlement_edge,false,no non-naive model reaches conservative settlement edge
+symbol_holdout,false,no non-naive model passes all symbol holdouts
+walk_forward_oos,false,no non-naive model has non-empty OOS windows with positive_window_ratio >= 0.60
+"""
+
 AUTOFACTOR_REPORT = """
 # AutoFactor target=full_depth_settlement_executable_pnl
 === AutoFactor Seed Candidate Report ===
@@ -170,7 +183,9 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
 
     def test_qualifies_settlement_native_auto_factors_when_gate_is_ready(self):
         _, payload, registry, handoff, handoff_md = self.run_script(
-            READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT
+            READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            "--allowed-target",
+            "full_depth_settlement_executable_pnl",
         )
 
         self.assertEqual(payload["decision"], "qualified")
@@ -206,7 +221,9 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
 
     def test_qualifies_predictive_external_formula_when_gate_is_ready(self):
         _, payload, registry, handoff, handoff_md = self.run_script(
-            READY_GATE + AUTOFACTOR_PREDICTIVE_EXTERNAL_REPORT
+            READY_GATE + AUTOFACTOR_PREDICTIVE_EXTERNAL_REPORT,
+            "--allowed-target",
+            "full_depth_settlement_executable_pnl",
         )
 
         self.assertEqual(payload["decision"], "qualified")
@@ -263,12 +280,28 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             first["blockers"],
         )
 
+    def test_tradeable_target_waives_global_price_first_gates(self):
+        _, payload, registry, handoff, _ = self.run_script(
+            PRICE_FIRST_MODEL_EDGE_BLOCKED_GATE + AUTOFACTOR_TRADEABLE_HARD_GATE_REPORT
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(registry["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        first = payload["evaluated_factors"][0]
+        self.assertTrue(first["qualified"])
+        self.assertEqual(first["blockers"], [])
+
     def test_core_suite_report_is_sufficient_for_handoff_evaluation(self):
         self.assertNotIn("=== Fillability Review V1 Data Health ===", CORE_SUITE_REPORT)
         self.assertNotIn("=== Liquidity Gate V1 ===", CORE_SUITE_REPORT)
         self.assertNotIn("=== Meta Label Walk-Forward V1 ===", CORE_SUITE_REPORT)
 
-        _, payload, registry, handoff, handoff_md = self.run_script(CORE_SUITE_REPORT)
+        _, payload, registry, handoff, handoff_md = self.run_script(
+            CORE_SUITE_REPORT,
+            "--allowed-target",
+            "full_depth_settlement_executable_pnl",
+        )
 
         self.assertEqual(payload["decision"], "qualified")
         self.assertEqual(registry["decision"], "qualified")
@@ -321,7 +354,9 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
 
     def test_formula_candidates_use_formula_specific_model_gates(self):
         _, payload, _, handoff, _ = self.run_script(
-            MODEL_BLOCKED_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT
+            MODEL_BLOCKED_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            "--allowed-target",
+            "full_depth_settlement_executable_pnl",
         )
 
         self.assertEqual(payload["decision"], "qualified")
@@ -338,7 +373,9 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         )
 
         _, payload, _, handoff, _ = self.run_script(
-            MODEL_BLOCKED_GATE + weak_symbol_report
+            MODEL_BLOCKED_GATE + weak_symbol_report,
+            "--allowed-target",
+            "full_depth_settlement_executable_pnl",
         )
 
         self.assertEqual(payload["decision"], "blocked")
@@ -353,7 +390,11 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             1,
         )
 
-        _, payload, _, handoff, _ = self.run_script(READY_GATE + sparse_report)
+        _, payload, _, handoff, _ = self.run_script(
+            READY_GATE + sparse_report,
+            "--allowed-target",
+            "full_depth_settlement_executable_pnl",
+        )
 
         self.assertEqual(payload["decision"], "qualified")
         self.assertEqual(handoff["status"], "ready")
@@ -372,7 +413,11 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             1,
         )
 
-        _, payload, _, handoff, _ = self.run_script(READY_GATE + thin_report)
+        _, payload, _, handoff, _ = self.run_script(
+            READY_GATE + thin_report,
+            "--allowed-target",
+            "full_depth_settlement_executable_pnl",
+        )
 
         self.assertEqual(payload["decision"], "qualified")
         self.assertEqual(handoff["status"], "ready")
@@ -394,7 +439,11 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         )
         legacy_report = legacy_report.replace(",9966,1,1", ",1", 1)
 
-        _, payload, _, handoff, _ = self.run_script(READY_GATE + legacy_report)
+        _, payload, _, handoff, _ = self.run_script(
+            READY_GATE + legacy_report,
+            "--allowed-target",
+            "full_depth_settlement_executable_pnl",
+        )
 
         self.assertEqual(payload["decision"], "blocked")
         self.assertEqual(handoff["status"], "blocked")
@@ -408,7 +457,11 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             1,
         )
 
-        _, payload, _, handoff, _ = self.run_script(READY_GATE + duplicate_event_report)
+        _, payload, _, handoff, _ = self.run_script(
+            READY_GATE + duplicate_event_report,
+            "--allowed-target",
+            "full_depth_settlement_executable_pnl",
+        )
 
         self.assertEqual(payload["decision"], "qualified")
         self.assertEqual(handoff["status"], "ready")
