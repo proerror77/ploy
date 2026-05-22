@@ -634,8 +634,11 @@ def runtime_replay_request(run: dict[str, Any]) -> dict[str, Any] | None:
                 "min_trade_count": "50",
                 "min_fill_rate": "0.30",
                 "min_roi": "0",
-                "full_depth_entry": "true",
-                "skip_settlement_exits": "false",
+                "options_json": json.dumps(
+                    {"full_depth_entry": True, "skip_settlement_exits": False},
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
             },
         }
     return None
@@ -717,8 +720,11 @@ def runtime_replay_candidate(run: dict[str, Any]) -> dict[str, Any] | None:
             "min_trade_count": "50",
             "min_fill_rate": "0.30",
             "min_roi": "0",
-            "full_depth_entry": "true",
-            "skip_settlement_exits": "false",
+            "options_json": json.dumps(
+                {"full_depth_entry": True, "skip_settlement_exits": False},
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
         },
     }
 
@@ -1033,8 +1039,11 @@ def write_markdown(decision: dict[str, Any], path: Path, prior_path: Path | None
             "recording_path",
             "runtime_score",
             "strategy_profile",
-            "full_depth_entry",
-            "skip_settlement_exits",
+            "issue_number",
+            "min_trade_count",
+            "min_fill_rate",
+            "min_roi",
+            "options_json",
         ):
             if key in inputs:
                 lines.append(f"- {key}: `{inputs[key]}`")

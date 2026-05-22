@@ -573,6 +573,10 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             self.assertEqual(request["git_ref"], "main")
             self.assertEqual(request["inputs"]["runtime_score"], runtime_score)
             self.assertEqual(request["inputs"]["strategy_profile"], "settlement_probability")
+            self.assertEqual(
+                json.loads(request["inputs"]["options_json"]),
+                {"full_depth_entry": True, "skip_settlement_exits": False},
+            )
 
     def test_fix_runtime_request_uses_best_current_runtime_mappable_factor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1217,6 +1221,7 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             self.assertEqual(decision["decision"], "fix_runtime")
             self.assertIn("## Runtime Replay Request", markdown)
             self.assertIn(f"- runtime_score: `{runtime_score}`", markdown)
+            self.assertIn("- options_json: `", markdown)
 
     def test_missing_feedback_routes_to_fix_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -35,6 +35,16 @@ def decimal_value(raw: Any, default: Decimal = Decimal("0")) -> Decimal:
         return default
 
 
+def decimal_arg(raw: Any, name: str) -> Decimal:
+    try:
+        value = Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        raise SystemExit(f"{name} must be a decimal value: {raw!r}") from None
+    if not value.is_finite():
+        raise SystemExit(f"{name} must be finite: {raw!r}")
+    return value
+
+
 def is_closed_settlement(raw: Any) -> bool:
     if raw is None:
         return False
@@ -59,7 +69,18 @@ def int_metric(payload: dict[str, Any], key: str) -> int:
         return 0
 
 
-def score_counterfactual(diagnostics: dict[str, Any]) -> dict[str, Any]:
+def normalize_counterfactual_threshold(raw: str) -> str:
+    value = decimal_arg(raw, "--configured-entry-threshold")
+    for label, _suffix in COUNTERFACTUAL_THRESHOLDS:
+        if value == Decimal(label):
+            return label
+    allowed = ", ".join(label for label, _suffix in COUNTERFACTUAL_THRESHOLDS)
+    raise SystemExit(f"--configured-entry-threshold must be one of: {allowed}")
+
+
+def score_counterfactual(
+    diagnostics: dict[str, Any], configured_entry_threshold: str
+) -> dict[str, Any]:
     if not diagnostics:
         return {}
     formula_evaluations = int_metric(diagnostics, "settlement_autofactor_formula_evaluations")
@@ -77,8 +98,9 @@ def score_counterfactual(diagnostics: dict[str, Any]) -> dict[str, Any]:
     if not formula_evaluations and not any(direct.values()) and not any(reverse.values()):
         return {}
 
-    configured_direct = direct["0.25"]
-    configured_reverse = reverse["0.25"]
+    threshold_label = normalize_counterfactual_threshold(configured_entry_threshold)
+    configured_direct = direct[threshold_label]
+    configured_reverse = reverse[threshold_label]
     if configured_reverse > configured_direct:
         diagnosis = "reverse_direction_stronger_at_configured_threshold"
     elif configured_direct == 0 and any(value > 0 for key, value in direct.items() if key != "0.25"):
@@ -92,7 +114,7 @@ def score_counterfactual(diagnostics: dict[str, Any]) -> dict[str, Any]:
         "formula_evaluations": formula_evaluations,
         "depth_fillable": int_metric(diagnostics, "settlement_autofactor_depth_fillable"),
         "entry_score_skips": int_metric(diagnostics, "skip_entry_score"),
-        "configured_entry_threshold": "0.25",
+        "configured_entry_threshold": threshold_label,
         "direct_pass_counts": direct,
         "reverse_direction_pass_counts": reverse,
         "diagnosis": diagnosis,
@@ -152,6 +174,7 @@ def build_artifact(
     min_trade_count: int,
     min_fill_rate: Decimal,
     min_roi: Decimal,
+    configured_entry_threshold: str,
     evidence: str,
 ) -> dict[str, Any]:
     evidence_rows = runtime_evidence(runtime_eval)
@@ -235,7 +258,7 @@ def build_artifact(
         blocking_flags.append("zero_runtime_orders_and_fills")
 
     diagnostics = runtime_eval.get("strategy_diagnostics") or result.get("strategy_diagnostics") or {}
-    counterfactual = score_counterfactual(diagnostics)
+    counterfactual = score_counterfactual(diagnostics, configured_entry_threshold)
 
     artifact = {
         "schema_version": 1,
@@ -252,6 +275,12 @@ def build_artifact(
             "official_settlement": trade_count > 0 and settled_event_count >= trade_count,
             "full_depth_entry": full_depth_entry,
             "stake_usd": float(stake_usd),
+        },
+        "acceptance_criteria": {
+            "min_trade_count": min_trade_count,
+            "min_fill_rate": float(min_fill_rate),
+            "min_roi": float(min_roi),
+            "full_depth_entry": full_depth_entry,
         },
         "metrics": {
             "updates_processed": int(result.get("updates_processed") or 0),
@@ -293,9 +322,19 @@ def render_markdown(artifact: dict[str, Any]) -> str:
         f"- Total PnL: `{metrics.get('total_pnl')}`",
         f"- ROI: `{metrics.get('roi')}`",
         "",
-        "## Blocking Risk Flags",
+        "## Acceptance Criteria",
         "",
     ]
+    criteria = artifact.get("acceptance_criteria") or {}
+    for key in ("min_trade_count", "min_fill_rate", "min_roi", "full_depth_entry"):
+        lines.append(f"- {key}: `{criteria.get(key)}`")
+    lines.extend(
+        [
+            "",
+            "## Blocking Risk Flags",
+            "",
+        ]
+    )
     lines.extend(f"- `{flag}`" for flag in flags) if flags else lines.append("- `<none>`")
     counterfactual = artifact.get("score_counterfactual")
     if isinstance(counterfactual, dict):
@@ -331,6 +370,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-trade-count", type=int, default=50)
     parser.add_argument("--min-fill-rate", default="0.30")
     parser.add_argument("--min-roi", default="0")
+    parser.add_argument("--configured-entry-threshold", default="0.25")
     parser.add_argument("--evidence", default="")
     parser.add_argument("--output-json", required=True)
     parser.add_argument("--output-md", default="")
@@ -345,11 +385,12 @@ def main() -> int:
         runtime_eval,
         runtime_score=args.runtime_score,
         strategy_profile=args.strategy_profile,
-        stake_usd=decimal_value(args.stake_usd),
+        stake_usd=decimal_arg(args.stake_usd, "--stake-usd"),
         full_depth_entry=args.full_depth_entry,
         min_trade_count=args.min_trade_count,
-        min_fill_rate=decimal_value(args.min_fill_rate),
-        min_roi=decimal_value(args.min_roi),
+        min_fill_rate=decimal_arg(args.min_fill_rate, "--min-fill-rate"),
+        min_roi=decimal_arg(args.min_roi, "--min-roi"),
+        configured_entry_threshold=args.configured_entry_threshold,
         evidence=args.evidence or str(runtime_path),
     )
     output_json = Path(args.output_json)

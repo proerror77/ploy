@@ -12,6 +12,13 @@ use crate::factors_v2::FactorObservationV2;
 const EPS: f64 = 1e-9;
 const MAX_DETERMINISTIC_MUTATION_DEPTH: usize = 2;
 const MAX_DETERMINISTIC_MUTATION_CANDIDATES: usize = 160;
+const SELECTOR_GATE_THRESHOLDS: [f64; 3] = [0.25, 0.50, 0.75];
+const SELECTOR_GATE_FEATURES: [&str; 4] = [
+    "near_strike_score",
+    "entry_price_quality_score",
+    "entry_capacity_score",
+    "full_depth_entry_fillable_gate",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum FactorExpr {
@@ -1343,6 +1350,30 @@ fn deterministic_mutation_layer(
             );
         }
 
+        if settlement_target {
+            for feature in SELECTOR_GATE_FEATURES {
+                if !input_names.contains(feature) {
+                    continue;
+                }
+                for threshold in SELECTOR_GATE_THRESHOLDS {
+                    push_mutation(
+                        &mut out,
+                        seed,
+                        depth,
+                        &format!(
+                            "select_{}_ge_{:03}",
+                            selector_gate_suffix(feature),
+                            (threshold * 100.0).round() as usize
+                        ),
+                        gate(seed.expr.clone(), input(feature), threshold),
+                        &format!(
+                            "add_feature_gate: discovery-only selector requiring {feature} >= {threshold:.2}; promotion still requires runtime replay.",
+                        ),
+                    );
+                }
+            }
+        }
+
         if !settlement_target && input_names.contains("poly_quote_age") {
             push_mutation(
                 &mut out,
@@ -1361,6 +1392,16 @@ fn deterministic_mutation_layer(
         }
     }
     out
+}
+
+fn selector_gate_suffix(feature: &str) -> &str {
+    match feature {
+        "near_strike_score" => "near_strike",
+        "entry_price_quality_score" => "entry_price_quality",
+        "entry_capacity_score" => "entry_capacity",
+        "full_depth_entry_fillable_gate" => "full_depth_entry",
+        _ => feature,
+    }
 }
 
 fn push_mutation(
@@ -2604,6 +2645,41 @@ mod tests {
             hard_gate.notes[0].contains("execution gate"),
             "hard fillability should be documented as execution gating"
         );
+    }
+
+    #[test]
+    fn settlement_mutations_include_bounded_selector_threshold_grid() {
+        let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
+        let matrix = autofactor_matrix_from_v2(&rows).expect("matrix");
+        let seeds = vec![NamedFactorExpr {
+            name: "predictive_seed".to_string(),
+            target: Some("full_depth_settlement_executable_pnl".to_string()),
+            expr: input("external_move_since_poly_update"),
+            notes: vec![],
+        }];
+
+        let mutations = deterministic_mutation_layer(
+            &matrix.input_names(),
+            &seeds,
+            AutoFactorV2Target::FullDepthSettlementExecutablePnl,
+            1,
+        );
+
+        for expected in [
+            "mut_predictive_seed_select_near_strike_ge_025",
+            "mut_predictive_seed_select_near_strike_ge_050",
+            "mut_predictive_seed_select_near_strike_ge_075",
+            "mut_predictive_seed_select_entry_price_quality_ge_050",
+            "mut_predictive_seed_select_entry_capacity_ge_050",
+            "mut_predictive_seed_select_full_depth_entry_ge_050",
+        ] {
+            let candidate = mutations
+                .iter()
+                .find(|candidate| candidate.name == expected)
+                .unwrap_or_else(|| panic!("missing selector mutation {expected}"));
+            assert!(matches!(candidate.expr, FactorExpr::Gate { .. }));
+            assert!(candidate.notes[0].contains("discovery-only selector"));
+        }
     }
 
     #[test]

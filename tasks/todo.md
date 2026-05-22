@@ -1,3 +1,143 @@
+# Short-Window Strategy Discovery Repair (2026-05-22)
+
+## Goal
+
+Improve PM5D short-window strategy discovery after the initial 1d/2d AutoFactor
+run showed that single-factor discovery over-selected external-move variants and
+did not reliably translate into positive runtime replay EV.
+
+Evidence stage: `walk_forward / runtime_parity`.
+
+## Files / Ownership
+
+- `.github/workflows/runtime-candidate-replay.yml`
+  - Owner: let runtime replay evidence attach to the active research issue.
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs` and
+  `crates/ploy-research/src/factors_v2.rs`
+  - Owner: inspect existing selector/combo discovery path before adding more
+    search machinery.
+- `tasks/todo.md`
+  - Owner: current session tracking and evidence summary.
+
+## Tasks
+
+- [x] Record that the first short-window replay batch rejected
+      `mut_spread_adjusted_external_move_full_depth_entry_gate` despite perfect
+      fill rate because runtime replay ROI was negative.
+- [x] Add a caller-provided issue number to `runtime-candidate-replay.yml`
+      while preserving the existing #538 default and GitHub's dispatch input
+      limit.
+- [x] Run short-window `report_suite=full` selector/combo evidence against issue
+      #581.
+- [x] Add bounded AutoFactor selector/threshold discovery mutations without
+      relaxing promotion gates.
+- [x] Decide whether the next implementation should promote a combo/selector
+      artifact into a typed runtime contract, or only tune thresholds around
+      the positive but sparse `near_strike` baseline.
+
+## Review
+
+- 2026-05-22: Runtime replay comparators from issue #581 showed:
+  `mut_spread_adjusted_external_move_full_depth_entry_gate` had 28 trades,
+  fill rate `1.0`, and ROI `-0.005590`; `mut_spread_adjusted_external_move_near_strike`
+  had 8 trades, fill rate `1.0`, and ROI `0.060188`; and
+  `mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted` emitted no trades
+  at configured thresholds. This makes the next search a selector/threshold
+  problem, not a simple "pick the highest IC single factor" problem.
+- 2026-05-22: Hosted full-report runs `26260172640` and `26260179765` exposed
+  the existing `Combo V1` selector path that earlier `report_suite=core` runs
+  skipped. The 1d combo diagnostic had 1 positive window, total test PnL
+  `1165.1388`, fill rate `0.8768`, and avg component count `12`. The 2d combo
+  diagnostic had 3 windows, positive-window ratio `0.6667`, total test PnL
+  `1511.9387`, and one negative test window. This is promising but still
+  diagnostic-only until a typed selector runtime contract and replay path exist.
+- 2026-05-22: Decision: do not promote the sparse `near_strike` runtime replay
+  result by threshold tuning alone. The next research slice should validate
+  selector/combo candidates as typed runtime contracts with acceptance criteria
+  attached to issue #581, because the weakness is strategy selection and
+  executable gating, not another single-factor mutation.
+- 2026-05-22: PR #582 run `26260888380` validated the new selector search on
+  snapshot `26135455846` for `BTCUSDT,ETHUSDT`. The best
+  `full_depth_settlement_executable_pnl` candidate was
+  `mut_spread_adjusted_external_move_select_near_strike_ge_075` with `n=1226`,
+  ICIR `2.161689`, positive-window ratio `1.0`, top-bucket label `3.060470`,
+  top-bucket fill rate `1.0`, `246` unique events, and max event decisions `1`.
+  It remains blocked from promotion until runtime MarketUpdate replay proves the
+  same selector scorer.
+- 2026-05-22: Follow-up code teaches the candidate replay builder and sweep
+  summary to prefer selector-quality candidates over raw top-bucket PnL, and
+  teaches the runtime predictive AutoFactor scorer to execute
+  `_select_<feature>_ge_<threshold>` gates. Local replay-builder verification
+  now selects
+  `autofactor_formula:mut_spread_adjusted_external_move_select_near_strike_ge_075`
+  from the run artifact, with aggregate `246` trades, fill rate `1.0`, total PnL
+  `752.87562`, and ROI `0.204031`; this is still an aggregate artifact, not a
+  promotion.
+- 2026-05-22: Runtime candidate replay run `26261449534` rejected
+  `autofactor_formula:mut_spread_adjusted_external_move_select_near_strike_ge_075`.
+  It processed `973390` updates, emitted `8` filled trades on `8` unique events,
+  had fill rate `1.0`, total PnL `-8.153820616012`, ROI `-0.06794850513343334`,
+  and blockers `trade_count_too_small:8<20`, `official_settlement_missing:7<8`,
+  and `roi_too_low`. Counterfactual diagnosis was
+  `reverse_direction_stronger_at_configured_threshold`, so this selector should
+  be used as negative runtime feedback for the next search, not promoted.
+- 2026-05-22: Replay-feedback walk-forward run `26261684452` correctly kept the
+  selector blocked and generated `revise_prior` with
+  `runtime_pass_through_collapse`. The next typed prior includes
+  `runtime_pass_through_add_spread_penalty` and
+  `runtime_pass_through_add_capacity_gate` mutations, so runtime now canonicalizes
+  those LLM suffixes to supported `spread_adjusted` and
+  `full_depth_entry_gate` semantics and allows selector gates to be followed by
+  additional mutations.
+- 2026-05-22: Prior-feedback run `26261893965` moved the best runtime-mappable
+  candidate to
+  `mcts_mcts_spread_adjusted_external_move_select_entry_price_quality_ge_025_select_entry_capacity_ge_025`.
+  Runtime scoring now supports multiple `_select_*_ge_*` gates in one formula
+  name so this candidate can be replayed instead of getting stuck at research
+  artifact selection.
+- 2026-05-22: Runtime candidate replay run `26262036674` improved but still did
+  not pass promotion gates for
+  `autofactor_formula:mcts_mcts_spread_adjusted_external_move_select_entry_price_quality_ge_025_select_entry_capacity_ge_025`.
+  It processed `1037301` updates, emitted `18` trades on `18` unique events,
+  had fill rate `1.0`, total PnL `11.28650819509724`, and ROI
+  `0.04180188220406385`; blockers were `trade_count_too_small:18<20` and
+  `official_settlement_missing:17<18`. The counterfactual still reported
+  `reverse_direction_stronger_at_configured_threshold`, with direct/reverse
+  pass counts `18/35` at threshold `0.25`, `42/64` at `0.15`, `51/79` at
+  `0.10`, and `76/94` at `0.05`.
+- 2026-05-22: Follow-up code lets `runtime-candidate-replay.yml` override
+  `three_layer_min_entry_score` through fail-closed `options_json` values
+  `0.05`, `0.10`, `0.15`, or `0.25`, and records the configured threshold in
+  the candidate replay artifact. This is a diagnostic replay knob only; it does
+  not mutate the remote dry-run config. If lower-threshold replay still fails or
+  shows worse ROI, stop iterating the `external_move` family and switch the next
+  search to settlement-native runtime-mappable formulas such as
+  `auto_settlement_model_conservative_settlement_edge*`.
+- 2026-05-22: Threshold diagnostic replay run `26262423629` with
+  `three_layer_min_entry_score=0.15` materially improved runtime evidence for
+  the same multi-selector formula: `35` trades on `35` unique events, fill rate
+  `1.0`, total PnL `42.00878575784524`, and ROI `0.08001673477684808`. It still
+  is not promotion-ready because official settlement was available for only
+  `34/35` traded events. The counterfactual remained
+  `reverse_direction_stronger_at_configured_threshold`, with direct/reverse pass
+  counts `35/59` at `0.15`; run `26262629518` is testing `0.10` to determine
+  whether the extra pass-through improves or dilutes realized EV.
+- 2026-05-22: Threshold replay run `26262629518` with
+  `three_layer_min_entry_score=0.10` improved further to `39` trades, fill rate
+  `1.0`, total PnL `56.87549434398724`, and ROI `0.09722306725467904`, but was
+  still blocked by `official_settlement_missing:38<39`. The lower-bound
+  threshold run `26262853743` with `three_layer_min_entry_score=0.05` produced
+  more trades (`46`) but negative ROI `-0.010946529804138783`, so `0.05` is too
+  loose for this candidate.
+- 2026-05-22: Re-running the `0.10` threshold after settlement freshness caught
+  up produced promotion-ready executable replay run `26263054204`:
+  `39` trades on `39` unique events, one decision per event, fill rate `1.0`,
+  official settlement `39/39`, total PnL `77.06391934398724`, ROI
+  `0.13173319545980725`, and no blocking flags. This is the first short-window
+  runtime replay artifact in this loop that passes the current pre-dry-run
+  executable replay gates; next work should be a separate implementation issue
+  or PR for a dry-run candidate config rather than expanding this tooling PR.
+
 # Predictive AutoFactor Runtime Entry Edge (2026-05-20)
 
 ## Goal

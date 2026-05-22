@@ -145,8 +145,18 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         self.assertEqual(payload["metrics"]["settlement_event_count"], 2)
         self.assertEqual(payload["metrics"]["entry_fill_rate"], 1.0)
         self.assertGreater(payload["metrics"]["roi"], 0)
+        self.assertEqual(
+            payload["acceptance_criteria"],
+            {
+                "full_depth_entry": True,
+                "min_fill_rate": 0.3,
+                "min_roi": 0.0,
+                "min_trade_count": 2,
+            },
+        )
         self.assertEqual(payload["blocking_risk_flags"], [])
         self.assertIn("Promotion ready: `true`", markdown)
+        self.assertIn("## Acceptance Criteria", markdown)
 
     def test_blocks_zero_intent_runtime_replay_with_diagnostics(self):
         payload, _ = self.run_script(
@@ -226,6 +236,86 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         )
         self.assertIn("## Score Counterfactual", markdown)
         self.assertIn("| `0.15` | `3` | `0` |", markdown)
+
+    def test_counterfactual_uses_configured_entry_threshold(self):
+        payload, _ = self.run_script(
+            {
+                "result": {
+                    "updates_processed": 1000,
+                    "intents_submitted": 0,
+                    "strategy_diagnostics": {
+                        "settlement_autofactor_formula_evaluations": 20,
+                        "settlement_autofactor_predictive_score_ge_005": 12,
+                        "settlement_autofactor_predictive_score_ge_010": 8,
+                        "settlement_autofactor_predictive_score_ge_015": 3,
+                        "settlement_autofactor_predictive_score_ge_025": 0,
+                        "settlement_autofactor_predictive_reverse_score_ge_005": 14,
+                        "settlement_autofactor_predictive_reverse_score_ge_010": 10,
+                        "settlement_autofactor_predictive_reverse_score_ge_015": 4,
+                        "settlement_autofactor_predictive_reverse_score_ge_025": 0,
+                    },
+                },
+                "runtime_evidence": {
+                    "basis": "trading_runtime_snapshot",
+                    "events": [],
+                    "orders": [],
+                    "fills": [],
+                    "intents": [],
+                },
+            },
+            "--full-depth-entry",
+            "--configured-entry-threshold",
+            "0.15",
+            "--min-trade-count",
+            "2",
+        )
+
+        counterfactual = payload["score_counterfactual"]
+        self.assertEqual(counterfactual["configured_entry_threshold"], "0.15")
+        self.assertEqual(
+            counterfactual["diagnosis"],
+            "reverse_direction_stronger_at_configured_threshold",
+        )
+
+    def test_rejects_unknown_counterfactual_threshold(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            runtime_json = tmp_path / "runtime-eval.json"
+            output_json = tmp_path / "candidate-strategy-replay.json"
+            runtime_json.write_text(
+                json.dumps(
+                    {
+                        "result": {
+                            "strategy_diagnostics": {
+                                "settlement_autofactor_formula_evaluations": 1,
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--runtime-evaluation-json",
+                    str(runtime_json),
+                    "--runtime-score",
+                    "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                    "--output-json",
+                    str(output_json),
+                    "--configured-entry-threshold",
+                    "0.20",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "--configured-entry-threshold must be one of",
+                completed.stderr + completed.stdout,
+            )
 
     def test_blocks_open_settlement_and_unconfirmed_depth(self):
         payload, _ = self.run_script(
@@ -362,6 +452,33 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         self.assertEqual(artifact["metrics"]["settlement_event_count"], 2)
         self.assertEqual(artifact["metrics"]["total_pnl"], 12.0)
         self.assertEqual(artifact["metrics"]["entry_fill_rate"], 1.0)
+
+    def test_invalid_decimal_gate_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            runtime_json = tmp_path / "runtime-eval.json"
+            output_json = tmp_path / "candidate-strategy-replay.json"
+            runtime_json.write_text(json.dumps(runtime_eval_payload()), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--runtime-evaluation-json",
+                    str(runtime_json),
+                    "--runtime-score",
+                    "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                    "--output-json",
+                    str(output_json),
+                    "--min-roi",
+                    "not-a-decimal",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--min-roi must be a decimal value", result.stderr)
 
 
 if __name__ == "__main__":

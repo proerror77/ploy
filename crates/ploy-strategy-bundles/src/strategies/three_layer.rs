@@ -636,6 +636,8 @@ fn normalized_autofactor_formula_name(mut name: &str) -> &str {
             name = stripped;
         } else if let Some(stripped) = name.strip_prefix("mcts_") {
             name = stripped;
+        } else if let Some(stripped) = name.strip_prefix("llm_") {
+            name = stripped;
         } else {
             return name;
         }
@@ -5475,6 +5477,95 @@ mod tests {
         )
         .expect("MCTS-guided momentum predictive formula should score fillable rows");
         assert!(mcts_momentum_raw > raw);
+    }
+
+    #[test]
+    fn predictive_autofactor_formula_supports_selector_threshold_gate() {
+        let config = test_config();
+        let near = AutoSettlementFactorInputs {
+            settlement_edge: -0.01,
+            entry_price: 0.48,
+            distance_over_sigma: 0.20,
+            direction_sign: 1.0,
+            drift_30s: 0.006,
+            sigma_horizon: 4.0,
+            entry_capacity_ratio: 1.20,
+            side_spread: 0.03,
+            external_pressure: 0.0,
+            pm_lag_secs: 0.0,
+            iv_change_1m: 0.0,
+        };
+        let far = AutoSettlementFactorInputs {
+            distance_over_sigma: 4.0,
+            ..near
+        };
+
+        let (raw, score) = autofactor_formula_entry_score(
+            "autofactor_formula:mut_spread_adjusted_external_move_select_near_strike_ge_075",
+            near,
+            config.min_edge,
+        )
+        .expect("selector-gated predictive formula should score rows passing the selector");
+        assert!(raw > 0.0);
+        assert!(score > 0.0);
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mut_spread_adjusted_external_move_select_near_strike_ge_075",
+            far,
+            config.min_edge,
+        )
+        .is_none());
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mut_spread_adjusted_external_move_select_entry_price_quality_ge_075",
+            near,
+            config.min_edge,
+        )
+        .is_some());
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mut_spread_adjusted_external_move_select_entry_capacity_ge_075",
+            AutoSettlementFactorInputs {
+                entry_capacity_ratio: 0.10,
+                ..near
+            },
+            config.min_edge,
+        )
+        .is_none());
+
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:llm_mut_spread_adjusted_external_move_select_near_strike_ge_075_runtime_pass_through_add_capacity_gate",
+            near,
+            config.min_edge,
+        )
+        .is_some());
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:llm_mut_spread_adjusted_external_move_select_near_strike_ge_075_runtime_pass_through_add_capacity_gate",
+            AutoSettlementFactorInputs {
+                entry_capacity_ratio: 0.10,
+                ..near
+            },
+            config.min_edge,
+        )
+        .is_none());
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:llm_mut_spread_adjusted_external_move_select_near_strike_ge_075_runtime_pass_through_add_spread_penalty",
+            near,
+            config.min_edge,
+        )
+        .is_some());
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mcts_mcts_spread_adjusted_external_move_select_entry_price_quality_ge_025_select_entry_capacity_ge_025",
+            near,
+            config.min_edge,
+        )
+        .is_some());
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:mcts_mcts_spread_adjusted_external_move_select_entry_price_quality_ge_025_select_entry_capacity_ge_025",
+            AutoSettlementFactorInputs {
+                entry_capacity_ratio: 0.01,
+                ..near
+            },
+            config.min_edge,
+        )
+        .is_none());
     }
 
     #[test]
