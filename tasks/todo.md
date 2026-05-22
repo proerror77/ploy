@@ -73,6 +73,22 @@ Evidence stage: `walk_forward / runtime_parity`.
   from the run artifact, with aggregate `246` trades, fill rate `1.0`, total PnL
   `752.87562`, and ROI `0.204031`; this is still an aggregate artifact, not a
   promotion.
+- 2026-05-22: Runtime candidate replay run `26261449534` rejected
+  `autofactor_formula:mut_spread_adjusted_external_move_select_near_strike_ge_075`.
+  It processed `973390` updates, emitted `8` filled trades on `8` unique events,
+  had fill rate `1.0`, total PnL `-8.153820616012`, ROI `-0.06794850513343334`,
+  and blockers `trade_count_too_small:8<20`, `official_settlement_missing:7<8`,
+  and `roi_too_low`. Counterfactual diagnosis was
+  `reverse_direction_stronger_at_configured_threshold`, so this selector should
+  be used as negative runtime feedback for the next search, not promoted.
+- 2026-05-22: Replay-feedback walk-forward run `26261684452` correctly kept the
+  selector blocked and generated `revise_prior` with
+  `runtime_pass_through_collapse`. The next typed prior includes
+  `runtime_pass_through_add_spread_penalty` and
+  `runtime_pass_through_add_capacity_gate` mutations, so runtime now canonicalizes
+  those LLM suffixes to supported `spread_adjusted` and
+  `full_depth_entry_gate` semantics and allows selector gates to be followed by
+  additional mutations.
 
 # Predictive AutoFactor Runtime Entry Edge (2026-05-20)
 

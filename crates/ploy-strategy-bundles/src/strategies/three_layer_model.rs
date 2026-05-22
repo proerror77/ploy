@@ -291,6 +291,8 @@ fn normalize_autofactor_formula_name(mut name: &str) -> &str {
             name = stripped;
         } else if let Some(stripped) = name.strip_prefix("mcts_") {
             name = stripped;
+        } else if let Some(stripped) = name.strip_prefix("llm_") {
+            name = stripped;
         } else {
             return name;
         }
@@ -307,7 +309,7 @@ fn predictive_formula_score(name: &str, inputs: AutoSettlementFactorInputs) -> O
     } else {
         return None;
     };
-    let suffix = name.strip_prefix(base)?;
+    let suffix = normalize_predictive_llm_suffix(name.strip_prefix(base)?);
     let mut score = match base {
         "amplitude_weighted_momentum_30s_sigma" => {
             if !inputs.drift_30s.is_finite()
@@ -342,7 +344,7 @@ fn predictive_formula_score(name: &str, inputs: AutoSettlementFactorInputs) -> O
     if suffix.is_empty() {
         return Some(score);
     }
-    let suffix = apply_predictive_selector_gate(suffix, inputs)?;
+    let suffix = apply_predictive_selector_gate(&suffix, inputs)?;
     if suffix.is_empty() {
         return Some(score);
     }
@@ -383,14 +385,27 @@ fn predictive_formula_score(name: &str, inputs: AutoSettlementFactorInputs) -> O
     Some(score)
 }
 
-fn apply_predictive_selector_gate<'a>(
-    suffix: &'a str,
+fn normalize_predictive_llm_suffix(suffix: &str) -> String {
+    suffix
+        .replace(
+            "_runtime_pass_through_add_spread_penalty",
+            "_spread_adjusted",
+        )
+        .replace(
+            "_runtime_pass_through_add_capacity_gate",
+            "_full_depth_entry_gate",
+        )
+        .replace("_add_capacity_gate", "_full_depth_entry_gate")
+}
+
+fn apply_predictive_selector_gate(
+    suffix: &str,
     inputs: AutoSettlementFactorInputs,
-) -> Option<&'a str> {
+) -> Option<String> {
     let Some((remaining, selector)) = suffix.split_once("_select_") else {
-        return Some(suffix);
+        return Some(suffix.to_string());
     };
-    let (feature, raw_threshold) = selector.rsplit_once("_ge_")?;
+    let (feature, raw_threshold, trailing_suffix) = parse_selector_gate(selector)?;
     let threshold = parse_selector_threshold(raw_threshold)?;
     let gate_score = match feature {
         "near_strike" => {
@@ -413,7 +428,27 @@ fn apply_predictive_selector_gate<'a>(
     if !gate_score.is_finite() || gate_score < threshold {
         return None;
     }
-    Some(remaining)
+    Some(format!("{remaining}{trailing_suffix}"))
+}
+
+fn parse_selector_gate(selector: &str) -> Option<(&'static str, &str, String)> {
+    for feature in [
+        "entry_price_quality",
+        "full_depth_entry",
+        "entry_capacity",
+        "near_strike",
+    ] {
+        let prefix = format!("{feature}_ge_");
+        let Some(raw) = selector.strip_prefix(&prefix) else {
+            continue;
+        };
+        let (threshold, trailing_suffix) = match raw.split_once('_') {
+            Some((threshold, trailing)) => (threshold, format!("_{trailing}")),
+            None => (raw, String::new()),
+        };
+        return Some((feature, threshold, trailing_suffix));
+    }
+    None
 }
 
 fn parse_selector_threshold(raw: &str) -> Option<f64> {

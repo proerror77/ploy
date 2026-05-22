@@ -636,6 +636,8 @@ fn normalized_autofactor_formula_name(mut name: &str) -> &str {
             name = stripped;
         } else if let Some(stripped) = name.strip_prefix("mcts_") {
             name = stripped;
+        } else if let Some(stripped) = name.strip_prefix("llm_") {
+            name = stripped;
         } else {
             return name;
         }
@@ -5527,6 +5529,28 @@ mod tests {
             config.min_edge,
         )
         .is_none());
+
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:llm_mut_spread_adjusted_external_move_select_near_strike_ge_075_runtime_pass_through_add_capacity_gate",
+            near,
+            config.min_edge,
+        )
+        .is_some());
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:llm_mut_spread_adjusted_external_move_select_near_strike_ge_075_runtime_pass_through_add_capacity_gate",
+            AutoSettlementFactorInputs {
+                entry_capacity_ratio: 0.10,
+                ..near
+            },
+            config.min_edge,
+        )
+        .is_none());
+        assert!(autofactor_formula_entry_score(
+            "autofactor_formula:llm_mut_spread_adjusted_external_move_select_near_strike_ge_075_runtime_pass_through_add_spread_penalty",
+            near,
+            config.min_edge,
+        )
+        .is_some());
     }
 
     #[test]
