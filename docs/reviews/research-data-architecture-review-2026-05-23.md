@@ -100,11 +100,15 @@ reserved for `executable_replay` evidence.
    claims must cite candidate replay or full-depth lake evidence, not only
    sampled snapshot rows.
 
-5. **Runtime input canonicalization remains incomplete.**
+5. **Runtime input canonicalization is now gated for AutoFactor promotion/replay,
+   but not yet a shared cross-language source of truth.**
 
-   Factor registry contracts now carry typed runtime metadata, but research and
-   runtime still need a single canonical input gate for feature names, horizons,
-   LOB surfaces, blocker semantics, and strategy profile/family mapping.
+   Factor registry contracts now carry typed runtime metadata, and Python
+   promotion/replay consumers fail closed when registry previews are present
+   but contracts are missing, blocked, or semantically mismatched. The remaining
+   gap is deeper: Rust runtime scoring and Rust/Python contract catalogs still
+   need one generated/shared source for feature names, horizons, LOB surfaces,
+   blocker semantics, and strategy profile/family mapping.
 
 6. **Multi-horizon label/accounting is not a single hard gate yet.**
 
@@ -129,7 +133,7 @@ reserved for `executable_replay` evidence.
 | P0 | Run one hosted walk-forward from current `main` with default trace persistence | DB contains current-run rows across Research OS trace tables |
 | P0 | Run `research-trace-plan.yml` against the fresh trace | Plan JSON references latest trace rows and returns `continue_search`, `revise_prior`, `fix_data`, `fix_runtime`, or `fix_workflow` |
 | P1 | Add Research Manager action executor | Plan output can open/link issues and dispatch bounded hosted research reruns without manual artifact reading |
-| P1 | Add runtime input canonicalization gate | Unsupported or mismatched research/runtime feature inputs fail closed before promotion/replay |
+| P1 | Promote runtime input canonicalization to a shared generated contract | Rust runtime scoring, Rust alpha-search, and Python promotion/replay use one source of truth instead of mirrored catalogs |
 | P1 | Harden feature snapshot contract at consumers | Sampled snapshots cannot be consumed as full-depth execution evidence |
 | P1 | Enforce multi-horizon accounting at persisted approval layer | Multi-decision or horizon-mixed artifacts are blocked before handoff |
 

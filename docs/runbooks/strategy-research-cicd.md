@@ -130,6 +130,13 @@ attached through the later gates. Candidate replay tapes must use their own
 `candidate_replay_id` instead of being collapsed into the sampled research
 snapshot identity.
 
+AutoFactor promotion and aggregate candidate-replay builders must prefer the
+typed `factor-registry-preview.json` runtime contract when it is available.
+When that preview is present, missing runtime contracts, contract blockers,
+unsupported inputs, semantic input mismatches, or placeholder runtime fields
+block promotion/replay handoff instead of falling back to factor-name
+inference.
+
 Hosted walk-forward runs the writer by default and requires a protected
 database secret unless the dispatch explicitly sets
 `options_json.persist_research_trace=false` for a read-only diagnostic run. It

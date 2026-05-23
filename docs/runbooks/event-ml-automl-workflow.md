@@ -154,7 +154,9 @@ python3 scripts/evaluate_autofactor_strategy_promotion.py \
   --output-md /tmp/autofactor-strategy-promotion.md \
   --output-registry-json /tmp/autofactor-factor-registry.json \
   --output-handoff-json /tmp/autofactor-strategy-handoff.json \
-  --output-handoff-md /tmp/autofactor-strategy-handoff.md
+  --output-handoff-md /tmp/autofactor-strategy-handoff.md \
+  --factor-registry-preview-json /tmp/factor-registry-preview.json \
+  --require-runtime-contract
 ```
 
 The evaluator requires all of the following before a dry-run handoff:
@@ -164,6 +166,8 @@ The evaluator requires all of the following before a dry-run handoff:
 - the target is an allowed executable target, defaulting to
   `full_depth_settlement_executable_pnl`;
 - the factor has an explicit runtime strategy-profile mapping; and
+- when a factor-registry preview exists, the factor has a typed, unblocked
+  runtime contract with canonical runtime inputs; and
 - the runtime profile matches the requested promotion lane, defaulting to
   `settlement_probability`; and
 - a candidate strategy executable replay artifact is ready for the exact same

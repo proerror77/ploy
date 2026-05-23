@@ -19,6 +19,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from autofactor_runtime_contract import RuntimeContractResolver
+
 
 DEFAULT_ALLOWED_TARGETS = {
     "full_depth_settlement_executable_pnl",
@@ -26,25 +28,6 @@ DEFAULT_ALLOWED_TARGETS = {
 }
 
 AGGREGATE_BASIS = "factor_walk_forward_top_bucket_aggregate"
-
-FORMULA_RUNTIME_MAPPED_NAMES = {
-    "amplitude_weighted_momentum_30s_sigma",
-    "mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
-    "mut_spread_adjusted_external_move_full_depth_entry_gate",
-}
-
-PREDICTIVE_FORMULA_BASES = (
-    "amplitude_weighted_momentum_30s_sigma",
-    "poly_lag_pressure",
-    "spread_adjusted_external_move",
-)
-
-SETTLEMENT_FORMULA_BASES = (
-    "auto_settlement_full_depth_settlement_edge",
-    "auto_settlement_conservative_settlement_edge",
-    "auto_settlement_model_full_depth_settlement_edge",
-    "auto_settlement_model_conservative_settlement_edge",
-)
 
 
 def parse_float(raw: str, default: float = float("nan")) -> float:
@@ -74,68 +57,6 @@ def replay_identity(*, runtime_score: str, strategy_profile: str, evidence: str,
         "evidence": evidence,
         "source_factor": source_factor or {},
     }
-
-
-def normalize_formula_name(name: str) -> str:
-    while True:
-        for prefix in ("llm_", "mut2_", "mut_", "mcts_"):
-            if name.startswith(prefix):
-                name = name[len(prefix) :]
-                break
-        else:
-            return name
-
-
-def is_settlement_predictive_formula(name: str) -> bool:
-    normalized = normalize_formula_name(name)
-    if normalized == "spread_adjusted_external_move":
-        return False
-    return any(normalized.startswith(base) for base in PREDICTIVE_FORMULA_BASES)
-
-
-def is_settlement_formula(name: str) -> bool:
-    normalized = normalize_formula_name(name)
-    for base in SETTLEMENT_FORMULA_BASES:
-        if not normalized.startswith(base):
-            continue
-        return settlement_formula_suffix_supported(normalized[len(base) :])
-    return False
-
-
-def settlement_formula_suffix_supported(suffix: str) -> bool:
-    if not suffix:
-        return True
-    tokens = suffix.removeprefix("_").split("_")
-    applied: set[str] = set()
-    for token in tokens:
-        effect = {
-            "strike": "near_strike",
-            "capacity": "capacity",
-            "quality": "entry_price_quality",
-            "adjusted": "spread_adjusted",
-            "pressure": "external_pressure",
-            "change": "iv_change",
-            "gate": "full_depth_entry_gate",
-            "squashed": "squashed",
-        }.get(token)
-        if effect:
-            if effect in applied:
-                return False
-            applied.add(effect)
-            continue
-        if token not in {
-            "x",
-            "near",
-            "full",
-            "depth",
-            "entry",
-            "price",
-            "spread",
-            "external",
-            "iv",
-        }:
-            return False
-    return True
 
 
 def parse_autofactor_rows(report_text: str) -> list[dict[str, Any]]:
@@ -170,31 +91,6 @@ def parse_autofactor_rows(report_text: str) -> list[dict[str, Any]]:
     return rows
 
 
-def runtime_mapping(name: str) -> dict[str, str]:
-    if name in {
-        "spread_adjusted_external_move",
-        "repricing_gap_side_10s",
-    }:
-        return {
-            "strategy_profile": "repricing_momentum",
-            "runtime_score": (
-                "spread_adjusted_external_move_score"
-                if name == "spread_adjusted_external_move"
-                else name
-            ),
-        }
-    if (
-        is_settlement_formula(name)
-        or name in FORMULA_RUNTIME_MAPPED_NAMES
-        or is_settlement_predictive_formula(name)
-    ):
-        return {
-            "strategy_profile": "settlement_probability",
-            "runtime_score": f"autofactor_formula:{name}",
-        }
-    return {"strategy_profile": "", "runtime_score": ""}
-
-
 def row_score(row: dict[str, Any]) -> tuple[float, ...]:
     rank = parse_int(row.get("rank", ""), default=10_000)
     return (
@@ -212,16 +108,25 @@ def select_candidate(
     *,
     allowed_targets: set[str],
     required_strategy_profile: str,
+    runtime_contracts: RuntimeContractResolver,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     candidates: list[dict[str, Any]] = []
     blockers: list[str] = []
     for row in rows:
-        mapping = runtime_mapping(str(row.get("name", "")))
+        name = str(row.get("name", ""))
+        resolution = runtime_contracts.resolve(name)
+        mapping = resolution.runtime_mapping
         row_target = str(row.get("target", ""))
         if row_target not in allowed_targets:
             continue
         if row.get("decision") != "candidate" or row.get("reason") != "passed":
             blockers.append(f"not_candidate:{row.get('name')}:{row.get('decision')}:{row.get('reason')}")
+            continue
+        if resolution.blockers:
+            blockers.extend(resolution.blockers)
+            continue
+        if not mapping:
+            blockers.append(f"missing_runtime_score:{row.get('name')}")
             continue
         if mapping.get("strategy_profile") != required_strategy_profile:
             blockers.append(
@@ -235,6 +140,8 @@ def select_candidate(
             continue
         row = dict(row)
         row["runtime_mapping"] = mapping
+        if resolution.runtime_contract:
+            row["runtime_contract"] = resolution.runtime_contract
         candidates.append(row)
     if not candidates:
         return None, blockers or ["no_runtime_mappable_candidate"]
@@ -328,6 +235,7 @@ def build_artifact(
         "basis": AGGREGATE_BASIS,
         "strategy_profile": row["runtime_mapping"]["strategy_profile"],
         "runtime_score": runtime_score,
+        "runtime_contract": row.get("runtime_contract") or {},
         "promotion_ready": False,
         "promotion_decision": "blocked",
         "evidence": evidence,
@@ -402,6 +310,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-fill-rate", type=float, default=0.30)
     parser.add_argument("--min-roi", type=float, default=0.0)
     parser.add_argument("--evidence", default="")
+    parser.add_argument("--factor-registry-preview-json", default="")
+    parser.add_argument("--require-runtime-contract", action="store_true")
     return parser.parse_args()
 
 
@@ -414,6 +324,10 @@ def main() -> int:
         rows,
         allowed_targets=allowed_targets,
         required_strategy_profile=args.required_strategy_profile,
+        runtime_contracts=RuntimeContractResolver(
+            registry_preview_json=args.factor_registry_preview_json or None,
+            require_runtime_contract=args.require_runtime_contract,
+        ),
     )
     artifact = build_artifact(
         row,

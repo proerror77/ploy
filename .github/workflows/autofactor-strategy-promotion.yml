@@ -82,6 +82,7 @@ jobs:
           trace_marker_path="$(find artifacts/source -path '*/research-trace/persisted.env' -print -quit)"
           snapshot_provenance_path="$(find artifacts/source -path '*/snapshot-provenance/source.txt' -print -quit)"
           snapshot_manifest_path="$(find artifacts/source -path '*/snapshot-provenance/manifest.json' -print -quit)"
+          registry_preview_path="$(find artifacts/source -path '*/factor-registry-preview.json' -print -quit)"
           side_effect_requested="false"
           if [ "${{ github.event.inputs.create_handoff_issue }}" = "true" ] || [ "${{ github.event.inputs.create_config_pr }}" = "true" ]; then
             side_effect_requested="true"
@@ -110,6 +111,7 @@ jobs:
             echo "SOURCE_TRACE_MARKER_PATH=${trace_marker_path}"
             echo "SOURCE_SNAPSHOT_PROVENANCE_PATH=${snapshot_provenance_path}"
             echo "SOURCE_SNAPSHOT_MANIFEST_PATH=${snapshot_manifest_path}"
+            echo "SOURCE_FACTOR_REGISTRY_PREVIEW_PATH=${registry_preview_path}"
           } >> "$GITHUB_ENV"
 
       - name: Evaluate AutoFactor strategy promotion
@@ -128,6 +130,9 @@ jobs:
           )
           if [ -n "${CANDIDATE_STRATEGY_REPLAY_PATH:-}" ]; then
             args+=(--candidate-strategy-replay-json "${CANDIDATE_STRATEGY_REPLAY_PATH}")
+          fi
+          if [ -n "${SOURCE_FACTOR_REGISTRY_PREVIEW_PATH:-}" ]; then
+            args+=(--factor-registry-preview-json "${SOURCE_FACTOR_REGISTRY_PREVIEW_PATH}" --require-runtime-contract)
           fi
           if [ "${{ github.event.inputs.fail_if_blocked }}" = "true" ]; then
             args+=(--fail-if-blocked)

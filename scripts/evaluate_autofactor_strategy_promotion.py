@@ -34,155 +34,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from autofactor_runtime_contract import RuntimeContractResolver
+
 
 DEFAULT_ALLOWED_TARGETS = (
     "full_depth_settlement_executable_pnl",
     "tradeable_full_depth_settlement_pnl",
 )
-
-SETTLEMENT_RUNTIME_MAPPING = {
-    "strategy_profile": "settlement_probability",
-    "strategy_family": "settlement_probability",
-}
-
-BUILTIN_RUNTIME_MAPPINGS: dict[str, dict[str, str]] = {
-    "spread_adjusted_external_move": {
-        "strategy_profile": "repricing_momentum",
-        "strategy_family": "repricing",
-        "runtime_score": "spread_adjusted_external_move_score",
-    },
-    "repricing_gap_side_10s": {
-        "strategy_profile": "repricing_momentum",
-        "strategy_family": "repricing",
-        "runtime_score": "repricing_gap_side_10s",
-    },
-    "amplitude_weighted_momentum_30s_sigma": {
-        "strategy_profile": "settlement_probability",
-        "strategy_family": "predictive_settlement_probability",
-        "runtime_score": "autofactor_formula:amplitude_weighted_momentum_30s_sigma",
-    },
-    "mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate": {
-        "strategy_profile": "settlement_probability",
-        "strategy_family": "predictive_settlement_probability",
-        "runtime_score": "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
-    },
-    "mut_spread_adjusted_external_move_full_depth_entry_gate": {
-        "strategy_profile": "settlement_probability",
-        "strategy_family": "predictive_settlement_probability",
-        "runtime_score": "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate",
-    },
-    "settlement_fair_edge": {
-        "strategy_profile": "",
-        "strategy_family": "settlement_probability",
-        "runtime_score": "",
-    },
-    "auto_settlement_full_depth_settlement_edge": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge",
-    },
-    "auto_settlement_full_depth_settlement_edge_x_near_strike": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike",
-    },
-    "auto_settlement_full_depth_settlement_edge_x_capacity": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_capacity",
-    },
-    "auto_settlement_full_depth_settlement_edge_x_entry_price_quality": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_entry_price_quality",
-    },
-    "auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity",
-    },
-    "auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality",
-    },
-    "auto_settlement_full_depth_settlement_edge_spread_adjusted": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_spread_adjusted",
-    },
-    "auto_settlement_full_depth_settlement_edge_x_external_pressure": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_external_pressure",
-    },
-    "auto_settlement_full_depth_settlement_edge_x_iv_change": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_iv_change",
-    },
-    "auto_settlement_conservative_settlement_edge": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge",
-    },
-    "auto_settlement_conservative_settlement_edge_x_near_strike": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike",
-    },
-    "auto_settlement_conservative_settlement_edge_x_capacity": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_capacity",
-    },
-    "auto_settlement_conservative_settlement_edge_x_entry_price_quality": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_entry_price_quality",
-    },
-    "auto_settlement_conservative_settlement_edge_x_near_strike_x_capacity": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike_x_capacity",
-    },
-    "auto_settlement_conservative_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality",
-    },
-    "auto_settlement_conservative_settlement_edge_spread_adjusted": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_spread_adjusted",
-    },
-    "auto_settlement_conservative_settlement_edge_x_external_pressure": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_external_pressure",
-    },
-    "auto_settlement_conservative_settlement_edge_x_iv_change": {
-        **SETTLEMENT_RUNTIME_MAPPING,
-        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_iv_change",
-    },
-}
-
-PREDICTIVE_FORMULA_BASES = (
-    "amplitude_weighted_momentum_30s_sigma",
-    "poly_lag_pressure",
-    "spread_adjusted_external_move",
-)
-
-SETTLEMENT_FORMULA_BASES = (
-    "auto_settlement_full_depth_settlement_edge",
-    "auto_settlement_conservative_settlement_edge",
-    "auto_settlement_model_full_depth_settlement_edge",
-    "auto_settlement_model_conservative_settlement_edge",
-)
-
-for _base in (
-    "auto_settlement_model_full_depth_settlement_edge",
-    "auto_settlement_model_conservative_settlement_edge",
-):
-    for _suffix in (
-        "",
-        "_x_near_strike",
-        "_x_capacity",
-        "_x_entry_price_quality",
-        "_x_near_strike_x_capacity",
-        "_x_near_strike_x_capacity_x_entry_price_quality",
-        "_spread_adjusted",
-        "_x_external_pressure",
-        "_x_iv_change",
-    ):
-        _name = f"{_base}{_suffix}"
-        BUILTIN_RUNTIME_MAPPINGS[_name] = {
-            **SETTLEMENT_RUNTIME_MAPPING,
-            "runtime_score": f"autofactor_formula:{_name}",
-        }
 
 
 @dataclass
@@ -249,6 +107,7 @@ class EvaluatedFactor:
     qualified: bool
     blockers: list[str]
     runtime_mapping: dict[str, str] | None
+    runtime_contract: dict[str, Any] | None = None
 
 
 def factor_metrics(row: AutoFactorRow) -> dict[str, Any]:
@@ -581,90 +440,6 @@ def parse_autofactor_rows(report_text: str) -> list[AutoFactorRow]:
     return rows
 
 
-def load_runtime_mappings(path: str | None) -> dict[str, dict[str, str]]:
-    mappings = dict(BUILTIN_RUNTIME_MAPPINGS)
-    if not path:
-        return mappings
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    for name, value in payload.items():
-        if isinstance(value, dict):
-            mappings[name] = {str(k): str(v) for k, v in value.items()}
-    return mappings
-
-
-def normalize_formula_name(name: str) -> str:
-    while True:
-        for prefix in ("llm_", "mut2_", "mut_", "mcts_"):
-            if name.startswith(prefix):
-                name = name[len(prefix) :]
-                break
-        else:
-            return name
-
-
-def settlement_formula_suffix_supported(suffix: str) -> bool:
-    if not suffix:
-        return True
-    tokens = suffix.removeprefix("_").split("_")
-    applied: set[str] = set()
-    for token in tokens:
-        effect = {
-            "strike": "near_strike",
-            "capacity": "capacity",
-            "quality": "entry_price_quality",
-            "adjusted": "spread_adjusted",
-            "pressure": "external_pressure",
-            "change": "iv_change",
-            "gate": "full_depth_entry_gate",
-            "squashed": "squashed",
-        }.get(token)
-        if effect:
-            if effect in applied:
-                return False
-            applied.add(effect)
-            continue
-        if token not in {
-            "x",
-            "near",
-            "full",
-            "depth",
-            "entry",
-            "price",
-            "spread",
-            "external",
-            "iv",
-        }:
-            return False
-    return True
-
-
-def is_settlement_formula(name: str) -> bool:
-    normalized = normalize_formula_name(name)
-    for base in SETTLEMENT_FORMULA_BASES:
-        if not normalized.startswith(base):
-            continue
-        return settlement_formula_suffix_supported(normalized[len(base) :])
-    return False
-
-
-def inferred_runtime_mapping(name: str) -> dict[str, str] | None:
-    normalized = normalize_formula_name(name)
-    if normalized == "spread_adjusted_external_move":
-        return None
-    if is_settlement_formula(name):
-        return {
-            **SETTLEMENT_RUNTIME_MAPPING,
-            "runtime_score": f"autofactor_formula:{name}",
-        }
-    if any(normalized.startswith(base) for base in PREDICTIVE_FORMULA_BASES):
-        return {
-            **SETTLEMENT_RUNTIME_MAPPING,
-            "strategy_family": "predictive_settlement_probability",
-            "runtime_score": f"autofactor_formula:{name}",
-        }
-    return None
-
-
 MODEL_SPECIFIC_PRD_GATE_PREFIXES = (
     "symbol_holdout:",
     "walk_forward_oos:",
@@ -740,7 +515,7 @@ def evaluate(
     candidate_strategy_replay: CandidateStrategyReplay,
     allowed_targets: tuple[str, ...],
     required_strategy_profile: str,
-    runtime_mappings: dict[str, dict[str, str]],
+    runtime_contracts: RuntimeContractResolver,
     min_factor_n: int,
     min_top_bucket_n: int,
     min_top_bucket_entry_fill_rate: float,
@@ -758,7 +533,9 @@ def evaluate(
 
     for row in rows:
         blockers: list[str] = []
-        mapping = runtime_mappings.get(row.name) or inferred_runtime_mapping(row.name)
+        resolution = runtime_contracts.resolve(row.name)
+        mapping = resolution.runtime_mapping
+        blockers.extend(resolution.blockers)
         formula_specific = is_autofactor_formula(mapping)
         suppress_global_fillability = (
             formula_specific
@@ -843,6 +620,7 @@ def evaluate(
                 qualified=not blockers,
                 blockers=blockers,
                 runtime_mapping=mapping,
+                runtime_contract=resolution.runtime_contract,
             )
         )
 
@@ -870,6 +648,7 @@ def evaluate(
             {
                 "factor": asdict(item.factor),
                 "runtime_mapping": item.runtime_mapping,
+                "runtime_contract": item.runtime_contract,
             }
             for item in qualified
         ],
@@ -879,6 +658,7 @@ def evaluate(
                 "qualified": item.qualified,
                 "blockers": item.blockers,
                 "runtime_mapping": item.runtime_mapping,
+                "runtime_contract": item.runtime_contract,
             }
             for item in evaluated
         ],
@@ -899,6 +679,7 @@ def build_factor_registry(result: dict[str, Any]) -> dict[str, Any]:
                 "autofactor_reason": factor["reason"],
                 "blockers": item["blockers"],
                 "runtime_mapping": mapping,
+                "runtime_contract": item.get("runtime_contract") or {},
                 "metrics": factor_metrics(AutoFactorRow(**factor)),
             }
         )
@@ -920,6 +701,7 @@ def build_strategy_handoff(result: dict[str, Any]) -> dict[str, Any]:
     for item in result["qualified_strategies"]:
         factor = item["factor"]
         mapping = item["runtime_mapping"] or {}
+        runtime_contract = item.get("runtime_contract") or {}
         strategies.append(
             {
                 "name": factor["name"],
@@ -927,6 +709,7 @@ def build_strategy_handoff(result: dict[str, Any]) -> dict[str, Any]:
                 "strategy_profile": mapping.get("strategy_profile", ""),
                 "strategy_family": mapping.get("strategy_family", ""),
                 "runtime_score": mapping.get("runtime_score", ""),
+                "runtime_contract": runtime_contract,
                 "promotion_status": "ready_for_dry_run_handoff",
                 "metrics": factor_metrics(AutoFactorRow(**factor)),
             }
@@ -1101,6 +884,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-handoff-json", default="")
     parser.add_argument("--output-handoff-md", default="")
     parser.add_argument("--runtime-mapping-json", default="")
+    parser.add_argument("--factor-registry-preview-json", default="")
+    parser.add_argument("--require-runtime-contract", action="store_true")
     parser.add_argument(
         "--candidate-strategy-replay-json",
         default="",
@@ -1137,7 +922,11 @@ def main() -> int:
         ),
         allowed_targets=allowed_targets,
         required_strategy_profile=args.required_strategy_profile,
-        runtime_mappings=load_runtime_mappings(args.runtime_mapping_json or None),
+        runtime_contracts=RuntimeContractResolver(
+            registry_preview_json=args.factor_registry_preview_json or None,
+            runtime_mapping_json=args.runtime_mapping_json or None,
+            require_runtime_contract=args.require_runtime_contract,
+        ),
         min_factor_n=args.min_factor_n,
         min_top_bucket_n=args.min_top_bucket_n,
         min_top_bucket_entry_fill_rate=args.min_top_bucket_entry_fill_rate,
