@@ -14,6 +14,8 @@ TANGO_DEPLOY = ROOT / ".github" / "workflows" / "deploy-tango-1-1.yml"
 LEGACY_FACTOR_REVIEW = ROOT / ".github" / "workflows" / "factor-review-v2.yml"
 LEGACY_WALK_FORWARD = ROOT / ".github" / "workflows" / "factor-walk-forward-v2.yml"
 RESEARCH_SNAPSHOT = ROOT / "crates" / "ploy-research" / "src" / "research_snapshot.rs"
+FACTOR_RESEARCH_SCRIPT = ROOT / "scripts" / "run_factor_research.sh"
+FACTOR_RESEARCH_MATRIX_SCRIPT = ROOT / "scripts" / "run_factor_research_matrix.sh"
 
 
 class PersistResearchTraceContractTest(unittest.TestCase):
@@ -194,14 +196,26 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertNotIn("cargo run", workflow)
         self.assertNotIn("StrictHostKeyChecking no", workflow)
 
-    def test_legacy_db_workflows_are_debug_only(self) -> None:
+    def test_legacy_db_workflows_are_removed_from_factor_routers(self) -> None:
         for path in [LEGACY_FACTOR_REVIEW, LEGACY_WALK_FORWARD]:
             workflow = path.read_text(encoding="utf-8")
-            self.assertIn("Reject legacy DB", workflow)
-            self.assertIn("direct-DB branch is disabled by default", workflow)
-            self.assertIn("allow_direct_db_debug=true", workflow)
-            self.assertIn("legacy_db_debug_ack=manual-legacy-db-debug", workflow)
+            self.assertIn("Reject non-snapshot", workflow)
+            self.assertIn("snapshot-backed router only", workflow)
+            self.assertIn("direct DB research is no longer available", workflow)
             self.assertIn("snapshot_run_id", workflow)
+            self.assertNotIn("allow_direct_db_debug", workflow)
+            self.assertNotIn("legacy_db_debug_ack", workflow)
+            self.assertNotIn("runs-on: [self-hosted, ploy-ci-1]", workflow)
+            self.assertNotIn("--allow-direct-db-debug", workflow)
+
+    def test_manual_factor_research_scripts_require_direct_db_ack(self) -> None:
+        script = FACTOR_RESEARCH_SCRIPT.read_text(encoding="utf-8")
+        matrix = FACTOR_RESEARCH_MATRIX_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("PLOY_ALLOW_DIRECT_FACTOR_RESEARCH", script)
+        self.assertIn("manual-direct-factor-research", script)
+        self.assertIn("manual direct-DB debug path", script)
+        self.assertIn("PLOY_ALLOW_DIRECT_FACTOR_RESEARCH", matrix)
+        self.assertIn("break-glass ACK requirement", matrix)
 
 
 if __name__ == "__main__":

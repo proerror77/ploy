@@ -53,8 +53,8 @@ collection behavior.
 | `scripts/check_polymarket_api_usage.sh` | diagnostic | ops | Keep; no Rust replacement needed. |
 | `scripts/report_drawdown.py` | report helper | research | Keep until research reporting is consolidated. |
 | `scripts/refresh_research_valid_windows.sh` | research maintenance | research | Keep; tied to factor research materialized view. |
-| `scripts/run_factor_research.sh` | canonical remote research runner | research | Runs on `tango-1-1`; prefer remote DB execution. |
-| `scripts/run_factor_research_matrix.sh` | canonical research batch runner | research | Sequential matrix reduces DB pressure. |
+| `scripts/run_factor_research.sh` | manual direct-DB debug runner | research | Break-glass only; requires `PLOY_ALLOW_DIRECT_FACTOR_RESEARCH=manual-direct-factor-research`. Prefer retained artifacts and hosted workflows. |
+| `scripts/run_factor_research_matrix.sh` | manual direct-DB debug batch runner | research | Calls `run_factor_research.sh` and inherits the same explicit ACK requirement. |
 
 ## Archive Candidates
 

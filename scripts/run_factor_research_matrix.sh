@@ -13,6 +13,9 @@ set -euo pipefail
 #     --lob-sample-secs 5
 #
 # Results are written to ./tmp/factor-research/<symbol>.log by default.
+#
+# This matrix calls run_factor_research.sh and therefore inherits its
+# PLOY_ALLOW_DIRECT_FACTOR_RESEARCH break-glass ACK requirement.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_DIR="${PLOY_RESEARCH_OUTPUT_DIR:-${ROOT_DIR}/tmp/factor-research}"

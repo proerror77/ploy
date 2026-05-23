@@ -54,8 +54,8 @@ when the mismatch is understood and tracked as a follow-up issue.
 | Legacy Python compatibility | `.github/workflows/legacy-python-tools.yml` | Isolated, path-scoped checks for remaining Python helper scripts; not part of the Rust-first required CI contract |
 | Research snapshot | `.github/workflows/research-snapshot.yml` | Compile reusable research evidence from remote data |
 | Factor diagnostics | `.github/workflows/factor-review-v2-hosted-artifact.yml` | GitHub-hosted factor review from a retained complete sampled research snapshot artifact |
-| Legacy factor diagnostics | `.github/workflows/factor-review-v2.yml` | Compatibility router to hosted artifacts; direct `ploy-ci-1` DB mode is debug-only and blocked by default |
-| Walk-forward diagnostics | `.github/workflows/factor-walk-forward-v2.yml` | Compatibility router to hosted artifacts; direct `ploy-ci-1` DB mode is debug-only and blocked by default |
+| Factor diagnostics router | `.github/workflows/factor-review-v2.yml` | Snapshot-backed router to the hosted artifact workflow; fails closed when `snapshot_run_id` is missing |
+| Walk-forward diagnostics router | `.github/workflows/factor-walk-forward-v2.yml` | Snapshot-backed router to the hosted artifact workflow; fails closed when `snapshot_run_id` is missing |
 | Parameter optimization | `.github/workflows/optimize.yml` | Bounded train/validation optimization from a snapshot or explicit debug data source |
 | Replay/backtest accounting | `.github/workflows/backtest.yml` | Build and run replay/backtest accounting in one job on `ploy-ci-1` |
 | Candidate strategy replay | `.github/workflows/runtime-candidate-replay.yml` | Required pre-dry-run proof that the selected runtime score emits executable runtime decisions on a Tango MarketUpdate recording |
@@ -63,7 +63,7 @@ when the mismatch is understood and tracked as a follow-up issue.
 | Recorded replay/dry-run parity | `.github/workflows/recorded-replay-parity.yml` | Replay a canonical MarketUpdate recording on `tango-1-1` with the deployed binary, then compare against the matching dry-run report slice |
 | Runtime evidence reset | `.github/workflows/reset-strategy-runtime-evidence.yml` | Backup-first cleanup for contaminated dry-run/paper `strategy_runtime_orders` and `strategy_runtime_fills`; follow `docs/runbooks/strategy-runtime-evidence-reset.md` |
 | Dry-run config sync | `.github/workflows/sync-dryrun-strategy-config-tango-1-1.yml` | Protected config-only sync for a reviewed dry-run strategy TOML; restarts only the target dry-run worker and avoids collector restarts during clean-window waits |
-| Event ML rolling evidence | `.github/workflows/event-ml-rolling-evidence.yml` | Produce event-root rolling ML datasets and compact reports; use `source_dataset_run_id` for the GitHub-hosted artifact path |
+| Event ML rolling evidence | `.github/workflows/event-ml-rolling-evidence.yml` | Produce rolling ML evidence from a retained event-root dataset artifact; `source_dataset_run_id` is required |
 | Research Manager plan | `.github/workflows/research-trace-plan.yml` | Read durable Research OS trace on `tango-1-1` with the deployed `research-trace-plan` binary and emit next-step JSON/Markdown artifacts |
 | Market data audit | `.github/workflows/market-data-gap-audit.yml` | Scheduled/manual Tango data freshness and gap gate |
 | Image build | `.github/workflows/build-push-acr.yml` | Build ACK images; push only immutable checked-out SHA tags |
@@ -355,18 +355,16 @@ different.
   replacement for longer promotion-grade rolling evidence.
 - Event ML rolling evidence should also default to GitHub-hosted runners after
   the source event-root dataset is artifactized. Pass `source_dataset_run_id`
-  to `event-ml-rolling-evidence.yml`; only the fresh DB export branch should
-  touch `ploy-ci-1`.
-- `ploy-ci-1` is now a legacy DB-adjacent fallback for compiling fresh research
-  snapshots from Tango PostgreSQL. Do not route AutoFactor mining,
-  walk-forward promotion, or dry-run handoff checks to `ploy-ci-1` when a
-  complete sampled snapshot artifact can be reused on `ubuntu-latest`.
-- Legacy `ploy-ci-1` research workflows read Tango PostgreSQL through GitHub
-  Actions secrets `PLOY_RESEARCH_DATABASE_URL` and `PLOY_DB_URL`; verify the
-  private endpoint with Aliyun CLI before changing those secrets.
-- DB-mode research workflows must fail closed unless the research database URL
-  targets Tango's private VPC endpoint `172.16.0.204`. A public Tango endpoint
-  can turn large backtest query results into billable公网出流量.
+  to `event-ml-rolling-evidence.yml`; the workflow no longer exposes its
+  former direct-DB `ploy-ci-1` export branch.
+- `factor-review-v2.yml` and `factor-walk-forward-v2.yml` are now router-only
+  workflows. They do not build research binaries, do not run on `ploy-ci-1`,
+  and do not expose direct-DB debug execution. Run `research-snapshot.yml`
+  first and pass `snapshot_run_id` so the request routes to the hosted artifact
+  workflow.
+- Remaining DB-mode research workflows must fail closed unless the research
+  database URL targets Tango's private VPC endpoint `172.16.0.204`. A public
+  Tango endpoint can turn large backtest query results into billable公网出流量.
 - ACK/ACR image workflows must use immutable checked-out commit SHA tags only.
   Do not push or deploy `latest`. ACK deployments must also pass through the
   protected `ack` environment before mutating the cluster.

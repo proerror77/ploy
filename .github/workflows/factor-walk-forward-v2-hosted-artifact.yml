@@ -1,4 +1,5 @@
 name: Factor Walk-Forward V2 Hosted Artifact
+# Research issue evidence label: evidence:walk-forward
 
 on:
   workflow_dispatch:

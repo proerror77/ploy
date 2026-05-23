@@ -38,7 +38,21 @@ trace, not dry-run promotion.
       artifacts can no longer create handoff issues or config PRs.
 - [x] Remove misleading `full snapshot` / `full payload` language from active
       sampled research snapshot contracts.
-- [ ] Apply remaining high-priority data/research cleanup based on audit results.
+- [x] Remove the active `ploy-ci-1` direct-DB branches from `factor-review-v2`
+      and `factor-walk-forward-v2`; the workflows are now snapshot-backed
+      routers only.
+- [x] Remove the active `ploy-ci-1` direct-DB export branch from
+      `event-ml-rolling-evidence.yml`; Event ML rolling evidence now requires
+      a retained event-root dataset artifact.
+- [x] Gate manual direct-DB factor research scripts behind an explicit
+      break-glass ACK.
+- [x] Refresh the research/data architecture review to reflect PR #610-#615,
+      candidate replay trace durability, diagnostic-only backtest evidence, and
+      the remaining deploy/rerun blockers.
+- [ ] Apply remaining high-priority data/research cleanup based on audit
+      results: Research Manager action executor, runtime input
+      canonicalization, feature snapshot hard gates, and multi-horizon
+      accounting gates.
 
 ## Review
 
@@ -88,6 +102,22 @@ trace, not dry-run promotion.
   scripts, crates, and tests do not reintroduce that language. Validation
   passed: YAML parse for touched workflows, `python3 -m unittest
   tests.test_persist_research_trace_contract`, and `rtk git diff --check`.
+- 2026-05-23: PR #615 is merged to `main` as
+  `c2e4fde4c74b44d7e03a49d99142cbb702560122`; deploy run `26330884546` is still
+  waiting on the protected `tango-1-1` environment. Mainline research
+  restoration remains unproven until that deploy succeeds and a fresh hosted
+  walk-forward persists trace from the current `main` SHA.
+- 2026-05-23: `factor-review-v2.yml` and `factor-walk-forward-v2.yml` no longer
+  contain the emergency self-hosted direct-DB jobs. They route snapshot-backed
+  requests to hosted artifact workflows and reject missing `snapshot_run_id`.
+- 2026-05-23: `event-ml-rolling-evidence.yml` no longer contains the
+  self-hosted direct-DB export job or hardcoded research DB URL. It now builds
+  only local Event ML executors, downloads a retained event-root dataset
+  artifact on `ubuntu-latest`, and rejects missing `source_dataset_run_id`.
+- 2026-05-23: `scripts/run_factor_research.sh` and
+  `scripts/run_factor_research_matrix.sh` now require
+  `PLOY_ALLOW_DIRECT_FACTOR_RESEARCH=manual-direct-factor-research`, so manual
+  DB research cannot be confused with the artifact-backed mainline path.
 
 # Candidate Replay Durable Trace (2026-05-23)
 

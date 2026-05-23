@@ -14,6 +14,21 @@ set -euo pipefail
 # The binary connects to localhost:5432 on the remote host (no SSH tunnel needed).
 # stderr streams back in real time. Pipe through `tee` to save locally:
 #   ./scripts/run_factor_research.sh ... 2>&1 | tee research-output.log
+#
+# This is a manual direct-DB debug path. The active research chain should use
+# retained dataset/snapshot artifacts. Set the ACK below only for break-glass
+# diagnostics.
+
+ACK="${PLOY_ALLOW_DIRECT_FACTOR_RESEARCH:-}"
+if [[ "${ACK}" != "manual-direct-factor-research" ]]; then
+  cat >&2 <<'EOF'
+run_factor_research.sh is a manual direct-DB debug path.
+Use research-snapshot.yml / hosted artifact workflows for normal research.
+To continue anyway, set:
+  PLOY_ALLOW_DIRECT_FACTOR_RESEARCH=manual-direct-factor-research
+EOF
+  exit 2
+fi
 
 HOST="${PLOY_RESEARCH_HOST:-tango-1-1}"
 BINARY="${PLOY_RESEARCH_BINARY:-/opt/ploy/bin/factor-research}"
