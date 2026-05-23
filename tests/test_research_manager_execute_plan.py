@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.research_manager_execute_plan import (
     EXECUTE_ACK,
@@ -194,6 +195,52 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             self.assertTrue((out / "research-manager-executor.json").exists())
             self.assertTrue((out / "research-manager-executor.md").exists())
             self.assertTrue((out / "next-llm-prior.json").exists())
+
+    def test_cli_records_dispatch_failures_without_dropping_executor_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = root / "plan.json"
+            out = root / "out"
+            plan.write_text(
+                json.dumps(
+                    plan_payload(
+                        "fix_runtime",
+                        ["run_recorded_replay_parity", "compare_runtime_scorer_contract"],
+                    )
+                )
+            )
+            import sys
+
+            argv = sys.argv
+            attempts = [
+                {"workflow": "runtime-candidate-replay.yml", "ok": True, "returncode": 0},
+                {"workflow": "recorded-replay-parity.yml", "ok": False, "returncode": 1},
+            ]
+            try:
+                sys.argv = [
+                    "research_manager_execute_plan.py",
+                    "--plan-json",
+                    str(plan),
+                    "--output-dir",
+                    str(out),
+                    "--mode",
+                    "execute",
+                    "--execute-ack",
+                    EXECUTE_ACK,
+                ]
+                with patch(
+                    "scripts.research_manager_execute_plan._dispatch_gh_workflow",
+                    side_effect=attempts,
+                ):
+                    main()
+            finally:
+                sys.argv = argv
+
+            payload = json.loads((out / "research-manager-executor.json").read_text())
+            self.assertEqual(2, len(payload["dispatch_attempts"]))
+            self.assertTrue(payload["dispatch_attempts"][0]["ok"])
+            self.assertFalse(payload["dispatch_attempts"][1]["ok"])
+            self.assertTrue((out / "research-manager-executor.md").exists())
 
     def test_fix_data_snapshot_dispatch_caps_large_dataset_window(self) -> None:
         payload = build_executor_payload(
