@@ -128,7 +128,7 @@ wait_for_recent_log() {{
   local message="$3"
   local attempts="${{4:-20}}"
   local sleep_secs="${{5:-3}}"
-  local since="${{DEPLOY_VERIFY_SINCE:-${{DEPLOY_STARTED_AT}}}}"
+  local since="${{DEPLOY_STARTED_AT}}"
   for _ in $(seq 1 "${{attempts}}"); do
     if journalctl -u "${{unit}}" --since "${{since}}" --no-pager | grep -E -q "${{pattern}}"; then
       return 0

@@ -28,6 +28,11 @@ strategy promotion.
   bounded follow-up evidence dispatches: `compare_runtime_scorer_contract`
   builds a `runtime-candidate-replay.yml` plan, and
   `run_recorded_replay_parity` builds a `recorded-replay-parity.yml` plan.
+- 2026-05-24: Deploy run `26339975164` proved the SSH path passes the new
+  PM trade postflight, but the Cloud Assistant fallback still failed because
+  the successful-poll window was scoped to the fallback restart timestamp.
+  The PM trade successful-poll check now uses the whole current deploy window
+  (`DEPLOY_STARTED_AT`) while the error guard remains recent.
 
 ## Goal
 
