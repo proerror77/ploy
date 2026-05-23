@@ -5,6 +5,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_042 = ROOT / "migrations" / "042_factor_research_os_registry.sql"
 MIGRATION_043 = ROOT / "migrations" / "043_research_os_trace_constraints.sql"
+MIGRATION_044 = ROOT / "migrations" / "044_candidate_replay_tapes.sql"
 
 
 def research_os_sql() -> str:
@@ -12,6 +13,7 @@ def research_os_sql() -> str:
         [
             MIGRATION_042.read_text(encoding="utf-8"),
             MIGRATION_043.read_text(encoding="utf-8"),
+            MIGRATION_044.read_text(encoding="utf-8"),
         ]
     )
 
@@ -24,6 +26,7 @@ class FactorResearchOsRegistryMigrationTest(unittest.TestCase):
             "research_dataset_snapshots",
             "factor_evaluations",
             "experiment_trace",
+            "candidate_replay_tapes",
         ]:
             self.assertIn(f"CREATE TABLE IF NOT EXISTS {table}", sql)
         self.assertRegex(
@@ -46,8 +49,35 @@ class FactorResearchOsRegistryMigrationTest(unittest.TestCase):
         self.assertIn("promotion_status TEXT NOT NULL DEFAULT 'blocked'", sql)
         self.assertIn("blockers_json JSONB NOT NULL DEFAULT '[]'::jsonb", sql)
         self.assertIn("artifact_kind TEXT NOT NULL DEFAULT 'artifact'", sql)
+        self.assertIn("candidate_replay_id TEXT", sql)
         self.assertIn("hash_prev TEXT", sql)
         self.assertIn("hash_current TEXT NOT NULL", sql)
+
+    def test_candidate_replay_tapes_schema_and_links_exist(self) -> None:
+        sql = research_os_sql()
+        required_snippets = [
+            "candidate_replay_id TEXT PRIMARY KEY",
+            "artifact_sha256 TEXT NOT NULL",
+            "CONSTRAINT uq_candidate_replay_tapes_artifact_sha256 UNIQUE (artifact_sha256)",
+            "basis TEXT NOT NULL",
+            "runtime_score TEXT NOT NULL",
+            "strategy_profile TEXT NOT NULL",
+            "decision_contract_json JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "acceptance_criteria_json JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "metrics_json JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "blocking_risk_flags_json JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "chk_candidate_replay_tapes_basis",
+            "runtime_market_update_replay",
+            "factor_walk_forward_top_bucket_aggregate",
+            "fk_factor_evaluations_candidate_replay",
+            "REFERENCES candidate_replay_tapes(candidate_replay_id)",
+            "fk_experiment_trace_candidate_replay",
+            "idx_candidate_replay_tapes_runtime_score",
+            "idx_candidate_replay_tapes_promotion_ready",
+            "idx_experiment_trace_candidate_replay",
+        ]
+        for snippet in required_snippets:
+            self.assertIn(snippet, sql)
 
     def test_experiment_trace_is_append_only_by_trigger(self) -> None:
         sql = research_os_sql()
@@ -81,6 +111,7 @@ class FactorResearchOsRegistryMigrationTest(unittest.TestCase):
         )
         self.assertIn("042_factor_research_os_registry.sql", workflow)
         self.assertIn("043_research_os_trace_constraints.sql", workflow)
+        self.assertIn("044_candidate_replay_tapes.sql", workflow)
 
 
 if __name__ == "__main__":

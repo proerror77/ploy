@@ -89,6 +89,64 @@ trace, not dry-run promotion.
   passed: YAML parse for touched workflows, `python3 -m unittest
   tests.test_persist_research_trace_contract`, and `rtk git diff --check`.
 
+# Candidate Replay Durable Trace (2026-05-23)
+
+## Goal
+
+Make AutoFactor candidate replay a first-class Research OS trace layer instead
+of an opaque JSON side artifact.
+
+Evidence stage: `executable_replay` for true runtime replay tapes; aggregate
+top-bucket candidate replay remains `diagnostic`.
+
+## Files / Ownership
+
+- `migrations/044_candidate_replay_tapes.sql`
+  - Owner: durable candidate replay table, indexes, and trace/evaluation FKs.
+- `crates/ploy-research/examples/persist_research_trace.rs`
+  - Owner: candidate replay artifact loader, tape writer, replay evaluation
+    linker, and experiment trace entry.
+- `scripts/build_runtime_candidate_strategy_replay.py`
+  - Owner: stable candidate replay identity and provenance fields.
+- `scripts/build_autofactor_candidate_strategy_replay.py`
+  - Owner: aggregate replay diagnostic identity and fail-closed semantics.
+- `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`
+  - Owner: pass candidate replay JSON into durable trace persistence.
+- `.github/workflows/runtime-candidate-replay.yml`
+  - Owner: pass runtime replay provenance into the artifact builder.
+
+## Tasks
+
+- [x] Add `candidate_replay_tapes` durable schema and indexes.
+- [x] Add Research OS typed record for candidate replay tapes.
+- [x] Extend `persist_research_trace` with repeatable `--candidate-replay-json`.
+- [x] Persist candidate replay tapes and link matching factor evaluations.
+- [x] Add runtime candidate replay stable identity/provenance fields.
+- [x] Keep aggregate top-bucket replay as diagnostic and blocked.
+- [x] Wire hosted walk-forward trace persistence to include candidate replay.
+- [x] Run focused Python/Rust/YAML/diff validation.
+
+## Review
+
+- 2026-05-23: Candidate replay is now persisted through
+  `candidate_replay_tapes` with artifact hash, basis, evidence stage,
+  runtime score, strategy profile, decision contract, metrics, blockers, and
+  provenance. `factor_evaluations.candidate_replay_id` and
+  `experiment_trace.candidate_replay_id` link back to the tape.
+- 2026-05-23: True runtime replay artifacts now emit stable
+  `candidate_replay_id`, identity fields, workflow/run provenance, deployment,
+  recording/config paths, runner SHA, and `promotion_decision`. Aggregate
+  top-bucket replay artifacts also get an ID but are explicitly
+  `evidence_stage=diagnostic`, `promotion_ready=false`, and
+  `promotion_decision=blocked`.
+- 2026-05-23: Focused validation passed: YAML parse for touched workflows;
+  `python3 -m py_compile` for replay builders; `python3 -m unittest` for
+  trace contracts, replay builders, sweep, promotion, and closed-loop tests
+  (`98` tests); `rtk cargo check --locked -p ploy-research --features db
+  --example persist_research_trace`; `rtk cargo test --locked --test
+  workflow_security`; `rtk cargo test --locked -p ploy-research
+  research_os::registry --lib`; and `rtk git diff --check`.
+
 # Runtime Candidate Replay Empty Override Repair (2026-05-23)
 
 ## Goal

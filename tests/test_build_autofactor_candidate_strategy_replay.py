@@ -54,9 +54,12 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
             payload["runtime_score"],
             "autofactor_formula:auto_settlement_conservative_settlement_edge",
         )
-        self.assertEqual(payload["evidence_stage"], "executable_replay")
+        self.assertRegex(payload["candidate_replay_id"], r"^candidate_replay:[0-9a-f]{32}$")
+        self.assertEqual(payload["evidence_stage"], "diagnostic")
         self.assertEqual(payload["basis"], "factor_walk_forward_top_bucket_aggregate")
         self.assertEqual(payload["strategy_profile"], "settlement_probability")
+        self.assertEqual(payload["promotion_decision"], "blocked")
+        self.assertEqual(payload["identity"]["basis"], "factor_walk_forward_top_bucket_aggregate")
         self.assertTrue(payload["decision_contract"]["event_level"])
         self.assertTrue(payload["decision_contract"]["one_decision_per_event"])
         self.assertTrue(payload["decision_contract"]["official_settlement"])

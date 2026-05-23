@@ -521,6 +521,13 @@ jobs:
             --run-id "${GITHUB_RUN_ID}"
             --snapshot-dir artifacts/research-snapshot
           )
+          candidate_strategy_replay_json="${WALK_CANDIDATE_STRATEGY_REPLAY_JSON:-}"
+          if [ -z "${candidate_strategy_replay_json}" ] && [ -f artifacts/candidate-strategy-replay/candidate-strategy-replay.json ]; then
+            candidate_strategy_replay_json="artifacts/candidate-strategy-replay/candidate-strategy-replay.json"
+          fi
+          if [ -z "${candidate_strategy_replay_json}" ]; then
+            candidate_strategy_replay_json="$(find artifacts/factor-walk-forward-v2 -name 'candidate-strategy-replay.json' -print -quit 2>/dev/null || true)"
+          fi
           if [ -d artifacts/factor-walk-forward-v2/alpha-search ]; then
             trace_args+=(--alpha-search-dir artifacts/factor-walk-forward-v2/alpha-search)
           fi
@@ -532,6 +539,9 @@ jobs:
           fi
           if [ -f artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json ]; then
             trace_args+=(--handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json)
+          fi
+          if [ -n "${candidate_strategy_replay_json}" ] && [ -f "${candidate_strategy_replay_json}" ]; then
+            trace_args+=(--candidate-replay-json "${candidate_strategy_replay_json}")
           fi
 
           case "${db_host}" in
@@ -583,6 +593,11 @@ jobs:
               if [ -d artifacts/factor-walk-forward-v2 ]; then
                 cp -R artifacts/factor-walk-forward-v2 /tmp/research-trace-input/
               fi
+              if [ -n "${candidate_strategy_replay_json}" ] && [ -f "${candidate_strategy_replay_json}" ]; then
+                mkdir -p /tmp/research-trace-input/candidate-strategy-replay
+                cp "${candidate_strategy_replay_json}" \
+                  /tmp/research-trace-input/candidate-strategy-replay/candidate-strategy-replay.json
+              fi
               tar -C /tmp/research-trace-input -cf /tmp/research-trace-input.tar .
               # shellcheck disable=SC2029
               ssh tango-1-1 "rm -rf '${remote_dir}' && mkdir -p '${remote_dir}'"
@@ -612,6 +627,9 @@ jobs:
           fi
           if [ -f "${remote_dir}/factor-walk-forward-v2/autofactor-strategy-handoff.json" ]; then
             trace_args+=(--handoff-json "${remote_dir}/factor-walk-forward-v2/autofactor-strategy-handoff.json")
+          fi
+          if [ -f "${remote_dir}/candidate-strategy-replay/candidate-strategy-replay.json" ]; then
+            trace_args+=(--candidate-replay-json "${remote_dir}/candidate-strategy-replay/candidate-strategy-replay.json")
           fi
           DATABASE_URL="${db_url}" "${persist_bin}" "${trace_args[@]}"
           EOF

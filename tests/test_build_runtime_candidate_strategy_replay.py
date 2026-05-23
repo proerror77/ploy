@@ -139,7 +139,14 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         )
 
         self.assertTrue(payload["promotion_ready"])
+        self.assertRegex(payload["candidate_replay_id"], r"^candidate_replay:[0-9a-f]{32}$")
         self.assertEqual(payload["basis"], "runtime_market_update_replay")
+        self.assertEqual(payload["evidence_stage"], "executable_replay")
+        self.assertEqual(payload["promotion_decision"], "promote_to_runtime")
+        self.assertEqual(payload["source_workflow"], "runtime-candidate-replay.yml")
+        self.assertEqual(payload["identity"]["runtime_score"], payload["runtime_score"])
+        self.assertEqual(payload["identity"]["basis"], "runtime_market_update_replay")
+        self.assertEqual(len(payload["runtime_evaluation_sha256"]), 64)
         self.assertEqual(payload["metrics"]["trade_count"], 2)
         self.assertEqual(payload["metrics"]["unique_event_count"], 2)
         self.assertEqual(payload["metrics"]["settlement_event_count"], 2)
@@ -325,6 +332,7 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         )
 
         self.assertFalse(payload["promotion_ready"])
+        self.assertEqual(payload["promotion_decision"], "blocked")
         self.assertIn("official_settlement_missing:0<2", payload["blocking_risk_flags"])
         self.assertIn("full_depth_entry_not_confirmed", payload["blocking_risk_flags"])
 
