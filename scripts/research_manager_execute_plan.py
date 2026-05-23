@@ -53,7 +53,7 @@ def _research_snapshot_dispatch(
     options = {
         "data_profile": "pm5d-execution",
         "data_gate": "warn",
-        "upload_full_snapshot": True,
+        "upload_sampled_snapshot": True,
     }
     blockers: list[str] = []
     if not _parse_symbols(symbols):

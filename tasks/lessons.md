@@ -94,13 +94,13 @@
   - After boot, use Cloud Assistant if needed to run `systemctl enable --now actions.runner.proerror77-ploy.ploy-ci-1.service`.
   - Confirm queued workflow runs move to `in_progress` before assuming ploy-ci work has actually started.
 
-- Pattern: AutoFactor / settlement-probability PRD downstream evidence does not need a live self-hosted runner once a full research snapshot artifact exists.
+- Pattern: AutoFactor / settlement-probability PRD downstream evidence does not need a live self-hosted runner once a complete sampled research snapshot artifact exists.
 - Rule: Prefer GitHub-hosted `ubuntu-latest` artifact workflows for AutoFactor mining, promotion, and dry-run handoff gates. Treat `ploy-ci-1` as a legacy DB-adjacent fallback only for fresh snapshot/export work that still requires Tango private-network database access.
 - Migration guardrail:
   - Do not describe `ploy-ci-1` as the default research/backtest runner for current PM5D evidence. Name the GitHub-hosted artifact path first, then call out `ploy-ci-1` only if fresh private-network DB export is the actual blocker.
   - Use `factor-walk-forward-v2-hosted-artifact.yml` or `settlement-probability-prd-gate.yml` with `snapshot_run_id` before dispatching legacy `factor-walk-forward-v2.yml`.
   - Do not move a DB/private-endpoint workflow to GitHub-hosted runners by changing only `runs-on`; first replace the data source with a portable artifact or a hosted-safe export path.
-  - When a full snapshot artifact exists, do not block strategy promotion on `ploy-ci-1` availability.
+  - When a complete sampled snapshot artifact exists, do not block strategy promotion on `ploy-ci-1` availability.
 
 ## 2026-03-06
 
@@ -278,7 +278,7 @@
   snapshot manifest.
 - Rule: Artifact-backed research loops should resolve default windows from the
   snapshot manifest and run sub-window searches against the retained artifact.
-  Do not re-export a full snapshot or rely on hidden inclusive-date semantics
+  Do not re-export a sampled snapshot or rely on hidden inclusive-date semantics
   just to test another factor window.
 
 ## 2026-05-13
@@ -295,7 +295,7 @@
   residual runtime orders/fills.
 
 - Pattern: GitHub-hosted artifact workflows are now the default efficient
-  research/search surface once a full snapshot artifact exists, but older notes
+  research/search surface once a complete sampled snapshot artifact exists, but older notes
   and habits still point agents at `ploy-ci-1`.
 - Rule: For PM5D AutoFactor mining, walk-forward promotion, and dry-run handoff
   checks, use GitHub-hosted artifact workflows by default. Treat `ploy-ci-1` as

@@ -128,6 +128,34 @@ class PersistResearchTraceContractTest(unittest.TestCase):
                         offenders.append(f"{path.relative_to(ROOT)}: {needle}")
         self.assertEqual([], offenders)
 
+    def test_active_sampled_snapshot_api_uses_canonical_names(self) -> None:
+        forbidden_identifiers = [
+            "upload_" + "full_snapshot",
+            "full_" + "snapshot_embedded",
+            "SNAPSHOT_UPLOAD_" + "FULL_SNAPSHOT",
+        ]
+        active_paths = [
+            ROOT / ".github" / "workflows" / "research-snapshot.yml",
+            ROOT / ".github" / "workflows" / "factor-review-v2-hosted-artifact.yml",
+            ROOT / ".github" / "workflows" / "factor-walk-forward-v2-hosted-artifact.yml",
+            ROOT / "scripts" / "research_manager_execute_plan.py",
+            ROOT / "scripts" / "run_settlement_probability_prd_gate.py",
+        ]
+        offenders: list[str] = []
+        for path in active_paths:
+            text = path.read_text(encoding="utf-8")
+            for needle in forbidden_identifiers:
+                if needle in text:
+                    offenders.append(f"{path.relative_to(ROOT)}: {needle}")
+        self.assertEqual([], offenders)
+
+        snapshot_workflow = (ROOT / ".github" / "workflows" / "research-snapshot.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("upload_sampled_snapshot", snapshot_workflow)
+        self.assertIn("sampled_snapshot_embedded=", snapshot_workflow)
+        self.assertIn('"upload_" + "full_snapshot": "upload_sampled_snapshot"', snapshot_workflow)
+
     def test_hosted_walk_forward_persists_trace_by_default(self) -> None:
         workflow = HOSTED_WALK.read_text(encoding="utf-8")
         persist_step = workflow.split("- name: Persist Research OS trace", 1)[1].split(

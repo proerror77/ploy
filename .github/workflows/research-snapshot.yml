@@ -26,7 +26,7 @@ on:
       options_json:
         description: "Advanced options JSON: optional start_ts/end_ts, sampling, optimizer_data_dir, data_profile, audit gate, and optional complete sampled snapshot upload"
         required: false
-        default: '{"start_ts":"","end_ts":"","lob_sample_secs":30,"pm_book_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":"","upload_full_snapshot":true}'
+        default: '{"start_ts":"","end_ts":"","lob_sample_secs":30,"pm_book_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":"","upload_sampled_snapshot":true}'
 
 concurrency:
   group: research-snapshot-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}-${{ github.event.inputs.symbols }}
@@ -78,9 +78,12 @@ jobs:
               "audit_lookback_hours": "168",
               "data_gate": "never",
               "snapshot_registry_dir": "",
-              "upload_full_snapshot": "true",
+              "upload_sampled_snapshot": "true",
           }
-          bool_keys = {"upload_full_snapshot"}
+          legacy_aliases = {
+              "upload_" + "full_snapshot": "upload_sampled_snapshot",
+          }
+          bool_keys = {"upload_sampled_snapshot"}
           choices = {
               "data_profile": {"pm5d-execution", "pm5d-vol", "all", "custom"},
               "data_gate": {"critical", "warn", "never"},
@@ -89,9 +92,16 @@ jobs:
           data = json.loads(raw) if raw else {}
           if not isinstance(data, dict):
               raise SystemExit("options_json must be a JSON object")
-          unknown = sorted(set(data) - set(defaults))
+          unknown = sorted(set(data) - set(defaults) - set(legacy_aliases))
           if unknown:
               raise SystemExit(f"unknown options_json keys: {', '.join(unknown)}")
+          for legacy_key, canonical_key in legacy_aliases.items():
+              if legacy_key in data:
+                  if canonical_key in data:
+                      raise SystemExit(
+                          f"options_json cannot include both {legacy_key} and {canonical_key}"
+                      )
+                  data[canonical_key] = data.pop(legacy_key)
 
           values = dict(defaults)
           for key, value in data.items():
@@ -115,7 +125,7 @@ jobs:
                       raise SystemExit(f"options_json value for {key} must be single-line")
                   handle.write(f"SNAPSHOT_{key.upper()}={value}\n")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-              handle.write(f"upload_full_snapshot={values['upload_full_snapshot']}\n")
+              handle.write(f"upload_sampled_snapshot={values['upload_sampled_snapshot']}\n")
           PY
 
       - name: Configure SSH
@@ -452,14 +462,14 @@ jobs:
           done
           {
             echo "run_id=${GITHUB_RUN_ID}"
-            echo "full_snapshot_embedded=${SNAPSHOT_UPLOAD_FULL_SNAPSHOT}"
+            echo "sampled_snapshot_embedded=${SNAPSHOT_UPLOAD_SAMPLED_SNAPSHOT}"
             echo "registry=tango-remote"
             echo "execution_host=tango-1-1"
             echo "workflow_runner=ubuntu-latest"
           } > artifacts/research-snapshot-provenance/source.txt
 
       - name: Upload complete sampled snapshot artifact
-        if: ${{ steps.snapshot_options.outputs.upload_full_snapshot == 'true' }}
+        if: ${{ steps.snapshot_options.outputs.upload_sampled_snapshot == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: research-snapshot-${{ github.run_id }}
