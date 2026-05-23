@@ -851,6 +851,20 @@ fn factor_review_comments_are_factor_attribution_not_deployable_candidates() {
             }
         }
     }
+    for needle in [
+        "evidence-stage.json",
+        "\"kind\": \"research_evidence_stage\"",
+        "\"promotion_ready\": false",
+        "\"promotion_decision\": \"do_not_promote_from_factor_review\"",
+        "\"allowed_next_stage\": \"walk_forward\"",
+        "\"blocked_next_stages\": [\"dry_run_candidate\", \"live_candidate\"]",
+    ] {
+        if !hosted.contains(needle) {
+            offenders.push(format!(
+                "factor-review-v2-hosted-artifact.yml: missing artifact stage contract `{needle}`"
+            ));
+        }
+    }
 
     assert!(
         offenders.is_empty(),
