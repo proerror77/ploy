@@ -186,7 +186,7 @@ def promotion_args(args: argparse.Namespace, report: Path, variant_dir: Path) ->
     command.extend(["--candidate-strategy-replay-json", replay_json])
     if args.snapshot_manifest_json:
         command.extend(["--snapshot-manifest-json", args.snapshot_manifest_json])
-    registry_preview = factor_registry_preview_path(variant_dir)
+    registry_preview = factor_registry_preview_path(variant_dir, args.allowed_target)
     if registry_preview:
         command.extend(["--factor-registry-preview-json", str(registry_preview)])
         command.append("--require-runtime-contract")
@@ -216,7 +216,7 @@ def candidate_replay_args(
         "--evidence",
         str(report),
     ]
-    registry_preview = factor_registry_preview_path(variant_dir)
+    registry_preview = factor_registry_preview_path(variant_dir, args.allowed_target)
     if registry_preview:
         command.extend(["--factor-registry-preview-json", str(registry_preview)])
         command.append("--require-runtime-contract")
@@ -227,12 +227,38 @@ def candidate_replay_args(
     return command
 
 
-def factor_registry_preview_path(variant_dir: Path) -> Path | None:
+def factor_registry_preview_path(variant_dir: Path, allowed_targets: list[str]) -> Path | None:
     alpha_root = variant_dir / "alpha-search"
     if not alpha_root.exists():
         return None
     previews = sorted(alpha_root.rglob("factor-registry-preview.json"))
-    return previews[0] if previews else None
+    if not previews:
+        return None
+
+    targets = allowed_targets or ["full_depth_settlement_executable_pnl"]
+    for target in targets:
+        exact = alpha_root / target / "factor-registry-preview.json"
+        if exact.exists():
+            return exact
+
+    for target in targets:
+        for preview in previews:
+            try:
+                payload = json.loads(preview.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as err:
+                raise SystemExit(f"invalid factor registry preview {preview}: {err}") from err
+            if payload.get("target") == target:
+                return preview
+
+    if len(previews) == 1:
+        return previews[0]
+
+    available = ", ".join(str(path.relative_to(alpha_root).parent) for path in previews)
+    requested = ", ".join(targets)
+    raise SystemExit(
+        "no factor registry preview matched allowed target(s): "
+        f"{requested}; available target dirs: {available}"
+    )
 
 
 def ranked_factor_rows(promotion: dict[str, Any], allowed_targets: set[str]) -> list[dict[str, Any]]:

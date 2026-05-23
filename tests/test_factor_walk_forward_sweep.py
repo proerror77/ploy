@@ -374,6 +374,103 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertEqual(first_marker, "<empty>")
         self.assertEqual(second_marker, "auto_settlement")
 
+    def test_runtime_contract_preview_selection_matches_allowed_target(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            factor_name = "mut_spread_adjusted_external_move_full_depth_entry_gate"
+            binary = tmp / "fake_factor_walk_forward.py"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "if '--alpha-search-output-dir' in args:\n"
+                "    root = pathlib.Path(args[args.index('--alpha-search-output-dir') + 1])\n"
+                "    def write_preview(target, factors):\n"
+                "        out = root / target\n"
+                "        out.mkdir(parents=True, exist_ok=True)\n"
+                "        (out / 'factor-registry-preview.json').write_text(\n"
+                "            json.dumps({\n"
+                "                'version': 'alpha_search_artifacts_v1',\n"
+                "                'target': target,\n"
+                "                'horizon': '5m',\n"
+                "                'factors': factors,\n"
+                "            }, indent=2, sort_keys=True),\n"
+                "            encoding='utf-8',\n"
+                "        )\n"
+                "    contract = {\n"
+                "        'version': 'autofactor_runtime_contract_v1',\n"
+                "        'dsl_hash': 'dsl:tradeable',\n"
+                "        'ast_json': {'op': 'mul'},\n"
+                "        'runtime_score': 'autofactor_formula:"
+                f"{factor_name}',\n"
+                "        'strategy_profile': 'settlement_probability',\n"
+                "        'strategy_family': 'predictive_settlement_probability',\n"
+                "        'input_names': ['external_move_since_poly_update'],\n"
+                "        'ast_input_names': ['external_move_since_poly_update'],\n"
+                "        'runtime_input_names': ['direction_sign', 'drift_30s'],\n"
+                "        'input_mappings': [\n"
+                "            {'ast_input': 'external_move_since_poly_update', 'runtime_input': 'direction_sign'},\n"
+                "            {'ast_input': 'external_move_since_poly_update', 'runtime_input': 'drift_30s'},\n"
+                "        ],\n"
+                "        'blockers': [],\n"
+                "    }\n"
+                "    write_preview('full_depth_settlement_executable_pnl', [\n"
+                "        {'factor_name': 'auto_settlement_conservative_settlement_edge', 'blockers': []}\n"
+                "    ])\n"
+                "    write_preview('tradeable_full_depth_settlement_pnl', [\n"
+                f"        {{'factor_name': {factor_name!r}, 'runtime_contract': contract, 'blockers': []}}\n"
+                "    ])\n"
+                f"{FAKE_TRADEABLE_HARD_GATE_BY_FILTER}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+
+            subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--factor-name-filter",
+                    "external_move",
+                    "--allowed-target",
+                    "tradeable_full_depth_settlement_pnl",
+                    "--alpha-search-output-dir",
+                    str(tmp / "out" / "alpha-search"),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            summary = json.loads((tmp / "out" / "sweep-summary.json").read_text(encoding="utf-8"))
+            replay = json.loads(
+                (tmp / "out" / "candidate-strategy-replay.json").read_text(encoding="utf-8")
+            )
+            promotion = json.loads(
+                (tmp / "out" / "autofactor-strategy-promotion.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(
+            replay["runtime_score"],
+            f"autofactor_formula:{factor_name}",
+        )
+        self.assertNotIn(
+            f"missing_runtime_contract:{factor_name}",
+            replay["blocking_risk_flags"],
+        )
+        self.assertEqual(
+            summary["variants"][0]["best_runtime_mappable_factor"]["name"],
+            factor_name,
+        )
+        evaluated = promotion["evaluated_factors"][0]
+        self.assertEqual(evaluated["factor"]["name"], factor_name)
+        self.assertEqual(
+            evaluated["runtime_mapping"]["runtime_score"],
+            f"autofactor_formula:{factor_name}",
+        )
+        self.assertNotIn(f"missing_runtime_contract:{factor_name}", evaluated["blockers"])
+
     def test_summary_marks_predictive_formula_mutation_runtime_mappable(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
