@@ -48,6 +48,8 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("evaluation_kind = 'candidate_replay'", source)
         self.assertIn("candidate_replay_id = $3", source)
         self.assertIn("ON CONFLICT (candidate_replay_id) DO UPDATE", source)
+        self.assertIn("canonical_candidate_replay_evidence_stage", source)
+        self.assertIn("contradicts basis", source)
         self.assertIn('"promotion_registry" | "autofactor_promotion" | "strategy_handoff" => "walk_forward"', source)
         self.assertIn("preview_factors(&preview)", source)
         self.assertIn("target_from_preview_path(&path)", source)
@@ -190,6 +192,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("--example persist_research_trace", workflow)
         self.assertIn("--example research_trace_plan", workflow)
         self.assertIn("044_candidate_replay_tapes.sql", workflow)
+        self.assertIn("045_candidate_replay_basis_stage_constraint.sql", workflow)
 
     def test_research_trace_plan_reads_durable_tables(self) -> None:
         source = TRACE_PLAN.read_text(encoding="utf-8")

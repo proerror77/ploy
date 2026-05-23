@@ -48,6 +48,17 @@ CREATE TABLE IF NOT EXISTS candidate_replay_tapes (
                 'live_candidate'
             )
         ),
+    CONSTRAINT chk_candidate_replay_tapes_basis_evidence_stage
+        CHECK (
+            (
+                basis = 'runtime_market_update_replay'
+                AND evidence_stage = 'executable_replay'
+            )
+            OR (
+                basis = 'factor_walk_forward_top_bucket_aggregate'
+                AND evidence_stage = 'diagnostic'
+            )
+        ),
     CONSTRAINT chk_candidate_replay_tapes_blockers_array
         CHECK (jsonb_typeof(blocking_risk_flags_json) = 'array'),
     CONSTRAINT chk_candidate_replay_tapes_promotion_decision

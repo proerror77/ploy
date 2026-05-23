@@ -49,10 +49,17 @@ trace, not dry-run promotion.
 - [x] Refresh the research/data architecture review to reflect PR #610-#615,
       candidate replay trace durability, diagnostic-only backtest evidence, and
       the remaining deploy/rerun blockers.
+- [x] Rerun hosted walk-forward from current `main` with durable trace
+      persistence after the trace-gate merge.
+- [x] Archive immediately-safe legacy research/debug scripts from the active
+      `scripts/` root.
+- [x] Add a durable trace hard gate so candidate replay `basis` and
+      `evidence_stage` cannot contradict each other.
+- [x] Add a default-dry-run Research Manager executor workflow that turns
+      trace-plan actions into auditable bounded follow-up research dispatches.
 - [ ] Apply remaining high-priority data/research cleanup based on audit
-      results: Research Manager action executor, runtime input
-      canonicalization, feature snapshot hard gates, and multi-horizon
-      accounting gates.
+      results: runtime input canonicalization, feature snapshot hard gates, and
+      multi-horizon accounting gates.
 
 ## Review
 
@@ -96,6 +103,30 @@ trace, not dry-run promotion.
   --example factor_review_v2 --example factor_walk_forward_v2`; and `rtk git
   diff --check`. `actionlint` was not installed in this worktree/PATH, so it
   was not run for this slice.
+- 2026-05-23: Fresh hosted walk-forward from current `main` initially failed in
+  run `26333356769` because snapshot `26327019766` only contained
+  `BTCUSDT,ETHUSDT,SOLUSDT` while the dispatch requested six symbols. Rerun
+  `26333447143` with the snapshot-scoped symbols succeeded, uploaded
+  `research-trace/persisted.env`, and recorded
+  `evidence_stages=factor_attribution,walk_forward`.
+- 2026-05-23: Archived `scripts/simulate_backtest.py` and the self-deprecated
+  `scripts/train_crypto_lob_mlp_onnx_from_db.py` under
+  `scripts/archive/research-debug/`. Kept `run_factor_research*.sh` as
+  explicit break-glass and left quote backfill scripts untouched pending repair
+  completion evidence.
+- 2026-05-23: Added candidate replay stage/basis hardening.
+  `persist_research_trace` now derives canonical replay `evidence_stage` from
+  `basis` and rejects spoofed contradictions such as top-bucket diagnostic
+  artifacts claiming `executable_replay`. Migration
+  `045_candidate_replay_basis_stage_constraint.sql` adds the same DB-level
+  guard for future rows.
+- 2026-05-23: Added `research-manager-execute-plan.yml` plus
+  `scripts/research_manager_execute_plan.py`. The executor reads
+  `research-trace-plan.json`, writes `research-manager-executor.json/.md`, can
+  generate a typed-prior artifact, and remains dry-run unless
+  `execute_ack=execute-research-manager-plan` is provided. Execute mode is
+  limited to research workflows such as snapshot refresh and hosted
+  walk-forward continuation.
 - 2026-05-23: Active workflow/docs/script contracts now call retained
   snapshots `complete sampled research snapshot` artifacts instead of `full`
   snapshots/full payloads. Added a regression test so active docs, workflows,

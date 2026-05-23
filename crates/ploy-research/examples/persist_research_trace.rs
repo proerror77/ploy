@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use ploy_research::ResearchSnapshotManifest;
 use ploy_research::autofactor_target_horizon;
@@ -422,13 +422,17 @@ fn candidate_replay_row(
     let artifact_sha256 = file_sha256(path)?;
     let basis = string_field(&artifact_json, "basis")
         .with_context(|| format!("{} missing basis", path.display()))?;
-    let evidence_stage = string_field(&artifact_json, "evidence_stage").unwrap_or_else(|| {
-        if basis == "factor_walk_forward_top_bucket_aggregate" {
-            "diagnostic".to_string()
-        } else {
-            "executable_replay".to_string()
-        }
-    });
+    let evidence_stage = canonical_candidate_replay_evidence_stage(
+        &basis,
+        string_field(&artifact_json, "evidence_stage").as_deref(),
+    )
+    .with_context(|| {
+        format!(
+            "{} has invalid candidate replay basis/evidence_stage",
+            path.display()
+        )
+    })?
+    .to_string();
     let candidate_replay_id = string_field(&artifact_json, "candidate_replay_id")
         .unwrap_or_else(|| format!("candidate_replay:{}", &artifact_sha256[..32]));
     let source_factor = artifact_json
@@ -516,6 +520,25 @@ fn candidate_replay_row(
         promotion_decision,
         artifact_path: path.to_path_buf(),
     })
+}
+
+fn canonical_candidate_replay_evidence_stage(
+    basis: &str,
+    explicit_evidence_stage: Option<&str>,
+) -> Result<&'static str> {
+    let canonical = match basis {
+        "runtime_market_update_replay" => "executable_replay",
+        "factor_walk_forward_top_bucket_aggregate" => "diagnostic",
+        other => bail!("unsupported candidate replay basis: {other}"),
+    };
+    if let Some(explicit) = explicit_evidence_stage {
+        if explicit != canonical {
+            bail!(
+                "candidate replay evidence_stage {explicit} contradicts basis {basis}; expected {canonical}"
+            );
+        }
+    }
+    Ok(canonical)
 }
 
 fn factor_name_from_runtime_score(value: &Value) -> Option<String> {
@@ -1341,6 +1364,36 @@ mod tests {
             &json!({"blockers": ["a", "c"]}),
         );
         assert_eq!(blockers, json!(["a", "b", "c"]));
+    }
+
+    #[test]
+    fn candidate_replay_stage_is_derived_from_basis() {
+        assert_eq!(
+            canonical_candidate_replay_evidence_stage("runtime_market_update_replay", None)
+                .expect("runtime basis"),
+            "executable_replay"
+        );
+        assert_eq!(
+            canonical_candidate_replay_evidence_stage(
+                "factor_walk_forward_top_bucket_aggregate",
+                None
+            )
+            .expect("diagnostic basis"),
+            "diagnostic"
+        );
+    }
+
+    #[test]
+    fn candidate_replay_rejects_stage_basis_mismatch() {
+        let err = canonical_candidate_replay_evidence_stage(
+            "factor_walk_forward_top_bucket_aggregate",
+            Some("executable_replay"),
+        )
+        .expect_err("stage spoofing must fail");
+        assert!(
+            err.to_string().contains("contradicts basis"),
+            "unexpected error: {err:#}"
+        );
     }
 
     fn preview_plan(alpha_search_dir: PathBuf) -> TracePlan {
