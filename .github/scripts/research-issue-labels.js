@@ -39,6 +39,10 @@ const LABEL_DEFINITIONS = {
     color: "1d76db",
     description: "Issue has backtest workflow evidence",
   },
+  "evidence:diagnostic": {
+    color: "1d76db",
+    description: "Issue has diagnostic research evidence; not deployable by itself",
+  },
   "evidence:factor-review": {
     color: "1d76db",
     description: "Issue has factor review workflow evidence",

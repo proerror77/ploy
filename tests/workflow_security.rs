@@ -777,6 +777,7 @@ fn research_issue_workflows_apply_decision_labels() {
         "decision:fix-data",
         "decision:fix-runtime",
         "evidence:factor-attribution",
+        "evidence:diagnostic",
         "evidence:missing-metrics",
         "parity:blocked",
     ] {
