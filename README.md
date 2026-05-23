@@ -378,13 +378,19 @@ ploy ev --price 95 --probability 97            # Calculate expected value for ne
 
 ### Collector And Backfill
 
-Use the right command for the right data job:
+Current data work is split between CI-managed collectors and artifact-backed
+research workflows. Treat older `ploy collect`, `ploy orderbook-history`, and
+`ploy strategy backfill-*` references as archived compatibility paths.
 
-- `ploy collect` for continuous live/raw synchronized capture
-- `ploy collect --check-only` for a lightweight freshness / duplicate report
-- `ploy orderbook-history` for historical PM L2 snapshots by token ID
-- `ploy deribit-iv-backfill` for historical Deribit IV bars
-- `ploy strategy backfill-*` for offline replay / settlement / kline prep
+- `.github/workflows/deploy-tango-1-1.yml` deploys the CI-built
+  `/opt/ploy/bin/ploy-runner` and collector systemd units on `tango-1-1`.
+- `/opt/ploy/bin/ploy-runner collect-*` commands are foreground operator
+  diagnostics on the data host, not promotion evidence.
+- `.github/workflows/research-snapshot.yml` creates retained sampled research
+  artifacts.
+- `factor-review-v2.yml`, `factor-walk-forward-v2.yml`, and
+  `runtime-candidate-replay.yml` produce attribution, walk-forward, and runtime
+  replay evidence from retained artifacts.
 
 See [docs/COLLECTOR_RUNBOOK.md](docs/COLLECTOR_RUNBOOK.md) for examples and workflow guidance.
 
@@ -540,8 +546,13 @@ ploy rl agent --symbol BTCUSDT --market btc-price-series-15m \
 ### Data Collection
 
 ```bash
-ploy collect --symbols BTCUSDT --duration 60         # Collect data for lag analysis
-ploy orderbook-history --asset-ids <ids>             # Backfill L2 orderbook history
+gh workflow run research-snapshot.yml \
+  -f git_ref=main \
+  -f start_date=2026-05-16 \
+  -f end_date=2026-05-18 \
+  -f symbols=BTCUSDT,ETHUSDT,SOLUSDT
+
+/opt/ploy/bin/ploy-runner check-db --db-url "$PLOY_DATABASE__URL"
 ```
 
 ## Architecture
