@@ -15,6 +15,13 @@ strategy promotion.
 - [x] Validate workflow/script syntax and targeted tests.
 - [x] Use the restored Research Manager `fix_runtime` plan to run or repair
       runtime scorer contract / recorded replay parity.
+- [x] Remove the weak hardcoded runtime replay default from Research Manager
+      execution; runtime candidate replay now requires an explicit score or an
+      unblocked typed runtime contract from the trace plan.
+- [x] Promote unblocked runtime-contract candidates to a first-class Research
+      Manager `candidate_to_runtime_replay` plan action.
+- [x] Refresh the research/data architecture review with the successful
+      executor/parity runs and the blocked zero-order candidate replay.
 
 ### Review
 
@@ -33,6 +40,12 @@ strategy promotion.
   the successful-poll window was scoped to the fallback restart timestamp.
   The PM trade successful-poll check now uses the whole current deploy window
   (`DEPLOY_STARTED_AT`) while the error guard remains recent.
+- 2026-05-24: Research Manager executor run `26340671822` proved closed-loop
+  evidence dispatch from `main`; runtime candidate replay `26340673836` was
+  correctly blocked with `0` intents/orders/fills, while recorded replay parity
+  `26340674276` reported strict parity ready. The executor no longer falls back
+  to the previously hardcoded weak AutoFactor score and instead derives replay
+  candidates from unblocked typed runtime contracts or fails closed.
 
 ## Goal
 

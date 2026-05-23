@@ -89,3 +89,7 @@ collection behavior.
   Artifact-backed research starts with `research-snapshot.yml`, routes through
   hosted factor review/walk-forward workflows, persists Research OS trace, and
   lets `research-trace-plan.yml` produce the next bounded research action.
+- Treat `--allow-direct-db-debug` and `--allow-legacy-snapshot-build` as
+  audited manual exceptions. They may reproduce old evidence or debug a data
+  incident, but they must not feed promotion, handoff issues, config PRs, or
+  Research Manager "ready" decisions.

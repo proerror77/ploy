@@ -137,9 +137,9 @@ async fn factor_registry_summary(pool: &PgPool, limit: usize) -> Result<Value> {
     )
     .fetch_all(pool)
     .await?;
-    let recent: Vec<(String, String, String, String, String, Value)> = sqlx::query_as(
+    let recent: Vec<(String, String, String, String, String, Value, Value)> = sqlx::query_as(
         r#"
-        SELECT factor_name, dsl_hash, target, horizon, status, runtime_contract
+        SELECT factor_name, dsl_hash, target, horizon, status, runtime_contract, blockers_json
         FROM factor_registry
         ORDER BY created_at DESC
         LIMIT $1
@@ -162,6 +162,7 @@ async fn factor_registry_summary(pool: &PgPool, limit: usize) -> Result<Value> {
                 "horizon": row.3,
                 "status": row.4,
                 "runtime_contract": row.5,
+                "blockers": row.6,
             })
         }).collect::<Vec<_>>()
     }))

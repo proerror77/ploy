@@ -257,6 +257,81 @@ def _recorded_replay_parity_dispatch(
     }
 
 
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item)]
+
+
+def _runtime_candidate_from_plan(
+    plan_payload: dict[str, Any],
+    *,
+    strategy_profile: str,
+    source_target: str,
+    source_horizon: str,
+) -> dict[str, str] | None:
+    """Select the newest typed, unblocked runtime contract from the trace plan."""
+
+    summary = ((plan_payload.get("input") or {}).get("factor_registry_summary") or {})
+    recent = summary.get("recent_factors")
+    if not isinstance(recent, list):
+        return None
+    for item in recent:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "")
+        if status and status not in {"candidate", "watchlist"}:
+            continue
+        contract = item.get("runtime_contract")
+        if not isinstance(contract, dict):
+            continue
+        blockers = set(_string_list(item.get("blockers"))) | set(
+            _string_list(contract.get("blockers"))
+        )
+        if blockers:
+            continue
+        if contract.get("version") != "autofactor_runtime_contract_v1":
+            continue
+        runtime_score = str(contract.get("runtime_score") or "")
+        contract_profile = str(contract.get("strategy_profile") or "")
+        contract_target = str(contract.get("target") or item.get("target") or "")
+        contract_horizon = str(contract.get("horizon") or item.get("horizon") or "")
+        if not runtime_score or not contract_profile:
+            continue
+        if strategy_profile and contract_profile != strategy_profile:
+            continue
+        if source_target and contract_target and contract_target != source_target:
+            continue
+        if source_horizon and contract_horizon and contract_horizon != source_horizon:
+            continue
+        return {
+            "factor_name": str(item.get("factor_name") or item.get("name") or ""),
+            "runtime_score": runtime_score,
+            "strategy_profile": contract_profile,
+            "source_target": contract_target or source_target,
+            "source_horizon": contract_horizon or source_horizon,
+        }
+    return None
+
+
+def _runtime_replay_args(args: argparse.Namespace, plan_payload: dict[str, Any]) -> dict[str, Any]:
+    selected = _runtime_candidate_from_plan(
+        plan_payload,
+        strategy_profile=args.runtime_strategy_profile,
+        source_target=args.runtime_source_target,
+        source_horizon=args.runtime_source_horizon,
+    )
+    return {
+        "runtime_score": args.runtime_score or (selected or {}).get("runtime_score", ""),
+        "strategy_profile": args.runtime_strategy_profile
+        or (selected or {}).get("strategy_profile", ""),
+        "source_target": (selected or {}).get("source_target") or args.runtime_source_target,
+        "source_horizon": (selected or {}).get("source_horizon") or args.runtime_source_horizon,
+        "selected_factor_name": (selected or {}).get("factor_name", ""),
+        "extra_blockers": [] if args.runtime_score or selected else ["missing_runtime_candidate_contract"],
+    }
+
+
 def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any]) -> dict[str, Any]:
     if plan_payload.get("schema_version") != "research_trace_plan.v1":
         raise SystemExit("research_trace_plan schema mismatch")
@@ -293,22 +368,29 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
             )
         )
 
-    if "compare_runtime_scorer_contract" in actions:
+    if "compare_runtime_scorer_contract" in actions or "build_runtime_candidate_replay" in actions:
+        replay_args = _runtime_replay_args(args, plan_payload)
         dispatches.append(
             _runtime_candidate_replay_dispatch(
                 deployment_id=args.runtime_deployment_id,
                 config_path=args.runtime_config_path,
                 recording_path=args.runtime_recording_path,
-                runtime_score=args.runtime_score,
-                strategy_profile=args.runtime_strategy_profile,
+                runtime_score=replay_args["runtime_score"],
+                strategy_profile=replay_args["strategy_profile"],
                 issue_number=args.runtime_issue_number,
                 min_trade_count=args.runtime_min_trade_count,
                 min_fill_rate=args.runtime_min_fill_rate,
                 min_roi=args.runtime_min_roi,
-                source_target=args.runtime_source_target,
-                source_horizon=args.runtime_source_horizon,
+                source_target=replay_args["source_target"],
+                source_horizon=replay_args["source_horizon"],
             )
         )
+        if replay_args["extra_blockers"]:
+            dispatches[-1]["blockers"].extend(replay_args["extra_blockers"])
+            dispatches[-1]["blockers"] = sorted(set(dispatches[-1]["blockers"]))
+            dispatches[-1]["ready"] = False
+        if replay_args["selected_factor_name"]:
+            dispatches[-1]["selected_factor_name"] = replay_args["selected_factor_name"]
 
     if "run_recorded_replay_parity" in actions:
         dispatches.append(
@@ -384,7 +466,9 @@ def render_markdown(payload: dict[str, Any]) -> str:
     for item in payload["dispatches"]:
         status = "ready" if item["ready"] else "blocked"
         blockers = ", ".join(item["blockers"]) if item["blockers"] else "<none>"
-        lines.append(f"- `{item['workflow']}`: `{status}`; blockers: `{blockers}`")
+        selected = item.get("selected_factor_name")
+        suffix = f"; selected factor: `{selected}`" if selected else ""
+        lines.append(f"- `{item['workflow']}`: `{status}`; blockers: `{blockers}`{suffix}")
     if payload.get("typed_prior"):
         lines.extend(["", "## Typed Prior", "", "- `research_manager_typed_prior.v1` generated"])
     if payload.get("dispatch_attempts"):
@@ -421,7 +505,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--runtime-score",
-        default="autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike",
+        default="",
     )
     parser.add_argument("--runtime-strategy-profile", default="settlement_probability")
     parser.add_argument("--runtime-issue-number", default="538")
