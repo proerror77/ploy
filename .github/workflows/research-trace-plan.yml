@@ -181,6 +181,16 @@ jobs:
               lines.extend(f"- `{action}`" for action in actions)
           else:
               lines.append("- `<none>`")
+          blocker_actions = plan.get("blocker_actions") or []
+          lines.extend(["", "## Blocker Actions", ""])
+          if blocker_actions:
+              for item in blocker_actions:
+                  family = item.get("blocker_family", "")
+                  action = item.get("action", "")
+                  reason = item.get("reason", "")
+                  lines.append(f"- `{family}` -> `{action}`: {reason}")
+          else:
+              lines.append("- `<none>`")
           lines.append("")
           summary = "\n".join(lines)
           Path("artifacts/research-trace-plan/research-trace-plan.md").write_text(

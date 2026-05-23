@@ -1,5 +1,28 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Trace Plan Blocker Summary (2026-05-24)
+
+Evidence stage: architecture/data-plane cleanup and research workflow planning;
+no strategy promotion and no live data mutation.
+
+### Tasks
+
+- [x] Start a fresh CI visibility branch from current `origin/main`.
+- [x] Render Research Manager `blocker_actions` in the trace-plan workflow
+      summary.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+### Review
+
+- 2026-05-24: The trace-plan workflow now prints machine-readable blocker
+  action families and action IDs in the Actions summary. This prepares the
+  hosted plan artifact for the newly merged Research Manager blocker-action
+  schema once the deployed `research-trace-plan` binary is refreshed.
+- 2026-05-24: Focused validation passed: YAML parse for
+  `research-trace-plan.yml`, `python3 -m unittest
+  tests.test_persist_research_trace_contract`, and `rtk git diff --check`.
+
 ## Current Session - Research Manager Blocker Actions (2026-05-24)
 
 Evidence stage: architecture/data-plane cleanup and research workflow planning;
@@ -13,7 +36,7 @@ no strategy promotion and no live data mutation.
       and promotion blockers.
 - [x] Propagate blocker actions into the executor typed prior artifact.
 - [x] Run focused validation.
-- [ ] Commit, push, open PR, wait for CI, and merge.
+- [x] Commit, push, open PR, wait for CI, and merge.
 
 ### Review
 
@@ -30,6 +53,8 @@ no strategy promotion and no live data mutation.
   as a pass/fail gate because the current repo has pre-existing unrelated
   rustfmt drift outside this slice; the touched Rust file was formatted with
   `rustfmt`.
+- 2026-05-24: PR #649 merged to `main` at
+  `f0cba326f9da9332c42ba1245b46a9540688cd96`.
 
 ## Current Session - Legacy Crypto Trainer Cleanup (2026-05-24)
 

@@ -257,6 +257,8 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("candidate_to_runtime_replay", workflow)
         self.assertIn("continue_search", workflow)
         self.assertIn("fix_runtime", workflow)
+        self.assertIn("blocker_actions = plan.get", workflow)
+        self.assertIn("## Blocker Actions", workflow)
 
     def test_research_trace_plan_workflow_uses_deployed_tango_binary(self) -> None:
         workflow = TRACE_PLAN_WORKFLOW.read_text(encoding="utf-8")
