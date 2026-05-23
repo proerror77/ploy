@@ -95,10 +95,12 @@ reserved for `executable_replay` evidence.
    tapes.**
 
    Snapshot manifests carry source surfaces, cadence, `raw_full_fidelity`,
-   `snapshot_sampled`, and `gate_category`, but the hard boundary still needs
-   to be enforced at every promotion/handoff consumer. Full-depth execution
-   claims must cite candidate replay or full-depth lake evidence, not only
-   sampled snapshot rows.
+   `snapshot_sampled`, and `gate_category`. AutoFactor promotion and aggregate
+   candidate replay now consume that manifest and attach blocking flags when a
+   `required_for_execution` surface is sampled, so sampled rows cannot suppress
+   full-depth fillability blockers. The remaining data-layer gap is the
+   positive replacement: durable full-depth lake/runtime replay evidence must
+   become the normal executable handoff source.
 
 5. **Runtime input canonicalization is now gated for AutoFactor promotion/replay,
    but not yet a shared cross-language source of truth.**
@@ -134,7 +136,7 @@ reserved for `executable_replay` evidence.
 | P0 | Run `research-trace-plan.yml` against the fresh trace | Plan JSON references latest trace rows and returns `continue_search`, `revise_prior`, `fix_data`, `fix_runtime`, or `fix_workflow` |
 | P1 | Add Research Manager action executor | Plan output can open/link issues and dispatch bounded hosted research reruns without manual artifact reading |
 | P1 | Promote runtime input canonicalization to a shared generated contract | Rust runtime scoring, Rust alpha-search, and Python promotion/replay use one source of truth instead of mirrored catalogs |
-| P1 | Harden feature snapshot contract at consumers | Sampled snapshots cannot be consumed as full-depth execution evidence |
+| P1 | Complete full-depth executable evidence layer | Runtime replay or full-depth lake evidence replaces sampled snapshot rows for executable handoff |
 | P1 | Enforce multi-horizon accounting at persisted approval layer | Multi-decision or horizon-mixed artifacts are blocked before handoff |
 
 ## Verdict

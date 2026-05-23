@@ -459,6 +459,62 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertIn("--factor-name-filter \"${WALK_FACTOR_NAME_FILTER}\"", workflow)
         self.assertIn("--train-window-hours \"${WALK_TRAIN_WINDOW_HOURS}\"", workflow)
         self.assertIn("--candidate-strategy-replay-json", workflow)
+        self.assertIn("--snapshot-manifest-json artifacts/research-snapshot/manifest.json", workflow)
+
+    def test_snapshot_manifest_passes_to_candidate_replay_and_promotion(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            snapshot_dir = tmp / "snapshot"
+            snapshot_dir.mkdir()
+            manifest = snapshot_dir / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "research_snapshot_manifest_v1",
+                        "snapshot_hash": "snapshot:sampled-execution",
+                        "source_kind": "complete_sampled_research_snapshot",
+                        "source_surfaces": [
+                            {
+                                "name": "clob_orderbook_snapshots",
+                                "gate_category": "required_for_execution",
+                                "raw_full_fidelity": True,
+                                "snapshot_sampled": True,
+                            }
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            binary = self.fake_binary(tmp)
+            subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--snapshot-manifest-json",
+                    str(manifest),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            replay = json.loads(
+                (tmp / "out" / "candidate-strategy-replay.json").read_text(encoding="utf-8")
+            )
+            promotion = json.loads(
+                (tmp / "out" / "autofactor-strategy-promotion.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        expected_flags = [
+            "sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots"
+        ]
+        self.assertEqual(replay["source_snapshot_contract"]["blocking_risk_flags"], expected_flags)
+        self.assertEqual(
+            promotion["source_snapshot_contract"]["blocking_risk_flags"], expected_flags
+        )
 
     def test_alpha_search_prior_and_state_args_pass_through_to_factor_binary(self):
         with tempfile.TemporaryDirectory() as raw_tmp:

@@ -134,6 +134,9 @@ jobs:
           if [ -n "${SOURCE_FACTOR_REGISTRY_PREVIEW_PATH:-}" ]; then
             args+=(--factor-registry-preview-json "${SOURCE_FACTOR_REGISTRY_PREVIEW_PATH}" --require-runtime-contract)
           fi
+          if [ -n "${SOURCE_SNAPSHOT_MANIFEST_PATH:-}" ]; then
+            args+=(--snapshot-manifest-json "${SOURCE_SNAPSHOT_MANIFEST_PATH}")
+          fi
           if [ "${{ github.event.inputs.fail_if_blocked }}" = "true" ]; then
             args+=(--fail-if-blocked)
           fi

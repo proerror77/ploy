@@ -9,6 +9,7 @@ from tests.test_autofactor_strategy_promotion import (
     AUTOFACTOR_REPORT,
     AUTOFACTOR_LLM_RUNTIME_PASS_THROUGH_MUTATION_REPORT,
     AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+    SAMPLED_EXECUTION_SNAPSHOT_MANIFEST,
 )
 
 
@@ -22,6 +23,7 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
         report: str,
         *extra_args: str,
         registry_preview_payload: dict | None = None,
+        snapshot_manifest_payload: dict | None = None,
     ) -> tuple[dict, str]:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -41,6 +43,14 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
                     str(registry_path),
                     "--require-runtime-contract",
                 ]
+            snapshot_args = []
+            if snapshot_manifest_payload is not None:
+                snapshot_manifest_path = tmp_path / "manifest.json"
+                snapshot_manifest_path.write_text(
+                    json.dumps(snapshot_manifest_payload, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                snapshot_args = ["--snapshot-manifest-json", str(snapshot_manifest_path)]
             subprocess.run(
                 [
                     sys.executable,
@@ -52,6 +62,7 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
                     "--output-md",
                     str(output_md),
                     *registry_args,
+                    *snapshot_args,
                     *extra_args,
                 ],
                 cwd=ROOT,
@@ -175,6 +186,22 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
             payload["blocking_risk_flags"],
         )
         self.assertIn("Promotion ready: `false`", markdown)
+
+    def test_sampled_execution_snapshot_adds_blocking_risk_flag(self):
+        payload, _ = self.run_script(
+            AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            snapshot_manifest_payload=SAMPLED_EXECUTION_SNAPSHOT_MANIFEST,
+        )
+
+        self.assertFalse(payload["promotion_ready"])
+        self.assertEqual(
+            payload["source_snapshot_contract"]["blocking_risk_flags"],
+            ["sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots"],
+        )
+        self.assertIn(
+            "sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots",
+            payload["blocking_risk_flags"],
+        )
 
     def test_blocks_when_only_candidate_is_wrong_profile(self):
         payload, markdown = self.run_script(

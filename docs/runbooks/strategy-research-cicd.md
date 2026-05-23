@@ -137,6 +137,14 @@ unsupported inputs, semantic input mismatches, or placeholder runtime fields
 block promotion/replay handoff instead of falling back to factor-name
 inference.
 
+AutoFactor promotion and candidate replay must also consume the source
+snapshot manifest. If a `required_for_execution` surface is marked
+`snapshot_sampled=true`, the run can remain factor-search evidence but cannot
+suppress global full-depth fillability blockers or claim full-depth executable
+handoff from sampled rows. The blocking flag must stay attached to promotion,
+handoff, and candidate replay artifacts until replaced by runtime replay or
+full-depth lake evidence.
+
 Hosted walk-forward runs the writer by default and requires a protected
 database secret unless the dispatch explicitly sets
 `options_json.persist_research_trace=false` for a read-only diagnostic run. It

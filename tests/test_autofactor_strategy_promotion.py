@@ -209,6 +209,20 @@ DEFAULT_REPLAY_PAYLOAD = {
     "blocking_risk_flags": [],
 }
 
+SAMPLED_EXECUTION_SNAPSHOT_MANIFEST = {
+    "schema_version": "research_snapshot_manifest_v1",
+    "snapshot_hash": "snapshot:sampled-execution",
+    "source_kind": "complete_sampled_research_snapshot",
+    "source_surfaces": [
+        {
+            "name": "clob_orderbook_snapshots",
+            "gate_category": "required_for_execution",
+            "raw_full_fidelity": True,
+            "snapshot_sampled": True,
+        }
+    ],
+}
+
 
 class AutoFactorStrategyPromotionTests(unittest.TestCase):
     def run_script(
@@ -218,11 +232,13 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         check=True,
         replay_payload=DEFAULT_REPLAY_PAYLOAD,
         registry_preview_payload=None,
+        snapshot_manifest_payload=None,
     ):
         with tempfile.TemporaryDirectory() as tmp:
             report_path = Path(tmp) / "report.txt"
             replay_path = Path(tmp) / "candidate-strategy-replay.json"
             registry_path = Path(tmp) / "factor-registry-preview.json"
+            snapshot_manifest_path = Path(tmp) / "manifest.json"
             output_json = Path(tmp) / "promotion.json"
             output_registry = Path(tmp) / "registry.json"
             output_handoff = Path(tmp) / "handoff.json"
@@ -246,6 +262,13 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                     str(registry_path),
                     "--require-runtime-contract",
                 ]
+            snapshot_args = []
+            if snapshot_manifest_payload is not None:
+                snapshot_manifest_path.write_text(
+                    json.dumps(snapshot_manifest_payload, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                snapshot_args = ["--snapshot-manifest-json", str(snapshot_manifest_path)]
             result = subprocess.run(
                 [
                     sys.executable,
@@ -262,6 +285,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                     str(output_handoff_md),
                     *replay_args,
                     *registry_args,
+                    *snapshot_args,
                     *extra_args,
                 ],
                 cwd=ROOT,
@@ -472,6 +496,37 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertEqual(handoff["status"], "ready")
         blockers = payload["qualified_strategies"][0].get("blockers", [])
         self.assertNotIn("global_full_depth_entry_fillability", ",".join(blockers))
+
+    def test_sampled_execution_snapshot_blocks_top_bucket_fillability_override(self):
+        _, payload, _, handoff, _ = self.run_script(
+            LOW_SLIPPAGE_HEALTH
+            + GLOBAL_FILLABILITY_BLOCKED_GATE
+            + AUTOFACTOR_TOP_BUCKET_EXECUTION_REPORT,
+            snapshot_manifest_payload=SAMPLED_EXECUTION_SNAPSHOT_MANIFEST,
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        self.assertEqual(
+            payload["source_snapshot_contract"]["blocking_risk_flags"],
+            ["sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots"],
+        )
+        self.assertEqual(
+            handoff["source_snapshot_contract"]["blocking_risk_flags"],
+            ["sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots"],
+        )
+        blockers = payload["evaluated_factors"][0]["blockers"]
+        self.assertIn(
+            "snapshot_contract_blocks_execution_claim:"
+            "sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots",
+            blockers,
+        )
+        self.assertIn(
+            "global_promotion_gate_not_ready:"
+            "global_full_depth_entry_fillability: "
+            "global_full_depth_entry_fill_rate=0.1311 min_required=0.3000",
+            blockers,
+        )
 
     def test_qualifies_predictive_external_formula_when_gate_is_ready(self):
         replay = {
