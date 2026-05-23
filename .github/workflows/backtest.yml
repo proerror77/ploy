@@ -20,11 +20,11 @@ on:
         required: true
         default: "config/strategies/02-pm5d-threelayer.unified.toml"
       data_dir:
-        description: "Local Parquet data dir (leave empty to use DB)"
+        description: "Diagnostic Parquet stream dir (leave empty to use DB; not full-depth lake replay)"
         required: false
         default: ""
       sync_parquet_data:
-        description: "Sync the full Parquet tree from Tango before running"
+        description: "Sync legacy quote-tick Parquet from Tango before running"
         required: false
         default: "false"
       issue_number:
@@ -151,10 +151,37 @@ jobs:
               echo "- Artifact: \`backtest-evaluation-${{ github.run_id }}\`"
               echo ""
               echo '```json'
-              python3 -c 'import json; data=json.load(open("artifacts/backtest/evaluation.json")); print(json.dumps({"producer": data.get("producer"), "replay_mode": data.get("replay_mode"), "canonical_result": data.get("canonical_result"), "metrics": data.get("metrics"), "risk_flags": data.get("risk_flags")}, indent=2, sort_keys=True))'
+              python3 -c 'import json; data=json.load(open("artifacts/backtest/evaluation.json")); print(json.dumps({"producer": data.get("producer"), "replay_mode": data.get("replay_mode"), "evidence_stage": data.get("evidence_stage"), "promotion_ready": data.get("promotion_ready"), "promotion_decision": data.get("promotion_decision"), "canonical_result": data.get("canonical_result"), "source": data.get("source"), "data_surfaces": data.get("data_surfaces"), "metrics": data.get("metrics"), "risk_flags": data.get("risk_flags"), "blocking_risk_flags": data.get("blocking_risk_flags"), "advisory_flags": data.get("advisory_flags")}, indent=2, sort_keys=True))'
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Assert backtest remains non-promotion evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("artifacts/backtest/evaluation.json")
+          if not path.exists():
+              raise SystemExit("missing backtest evaluation artifact")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          if data.get("artifact_type") != "strategy_backtest_evaluation":
+              raise SystemExit("unexpected backtest artifact_type")
+          if data.get("promotion_ready") is not False:
+              raise SystemExit("backtest promotion_ready must remain false")
+          if not isinstance(data.get("data_surfaces"), dict):
+              raise SystemExit("backtest evaluation must expose data_surfaces")
+          blockers = set(data.get("blocking_risk_flags") or [])
+          required = {
+              "missing_replay_dryrun_parity",
+              "missing_runtime_scorer_parity",
+          }
+          missing = sorted(required - blockers)
+          if missing:
+              raise SystemExit(f"backtest evaluation missing promotion blockers: {missing}")
+          PY
 
       - name: Upload backtest evaluation artifact
         if: always()
@@ -176,17 +203,28 @@ jobs:
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
             let metrics = null;
             let riskFlags = [];
+            let blockingRiskFlags = [];
+            let advisoryFlags = [];
+            let evidenceStage = "unknown";
+            let promotionReady = false;
             let decision = "pending replay/dry-run parity review";
             if (fs.existsSync("artifacts/backtest/evaluation.json")) {
               const data = JSON.parse(fs.readFileSync("artifacts/backtest/evaluation.json", "utf8"));
               metrics = data.metrics || null;
               riskFlags = data.risk_flags || [];
+              blockingRiskFlags = data.blocking_risk_flags || [];
+              advisoryFlags = data.advisory_flags || [];
+              evidenceStage = data.evidence_stage || "unknown";
+              promotionReady = data.promotion_ready === true;
+              decision = data.promotion_decision || decision;
               if (!metrics || Object.keys(metrics).length === 0) {
                 riskFlags.push("missing_headline_metrics");
+                blockingRiskFlags.push("missing_headline_metrics");
                 decision = "fix-workflow-or-artifact";
               }
             } else {
               riskFlags.push("missing_evaluation_artifact");
+              blockingRiskFlags.push("missing_evaluation_artifact");
               decision = "fix-workflow-or-data-source";
             }
             const headlineMetrics = metrics && Object.keys(metrics).length > 0
@@ -201,8 +239,12 @@ jobs:
               `- Dataset/window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}`,
               `- Config: \`${{ github.event.inputs.config }}\``,
               `- Artifact: \`backtest-evaluation-${process.env.GITHUB_RUN_ID}\``,
+              `- Evidence stage: \`${evidenceStage}\``,
+              `- Promotion ready: \`${promotionReady}\``,
               `- Headline metrics: \`${headlineMetrics}\``,
-              `- Caveats: \`${riskFlags.join(", ") || "none"}\``,
+              `- Artifact caveats: \`${riskFlags.join(", ") || "none"}\``,
+              `- Blocking promotion flags: \`${blockingRiskFlags.join(", ") || "none"}\``,
+              `- Advisory flags: \`${advisoryFlags.join(", ") || "none"}\``,
               `- Decision: ${decision}`
             ].join("\n");
             await github.rest.issues.createComment({
@@ -212,6 +254,9 @@ jobs:
               body
             });
             const labels = ["evidence:backtest", ...labelsForDecision(decision)];
+            if (blockingRiskFlags.some((flag) => String(flag).includes("parity"))) {
+              labels.push("parity:blocked");
+            }
             if (riskFlags.includes("missing_headline_metrics")) {
               labels.push("evidence:missing-metrics");
             }

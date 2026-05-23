@@ -43,7 +43,8 @@ mismatch is understood and tracked as a follow-up issue.
 
 | Purpose | Workflow | Default role |
 | --- | --- | --- |
-| PR validation | `.github/workflows/test.yml` | Required Platform CI gate for code, contracts, frontend, integration, dependency audit, and workflow lint |
+| PR validation | `.github/workflows/test.yml` | Required Rust-first Platform CI gate for code, contracts, frontend, integration, dependency audit, and workflow lint |
+| Legacy Python compatibility | `.github/workflows/legacy-python-tools.yml` | Isolated, path-scoped checks for remaining Python helper scripts; not part of the Rust-first required CI contract |
 | Research snapshot | `.github/workflows/research-snapshot.yml` | Compile reusable research evidence from remote data |
 | Factor diagnostics | `.github/workflows/factor-review-v2-hosted-artifact.yml` | GitHub-hosted factor review from a retained full research snapshot artifact |
 | Legacy factor diagnostics | `.github/workflows/factor-review-v2.yml` | Compatibility router to hosted artifacts; direct `ploy-ci-1` DB mode is debug-only and blocked by default |
