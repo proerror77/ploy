@@ -161,7 +161,7 @@ jobs:
               raise SystemExit("research trace plan schema mismatch")
           plan = payload.get("plan") or {}
           theme = plan.get("theme", "")
-          if theme not in {"continue_search", "revise_prior", "fix_data", "fix_runtime", "fix_workflow"}:
+          if theme not in {"candidate_to_runtime_replay", "continue_search", "revise_prior", "fix_data", "fix_runtime", "fix_workflow"}:
               raise SystemExit(f"unsupported research plan theme: {theme}")
           actions = plan.get("actions") or []
           lines = [
