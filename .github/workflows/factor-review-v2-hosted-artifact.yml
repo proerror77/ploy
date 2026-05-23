@@ -375,6 +375,7 @@ jobs:
             const issue_number = Number(issueNumberRaw);
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
             let decision = "fix-workflow-or-artifact";
+            const evidenceStage = "factor_attribution";
             let riskFlags = ["missing_evaluation_artifact"];
             let bucketSummary = "unavailable";
             if (fs.existsSync("artifacts/factor-review-v2/evaluation.json")) {
@@ -396,7 +397,7 @@ jobs:
                   t_stat: bucket.t_stat
                 }))
               });
-              decision = supported.length > 0 ? "candidate-for-oos-replay-gate" : "no-deploy-factor-review-only";
+              decision = supported.length > 0 ? "continue-to-walk-forward" : "continue-diagnostic-only";
             }
             const body = [
               "Factor review evidence:",
@@ -409,6 +410,7 @@ jobs:
               `- Artifact: \`factor-review-v2-${process.env.GITHUB_RUN_ID}\``,
               `- Runner: \`ubuntu-latest\``,
               `- Source snapshot run: \`${{ github.event.inputs.snapshot_run_id }}\``,
+              `- Evidence stage: \`${evidenceStage}\``,
               `- Executable EV buckets: \`${bucketSummary}\``,
               `- Risk flags: \`${riskFlags.join(", ") || "none"}\``,
               `- Decision: ${decision}`
@@ -424,5 +426,5 @@ jobs:
               context,
               core,
               issue_number,
-              labels: ["evidence:factor-review", ...labelsForDecision(decision), ...(riskFlags.includes("missing_evaluation_artifact") ? ["evidence:missing-artifact"] : [])]
+              labels: ["evidence:factor-review", "evidence:factor-attribution", ...labelsForDecision(decision), ...(riskFlags.includes("missing_evaluation_artifact") ? ["evidence:missing-artifact"] : [])]
             });

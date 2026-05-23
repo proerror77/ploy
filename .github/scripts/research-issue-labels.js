@@ -43,6 +43,10 @@ const LABEL_DEFINITIONS = {
     color: "1d76db",
     description: "Issue has factor review workflow evidence",
   },
+  "evidence:factor-attribution": {
+    color: "1d76db",
+    description: "Issue has factor attribution evidence; not deployable by itself",
+  },
   "evidence:walk-forward": {
     color: "1d76db",
     description: "Issue has walk-forward workflow evidence",
