@@ -3,7 +3,7 @@
 
 The default gate is intentionally strict:
 
-1. Reuse a retained full research snapshot artifact when --snapshot-run-id is
+1. Reuse a retained complete sampled research snapshot artifact when --snapshot-run-id is
    supplied, or build a portable pm5d-vol research snapshot as a legacy
    fallback.
 2. Feed that snapshot artifact into the GitHub-hosted Factor Walk-Forward V2
@@ -283,7 +283,7 @@ def parse_args() -> argparse.Namespace:
         "--snapshot-run-id",
         default="",
         help=(
-            "Existing workflow run id that owns a full research-snapshot artifact. "
+            "Existing workflow run id that owns a complete sampled research-snapshot artifact. "
             "When supplied, skip the legacy ploy-ci-1 snapshot workflow and run "
             "the hosted artifact-only walk-forward path."
         ),
@@ -307,6 +307,11 @@ def parse_args() -> argparse.Namespace:
         "--lob-sample-secs",
         default="",
         help="Override LOB sampling seconds; empty inherits an existing snapshot manifest or uses 30 for new snapshots",
+    )
+    parser.add_argument(
+        "--pm-book-sample-secs",
+        default="",
+        help="Override PM full-book sampling seconds; empty inherits an existing snapshot manifest or uses 30 for new snapshots",
     )
     parser.add_argument(
         "--observation-sample-secs",
@@ -347,13 +352,14 @@ def main() -> int:
     if args.snapshot_run_id:
         snapshot_result = refresh_run(int(args.snapshot_run_id))
         print(
-            "Using existing full research snapshot artifact "
+            "Using existing complete sampled research snapshot artifact "
             f"snapshot_run_id={snapshot_result.database_id} url={snapshot_result.url}.",
             flush=True,
         )
     else:
         snapshot_options = {
             "lob_sample_secs": int(args.lob_sample_secs or "30"),
+            "pm_book_sample_secs": int(args.pm_book_sample_secs or "30"),
             "observation_sample_secs": int(args.observation_sample_secs or "30"),
             "max_quote_age_secs": int(args.max_quote_age_secs or "30"),
             "optimizer_data_dir": "/tmp/ploy-parquet",
@@ -411,7 +417,7 @@ def main() -> int:
                         f"- Data quality mode: `{args.data_quality_mode}`",
                         f"- Snapshot data gate: `{snapshot_data_gate}`",
                         f"- Lookback: `{args.audit_lookback_hours}h`",
-                        "- Decision: provide an existing full snapshot artifact or inspect snapshot compilation/data coverage before promotion.",
+                        "- Decision: provide an existing complete sampled snapshot artifact or inspect snapshot compilation/data coverage before promotion.",
                     ]
                 ),
                 dry_run=False,
@@ -423,6 +429,7 @@ def main() -> int:
         "test_window_days": int(args.test_window_days),
         "step_days": int(args.step_days),
         "lob_sample_secs": int(args.lob_sample_secs) if args.lob_sample_secs else "",
+        "pm_book_sample_secs": int(args.pm_book_sample_secs) if args.pm_book_sample_secs else "",
         "observation_sample_secs": (
             int(args.observation_sample_secs) if args.observation_sample_secs else ""
         ),

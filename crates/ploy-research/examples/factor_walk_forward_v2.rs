@@ -385,6 +385,9 @@ async fn main() {
     let lob_sample_secs: i32 = flag_value(&args, "--lob-sample-secs")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(30);
+    let pm_book_sample_secs: i32 = flag_value(&args, "--pm-book-sample-secs")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(lob_sample_secs);
     let max_quote_age_secs: i64 = flag_value(&args, "--max-quote-age-secs")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(30);
@@ -430,7 +433,7 @@ async fn main() {
     let report_suite = ReportSuite::parse(flag_value(&args, "--report-suite"));
 
     eprintln!(
-        "factor_walk_forward_v2: {} -> {} for {:?}, stake_usd={:.2}, train_window={}, test_window={}, step={}, observation_sample_secs={}, factor_name_filter={}, report_suite={}",
+        "factor_walk_forward_v2: {} -> {} for {:?}, stake_usd={:.2}, train_window={}, test_window={}, step={}, observation_sample_secs={}, pm_book_sample_secs={}, factor_name_filter={}, report_suite={}",
         start,
         end,
         symbols,
@@ -439,6 +442,7 @@ async fn main() {
         options.test_window_label(),
         options.step_label(),
         observation_sample_secs,
+        pm_book_sample_secs,
         options.factor_name_filter.as_deref().unwrap_or("<none>"),
         report_suite.as_str()
     );
@@ -505,6 +509,7 @@ async fn main() {
                 start,
                 end,
                 lob_sample_secs,
+                pm_book_sample_secs,
                 observation_sample_secs,
                 max_quote_age_secs,
                 stake_usd: options.review.stake_usd,
@@ -652,7 +657,7 @@ async fn main() {
             &symbols,
             history_start,
             end,
-            lob_sample_secs,
+            pm_book_sample_secs,
         )
         .await
         .expect("bulk PM book snapshot load failed");
