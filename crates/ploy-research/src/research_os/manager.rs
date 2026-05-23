@@ -165,7 +165,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
     }
 
     if has_unblocked_runtime_candidate(&input.factor_registry_summary) {
-        return Ok(plan(
+        return Ok(plan_with_blocker_actions(
             "candidate_to_runtime_replay",
             1,
             0,
@@ -175,6 +175,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
                 "build_runtime_candidate_replay",
                 "write_runtime_replay_trace_artifact",
             ],
+            blocker_actions,
         ));
     }
 
@@ -190,7 +191,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
         &input.rejected_factor_patterns,
         &["stagnant", "repeated_rejection"],
     ) {
-        return Ok(plan(
+        return Ok(plan_with_blocker_actions(
             "revise_prior",
             input.research_budget.max_candidates_per_day.min(8),
             2,
@@ -200,6 +201,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
                 "generate_typed_llm_prior_json",
                 "rerun_alpha_search_with_bounded_mutations",
             ],
+            blocker_actions,
         ));
     }
 
@@ -211,7 +213,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
         input.research_budget.max_candidates_per_day.min(4)
     };
 
-    Ok(plan(
+    Ok(plan_with_blocker_actions(
         "continue_search",
         candidate_count,
         2,
@@ -221,6 +223,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
             "continue_hosted_alpha_search",
             "write_registry_preview_and_trace_artifacts",
         ],
+        blocker_actions,
     ))
 }
 
@@ -268,6 +271,7 @@ fn plan_with_blocker_actions(
 fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAction> {
     let mut actions = Vec::new();
     let latest = input.latest_runs.to_string().to_lowercase();
+    let market_data = input.market_data_health.to_string().to_lowercase();
     let rejected = input.rejected_factor_patterns.to_string().to_lowercase();
     let runtime_or_promotion_blockers = format!("{latest} {rejected}");
 
@@ -355,7 +359,37 @@ fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAc
         ));
     }
 
-    actions
+    if contains_any_text(
+        &market_data,
+        &[
+            "required_execution_surface_is_sampled_snapshot",
+            "sampled_snapshot_required_for_execution_surface",
+            "full_depth_missing",
+            "full-depth missing",
+        ],
+    ) {
+        actions.push(blocker_action(
+            "promotion_data_execution_surface",
+            "collect_full_depth_execution_surface",
+            "Research snapshot data health reports sampled execution surface; promotion needs full-depth evidence.",
+        ));
+    }
+    if contains_any_text(
+        &market_data,
+        &[
+            "required_execution_surface_not_materialized",
+            "pm_token_settlements",
+            "official_settlement_missing",
+        ],
+    ) {
+        actions.push(blocker_action(
+            "promotion_data_settlement",
+            "repair_official_settlement_coverage",
+            "Research snapshot data health reports missing or non-materialized official settlement labels.",
+        ));
+    }
+
+    dedupe_blocker_actions(actions)
 }
 
 fn blocker_action(blocker_family: &str, action: &str, reason: &str) -> ResearchBlockerAction {
@@ -368,6 +402,19 @@ fn blocker_action(blocker_family: &str, action: &str, reason: &str) -> ResearchB
 
 fn contains_any_text(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+fn dedupe_blocker_actions(actions: Vec<ResearchBlockerAction>) -> Vec<ResearchBlockerAction> {
+    let mut deduped = Vec::new();
+    for action in actions {
+        if !deduped
+            .iter()
+            .any(|item: &ResearchBlockerAction| item.action == action.action)
+        {
+            deduped.push(action);
+        }
+    }
+    deduped
 }
 
 fn contains_string(value: &serde_json::Value, needles: &[&str]) -> bool {
@@ -498,6 +545,10 @@ mod tests {
         .expect("plan");
         assert_ne!(plan.theme, "fix_data");
         assert!(plan.candidate_count > 0);
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "promotion_data_execution_surface"
+                && item.action == "collect_full_depth_execution_surface"
+        }));
     }
 
     #[test]
@@ -625,6 +676,31 @@ mod tests {
         assert!(plan.blocker_actions.iter().any(|item| {
             item.blocker_family == "data_execution_surface"
                 && item.action == "collect_full_depth_execution_surface"
+        }));
+    }
+
+    #[test]
+    fn planner_surfaces_snapshot_settlement_promotion_blocker_without_forcing_data_repair() {
+        let plan = plan_next_research(&input(
+            "factor_attribution",
+            serde_json::json!({}),
+            serde_json::json!({
+                "missing_blocks_promotion": true,
+                "critical_missing": false,
+                "promotion_blockers": [
+                    {
+                        "surface": "pm_token_settlements",
+                        "reason": "required_execution_surface_not_materialized"
+                    }
+                ]
+            }),
+        ))
+        .expect("plan");
+
+        assert_ne!(plan.theme, "fix_data");
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "promotion_data_settlement"
+                && item.action == "repair_official_settlement_coverage"
         }));
     }
 }

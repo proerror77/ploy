@@ -1,5 +1,32 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Market Data Promotion Blocker Actions (2026-05-24)
+
+Evidence stage: architecture/data-plane cleanup and research workflow planning;
+no strategy promotion and no live data mutation.
+
+### Tasks
+
+- [x] Start a fresh fix branch from current `origin/main`.
+- [x] Reproduce the missing full-depth blocker action from hosted
+      `research-trace-plan` artifact `26346490855`.
+- [x] Map market-data promotion blockers to visible `promotion_data_*`
+      blocker actions without making them alone trigger snapshot reruns.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+### Review
+
+- 2026-05-24: Hosted trace plan `26346490855` correctly emitted runtime replay
+  blocker actions, but `clob_orderbook_snapshots` sampled execution-surface
+  evidence stayed only in `market_data_health.promotion_blockers`. This fix
+  surfaces those promotion blockers as `promotion_data_execution_surface` /
+  `promotion_data_settlement` actions while preserving the existing rule that
+  promotion-only snapshot blockers do not by themselves cause another snapshot
+  rerun.
+- 2026-05-24: Focused validation passed: `rtk cargo test --locked -p
+  ploy-research research_os::manager --lib`.
+
 ## Current Session - Research Trace Plan Blocker Summary (2026-05-24)
 
 Evidence stage: architecture/data-plane cleanup and research workflow planning;
@@ -11,7 +38,7 @@ no strategy promotion and no live data mutation.
 - [x] Render Research Manager `blocker_actions` in the trace-plan workflow
       summary.
 - [x] Run focused validation.
-- [ ] Commit, push, open PR, wait for CI, and merge.
+- [x] Commit, push, open PR, wait for CI, and merge.
 
 ### Review
 
@@ -22,6 +49,8 @@ no strategy promotion and no live data mutation.
 - 2026-05-24: Focused validation passed: YAML parse for
   `research-trace-plan.yml`, `python3 -m unittest
   tests.test_persist_research_trace_contract`, and `rtk git diff --check`.
+- 2026-05-24: PR #650 merged to `main` at
+  `d5c450634ab9747f873ac5bab6ec8f88f7946d5f`.
 
 ## Current Session - Research Manager Blocker Actions (2026-05-24)
 
