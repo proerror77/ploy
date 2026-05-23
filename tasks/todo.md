@@ -1,5 +1,43 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Archived Dry-Run Prototype Cleanup (2026-05-24)
+
+Evidence stage: architecture/data-plane cleanup after restored
+`walk_forward -> runtime_parity` automation; no strategy promotion.
+
+### Tasks
+
+- [x] Confirm PR #643 merged to `main`.
+- [x] Start a fresh cleanup branch from current `origin/main`.
+- [x] Use Agent Team review for remaining legacy script boundaries.
+- [x] Archive public-profile copycat and reverse-engineered dry-run prototypes
+      from active `scripts/`.
+- [x] Keep `install-platform-service.sh` marked as active release installer and
+      leave `install-service.sh` as the only host-support archive candidate.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+### Review
+
+- 2026-05-24: PR #643 is merged as
+  `54acdf3041a686ac0b4211705abb8cfa9ec9d404`; this slice continues legacy
+  separation from current `main`.
+- 2026-05-24: `scripts/copycat_dry_run.py` and
+  `scripts/reverse_engineered_strategy_dry_run.py` are public-profile research
+  prototypes, not canonical `MarketUpdate`/runtime replay or dry-run handoff
+  paths, so they were moved under `scripts/archive/research-debug/` while
+  retaining their unit tests as archived-prototype compatibility checks.
+- 2026-05-24: Agent Team review confirmed `scripts/install-platform-service.sh`
+  remains the active `release-platform.yml` host installer and must not be
+  archived. `scripts/install-service.sh` is still only a legacy host-support
+  archive candidate pending maintenance/watchdog ownership cleanup.
+- 2026-05-24: Focused validation passed:
+  `python3 -B -m unittest tests.test_copycat_dry_run
+  tests.test_reverse_engineered_strategy`,
+  `python3 -m py_compile` for the archived scripts and tests, root-script
+  absence/archive-presence check, active import absence check, and
+  `rtk git diff --check`.
+
 ## Current Session - Legacy Research Tool Cleanup (2026-05-24)
 
 Evidence stage: architecture/data-plane cleanup after restored
