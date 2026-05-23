@@ -200,6 +200,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             self.assertIn("Reject legacy DB", workflow)
             self.assertIn("direct-DB branch is disabled by default", workflow)
             self.assertIn("allow_direct_db_debug=true", workflow)
+            self.assertIn("legacy_db_debug_ack=manual-legacy-db-debug", workflow)
             self.assertIn("snapshot_run_id", workflow)
 
 
