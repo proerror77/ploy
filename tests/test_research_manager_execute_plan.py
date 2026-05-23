@@ -12,14 +12,15 @@ from scripts.research_manager_execute_plan import (
 )
 
 
-def plan_payload(theme: str, actions: list[str]) -> dict:
+def plan_payload(theme: str, actions: list[str], factor_registry_summary: dict | None = None) -> dict:
     return {
         "schema_version": "research_trace_plan.v1",
         "input": {
             "market_data_health": {
                 "dataset_start_ts": "2026-04-21T00:00:00Z",
                 "dataset_end_ts": "2026-04-23T00:00:00Z",
-            }
+            },
+            "factor_registry_summary": factor_registry_summary or {},
         },
         "plan": {
             "theme": theme,
@@ -171,6 +172,67 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
 
         self.assertEqual(0, payload["executable_dispatch_count"])
         self.assertIn("missing_runtime_score", payload["blocked_dispatches"][0]["blockers"])
+        self.assertIn(
+            "missing_runtime_candidate_contract",
+            payload["blocked_dispatches"][0]["blockers"],
+        )
+
+    def test_fix_runtime_derives_candidate_replay_score_from_plan_contract(self) -> None:
+        payload = build_executor_payload(
+            Namespace(
+                mode="dry_run",
+                execute_ack="",
+                git_ref="main",
+                snapshot_run_id="",
+                symbols="BTCUSDT",
+                stake_usd="15",
+                chain_remaining=1,
+                max_snapshot_window_days=2,
+                runtime_deployment_id="pm5d.threelayer.settlement-probability-btc-eth.dryrun",
+                runtime_config_path="/opt/ploy/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+                runtime_recording_path="/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson",
+                runtime_score="",
+                runtime_strategy_profile="settlement_probability",
+                runtime_issue_number="538",
+                runtime_min_trade_count="50",
+                runtime_min_fill_rate="0.30",
+                runtime_min_roi="0",
+                runtime_source_target="full_depth_settlement_executable_pnl",
+                runtime_source_horizon="5m",
+            ),
+            plan_payload(
+                "candidate_to_runtime_replay",
+                ["build_runtime_candidate_replay"],
+                {
+                    "recent_factors": [
+                        {
+                            "factor_name": "auto_settlement_conservative_settlement_edge",
+                            "status": "candidate",
+                            "target": "full_depth_settlement_executable_pnl",
+                            "horizon": "5m",
+                            "blockers": [],
+                            "runtime_contract": {
+                                "version": "autofactor_runtime_contract_v1",
+                                "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                                "strategy_profile": "settlement_probability",
+                                "target": "full_depth_settlement_executable_pnl",
+                                "horizon": "5m",
+                                "blockers": [],
+                            },
+                        }
+                    ]
+                },
+            ),
+        )
+
+        self.assertEqual(1, payload["executable_dispatch_count"])
+        dispatch = payload["dispatches"][0]
+        self.assertTrue(dispatch["ready"])
+        self.assertEqual("auto_settlement_conservative_settlement_edge", dispatch["selected_factor_name"])
+        self.assertEqual(
+            "autofactor_formula:auto_settlement_conservative_settlement_edge",
+            dispatch["fields"]["runtime_score"],
+        )
 
     def test_cli_writes_executor_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -227,6 +289,8 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
                     "execute",
                     "--execute-ack",
                     EXECUTE_ACK,
+                    "--runtime-score",
+                    "autofactor_formula:auto_settlement_conservative_settlement_edge",
                 ]
                 with patch(
                     "scripts.research_manager_execute_plan._dispatch_gh_workflow",

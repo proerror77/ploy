@@ -24,7 +24,7 @@ reserved for `executable_replay` evidence.
 | Alpha-search | Hosted artifact walk-forward emits registry previews, typed runtime contracts, MCTS tree, search feedback, promotion/handoff artifacts | Usable for factor discovery and attribution |
 | Candidate replay | `candidate_replay_tapes` exists and `persist_research_trace` can link replay artifacts to factor evaluations | Durable replay identity now exists; true runtime replay evidence must still be supplied per candidate |
 | Durable trace | Hosted walk-forward defaults to trace persistence and writes Research OS rows when DB secrets and deployed binaries are available | Current `main` run `26336054813` persisted trace and uploaded `research-trace/persisted.env` |
-| Research Manager | `research_trace_plan` can read durable DB trace and emit next-plan JSON | Current `main` run `26336127621` produced a `fix_data` plan; executor exists but automatic closed-loop execution is still unproven |
+| Research Manager | `research_trace_plan` can read durable DB trace and emit next-plan JSON; `research-manager-execute-plan.yml` can dispatch bounded follow-up evidence | Main run `26340671822` proved executor dispatch for runtime candidate replay and recorded replay parity |
 | Legacy research paths | Factor routers and Event ML rolling evidence are artifact-backed only | Former direct `ploy-ci-1` DB execution/export branches have been removed from the active research chain |
 | Diagnostic backtest | `backtest.yml` now emits `evidence-stage` artifacts with `promotion_ready=false` | Useful diagnostic replay/backtest surface; not promotion evidence |
 
@@ -91,6 +91,10 @@ reserved for `executable_replay` evidence.
 | --- | --- | --- | --- |
 | `26336054813` | `main` at `a5234cbfdf3cb93c22aa013888e418b83d308399` | Hosted walk-forward succeeded; `persisted=true`; stages `factor_attribution,walk_forward` | Snapshot -> walk-forward -> durable trace path is working from current main |
 | `26336127621` | `main` Research Trace Plan | Succeeded; `schema_version=research_trace_plan.v1`; `theme=fix_data`; `candidate_count=0` | Research Manager can read trace and produce a typed next plan |
+| `26340352094` | `main` deploy to `tango-1-1` | Succeeded; SSH path passed and Cloud Assistant fallback skipped | Runtime repair/deploy path is healthy from CI-built artifacts |
+| `26340671822` | `main` Research Manager executor | Succeeded; dispatched runtime candidate replay `26340673836` and recorded replay parity `26340674276` | Closed-loop evidence dispatch is proven |
+| `26340674276` | recorded replay parity | Succeeded; `strict_parity_ready=true` with no shared-row mismatches | Dry-run/runtime parity proof is available for the checked recording slice |
+| `26340673836` | runtime candidate replay | Succeeded but blocked; `updates_processed=43721`, `intents_submitted=0`, `orders=0`, `fills=0` | Current AutoFactor runtime candidate is not tradable and should be revised/rejected |
 
 The current walk-forward evidence is deliberately blocked:
 
@@ -106,13 +110,16 @@ The current walk-forward evidence is deliberately blocked:
 
 ## Remaining Problems
 
-1. **Research Manager is not proven closed-loop automation.**
+1. **Research Manager dispatch is proven, but strategy discovery is not.**
 
    `research_trace_plan` produces a typed plan from DB trace, and
-   `research-manager-execute-plan.yml` can dry-run bounded follow-up actions.
-   The missing proof is an executed loop that reads the plan, dispatches the
-   next research workflow, attaches evidence, and updates the next issue/run
-   without manual artifact interpretation.
+   `research-manager-execute-plan.yml` has executed bounded follow-up actions.
+   The current result is a blocked runtime candidate with zero runtime
+   orders/fills, not a dry-run handoff. The remaining automation gap is
+   candidate generation: positive factor/search rows must naturally become
+   runtime candidate replay requests through typed runtime contracts, and known
+   blocked runtime scores must feed back into the next prior instead of being
+   replayed repeatedly.
 
 2. **Feature snapshots are still sampled research products, not full execution
    tapes.**
@@ -158,7 +165,7 @@ The current walk-forward evidence is deliberately blocked:
 
 | Priority | Work | Done when |
 | --- | --- | --- |
-| P0 | Execute the Research Manager `fix_data` plan in dry-run and then bounded execute mode | Executor artifact dispatches the next snapshot/data-audit or hosted walk-forward run and records issue/run linkage |
+| P0 | Keep Research Manager candidate replay contract-driven | Executor replays only explicit or trace-derived unblocked runtime contracts and fails closed without one |
 | P0 | Repair or replace sampled execution-surface evidence | Full-depth CLOB lake or runtime replay evidence replaces sampled `clob_orderbook_snapshots` for executable handoff |
 | P0 | Explain why latest trace plan had empty factor registry/latest run arrays | Query path either links run `26336054813` rows or records why no runtime-mappable factor rows were persisted |
 | P1 | Promote runtime input canonicalization to a generated shared contract | Rust runtime scoring, Rust alpha-search, and Python promotion/replay use one source of truth instead of mirrored catalogs |
@@ -173,26 +180,26 @@ have separate evidence stages and the old direct-DB factor execution branch has
 been cut out of the active workflows.
 
 The research chain has been restored through durable trace planning, but not
-through strategy discovery or dry-run handoff. The proven sequence is:
+through profitable strategy discovery or dry-run handoff. The proven sequence is:
 
 ```text
 research-snapshot.yml
   -> factor-walk-forward-v2-hosted-artifact.yml
   -> persist Research OS trace
   -> research-trace-plan.yml
+  -> research-manager-execute-plan.yml
+  -> runtime-candidate-replay.yml / recorded-replay-parity.yml
 ```
 
-The missing sequence is:
+The missing sequence is now:
 
 ```text
-research-trace-plan.yml
-  -> research-manager-execute-plan.yml
-  -> next bounded snapshot/data-audit or hosted walk-forward run
-  -> issue/evidence update
-  -> revised candidate or explicit rejection
+blocked runtime candidate
+  -> closed-loop prior revision / new runtime-mappable candidate
+  -> runtime_market_update_replay with executable orders/fills
+  -> handoff only if full-depth execution, official settlement, ROI, fillability, and parity gates pass
 ```
 
-Only after that loop runs without manual artifact interpretation should the
-system be described as automatic research/backtest/strategy discovery. Today it
-is a separated, trace-backed research architecture whose current result is
-`fix_data` with zero qualified candidates, not a tradable strategy.
+The system can now automatically research, persist trace, dispatch replay/parity
+evidence, and reject a weak candidate. It should not be described as having
+found an automatically tradable strategy yet.

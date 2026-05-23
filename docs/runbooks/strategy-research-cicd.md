@@ -199,7 +199,12 @@ id. It defaults to `mode=dry_run`, uploads a machine-readable executor artifact,
 and only dispatches follow-up research workflows when `mode=execute` and
 `execute_ack=execute-research-manager-plan` are both set. The executor is a
 research-only surface: it can dispatch snapshot refreshes or hosted
-walk-forward continuations, but it does not deploy, trade, or create config PRs.
+walk-forward continuations, runtime candidate replay, and recorded replay
+parity checks, but it does not deploy, trade, or create config PRs. Runtime
+candidate replay must be selected from an explicit workflow input or from a
+typed, unblocked runtime contract in the Research Trace Plan
+`factor_registry_summary`; when no such contract exists, the executor fails
+closed instead of replaying a hardcoded default score.
 
 The current architecture review is
 `docs/reviews/research-data-architecture-review-2026-05-23.md`.
