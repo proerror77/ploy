@@ -60,8 +60,10 @@ trace, not dry-run promotion.
 - [x] Add an AutoFactor runtime input canonicalization gate so promotion and
       candidate replay prefer typed registry contracts and fail closed on
       missing, blocked, or semantically mismatched runtime inputs.
+- [x] Apply feature snapshot hard gates so sampled required-for-execution
+      surfaces cannot suppress full-depth executable blockers.
 - [ ] Apply remaining high-priority data/research cleanup based on audit
-      results: feature snapshot hard gates and multi-horizon accounting gates.
+      results: multi-horizon accounting gates and side-effect replay validators.
 
 ## Review
 
@@ -159,6 +161,11 @@ trace, not dry-run promotion.
   placeholder `iv_change_1m` instead of falling back to factor-name inference.
   Rust alpha-search registry previews now emit the same blockers and no longer
   mark unsupported predictive suffixes as runtime-mappable.
+- 2026-05-23: Added a snapshot execution-contract gate for AutoFactor
+  promotion and aggregate candidate replay. Hosted sweep and standalone
+  promotion now pass `manifest.json`; sampled `required_for_execution` surfaces
+  add blocking risk flags and prevent top-bucket sampled fillability from
+  suppressing global full-depth fillability blockers.
 
 # Candidate Replay Durable Trace (2026-05-23)
 

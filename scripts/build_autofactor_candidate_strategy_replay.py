@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from autofactor_runtime_contract import RuntimeContractResolver
+from research_snapshot_contract import load_snapshot_execution_contract
 
 
 DEFAULT_ALLOWED_TARGETS = {
@@ -158,7 +159,9 @@ def build_artifact(
     min_trade_count: int,
     min_fill_rate: float,
     min_roi: float,
+    snapshot_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    snapshot_contract = snapshot_contract or {}
     if row is None:
         identity = replay_identity(
             runtime_score="",
@@ -185,6 +188,7 @@ def build_artifact(
                 "full_depth_entry": True,
                 "stake_usd": stake_usd,
             },
+            "source_snapshot_contract": snapshot_contract,
             "metrics": {},
             "blocking_risk_flags": blockers,
         }
@@ -213,6 +217,7 @@ def build_artifact(
 
     artifact_blockers = list(blockers)
     artifact_blockers.append("requires_runtime_replay_not_top_bucket_aggregate")
+    artifact_blockers.extend(snapshot_contract.get("blocking_risk_flags", []))
     if top_bucket_n < min_trade_count:
         artifact_blockers.append(f"trade_count_too_small:{top_bucket_n}<{min_trade_count}")
     if unique_events < min(top_bucket_n, min_trade_count):
@@ -240,6 +245,7 @@ def build_artifact(
         "promotion_decision": "blocked",
         "evidence": evidence,
         "source_factor": source_factor,
+        "source_snapshot_contract": snapshot_contract,
         "decision_contract": {
             "event_level": True,
             "one_decision_per_event": True,
@@ -312,6 +318,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--evidence", default="")
     parser.add_argument("--factor-registry-preview-json", default="")
     parser.add_argument("--require-runtime-contract", action="store_true")
+    parser.add_argument("--snapshot-manifest-json", default="")
     return parser.parse_args()
 
 
@@ -338,6 +345,7 @@ def main() -> int:
         min_trade_count=args.min_trade_count,
         min_fill_rate=args.min_fill_rate,
         min_roi=args.min_roi,
+        snapshot_contract=load_snapshot_execution_contract(args.snapshot_manifest_json or None),
     )
     output_json = Path(args.output_json)
     output_json.parent.mkdir(parents=True, exist_ok=True)

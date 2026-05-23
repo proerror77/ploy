@@ -423,6 +423,7 @@ jobs:
             --binary ./target/fast/examples/factor_walk_forward_v2
             --evaluator scripts/evaluate_autofactor_strategy_promotion.py
             --snapshot-dir artifacts/research-snapshot
+            --snapshot-manifest-json artifacts/research-snapshot/manifest.json
             --output-dir artifacts/factor-walk-forward-v2
             --symbols "${{ github.event.inputs.symbols }}"
             --start-ts "${WALK_START_TS}"

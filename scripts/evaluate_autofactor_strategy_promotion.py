@@ -35,6 +35,10 @@ from pathlib import Path
 from typing import Any
 
 from autofactor_runtime_contract import RuntimeContractResolver
+from research_snapshot_contract import (
+    load_snapshot_execution_contract,
+    snapshot_blocks_execution_claim,
+)
 
 
 DEFAULT_ALLOWED_TARGETS = (
@@ -525,10 +529,13 @@ def evaluate(
     min_replay_trade_count: int,
     min_replay_fill_rate: float,
     min_replay_roi: float,
+    snapshot_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     gate = parse_promotion_gate(report_text)
     quality = parse_execution_quality(report_text)
     rows = parse_autofactor_rows(report_text)
+    snapshot_contract = snapshot_contract or {}
+    sampled_snapshot_blocks_execution = snapshot_blocks_execution_claim(snapshot_contract)
     evaluated: list[EvaluatedFactor] = []
 
     for row in rows:
@@ -539,11 +546,17 @@ def evaluate(
         formula_specific = is_autofactor_formula(mapping)
         suppress_global_fillability = (
             formula_specific
+            and not sampled_snapshot_blocks_execution
             and row.top_bucket_full_depth_entry_fill_rate == row.top_bucket_full_depth_entry_fill_rate
             and row.top_bucket_full_depth_entry_fill_rate >= min_top_bucket_entry_fill_rate
             and row.top_bucket_avg_entry_sweep_slip_bps is not None
             and row.top_bucket_avg_entry_sweep_levels is not None
         )
+        if not gate.ready and formula_specific and sampled_snapshot_blocks_execution:
+            blockers.extend(
+                f"snapshot_contract_blocks_execution_claim:{item}"
+                for item in snapshot_contract.get("blocking_risk_flags", [])
+            )
         blockers.extend(
             global_gate_blockers(
                 gate,
@@ -643,6 +656,7 @@ def evaluate(
         },
         "promotion_gate": asdict(gate),
         "execution_quality": asdict(quality),
+        "source_snapshot_contract": snapshot_contract,
         "candidate_strategy_replay": asdict(candidate_strategy_replay),
         "qualified_strategies": [
             {
@@ -724,6 +738,7 @@ def build_strategy_handoff(result: dict[str, Any]) -> dict[str, Any]:
         "allowed_targets": result["allowed_targets"],
         "promotion_gate": result["promotion_gate"],
         "execution_quality": result["execution_quality"],
+        "source_snapshot_contract": result["source_snapshot_contract"],
         "candidate_strategy_replay": result["candidate_strategy_replay"],
         "strategies": strategies,
         "blocked_factor_count": sum(
@@ -886,6 +901,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runtime-mapping-json", default="")
     parser.add_argument("--factor-registry-preview-json", default="")
     parser.add_argument("--require-runtime-contract", action="store_true")
+    parser.add_argument("--snapshot-manifest-json", default="")
     parser.add_argument(
         "--candidate-strategy-replay-json",
         default="",
@@ -936,6 +952,7 @@ def main() -> int:
         min_replay_trade_count=args.min_replay_trade_count,
         min_replay_fill_rate=args.min_replay_fill_rate,
         min_replay_roi=args.min_replay_roi,
+        snapshot_contract=load_snapshot_execution_contract(args.snapshot_manifest_json or None),
     )
 
     if args.output_json:
