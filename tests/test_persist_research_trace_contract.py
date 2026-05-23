@@ -49,6 +49,31 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("candidate_replay_id = $3", source)
         self.assertIn("ON CONFLICT (candidate_replay_id) DO UPDATE", source)
         self.assertIn('"promotion_registry" | "autofactor_promotion" | "strategy_handoff" => "walk_forward"', source)
+        self.assertIn("preview_factors(&preview)", source)
+        self.assertIn("target_from_preview_path(&path)", source)
+        self.assertIn("default_horizon_for_target(&target)", source)
+        self.assertIn("autofactor_target_horizon(target)", source)
+        self.assertIn("string_field(factor, \"horizon\")", source)
+
+    def test_alpha_search_registry_preview_is_versioned_runtime_contract(self) -> None:
+        source = (ROOT / "crates" / "ploy-research" / "src" / "alpha_search.rs").read_text(
+            encoding="utf-8"
+        )
+        required = [
+            "struct FactorRegistryPreviewArtifact",
+            "autofactor_target_horizon(target)",
+            "version: ALPHA_SEARCH_ARTIFACT_VERSION",
+            "target: target.to_string()",
+            "factors: factor_registry_preview_rows",
+            "runtime_contract_for_report",
+            "autofactor_runtime_contract_v1",
+            '"runtime_score": mapping.runtime_score',
+            '"strategy_profile": mapping.strategy_profile',
+            '"input_names": input_names',
+            "runtime_contract_unmapped_factor",
+        ]
+        for snippet in required:
+            self.assertIn(snippet, source)
 
     def test_promotion_mapping_is_fail_closed(self) -> None:
         source = EXAMPLE.read_text(encoding="utf-8")
@@ -103,6 +128,10 @@ class PersistResearchTraceContractTest(unittest.TestCase):
 
     def test_hosted_walk_forward_persists_trace_by_default(self) -> None:
         workflow = HOSTED_WALK.read_text(encoding="utf-8")
+        persist_step = workflow.split("- name: Persist Research OS trace", 1)[1].split(
+            "- name: Create config PR from ready handoff",
+            1,
+        )[0]
         required_snippets = [
             '"persist_research_trace":true',
             '"persist_research_trace": "true"',
@@ -128,9 +157,11 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "--handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json",
             "--candidate-replay-json",
             "candidate-strategy-replay/candidate-strategy-replay.json",
+            "factor walk-forward report is required for durable trace persistence.",
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, workflow)
+        self.assertNotIn("if: always()", persist_step)
 
     def test_standalone_autofactor_promotion_side_effects_require_trace(self) -> None:
         workflow = AUTOFACTOR_PROMOTION.read_text(encoding="utf-8")

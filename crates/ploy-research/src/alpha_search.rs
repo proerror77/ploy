@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::autofactor::{
     AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr, LlmPriorSpec,
-    factor_expr_hash,
+    autofactor_target_horizon, factor_expr_hash,
 };
 
 const ALPHA_SEARCH_ARTIFACT_VERSION: &str = "alpha_search_artifacts_v1";
@@ -272,11 +272,21 @@ struct RuntimeAvoidance {
 struct FactorRegistryPreviewRow {
     factor_name: String,
     target: Option<String>,
+    horizon: String,
     dsl_hash: String,
     ast_json: serde_json::Value,
+    runtime_contract: serde_json::Value,
     status: &'static str,
     metrics: serde_json::Value,
     blockers: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct FactorRegistryPreviewArtifact {
+    version: &'static str,
+    target: String,
+    horizon: String,
+    factors: Vec<FactorRegistryPreviewRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -461,7 +471,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
     write_json(&output_dir.join("node-metrics.json"), &node_metrics)?;
     write_json(
         &output_dir.join("factor-registry-preview.json"),
-        &factor_registry_preview_rows(reports, &node_metrics)?,
+        &factor_registry_preview_artifact(target, reports, &node_metrics)?,
     )?;
     let mcts_state = mcts_search_state(target, &node_metrics, prior_state);
     write_json(&output_dir.join("mcts-state.json"), &mcts_state)?;
@@ -550,24 +560,46 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
 }
 
 fn factor_registry_preview_rows(
+    target: &str,
     reports: &[AutoFactorReport],
     node_metrics: &[NodeMetric],
 ) -> Result<Vec<FactorRegistryPreviewRow>, AlphaSearchArtifactError> {
+    let horizon = factor_horizon(target);
     reports
         .iter()
         .zip(node_metrics.iter())
         .map(|(report, metric)| {
+            let dsl_hash = factor_expr_hash(&report.expr)?;
+            let ast_json = serde_json::to_value(&report.expr)?;
+            let runtime_contract =
+                runtime_contract_for_report(report, &dsl_hash, &ast_json, &horizon);
+            let blockers = registry_blockers(report, &runtime_contract);
             Ok(FactorRegistryPreviewRow {
                 factor_name: report.name.clone(),
                 target: report.target.clone(),
-                dsl_hash: factor_expr_hash(&report.expr)?,
-                ast_json: serde_json::to_value(&report.expr)?,
+                horizon: horizon.clone(),
+                dsl_hash,
+                ast_json,
+                runtime_contract,
                 status: registry_status(report.decision),
                 metrics: serde_json::to_value(metric)?,
-                blockers: registry_blockers(report),
+                blockers,
             })
         })
         .collect()
+}
+
+fn factor_registry_preview_artifact(
+    target: &str,
+    reports: &[AutoFactorReport],
+    node_metrics: &[NodeMetric],
+) -> Result<FactorRegistryPreviewArtifact, AlphaSearchArtifactError> {
+    Ok(FactorRegistryPreviewArtifact {
+        version: ALPHA_SEARCH_ARTIFACT_VERSION,
+        target: target.to_string(),
+        horizon: factor_horizon(target),
+        factors: factor_registry_preview_rows(target, reports, node_metrics)?,
+    })
 }
 
 fn registry_status(decision: AutoFactorDecision) -> &'static str {
@@ -578,11 +610,188 @@ fn registry_status(decision: AutoFactorDecision) -> &'static str {
     }
 }
 
-fn registry_blockers(report: &AutoFactorReport) -> Vec<String> {
-    if report.decision == AutoFactorDecision::Candidate {
-        Vec::new()
-    } else {
-        vec![report.reason.clone()]
+fn registry_blockers(
+    report: &AutoFactorReport,
+    runtime_contract: &serde_json::Value,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if report.decision != AutoFactorDecision::Candidate {
+        blockers.push(report.reason.clone());
+    }
+    if let Some(items) = runtime_contract.get("blockers").and_then(serde_json::Value::as_array) {
+        blockers.extend(
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|item| !item.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    }
+    blockers.sort();
+    blockers.dedup();
+    blockers
+}
+
+fn factor_horizon(target: &str) -> String {
+    autofactor_target_horizon(target).to_string()
+}
+
+fn runtime_contract_for_report(
+    report: &AutoFactorReport,
+    dsl_hash: &str,
+    ast_json: &serde_json::Value,
+    horizon: &str,
+) -> serde_json::Value {
+    let input_names = factor_input_names(&report.expr);
+    let mut blockers = Vec::new();
+    let mapping = inferred_runtime_mapping(&report.name);
+    if mapping.runtime_score.is_empty() || mapping.strategy_profile.is_empty() {
+        blockers.push("runtime_contract_unmapped_factor".to_string());
+    }
+    serde_json::json!({
+        "version": "autofactor_runtime_contract_v1",
+        "dsl_hash": dsl_hash,
+        "ast_json": ast_json,
+        "runtime_score": mapping.runtime_score,
+        "strategy_profile": mapping.strategy_profile,
+        "strategy_family": mapping.strategy_family,
+        "factor_family": normalized_factor_family(&report.name),
+        "target": report.target.as_deref().unwrap_or("unknown"),
+        "horizon": horizon,
+        "input_names": input_names,
+        "blockers": blockers,
+    })
+}
+
+#[derive(Debug, Default)]
+struct RuntimeMapping {
+    strategy_profile: String,
+    strategy_family: String,
+    runtime_score: String,
+}
+
+fn inferred_runtime_mapping(name: &str) -> RuntimeMapping {
+    let normalized = normalized_factor_key(name);
+    if normalized == "spread_adjusted_external_move" {
+        return RuntimeMapping {
+            strategy_profile: "repricing_momentum".to_string(),
+            strategy_family: "repricing".to_string(),
+            runtime_score: "spread_adjusted_external_move_score".to_string(),
+        };
+    }
+    if normalized == "repricing_gap_side_10s" {
+        return RuntimeMapping {
+            strategy_profile: "repricing_momentum".to_string(),
+            strategy_family: "repricing".to_string(),
+            runtime_score: "repricing_gap_side_10s".to_string(),
+        };
+    }
+    if is_settlement_formula(&normalized) {
+        return RuntimeMapping {
+            strategy_profile: "settlement_probability".to_string(),
+            strategy_family: "settlement_probability".to_string(),
+            runtime_score: format!("autofactor_formula:{name}"),
+        };
+    }
+    if [
+        "amplitude_weighted_momentum_30s_sigma",
+        "poly_lag_pressure",
+        "spread_adjusted_external_move",
+    ]
+    .iter()
+    .any(|base| normalized.starts_with(base))
+    {
+        return RuntimeMapping {
+            strategy_profile: "settlement_probability".to_string(),
+            strategy_family: "predictive_settlement_probability".to_string(),
+            runtime_score: format!("autofactor_formula:{name}"),
+        };
+    }
+    RuntimeMapping::default()
+}
+
+fn is_settlement_formula(normalized: &str) -> bool {
+    [
+        "auto_settlement_full_depth_settlement_edge",
+        "auto_settlement_conservative_settlement_edge",
+        "auto_settlement_model_full_depth_settlement_edge",
+        "auto_settlement_model_conservative_settlement_edge",
+    ]
+    .iter()
+    .any(|base| {
+        normalized
+            .strip_prefix(base)
+            .map(settlement_formula_suffix_supported)
+            .unwrap_or(false)
+    })
+}
+
+fn settlement_formula_suffix_supported(suffix: &str) -> bool {
+    if suffix.is_empty() {
+        return true;
+    }
+    let mut applied = BTreeSet::new();
+    for token in suffix.trim_start_matches('_').split('_') {
+        let effect = match token {
+            "strike" => Some("near_strike"),
+            "capacity" => Some("capacity"),
+            "quality" => Some("entry_price_quality"),
+            "adjusted" => Some("spread_adjusted"),
+            "pressure" => Some("external_pressure"),
+            "change" => Some("iv_change"),
+            "gate" => Some("full_depth_entry_gate"),
+            "squashed" => Some("squashed"),
+            _ => None,
+        };
+        if let Some(effect) = effect {
+            if !applied.insert(effect) {
+                return false;
+            }
+            continue;
+        }
+        if !matches!(
+            token,
+            "x" | "near" | "full" | "depth" | "entry" | "price" | "spread" | "external" | "iv"
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+fn factor_input_names(expr: &FactorExpr) -> Vec<String> {
+    let mut names = BTreeSet::new();
+    collect_factor_input_names(expr, &mut names);
+    names.into_iter().collect()
+}
+
+fn collect_factor_input_names(expr: &FactorExpr, names: &mut BTreeSet<String>) {
+    match expr {
+        FactorExpr::Input(name) => {
+            names.insert(name.clone());
+        }
+        FactorExpr::Const(_) => {}
+        FactorExpr::Add(lhs, rhs)
+        | FactorExpr::Sub(lhs, rhs)
+        | FactorExpr::Mul(lhs, rhs)
+        | FactorExpr::SafeDiv(lhs, rhs)
+        | FactorExpr::Max(lhs, rhs)
+        | FactorExpr::Min(lhs, rhs) => {
+            collect_factor_input_names(lhs, names);
+            collect_factor_input_names(rhs, names);
+        }
+        FactorExpr::Tanh(expr)
+        | FactorExpr::Log1pAbs(expr)
+        | FactorExpr::SqrtAbs(expr)
+        | FactorExpr::Clip { expr, .. }
+        | FactorExpr::Delta { expr, .. }
+        | FactorExpr::RollingMean { expr, .. }
+        | FactorExpr::RollingStd { expr, .. }
+        | FactorExpr::ZScore { expr, .. } => collect_factor_input_names(expr, names),
+        FactorExpr::Gate { expr, gate, .. } => {
+            collect_factor_input_names(expr, names);
+            collect_factor_input_names(gate, names);
+        }
     }
 }
 
@@ -1233,15 +1442,35 @@ mod tests {
         let registry_preview =
             tmp.join("full_depth_settlement_executable_pnl/factor-registry-preview.json");
         assert!(registry_preview.exists());
-        let rows: serde_json::Value =
+        let preview: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(registry_preview).expect("read preview"))
                 .expect("preview json");
+        assert_eq!(preview["version"], ALPHA_SEARCH_ARTIFACT_VERSION);
+        assert_eq!(
+            preview["target"],
+            "full_depth_settlement_executable_pnl"
+        );
+        assert_eq!(preview["horizon"], "5m");
+        let rows = preview["factors"].as_array().expect("factors array");
         assert_eq!(
             rows[0]["factor_name"],
             "auto_settlement_conservative_settlement_edge"
         );
+        assert_eq!(rows[0]["horizon"], "5m");
         assert_eq!(rows[0]["status"], "candidate");
         assert!(rows[0]["dsl_hash"].as_str().expect("dsl hash").len() >= 32);
+        assert_eq!(
+            rows[0]["runtime_contract"]["runtime_score"],
+            "autofactor_formula:auto_settlement_conservative_settlement_edge"
+        );
+        assert_eq!(
+            rows[0]["runtime_contract"]["strategy_profile"],
+            "settlement_probability"
+        );
+        assert_eq!(
+            rows[0]["runtime_contract"]["input_names"],
+            serde_json::json!(["conservative_settlement_edge"])
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

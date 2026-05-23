@@ -368,6 +368,19 @@ impl AutoFactorV2Target {
     }
 }
 
+pub fn autofactor_target_horizon(target: &str) -> &'static str {
+    match target {
+        "reprice_pnl_5s" | "full_depth_reprice_pnl_5s" => "5s",
+        "reprice_pnl_10s" | "full_depth_reprice_pnl_10s" => "10s",
+        "reprice_pnl_30s" | "full_depth_reprice_pnl_30s" => "30s",
+        "reprice_pnl_60s" | "full_depth_reprice_pnl_60s" => "60s",
+        "settlement_executable_pnl"
+        | "full_depth_settlement_executable_pnl"
+        | "tradeable_full_depth_settlement_pnl" => "5m",
+        _ => "unknown",
+    }
+}
+
 #[derive(Debug, Clone)]
 struct BucketSummary {
     n: usize,
@@ -3542,5 +3555,29 @@ mod tests {
         let formatted = format_autofactor_reports(&reports, reports.len());
         assert!(formatted.contains("reprice_pnl_30s"));
         assert!(!formatted.contains("reprice_pnl_10s"));
+    }
+
+    #[test]
+    fn autofactor_target_horizon_covers_repricing_and_settlement_catalog() {
+        for target in ["reprice_pnl_5s", "full_depth_reprice_pnl_5s"] {
+            assert_eq!(autofactor_target_horizon(target), "5s");
+        }
+        for target in ["reprice_pnl_10s", "full_depth_reprice_pnl_10s"] {
+            assert_eq!(autofactor_target_horizon(target), "10s");
+        }
+        for target in ["reprice_pnl_30s", "full_depth_reprice_pnl_30s"] {
+            assert_eq!(autofactor_target_horizon(target), "30s");
+        }
+        for target in ["reprice_pnl_60s", "full_depth_reprice_pnl_60s"] {
+            assert_eq!(autofactor_target_horizon(target), "60s");
+        }
+        for target in [
+            "settlement_executable_pnl",
+            "full_depth_settlement_executable_pnl",
+            "tradeable_full_depth_settlement_pnl",
+        ] {
+            assert_eq!(autofactor_target_horizon(target), "5m");
+        }
+        assert_eq!(autofactor_target_horizon("experimental_target"), "unknown");
     }
 }
