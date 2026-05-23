@@ -76,6 +76,10 @@ trace, not dry-run promotion.
       `main` trace-plan evidence.
 - [x] Record that the restored chain currently returns `fix_data` with zero
       qualified candidates, not dry-run-ready strategy discovery.
+- [x] Execute the Research Manager `fix_data` plan in dry-run and bounded
+      execute mode.
+- [x] Fix research snapshot data audit so it uses the requested dataset window
+      instead of a moving `now()-lookback` window.
 
 ## Review
 
@@ -229,6 +233,27 @@ trace, not dry-run promotion.
   Research Manager planning, but automatic research/backtest/strategy discovery
   is not proven until `research-manager-execute-plan.yml` drives the next
   bounded run and attaches evidence without manual artifact interpretation.
+- 2026-05-23: Research Manager executor dry-run `26336537960` read trace-plan
+  run `26336127621` and produced one ready dispatch:
+  `research-snapshot.yml` with `start_date=2026-05-16`,
+  `end_date=2026-05-21`, `symbols=BTCUSDT,ETHUSDT,SOLUSDT`,
+  `data_profile=pm5d-execution`, and `upload_sampled_snapshot=true`.
+- 2026-05-23: Research Manager executor execute run `26336555894` dispatched
+  snapshot run `26336559175` from `main` merge commit
+  `945e557afc5eb9766b1ba94c9c86fcabef26d036`. The snapshot run failed in
+  `Audit required market data on tango-1-1`, proving a data-audit window bug:
+  the requested dataset window was `2026-05-16 -> 2026-05-21`, but
+  `audit_market_data_gaps.py` audited `now()-168h` and blocked on Binance gaps
+  from `2026-05-22`, outside the requested dataset window.
+- 2026-05-23: Fixed the snapshot audit path to pass explicit historical
+  `--start-ts` / `--end-ts` bounds from `research-snapshot.yml` into
+  `scripts/audit_market_data_gaps.py`. In explicit historical-window mode,
+  coverage is audited over the requested dataset interval and current
+  freshness is reported but not enforced. Focused validation passed:
+  `python3 -m unittest tests.test_market_data_gap_audit_scope tests.test_research_manager_execute_plan`,
+  `rtk cargo test --locked --test workflow_security`, `python3 -m py_compile
+  scripts/audit_market_data_gaps.py tests/test_market_data_gap_audit_scope.py`,
+  and `rtk git diff --check`.
 
 # Candidate Replay Durable Trace (2026-05-23)
 

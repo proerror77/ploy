@@ -222,12 +222,16 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/research-snapshot
           remote_audit="${REMOTE_DIR}/research-snapshot/data-gap-audit.json"
+          audit_start_ts="${SNAPSHOT_START_TS:-${{ github.event.inputs.start_date }}}"
+          audit_end_ts="${SNAPSHOT_END_TS:-${{ github.event.inputs.end_date }}}"
 
           ssh tango-1-1 /bin/bash -s -- \
             "${DEPLOY_ROOT}" \
             "${REMOTE_DIR}" \
             "${remote_audit}" \
             "${SNAPSHOT_AUDIT_LOOKBACK_HOURS}" \
+            "${audit_start_ts}" \
+            "${audit_end_ts}" \
             "${{ github.event.inputs.symbols }}" \
             "${REQUIRED_SOURCES}" <<'EOF'
           set -euo pipefail
@@ -235,8 +239,10 @@ jobs:
           remote_dir="$2"
           remote_audit="$3"
           audit_lookback_hours="$4"
-          symbols="$5"
-          required_sources="$6"
+          audit_start_ts="$5"
+          audit_end_ts="$6"
+          symbols="$7"
+          required_sources="$8"
 
           set -a
           . "${deploy_root}/.env"
@@ -247,6 +253,8 @@ jobs:
           PLOY_DATABASE__URL="${PLOY_DATABASE__URL}" \
             "${deploy_root}/scripts/audit_market_data_gaps.py" \
               --lookback-hours "${audit_lookback_hours}" \
+              --start-ts "${audit_start_ts}" \
+              --end-ts "${audit_end_ts}" \
               --bucket-minutes 5 \
               --symbols "${symbols}" \
               --required-sources "${required_sources}" \
