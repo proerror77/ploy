@@ -162,6 +162,14 @@ research database, uploads `research-trace-plan.json` / `.md`, and can attach
 the plan to a research issue. It is read-only and does not build Rust or mutate
 runtime state.
 
+To convert a Research Manager plan into bounded follow-up actions, dispatch
+`.github/workflows/research-manager-execute-plan.yml` with the trace-plan run
+id. It defaults to `mode=dry_run`, uploads a machine-readable executor artifact,
+and only dispatches follow-up research workflows when `mode=execute` and
+`execute_ack=execute-research-manager-plan` are both set. The executor is a
+research-only surface: it can dispatch snapshot refreshes or hosted
+walk-forward continuations, but it does not deploy, trade, or create config PRs.
+
 The current architecture review is
 `docs/reviews/research-data-architecture-review-2026-05-23.md`.
 

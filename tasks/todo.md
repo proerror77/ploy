@@ -55,10 +55,11 @@ trace, not dry-run promotion.
       `scripts/` root.
 - [x] Add a durable trace hard gate so candidate replay `basis` and
       `evidence_stage` cannot contradict each other.
+- [x] Add a default-dry-run Research Manager executor workflow that turns
+      trace-plan actions into auditable bounded follow-up research dispatches.
 - [ ] Apply remaining high-priority data/research cleanup based on audit
-      results: Research Manager action executor, runtime input
-      canonicalization, feature snapshot hard gates, and multi-horizon
-      accounting gates.
+      results: runtime input canonicalization, feature snapshot hard gates, and
+      multi-horizon accounting gates.
 
 ## Review
 
@@ -119,6 +120,13 @@ trace, not dry-run promotion.
   artifacts claiming `executable_replay`. Migration
   `045_candidate_replay_basis_stage_constraint.sql` adds the same DB-level
   guard for future rows.
+- 2026-05-23: Added `research-manager-execute-plan.yml` plus
+  `scripts/research_manager_execute_plan.py`. The executor reads
+  `research-trace-plan.json`, writes `research-manager-executor.json/.md`, can
+  generate a typed-prior artifact, and remains dry-run unless
+  `execute_ack=execute-research-manager-plan` is provided. Execute mode is
+  limited to research workflows such as snapshot refresh and hosted
+  walk-forward continuation.
 - 2026-05-23: Active workflow/docs/script contracts now call retained
   snapshots `complete sampled research snapshot` artifacts instead of `full`
   snapshots/full payloads. Added a regression test so active docs, workflows,
