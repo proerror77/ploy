@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use ploy_research::ResearchSnapshotManifest;
 use ploy_research::autofactor_target_horizon;
@@ -768,12 +768,13 @@ async fn upsert_factor_registry(pool: &PgPool, row: &FactorPreviewRow) -> Result
             dsl_hash,
             ast_json,
             runtime_contract,
+            blockers_json,
             target,
             horizon,
             created_by_agent,
             metadata
         )
-        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, $12, $13, $14::jsonb)
+        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14, $15::jsonb)
         ON CONFLICT (dsl_hash, target, horizon) DO UPDATE SET
             factor_name = EXCLUDED.factor_name,
             factor_family = EXCLUDED.factor_family,
@@ -786,6 +787,7 @@ async fn upsert_factor_registry(pool: &PgPool, row: &FactorPreviewRow) -> Result
             dsl_source = EXCLUDED.dsl_source,
             ast_json = EXCLUDED.ast_json,
             runtime_contract = EXCLUDED.runtime_contract,
+            blockers_json = EXCLUDED.blockers_json,
             target = EXCLUDED.target,
             horizon = EXCLUDED.horizon,
             metadata = EXCLUDED.metadata
@@ -805,6 +807,7 @@ async fn upsert_factor_registry(pool: &PgPool, row: &FactorPreviewRow) -> Result
     .bind(&row.dsl_hash)
     .bind(row.ast_json.to_string())
     .bind(row.runtime_contract.to_string())
+    .bind(row.blockers.to_string())
     .bind(&row.target)
     .bind(&row.horizon)
     .bind(WRITER_AGENT)
@@ -1463,10 +1466,8 @@ mod tests {
 
     #[test]
     fn reads_legacy_top_level_array_preview_and_uses_parent_target() {
-        let root = std::env::temp_dir().join(format!(
-            "ploy-trace-preview-legacy-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ploy-trace-preview-legacy-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let preview_path = root
             .join("full_depth_reprice_pnl_10s")
@@ -1493,10 +1494,8 @@ mod tests {
 
     #[test]
     fn malformed_preview_without_factors_still_fails_closed() {
-        let root = std::env::temp_dir().join(format!(
-            "ploy-trace-preview-bad-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ploy-trace-preview-bad-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let preview_path = root
             .join("full_depth_settlement_executable_pnl")
@@ -1514,9 +1513,18 @@ mod tests {
 
     #[test]
     fn default_horizon_uses_shared_autofactor_target_catalog() {
-        assert_eq!(default_horizon_for_target("full_depth_reprice_pnl_5s"), "5s");
-        assert_eq!(default_horizon_for_target("full_depth_reprice_pnl_30s"), "30s");
-        assert_eq!(default_horizon_for_target("full_depth_reprice_pnl_60s"), "60s");
+        assert_eq!(
+            default_horizon_for_target("full_depth_reprice_pnl_5s"),
+            "5s"
+        );
+        assert_eq!(
+            default_horizon_for_target("full_depth_reprice_pnl_30s"),
+            "30s"
+        );
+        assert_eq!(
+            default_horizon_for_target("full_depth_reprice_pnl_60s"),
+            "60s"
+        );
         assert_eq!(
             default_horizon_for_target("tradeable_full_depth_settlement_pnl"),
             "5m"
