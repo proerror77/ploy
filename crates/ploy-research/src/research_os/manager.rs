@@ -30,6 +30,15 @@ pub struct ResearchManagerPlan {
     pub priority: String,
     pub evidence_stage: String,
     pub actions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocker_actions: Vec<ResearchBlockerAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResearchBlockerAction {
+    pub blocker_family: String,
+    pub action: String,
+    pub reason: String,
 }
 
 fn default_evidence_stage() -> String {
@@ -65,7 +74,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
         &["missing", "stale", "critical_missing"],
         &[true.into(), "true".into(), "critical".into()],
     ) {
-        return Ok(plan(
+        return Ok(plan_with_blocker_actions(
             "fix_data",
             0,
             0,
@@ -75,6 +84,36 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
                 "repair_or_exclude_missing_data_surface",
                 "rerun_snapshot_data_audit",
             ],
+            derive_blocker_actions(input),
+        ));
+    }
+
+    let blocker_actions = derive_blocker_actions(input);
+    if blocker_actions
+        .iter()
+        .any(|item| item.blocker_family.starts_with("data_"))
+    {
+        let mut actions = vec!["rerun_snapshot_data_audit"];
+        if blocker_actions
+            .iter()
+            .any(|item| item.action == "repair_official_settlement_coverage")
+        {
+            actions.insert(0, "repair_official_settlement_coverage");
+        }
+        if blocker_actions
+            .iter()
+            .any(|item| item.action == "collect_full_depth_execution_surface")
+        {
+            actions.insert(0, "collect_full_depth_execution_surface");
+        }
+        return Ok(plan_with_blocker_actions(
+            "fix_data",
+            0,
+            0,
+            "high",
+            &input.evidence_stage,
+            actions,
+            blocker_actions,
         ));
     }
 
@@ -94,7 +133,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
         &["replay_parity_ready", "runtime_parity_ready"],
         &[false.into(), "false".into()],
     ) {
-        return Ok(plan(
+        return Ok(plan_with_blocker_actions(
             "fix_runtime",
             0,
             0,
@@ -104,6 +143,24 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
                 "run_recorded_replay_parity",
                 "compare_runtime_scorer_contract",
             ],
+            blocker_actions,
+        ));
+    }
+
+    if blocker_actions.iter().any(|item| {
+        item.blocker_family == "search_power" || item.blocker_family == "execution_fillability"
+    }) {
+        return Ok(plan_with_blocker_actions(
+            "revise_prior",
+            input.research_budget.max_candidates_per_day.min(8),
+            2,
+            "high",
+            &input.evidence_stage,
+            vec![
+                "generate_typed_llm_prior_json",
+                "rerun_alpha_search_with_bounded_mutations",
+            ],
+            blocker_actions,
         ));
     }
 
@@ -182,7 +239,135 @@ fn plan(
         priority: priority.to_string(),
         evidence_stage: evidence_stage.to_string(),
         actions: actions.into_iter().map(str::to_string).collect(),
+        blocker_actions: Vec::new(),
     }
+}
+
+fn plan_with_blocker_actions(
+    theme: &str,
+    candidate_count: usize,
+    search_depth: usize,
+    priority: &str,
+    evidence_stage: &str,
+    actions: Vec<&str>,
+    blocker_actions: Vec<ResearchBlockerAction>,
+) -> ResearchManagerPlan {
+    ResearchManagerPlan {
+        blocker_actions,
+        ..plan(
+            theme,
+            candidate_count,
+            search_depth,
+            priority,
+            evidence_stage,
+            actions,
+        )
+    }
+}
+
+fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAction> {
+    let mut actions = Vec::new();
+    let latest = input.latest_runs.to_string().to_lowercase();
+    let rejected = input.rejected_factor_patterns.to_string().to_lowercase();
+    let runtime_or_promotion_blockers = format!("{latest} {rejected}");
+
+    if contains_any_text(
+        &runtime_or_promotion_blockers,
+        &[
+            "official_settlement_missing",
+            "missing_official_settlement",
+            "settlement_labels_missing",
+            "official settlement",
+        ],
+    ) {
+        actions.push(blocker_action(
+            "data_settlement",
+            "repair_official_settlement_coverage",
+            "Runtime replay traded events are missing official settlement labels.",
+        ));
+    }
+    if contains_any_text(
+        &runtime_or_promotion_blockers,
+        &[
+            "sampled_snapshot_required_for_execution_surface",
+            "required_execution_surface_is_sampled_snapshot",
+            "full_depth_missing",
+            "full-depth missing",
+        ],
+    ) {
+        actions.push(blocker_action(
+            "data_execution_surface",
+            "collect_full_depth_execution_surface",
+            "Promotion requires full-depth executable evidence instead of sampled snapshots.",
+        ));
+    }
+    if contains_any_text(
+        &runtime_or_promotion_blockers,
+        &["trade_count_too_small", "min_trade_count", "too_few_trades"],
+    ) {
+        actions.push(blocker_action(
+            "search_power",
+            "increase_distinct_event_coverage_or_reduce_selectivity",
+            "Runtime replay did not produce enough distinct event-level trades.",
+        ));
+    }
+    if contains_any_text(
+        &runtime_or_promotion_blockers,
+        &[
+            "fillability",
+            "fill_rate_too_low",
+            "entry_fill_rate_too_low",
+            "capacity_too_low",
+        ],
+    ) {
+        actions.push(blocker_action(
+            "execution_fillability",
+            "prefer_high_fillability_depth_filters",
+            "Candidate selection must avoid thin depth or low-fillability entry surfaces.",
+        ));
+    }
+    if contains_any_text(
+        &runtime_or_promotion_blockers,
+        &[
+            "missing_runtime_contract",
+            "runtime_contract_unmapped_factor",
+            "missing_runtime_strategy_mapping",
+        ],
+    ) {
+        actions.push(blocker_action(
+            "runtime_contract",
+            "repair_runtime_contract_mapping",
+            "Factor needs a typed unblocked runtime contract before replay or promotion.",
+        ));
+    }
+    if contains_any_text(
+        &runtime_or_promotion_blockers,
+        &[
+            "candidate_strategy_replay_not_runtime_replay",
+            "requires_runtime_replay_not_top_bucket_aggregate",
+            "candidate_strategy_replay_identity_basis_mismatch",
+        ],
+    ) {
+        actions.push(blocker_action(
+            "runtime_replay",
+            "build_runtime_market_update_replay",
+            "Top-bucket aggregate evidence must be replaced by ordered runtime MarketUpdate replay.",
+        ));
+    }
+
+    actions
+}
+
+fn blocker_action(blocker_family: &str, action: &str, reason: &str) -> ResearchBlockerAction {
+    ResearchBlockerAction {
+        blocker_family: blocker_family.to_string(),
+        action: action.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+fn contains_any_text(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
 }
 
 fn contains_string(value: &serde_json::Value, needles: &[&str]) -> bool {
@@ -346,10 +531,9 @@ mod tests {
         ))
         .expect("plan");
         assert_eq!(plan.theme, "revise_prior");
-        assert!(
-            plan.actions
-                .contains(&"generate_typed_llm_prior_json".to_string())
-        );
+        assert!(plan
+            .actions
+            .contains(&"generate_typed_llm_prior_json".to_string()));
     }
 
     #[test]
@@ -383,9 +567,64 @@ mod tests {
 
         let plan = plan_next_research(&input).expect("plan");
         assert_eq!(plan.theme, "candidate_to_runtime_replay");
-        assert!(
-            plan.actions
-                .contains(&"build_runtime_candidate_replay".to_string())
-        );
+        assert!(plan
+            .actions
+            .contains(&"build_runtime_candidate_replay".to_string()));
+    }
+
+    #[test]
+    fn planner_turns_runtime_replay_trade_count_blocker_into_typed_prior_action() {
+        let plan = plan_next_research(&input(
+            "executable_replay",
+            serde_json::json!({
+                "candidate_strategy_replay": {
+                    "blocking_risk_flags": ["trade_count_too_small:29<50"]
+                }
+            }),
+            serde_json::json!({}),
+        ))
+        .expect("plan");
+
+        assert_eq!(plan.theme, "revise_prior");
+        assert!(plan
+            .actions
+            .contains(&"generate_typed_llm_prior_json".to_string()));
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "search_power"
+                && item.action == "increase_distinct_event_coverage_or_reduce_selectivity"
+        }));
+    }
+
+    #[test]
+    fn planner_turns_runtime_replay_data_blockers_into_data_actions() {
+        let plan = plan_next_research(&input(
+            "executable_replay",
+            serde_json::json!({
+                "candidate_strategy_replay": {
+                    "blocking_risk_flags": [
+                        "official_settlement_missing:25<29",
+                        "sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots"
+                    ]
+                }
+            }),
+            serde_json::json!({}),
+        ))
+        .expect("plan");
+
+        assert_eq!(plan.theme, "fix_data");
+        assert!(plan
+            .actions
+            .contains(&"repair_official_settlement_coverage".to_string()));
+        assert!(plan
+            .actions
+            .contains(&"collect_full_depth_execution_surface".to_string()));
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "data_settlement"
+                && item.action == "repair_official_settlement_coverage"
+        }));
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "data_execution_surface"
+                && item.action == "collect_full_depth_execution_surface"
+        }));
     }
 }

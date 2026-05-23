@@ -1,5 +1,36 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Blocker Actions (2026-05-24)
+
+Evidence stage: architecture/data-plane cleanup and research workflow planning;
+no strategy promotion and no live data mutation.
+
+### Tasks
+
+- [x] Start a fresh implementation branch from current `origin/main`.
+- [x] Reconfirm project semantics and Event ML / AutoFactor workflow gates.
+- [x] Add machine-readable Research Manager blocker actions for runtime replay
+      and promotion blockers.
+- [x] Propagate blocker actions into the executor typed prior artifact.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+### Review
+
+- 2026-05-24: Runtime replay blockers such as small distinct-event trade count,
+  missing official settlement, sampled execution surface, and low fillability
+  now become explicit Research Manager `blocker_actions`. The executor carries
+  those actions into `research_manager_typed_prior.v1` constraints so the next
+  hosted search can mutate around the blocker rather than repeating the same
+  candidate loop.
+- 2026-05-24: Focused validation passed: `rtk cargo test --locked -p
+  ploy-research research_os::manager --lib`, `python3 -m unittest
+  tests.test_research_manager_execute_plan tests.test_persist_research_trace_contract`,
+  and `rtk git diff --check`. Full-workspace `cargo fmt --check` was not used
+  as a pass/fail gate because the current repo has pre-existing unrelated
+  rustfmt drift outside this slice; the touched Rust file was formatted with
+  `rustfmt`.
+
 ## Current Session - Legacy Crypto Trainer Cleanup (2026-05-24)
 
 Evidence stage: architecture/data-plane cleanup; no strategy promotion and no
@@ -15,7 +46,7 @@ live data mutation.
       checklist, or test callers.
 - [x] Keep the documented LOB TCN training entrypoint active.
 - [x] Run focused validation.
-- [ ] Commit, push, open PR, wait for CI, and merge.
+- [x] Commit, push, open PR, wait for CI, and merge.
 
 ### Review
 
@@ -29,6 +60,8 @@ live data mutation.
   archived trainer names, Python compile for the two archived trainers plus the
   retained LOB TCN trainer, `python3 -m unittest
   tests.test_persist_research_trace_contract`, and `rtk git diff --check`.
+- 2026-05-24: PR #648 merged to `main` at
+  `72daf3488fa06788785dc0716ed6c0f3b78257ec`.
 
 ## Current Session - Quote Backfill Legacy Cleanup (2026-05-24)
 

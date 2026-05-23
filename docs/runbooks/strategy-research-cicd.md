@@ -209,6 +209,14 @@ closed instead of replaying a hardcoded default score.
 The current architecture review is
 `docs/reviews/research-data-architecture-review-2026-05-23.md`.
 
+Research Manager plans also carry machine-readable `blocker_actions` when
+runtime replay or promotion evidence explains why a candidate stayed blocked.
+Current actions include official-settlement repair, full-depth execution-surface
+collection, broader distinct-event coverage, and high-fillability/depth-filter
+mutation. `scripts/research_manager_execute_plan.py` copies those actions into
+`research_manager_typed_prior.v1` so the next hosted search can consume the
+constraint instead of relying on a human to reinterpret the markdown blocker.
+
 `recorded-replay-parity.yml` defaults `since=auto` and `until=auto`. In auto
 mode it scans the target recording on `tango-1-1`, intersects that recording
 coverage with the dry-run report for the target deployment, prefers the latest
