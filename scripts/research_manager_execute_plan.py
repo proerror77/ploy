@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,46 @@ def _date_from_ts(raw: str | None) -> str:
     return raw.split("T", 1)[0]
 
 
+def _parse_utc_ts(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_utc_ts(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _bounded_snapshot_window(
+    market_data: dict[str, Any],
+    max_window_days: int,
+) -> dict[str, Any]:
+    start = _parse_utc_ts(market_data.get("dataset_start_ts"))
+    end = _parse_utc_ts(market_data.get("dataset_end_ts"))
+    if not start or not end or end <= start:
+        return {
+            "start_date": _date_from_ts(market_data.get("dataset_start_ts")),
+            "end_date": _date_from_ts(market_data.get("dataset_end_ts")),
+            "start_ts": market_data.get("dataset_start_ts") or "",
+            "end_ts": market_data.get("dataset_end_ts") or "",
+            "truncated": False,
+            "max_window_days": max_window_days,
+        }
+    capped_end = min(end, start + timedelta(days=max_window_days))
+    return {
+        "start_date": start.date().isoformat(),
+        "end_date": capped_end.date().isoformat(),
+        "start_ts": _format_utc_ts(start),
+        "end_ts": _format_utc_ts(capped_end),
+        "truncated": capped_end < end,
+        "max_window_days": max_window_days,
+        "source_end_ts": _format_utc_ts(end),
+    }
+
+
 def _parse_symbols(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
@@ -46,11 +87,16 @@ def _research_snapshot_dispatch(
     git_ref: str,
     symbols: str,
     stake_usd: str,
+    max_snapshot_window_days: int,
 ) -> dict[str, Any]:
     market_data = ((plan.get("input") or {}).get("market_data_health") or {})
-    start_date = _date_from_ts(market_data.get("dataset_start_ts"))
-    end_date = _date_from_ts(market_data.get("dataset_end_ts"))
+    window = _bounded_snapshot_window(
+        market_data,
+        max_window_days=max(1, max_snapshot_window_days),
+    )
     options = {
+        "start_ts": window["start_ts"],
+        "end_ts": window["end_ts"],
         "data_profile": "pm5d-execution",
         "data_gate": "warn",
         "upload_sampled_snapshot": True,
@@ -60,8 +106,8 @@ def _research_snapshot_dispatch(
         blockers.append("missing_symbols")
     fields = {
         "git_ref": git_ref,
-        "start_date": start_date,
-        "end_date": end_date,
+        "start_date": window["start_date"],
+        "end_date": window["end_date"],
         "symbols": symbols,
         "stake_usd": stake_usd,
         "options_json": json.dumps(options, separators=(",", ":"), sort_keys=True),
@@ -72,6 +118,7 @@ def _research_snapshot_dispatch(
         "ready": not blockers,
         "blockers": blockers,
         "fields": fields,
+        "bounded_window": window,
     }
 
 
@@ -132,6 +179,7 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                 git_ref=args.git_ref,
                 symbols=args.symbols,
                 stake_usd=args.stake_usd,
+                max_snapshot_window_days=args.max_snapshot_window_days,
             )
         )
 
@@ -229,6 +277,7 @@ def main() -> None:
     parser.add_argument("--symbols", default="")
     parser.add_argument("--stake-usd", default="15")
     parser.add_argument("--chain-remaining", type=int, default=1)
+    parser.add_argument("--max-snapshot-window-days", type=int, default=2)
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

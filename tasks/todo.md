@@ -80,6 +80,8 @@ trace, not dry-run promotion.
       execute mode.
 - [x] Fix research snapshot data audit so it uses the requested dataset window
       instead of a moving `now()-lookback` window.
+- [x] Fix Research Manager snapshot dispatch so exact timestamp windows and
+      short bounded compile windows are part of the machine contract.
 
 ## Review
 
@@ -254,6 +256,22 @@ trace, not dry-run promotion.
   `rtk cargo test --locked --test workflow_security`, `python3 -m py_compile
   scripts/audit_market_data_gaps.py tests/test_market_data_gap_audit_scope.py`,
   and `rtk git diff --check`.
+- 2026-05-23: Post-deploy executor run `26336977024` dispatched snapshot run
+  `26336990239` from `main` commit
+  `06d57e2bcdf14a449a475e0751dd1b133cab49b9`. The market-data audit step now
+  passed with `audit_window_start_ts=2026-05-16T00:00:00Z` and
+  `audit_window_end_ts=2026-05-21T00:00:00Z`, proving the moving-window audit
+  bug was fixed. The run then timed out/cancelled in `Compile snapshot on
+  tango-1-1` at the 60-minute job limit and uploaded provenance only, so the
+  next blocker is snapshot compile boundedness and exact dispatch window
+  semantics, not data audit coverage.
+- 2026-05-23: Research Manager executor now passes exact `start_ts` /
+  `end_ts` through `options_json` and caps fix-data snapshot refreshes to a
+  default 2-day compile window. Focused validation passed:
+  `python3 -m unittest tests.test_research_manager_execute_plan tests.test_market_data_gap_audit_scope`,
+  `python3 -m py_compile scripts/research_manager_execute_plan.py tests/test_research_manager_execute_plan.py`,
+  `rtk git diff --check`, and a dry-run against trace-plan run `26336127621`
+  produced `2026-05-16T00:00:00Z -> 2026-05-18T00:00:00Z` dispatch options.
 
 # Candidate Replay Durable Trace (2026-05-23)
 

@@ -40,6 +40,7 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
                 symbols="BTCUSDT,ETHUSDT",
                 stake_usd="15",
                 chain_remaining=1,
+                max_snapshot_window_days=2,
             ),
             plan_payload("fix_data", ["rerun_snapshot_data_audit"]),
         )
@@ -48,8 +49,11 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
         self.assertEqual(1, payload["executable_dispatch_count"])
         self.assertEqual("research-snapshot.yml", payload["dispatches"][0]["workflow"])
         self.assertEqual("2026-04-21", payload["dispatches"][0]["fields"]["start_date"])
+        self.assertEqual("2026-04-23", payload["dispatches"][0]["fields"]["end_date"])
         options = json.loads(payload["dispatches"][0]["fields"]["options_json"])
         self.assertTrue(options["upload_sampled_snapshot"])
+        self.assertEqual("2026-04-21T00:00:00Z", options["start_ts"])
+        self.assertEqual("2026-04-23T00:00:00Z", options["end_ts"])
         self.assertNotIn("upload_full_snapshot", options)
 
     def test_execute_mode_requires_ack(self) -> None:
@@ -62,6 +66,7 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
                 symbols="BTCUSDT",
                 stake_usd="15",
                 chain_remaining=1,
+                max_snapshot_window_days=2,
             ),
             plan_payload("continue_search", ["continue_hosted_alpha_search"]),
         )
@@ -78,6 +83,7 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
                 symbols="BTCUSDT",
                 stake_usd="15",
                 chain_remaining=2,
+                max_snapshot_window_days=2,
             ),
             plan_payload("continue_search", ["continue_hosted_alpha_search"]),
         )
@@ -112,6 +118,43 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             self.assertTrue((out / "research-manager-executor.json").exists())
             self.assertTrue((out / "research-manager-executor.md").exists())
             self.assertTrue((out / "next-llm-prior.json").exists())
+
+    def test_fix_data_snapshot_dispatch_caps_large_dataset_window(self) -> None:
+        payload = build_executor_payload(
+            Namespace(
+                mode="dry_run",
+                execute_ack="",
+                git_ref="main",
+                snapshot_run_id="",
+                symbols="BTCUSDT,ETHUSDT,SOLUSDT",
+                stake_usd="15",
+                chain_remaining=1,
+                max_snapshot_window_days=2,
+            ),
+            {
+                "schema_version": "research_trace_plan.v1",
+                "input": {
+                    "market_data_health": {
+                        "dataset_start_ts": "2026-05-16T00:00:00Z",
+                        "dataset_end_ts": "2026-05-21T00:00:00Z",
+                    }
+                },
+                "plan": {
+                    "theme": "fix_data",
+                    "priority": "high",
+                    "evidence_stage": "factor_attribution",
+                    "actions": ["rerun_snapshot_data_audit"],
+                },
+            },
+        )
+
+        dispatch = payload["dispatches"][0]
+        options = json.loads(dispatch["fields"]["options_json"])
+        self.assertEqual("2026-05-16", dispatch["fields"]["start_date"])
+        self.assertEqual("2026-05-18", dispatch["fields"]["end_date"])
+        self.assertEqual("2026-05-16T00:00:00Z", options["start_ts"])
+        self.assertEqual("2026-05-18T00:00:00Z", options["end_ts"])
+        self.assertTrue(dispatch["bounded_window"]["truncated"])
 
 
 if __name__ == "__main__":
