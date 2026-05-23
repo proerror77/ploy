@@ -53,6 +53,7 @@ env:
     042_factor_research_os_registry.sql
     043_research_os_trace_constraints.sql
     044_candidate_replay_tapes.sql
+    045_candidate_replay_basis_stage_constraint.sql
 
 jobs:
   build-and-deploy:
