@@ -89,6 +89,10 @@ class RuntimeMarketDataBoundaryTests(unittest.TestCase):
             self.assertIn("Polymarket trade collector poll complete", text)
             self.assertIn("pm trade collector did not complete a healthy poll after deploy", text)
             self.assertIn("pm trade collector failed after deploy", text)
+            if path.name == "deploy-tango-1-1.yml":
+                self.assertIn('local since="\\${DEPLOY_STARTED_AT}"', text)
+            else:
+                self.assertIn('local since="${{DEPLOY_STARTED_AT}}"', text)
             self.assertNotIn(
                 "clob_trade_ticks WHERE received_at >= NOW() - INTERVAL '5 minutes'",
                 text,
