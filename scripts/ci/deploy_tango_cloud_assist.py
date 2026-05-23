@@ -263,6 +263,16 @@ systemctl enable --now ploy-deribit-greeks-collector.service
 systemctl restart ploy-deribit-greeks-collector.service
 systemctl enable --now ploy-market-discovery.service
 systemctl restart ploy-market-discovery.service
+wait_for_recent_rows \\
+  "SELECT EXISTS (SELECT 1 FROM pm_market_catalog WHERE market_family = 'crypto' AND strategy_symbol IS NOT NULL AND end_time >= NOW())" \\
+  "pm_market_catalog has no active crypto markets after market-discovery restart" \\
+  20 \\
+  3
+wait_for_recent_rows \\
+  "SELECT EXISTS (SELECT 1 FROM pm_market_metadata WHERE symbol IS NOT NULL AND end_time >= NOW())" \\
+  "pm_market_metadata has no active crypto markets after market-discovery restart" \\
+  20 \\
+  3
 if service_exists ploy-quote-collector.service; then
   systemctl enable --now ploy-quote-collector.service
   systemctl restart ploy-quote-collector.service
@@ -319,7 +329,9 @@ wait_for_recent_rows \\
 wait_for_recent_log \\
   "ploy-pm-trade-collector.service" \\
   "Polymarket trade collector poll complete" \\
-  "pm trade collector did not complete a healthy poll after deploy"
+  "pm trade collector did not complete a healthy poll after deploy" \\
+  120 \\
+  5
 
 if service_exists ployd.service; then
   assert_no_recent_logs \\

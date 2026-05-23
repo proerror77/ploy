@@ -828,14 +828,19 @@ fn tango_deploy_pm_trade_postflight_uses_collector_health_not_fresh_trade_rows()
             offenders.push(format!("{name}: still requires fresh clob_trade_ticks inserts"));
         }
         if content.contains("clob_trade_ticks is not receiving PM trade prints after deploy") {
-            offenders.push(format!("{name}: still emits stale PM trade freshness failure"));
+            offenders.push(format!(
+                "{name}: still emits stale PM trade freshness failure"
+            ));
         }
         for needle in [
             "systemctl is-active --quiet ploy-pm-trade-collector.service",
             "require_service_guardrails ploy-pm-trade-collector.service",
+            "pm_market_catalog has no active crypto markets after market-discovery restart",
+            "pm_market_metadata has no active crypto markets after market-discovery restart",
             "wait_for_recent_log",
             "journalctl -u",
             "Polymarket trade collector poll complete",
+            "pm trade collector did not complete a healthy poll after deploy",
             "no partition of relation",
             "pm trade collector failed after deploy",
         ] {
@@ -843,6 +848,61 @@ fn tango_deploy_pm_trade_postflight_uses_collector_health_not_fresh_trade_rows()
                 offenders.push(format!("{name}: missing `{needle}`"));
             }
         }
+    }
+
+    for (name, content) in [
+        ("deploy-tango-1-1.yml", workflow.as_str()),
+        ("deploy_tango_cloud_assist.py", cloud_assist.as_str()),
+    ] {
+        let discovery_restart = content.find("systemctl restart ploy-market-discovery.service");
+        let catalog_wait = content
+            .find("pm_market_catalog has no active crypto markets after market-discovery restart");
+        let metadata_wait = content
+            .find("pm_market_metadata has no active crypto markets after market-discovery restart");
+        let trade_restart = content.find("systemctl restart ploy-pm-trade-collector.service");
+        match (
+            discovery_restart,
+            catalog_wait,
+            metadata_wait,
+            trade_restart,
+        ) {
+            (
+                Some(discovery_restart),
+                Some(catalog_wait),
+                Some(metadata_wait),
+                Some(trade_restart),
+            ) => {
+                if !(discovery_restart < catalog_wait && catalog_wait < trade_restart) {
+                    offenders.push(format!(
+                        "{name}: catalog readiness wait must run between market discovery and PM trade collector restart"
+                    ));
+                }
+                if !(discovery_restart < metadata_wait && metadata_wait < trade_restart) {
+                    offenders.push(format!(
+                        "{name}: metadata readiness wait must run between market discovery and PM trade collector restart"
+                    ));
+                }
+            }
+            _ => offenders.push(format!(
+                "{name}: missing market-discovery readiness ordering anchors"
+            )),
+        }
+    }
+
+    if !workflow.contains(
+        "\"pm trade collector did not complete a healthy poll after deploy\" \\\n              120 \\\n              5",
+    ) {
+        offenders.push(
+            "deploy-tango-1-1.yml: PM trade collector healthy-poll wait is too short".to_string(),
+        );
+    }
+    if !cloud_assist.contains(
+        "\"pm trade collector did not complete a healthy poll after deploy\" \\\\\n  120 \\\\\n  5",
+    ) {
+        offenders.push(
+            "deploy_tango_cloud_assist.py: PM trade collector healthy-poll wait is too short"
+                .to_string(),
+        );
     }
 
     assert!(
@@ -921,13 +981,17 @@ fn factor_review_comments_are_factor_attribution_not_deployable_candidates() {
         "\"evidence:factor-attribution\"",
     ] {
         if !hosted.contains(needle) {
-            offenders.push(format!("factor-review-v2-hosted-artifact.yml: missing `{needle}`"));
+            offenders.push(format!(
+                "factor-review-v2-hosted-artifact.yml: missing `{needle}`"
+            ));
         }
     }
     if !router.contains("snapshot-backed router only")
         || !router.contains("factor-review-v2-hosted-artifact.yml")
     {
-        offenders.push("factor-review-v2.yml: router no longer points only at hosted evidence".to_string());
+        offenders.push(
+            "factor-review-v2.yml: router no longer points only at hosted evidence".to_string(),
+        );
     }
     for (name, content) in [
         ("factor-review-v2-hosted-artifact.yml", hosted.as_str()),
