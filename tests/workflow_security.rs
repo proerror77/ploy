@@ -132,9 +132,15 @@ fn factor_evolve_daily_search_passes_snapshot_quote_age() {
     let mut offenders = Vec::new();
 
     for needle in [
+        "\"evidence_stage\": \"factor_attribution\"",
+        "\"trace_provenance\"",
+        "\"candidate_replay_ref\": \"\"",
+        "\"trace_manifest_uri\": \"\"",
         "max_quote_age_secs:",
         "MAX_QUOTE_AGE_SECS: ${{ github.event.inputs.max_quote_age_secs }}",
         "\"max_quote_age_secs\": max_quote_age_secs",
+        "\"persist_research_trace\": True",
+        "- Trace persistence: `required-for-search-mode`",
         "-f options_json=\"$(cat artifacts/factor-evolve-daily/hosted-options.json)\"",
     ] {
         if !workflow.contains(needle) {
@@ -770,6 +776,7 @@ fn research_issue_workflows_apply_decision_labels() {
         "decision:pending",
         "decision:fix-data",
         "decision:fix-runtime",
+        "evidence:factor-attribution",
         "evidence:missing-metrics",
         "parity:blocked",
     ] {
@@ -808,6 +815,46 @@ fn research_issue_workflows_apply_decision_labels() {
     assert!(
         offenders.is_empty(),
         "research issue label guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn factor_review_comments_are_factor_attribution_not_deployable_candidates() {
+    let hosted = workflow_contents(".github/workflows/factor-review-v2-hosted-artifact.yml");
+    let legacy = workflow_contents(".github/workflows/factor-review-v2.yml");
+    let mut offenders = Vec::new();
+
+    for (name, content) in [
+        ("factor-review-v2-hosted-artifact.yml", hosted.as_str()),
+        ("factor-review-v2.yml", legacy.as_str()),
+    ] {
+        for needle in [
+            "const evidenceStage = \"factor_attribution\"",
+            "- Evidence stage:",
+            "continue-to-walk-forward",
+            "continue-diagnostic-only",
+            "\"evidence:factor-attribution\"",
+        ] {
+            if !content.contains(needle) {
+                offenders.push(format!("{name}: missing `{needle}`"));
+            }
+        }
+        for forbidden in [
+            "candidate-for-oos-replay-gate",
+            "no-deploy-factor-review-only",
+        ] {
+            if content.contains(forbidden) {
+                offenders.push(format!(
+                    "{name}: still contains legacy decision `{forbidden}`"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "factor review evidence-stage comment guard failed:\n{}",
         offenders.join("\n")
     );
 }

@@ -191,6 +191,39 @@ Evidence stage: `executable_replay` plumbing for `runtime_market_update_replay`.
   promotion because runtime replay ROI was negative:
   `roi=-0.03889562973253067`, `total_pnl=-29.171722299398`.
 
+# Research Evidence Stage Cleanup (2026-05-23)
+
+## Goal
+
+Keep daily Research Manager and factor-review outputs from implying
+deployable/replay readiness before executable replay exists.
+
+Evidence stage: `factor_attribution` for factor review and daily search
+planning.
+
+## Tasks
+
+- [x] Add explicit `factor_attribution` evidence-stage fields to FactorEvolve
+      daily manager input and summary.
+- [x] Require daily search dispatches to request durable trace persistence.
+- [x] Change factor-review issue comments from legacy candidate/deploy wording
+      to `continue-to-walk-forward` / `continue-diagnostic-only`.
+- [x] Add `evidence:factor-attribution` issue label support.
+- [x] Add workflow security guards for the evidence-stage comment contract.
+
+## Review
+
+- 2026-05-23: Factor review issue comments now state
+  `Evidence stage: factor_attribution`, label issues with
+  `evidence:factor-attribution`, and no longer emit
+  `candidate-for-oos-replay-gate` or `no-deploy-factor-review-only`.
+- 2026-05-23: FactorEvolve daily search plan input includes
+  `evidence_stage=factor_attribution` and trace provenance placeholders, while
+  hosted search options set `persist_research_trace=true`.
+- 2026-05-23: Focused validation passed: YAML parse for touched workflows,
+  `rtk cargo test --locked --test workflow_security`, a label-helper smoke
+  check, and `rtk git diff --check`.
+
 # Settlement Probability PRD Gate Snapshot Contract (2026-05-23)
 
 ## Goal

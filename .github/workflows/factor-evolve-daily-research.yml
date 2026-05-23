@@ -93,7 +93,15 @@ jobs:
               "replay_parity_ready": False,
           }
           payload = {
+              "evidence_stage": "factor_attribution",
               "latest_runs": latest_runs,
+              "trace_provenance": {
+                  "source": "factor-evolve-daily-research",
+                  "run_mode": run_mode,
+                  "snapshot_run_id": os.environ.get("SNAPSHOT_RUN_ID", "").strip(),
+                  "candidate_replay_ref": "",
+                  "trace_manifest_uri": "",
+              },
               "factor_registry_summary": {},
               "rejected_factor_patterns": {},
               "market_data_health": {
@@ -139,6 +147,9 @@ jobs:
               f"- Symbols: `{os.environ.get('SYMBOLS') or 'BTCUSDT,ETHUSDT'}`",
               f"- Plan theme: `{plan['theme']}`",
               f"- Evidence stage: `{plan['evidence_stage']}`",
+              "- Candidate replay ref: `none`",
+              "- Trace manifest URI: `pending:factor-walk-forward-v2-hosted-artifact`",
+              "- Trace persistence: `required-for-search-mode`",
               f"- Candidate count: `{plan['candidate_count']}`",
               f"- Search depth: `{plan['search_depth']}`",
               "",
@@ -169,6 +180,7 @@ jobs:
               "chain_next_run": False,
               "chain_remaining": 0,
               "create_handoff_issue": False,
+              "persist_research_trace": True,
               "fail_if_blocked": False,
               "data_quality_mode": "event_complete",
               "max_quote_age_secs": max_quote_age_secs,
