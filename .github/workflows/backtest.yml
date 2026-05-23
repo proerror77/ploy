@@ -144,6 +144,10 @@ jobs:
           {
             echo "## Strategy Backtest"
             echo ""
+            echo "Evidence stage: \`diagnostic\`"
+            echo "Promotion ready: \`false\`"
+            echo "Promotion decision: \`diagnostic_backtest_only\`"
+            echo ""
             echo "- Window: ${{ github.event.inputs.start_date }} -> ${{ github.event.inputs.end_date }}"
             echo "- Config: \`${{ github.event.inputs.config }}\`"
             echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`"
@@ -155,6 +159,39 @@ jobs:
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stage diagnostic evidence contract
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/backtest
+          cat > artifacts/backtest/evidence-stage.json <<EOF
+          {
+            "schema_version": 1,
+            "kind": "research_evidence_stage",
+            "workflow": "backtest.yml",
+            "run_id": "${GITHUB_RUN_ID}",
+            "evidence_stage": "diagnostic",
+            "promotion_ready": false,
+            "promotion_decision": "diagnostic_backtest_only",
+            "allowed_next_stage": "runtime_parity",
+            "blocked_next_stages": ["dry_run_candidate", "live_candidate"],
+            "reason": "Backtest evidence is diagnostic/replay accounting only; promotion requires executable replay, runtime scorer parity, and dry-run parity evidence."
+          }
+          EOF
+          cat > artifacts/backtest/evidence-stage.md <<EOF
+          # Backtest Evidence Stage
+
+          - Evidence stage: \`diagnostic\`
+          - Promotion ready: \`false\`
+          - Promotion decision: \`diagnostic_backtest_only\`
+          - Allowed next stage: \`runtime_parity\`
+          - Blocked next stages: \`dry_run_candidate\`, \`live_candidate\`
+
+          Backtest evidence is diagnostic/replay accounting only. It is not a
+          dry-run or live promotion input without executable replay, runtime
+          scorer parity, and dry-run parity evidence.
+          EOF
 
       - name: Upload backtest evaluation artifact
         if: always()
@@ -178,18 +215,19 @@ jobs:
             let riskFlags = [];
             let blockingRiskFlags = [];
             let advisoryFlags = [];
-            let evidenceStage = "unknown";
+            let evidenceStage = "diagnostic";
             let promotionReady = false;
-            let decision = "pending replay/dry-run parity review";
+            let decision = "diagnostic_backtest_only";
             if (fs.existsSync("artifacts/backtest/evaluation.json")) {
               const data = JSON.parse(fs.readFileSync("artifacts/backtest/evaluation.json", "utf8"));
               metrics = data.metrics || null;
               riskFlags = data.risk_flags || [];
               blockingRiskFlags = data.blocking_risk_flags || [];
               advisoryFlags = data.advisory_flags || [];
-              evidenceStage = data.evidence_stage || "unknown";
-              promotionReady = data.promotion_ready === true;
-              decision = data.promotion_decision || decision;
+              if (data.promotion_ready === true) {
+                riskFlags.push("backtest_promotion_ready_ignored");
+                blockingRiskFlags.push("diagnostic_backtest_not_promotion_evidence");
+              }
               if (!metrics || Object.keys(metrics).length === 0) {
                 riskFlags.push("missing_headline_metrics");
                 blockingRiskFlags.push("missing_headline_metrics");
@@ -226,7 +264,7 @@ jobs:
               issue_number,
               body
             });
-            const labels = ["evidence:backtest", ...labelsForDecision(decision)];
+            const labels = ["evidence:backtest", "evidence:diagnostic", ...labelsForDecision(decision)];
             if (blockingRiskFlags.some((flag) => String(flag).includes("parity"))) {
               labels.push("parity:blocked");
             }

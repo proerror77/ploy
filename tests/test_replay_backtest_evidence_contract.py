@@ -37,6 +37,12 @@ class ReplayBacktestEvidenceContractTest(unittest.TestCase):
             "blocking_risk_flags",
             "Blocking promotion flags",
             "parity:blocked",
+            "evidence-stage.json",
+            '"evidence_stage": "diagnostic"',
+            '"promotion_ready": false',
+            '"promotion_decision": "diagnostic_backtest_only"',
+            "diagnostic_backtest_not_promotion_evidence",
+            "evidence:diagnostic",
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, workflow)
