@@ -13,9 +13,7 @@ fn main() -> anyhow::Result<()> {
     let output_path = PathBuf::from(&args[2]);
     let input: ResearchManagerInput = serde_json::from_str(&std::fs::read_to_string(&input_path)?)?;
     let plan = build_research_manager_plan(&input);
-    if !validate_evidence_stage(&plan.evidence_stage) {
-        anyhow::bail!("unsupported evidence_stage: {}", plan.evidence_stage);
-    }
+    validate_evidence_stage(&plan.evidence_stage).map_err(anyhow::Error::msg)?;
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
     }

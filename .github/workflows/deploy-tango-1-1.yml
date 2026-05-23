@@ -50,10 +50,13 @@ env:
     038_track_record_official_residual_settlement.sql
     040_polymarket_v2_indexer_events.sql
     041_repair_strategy_track_record_side_residual.sql
+    042_factor_research_os_registry.sql
+    043_research_os_trace_constraints.sql
 
 jobs:
   build-and-deploy:
     name: Build and deploy to tango-1-1
+    # Protected deploy environment for deploy=true: environment: tango-1-1
     runs-on: ubuntu-latest
     timeout-minutes: 40
     # deploy=true protected environment: tango-1-1
@@ -144,9 +147,13 @@ jobs:
             --features db,polars-export \
             -p ploy-research \
             --example factor_research \
-            --example research_snapshot_compile
+            --example research_snapshot_compile \
+            --example persist_research_trace \
+            --example research_trace_plan
           strip "target/${PLATFORM_TARGET}/release/examples/factor_research" || true
           strip "target/${PLATFORM_TARGET}/release/examples/research_snapshot_compile" || true
+          strip "target/${PLATFORM_TARGET}/release/examples/persist_research_trace" || true
+          strip "target/${PLATFORM_TARGET}/release/examples/research_trace_plan" || true
 
       - name: Build optimize-backtest
         run: |
@@ -168,6 +175,8 @@ jobs:
           cp "target/${PLATFORM_TARGET}/release/new-ploy-runner" dist/bin/ploy-runner
           cp "target/${PLATFORM_TARGET}/release/examples/factor_research" dist/bin/factor-research
           cp "target/${PLATFORM_TARGET}/release/examples/research_snapshot_compile" dist/bin/research-snapshot-compile
+          cp "target/${PLATFORM_TARGET}/release/examples/persist_research_trace" dist/bin/persist-research-trace
+          cp "target/${PLATFORM_TARGET}/release/examples/research_trace_plan" dist/bin/research-trace-plan
           cp "target/${PLATFORM_TARGET}/release/examples/optimize_backtest" dist/bin/optimize-backtest
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
           cp config/strategies/02-pm5d.live.toml dist/config/strategies/02-pm5d.live.toml
@@ -464,6 +473,8 @@ jobs:
             install -m 0755 ./bin/ploy-runner ${DEPLOY_ROOT}/bin/ploy-runner
             install -m 0755 ./bin/factor-research ${DEPLOY_ROOT}/bin/factor-research
             install -m 0755 ./bin/research-snapshot-compile ${DEPLOY_ROOT}/bin/research-snapshot-compile
+            install -m 0755 ./bin/persist-research-trace ${DEPLOY_ROOT}/bin/persist-research-trace
+            install -m 0755 ./bin/research-trace-plan ${DEPLOY_ROOT}/bin/research-trace-plan
             install -m 0755 ./bin/optimize-backtest ${DEPLOY_ROOT}/bin/optimize-backtest
             install -m 0644 ./config/strategies/02-pm5d.unified.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.unified.toml
             install -m 0644 ./config/strategies/02-pm5d.live.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.live.toml

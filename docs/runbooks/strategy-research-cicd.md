@@ -54,8 +54,8 @@ when the mismatch is understood and tracked as a follow-up issue.
 | Legacy Python compatibility | `.github/workflows/legacy-python-tools.yml` | Isolated, path-scoped checks for remaining Python helper scripts; not part of the Rust-first required CI contract |
 | Research snapshot | `.github/workflows/research-snapshot.yml` | Compile reusable research evidence from remote data |
 | Factor diagnostics | `.github/workflows/factor-review-v2-hosted-artifact.yml` | GitHub-hosted factor review from a retained full research snapshot artifact |
-| Legacy factor diagnostics | `.github/workflows/factor-review-v2.yml` | Fresh DB/snapshot fallback on `ploy-ci-1`; avoid when a full snapshot artifact already exists |
-| Walk-forward diagnostics | `.github/workflows/factor-walk-forward-v2.yml` | Rolling factor validation across train/test windows |
+| Legacy factor diagnostics | `.github/workflows/factor-review-v2.yml` | Compatibility router to hosted artifacts; direct `ploy-ci-1` DB mode is debug-only and blocked by default |
+| Walk-forward diagnostics | `.github/workflows/factor-walk-forward-v2.yml` | Compatibility router to hosted artifacts; direct `ploy-ci-1` DB mode is debug-only and blocked by default |
 | Parameter optimization | `.github/workflows/optimize.yml` | Bounded train/validation optimization from a snapshot or explicit debug data source |
 | Replay/backtest accounting | `.github/workflows/backtest.yml` | Build and run replay/backtest accounting in one job on `ploy-ci-1` |
 | Candidate strategy replay | `.github/workflows/runtime-candidate-replay.yml` | Required pre-dry-run proof that the selected runtime score emits executable runtime decisions on a Tango MarketUpdate recording |
@@ -80,6 +80,73 @@ also has full-depth CLOB fillability, official settlement, replay/dry-run
 parity, and runtime scorer parity. The machine-readable fields
 `evidence_stage`, `promotion_ready`, `blocking_risk_flags`, and
 `advisory_flags` are the operator-facing source of truth for that distinction.
+
+Research data products are intentionally split into four layers:
+
+1. Raw source surfaces: Tango PostgreSQL tables and cold Parquet/ZSTD lake data,
+   including full-depth Polymarket CLOB snapshots.
+2. Research snapshots: immutable, sampled artifacts for factor search and
+   walk-forward. Their `manifest.json` must record sampling cadence, source
+   surfaces, row counts, and whether a surface was raw full-fidelity before
+   materialization. Each source surface must also use the canonical
+   `gate_category` taxonomy: `required_for_prediction`,
+   `required_for_execution`, `optional_context`, or
+   `missing_blocks_promotion`.
+3. Candidate replay tapes: exact `MarketUpdate` sequences and runtime scorer
+   inputs used to test one candidate/event lifecycle.
+4. Durable research trace: `research_dataset_snapshots`, `factor_registry`,
+   `factor_evaluations`, and append-only `experiment_trace` rows tying
+   `dsl_hash`, `ast_json`, `runtime_contract`, run id, dataset window, blockers,
+   and promotion decision together.
+
+Do not call a sampled research snapshot "full data". It can be a complete
+retained research artifact for a chosen cadence and window, but full-resolution
+execution claims require a candidate replay against the full-depth CLOB lake or
+runtime tape.
+
+Use `persist_research_trace` to promote artifact files into the durable
+Research OS trace after a snapshot/search run:
+
+```bash
+rtk cargo run -p ploy-research --example persist_research_trace --features db -- \
+  --run-id <workflow-run-id> \
+  --snapshot-dir <research-snapshot-dir> \
+  --alpha-search-dir <alpha-search-artifact-dir> \
+  --registry-json <optional-promotion-registry.json> \
+  --handoff-json <optional-strategy-handoff.json> \
+  --db-url "$DATABASE_URL"
+```
+
+The writer stores the sampled snapshot manifest, factor registry preview,
+factor evaluations, blockers, runtime contracts, and artifact hash chain. It
+stores alpha-search rows as `factor_attribution` /
+`alpha_search_preview` evaluations keyed by `(dsl_hash, target, horizon)`. It
+stores promotion registry, AutoFactor promotion, and handoff artifacts as
+`walk_forward` trace rows, not as factor attribution. It does not create dry-run
+or live promotion evidence; candidate factors remain `continue` / `candidate`
+until executable replay, runtime scorer parity, and dry-run evidence are
+attached through the later gates. Candidate replay tapes must use their own
+`candidate_replay_id` instead of being collapsed into the sampled research
+snapshot identity.
+
+Hosted walk-forward can run the writer automatically only when explicitly
+requested with `options_json.persist_research_trace=true` and a protected
+`RESEARCH_OS_DATABASE_URL` or `PLOY_DATABASE_URL` secret is available. The
+default remains false so ordinary research runs stay read-only artifact
+generation.
+
+Use `research_trace_plan` after durable rows exist to generate the next
+Research Manager plan from DB trace:
+
+```bash
+rtk cargo run -p ploy-research --example research_trace_plan --features db -- \
+  --db-url "$DATABASE_URL" \
+  --evidence-stage factor_attribution \
+  --output research-trace-plan.json
+```
+
+The current architecture review is
+`docs/reviews/research-data-architecture-review-2026-05-23.md`.
 
 `recorded-replay-parity.yml` defaults `since=auto` and `until=auto`. In auto
 mode it scans the target recording on `tango-1-1`, intersects that recording

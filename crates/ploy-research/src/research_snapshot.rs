@@ -45,6 +45,31 @@ pub struct ResearchSnapshotRowCounts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchSnapshotSourceSurface {
+    pub name: String,
+    pub role: String,
+    #[serde(default = "default_source_surface_gate_category")]
+    pub gate_category: String,
+    pub raw_full_fidelity: bool,
+    pub snapshot_sampled: bool,
+    pub sample_secs: Option<i64>,
+    pub row_count: Option<usize>,
+    pub notes: String,
+}
+
+fn default_source_surface_gate_category() -> String {
+    "optional_context".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchSnapshotInputArtifact {
+    pub name: String,
+    pub path: String,
+    pub content_hash: Option<String>,
+    pub row_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResearchSnapshotPhaseTiming {
     pub phase: String,
     pub elapsed_ms: u128,
@@ -84,6 +109,10 @@ pub struct ResearchSnapshotManifest {
     pub immutable_input: bool,
     pub source_kind: String,
     pub optimizer_data_dir: Option<String>,
+    #[serde(default)]
+    pub source_surfaces: Vec<ResearchSnapshotSourceSurface>,
+    #[serde(default)]
+    pub input_artifacts: Vec<ResearchSnapshotInputArtifact>,
     #[serde(default)]
     pub data_requirements: Vec<String>,
     #[serde(default)]
@@ -741,7 +770,7 @@ pub async fn build_research_snapshot_from_database(
     pool: &sqlx::PgPool,
     options: ResearchSnapshotBuildOptions,
 ) -> Result<ResearchSnapshot> {
-    use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
+    use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
     use ploy_market_contracts::MarketUpdate;
 
     use crate::{
@@ -931,6 +960,7 @@ pub async fn build_research_snapshot_from_database(
         options.max_quote_age_secs,
         &pm_book_source,
     );
+    let symbols_csv = options.symbols.join(",");
 
     Ok(ResearchSnapshot {
         manifest: ResearchSnapshotManifest {
@@ -951,6 +981,82 @@ pub async fn build_research_snapshot_from_database(
             immutable_input: true,
             source_kind: "tango_postgres_compiled_snapshot".to_string(),
             optimizer_data_dir: options.optimizer_data_dir,
+            source_surfaces: vec![
+                ResearchSnapshotSourceSurface {
+                    name: "historical_market_updates".to_string(),
+                    role: "prediction_context".to_string(),
+                    gate_category: "required_for_prediction".to_string(),
+                    raw_full_fidelity: false,
+                    snapshot_sampled: true,
+                    sample_secs: Some(i64::from(historical_sample_secs)),
+                    row_count: Some(all_updates.len()),
+                    notes: "DB MarketUpdate tape loaded with sampler settings; suitable for factor search, not tick-complete replay.".to_string(),
+                },
+                ResearchSnapshotSourceSurface {
+                    name: "binance_lob_ticks".to_string(),
+                    role: "prediction_lob_context".to_string(),
+                    gate_category: "required_for_prediction".to_string(),
+                    raw_full_fidelity: false,
+                    snapshot_sampled: true,
+                    sample_secs: Some(i64::from(options.lob_sample_secs.max(1))),
+                    row_count: Some(all_lob_snapshots.len()),
+                    notes: "Partial-depth CEX LOB snapshots; not a sequence-correct local book for queue-position evidence.".to_string(),
+                },
+                ResearchSnapshotSourceSurface {
+                    name: "clob_orderbook_snapshots".to_string(),
+                    role: "execution_depth_context".to_string(),
+                    gate_category: "required_for_execution".to_string(),
+                    raw_full_fidelity: true,
+                    snapshot_sampled: true,
+                    sample_secs: Some(i64::from(pm_book_sample_secs)),
+                    row_count: Some(all_pm_book_snapshots.len()),
+                    notes: "Raw Polymarket full-depth CLOB surface exists, but this research snapshot stores sampled book states.".to_string(),
+                },
+                ResearchSnapshotSourceSurface {
+                    name: "pm_token_settlements".to_string(),
+                    role: "settlement_labels".to_string(),
+                    gate_category: "required_for_execution".to_string(),
+                    raw_full_fidelity: true,
+                    snapshot_sampled: false,
+                    sample_secs: None,
+                    row_count: None,
+                    notes: "Official settlement labels are required when require_official_settlement=true.".to_string(),
+                },
+                ResearchSnapshotSourceSurface {
+                    name: "deribit_feature_snapshots".to_string(),
+                    role: "optional_vol_context".to_string(),
+                    gate_category: "optional_context".to_string(),
+                    raw_full_fidelity: false,
+                    snapshot_sampled: options.include_deribit,
+                    sample_secs: if options.include_deribit {
+                        Some(options.observation_sample_secs)
+                    } else {
+                        None
+                    },
+                    row_count: Some(deribit_snapshots.len()),
+                    notes: if options.include_deribit {
+                        "Deribit context materialized at observation cadence.".to_string()
+                    } else {
+                        "Deribit context intentionally excluded for this profile.".to_string()
+                    },
+                },
+            ],
+            input_artifacts: vec![ResearchSnapshotInputArtifact {
+                name: "tango_postgres_research_window".to_string(),
+                path: format!(
+                    "tango_postgres://research_snapshot?start={}&end={}&symbols={}",
+                    options.start,
+                    options.end,
+                    symbols_csv
+                ),
+                content_hash: None,
+                row_count: Some(
+                    all_updates.len()
+                        + all_lob_snapshots.len()
+                        + all_pm_book_snapshots.len()
+                        + deribit_snapshots.len(),
+                ),
+            }],
             data_requirements: options.data_requirements,
             data_audit_status: options.data_audit_status,
             data_audit_report: options.data_audit_report,
@@ -1021,6 +1127,18 @@ fn compute_snapshot_hash(
             .as_bytes(),
     );
     update(&mut hash, manifest.data_requirements.join(",").as_bytes());
+    update(
+        &mut hash,
+        serde_json::to_string(&manifest.source_surfaces)
+            .context("serialize source_surfaces for snapshot hash")?
+            .as_bytes(),
+    );
+    update(
+        &mut hash,
+        serde_json::to_string(&manifest.input_artifacts)
+            .context("serialize input_artifacts for snapshot hash")?
+            .as_bytes(),
+    );
     update(&mut hash, manifest.include_deribit.to_string().as_bytes());
     update(&mut hash, manifest.pm_book_source.archive_status.as_bytes());
     update(
@@ -1118,6 +1236,47 @@ fn write_quality_markdown(path: &Path, manifest: &ResearchSnapshotManifest) -> R
             .as_deref()
             .unwrap_or("<missing>")
     ));
+    body.push_str("\n## Source Surfaces\n\n");
+    if manifest.source_surfaces.is_empty() {
+        body.push_str("- `<not-recorded>`\n");
+    } else {
+        for surface in &manifest.source_surfaces {
+            body.push_str(&format!(
+                "- `{}` role=`{}` gate_category=`{}` raw_full_fidelity=`{}` snapshot_sampled=`{}` sample_secs=`{}` rows=`{}` notes=`{}`\n",
+                surface.name,
+                surface.role,
+                surface.gate_category,
+                surface.raw_full_fidelity,
+                surface.snapshot_sampled,
+                surface
+                    .sample_secs
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                surface
+                    .row_count
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                surface.notes
+            ));
+        }
+    }
+    body.push_str("\n## Input Artifacts\n\n");
+    if manifest.input_artifacts.is_empty() {
+        body.push_str("- `<database-or-remote-source>`\n");
+    } else {
+        for artifact in &manifest.input_artifacts {
+            body.push_str(&format!(
+                "- `{}` path=`{}` hash=`{}` rows=`{}`\n",
+                artifact.name,
+                artifact.path,
+                artifact.content_hash.as_deref().unwrap_or("<missing>"),
+                artifact
+                    .row_count
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_string())
+            ));
+        }
+    }
     body.push_str(&format!(
         "- Data requirements: `{}`\n",
         if manifest.data_requirements.is_empty() {
@@ -1224,6 +1383,22 @@ mod tests {
                 immutable_input: true,
                 source_kind: "unit_test".to_string(),
                 optimizer_data_dir: Some("/tmp/immutable-parquet".to_string()),
+                source_surfaces: vec![ResearchSnapshotSourceSurface {
+                    name: "unit_surface".to_string(),
+                    role: "test".to_string(),
+                    gate_category: "required_for_prediction".to_string(),
+                    raw_full_fidelity: false,
+                    snapshot_sampled: true,
+                    sample_secs: Some(30),
+                    row_count: Some(0),
+                    notes: "unit test sampled surface".to_string(),
+                }],
+                input_artifacts: vec![ResearchSnapshotInputArtifact {
+                    name: "unit_input".to_string(),
+                    path: "/tmp/unit-input.parquet".to_string(),
+                    content_hash: Some("abc123".to_string()),
+                    row_count: Some(0),
+                }],
                 data_requirements: vec!["polymarket_quotes".to_string()],
                 data_audit_status: Some("ok".to_string()),
                 data_audit_report: Some("data-gap-audit.json".to_string()),
@@ -1248,6 +1423,13 @@ mod tests {
         assert_eq!(written.schema_version, RESEARCH_SNAPSHOT_SCHEMA_VERSION);
         assert!(written.snapshot_hash.is_some());
         assert_eq!(loaded.manifest.git_sha.as_deref(), Some("test-sha"));
+        assert_eq!(loaded.manifest.source_surfaces.len(), 1);
+        assert!(loaded.manifest.source_surfaces[0].snapshot_sampled);
+        assert_eq!(
+            loaded.manifest.source_surfaces[0].gate_category,
+            "required_for_prediction"
+        );
+        assert_eq!(loaded.manifest.input_artifacts.len(), 1);
         validate_snapshot_request(
             &loaded.manifest,
             ResearchSnapshotRequest {
@@ -1291,7 +1473,11 @@ mod tests {
         );
         assert!(exact_subset_result.is_err());
         assert_eq!(loaded.manifest.row_counts.observations, 0);
-        assert!(root.join("quality.md").exists());
+        let quality = std::fs::read_to_string(root.join("quality.md")).expect("read quality");
+        assert!(quality.contains("## Source Surfaces"));
+        assert!(quality.contains("gate_category=`required_for_prediction`"));
+        assert!(quality.contains("snapshot_sampled=`true`"));
+        assert!(quality.contains("## Input Artifacts"));
 
         let _ = std::fs::remove_dir_all(root);
     }
