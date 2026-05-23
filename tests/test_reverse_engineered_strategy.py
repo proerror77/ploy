@@ -1,11 +1,22 @@
+import importlib.util
+import sys
 import unittest
+from pathlib import Path
 
-from scripts.reverse_engineered_strategy_dry_run import (
-    ProfileSnapshot,
-    TradeEvent,
-    infer_strategy_params,
-    run_reverse_strategy_dry_run,
-)
+
+ROOT = Path(__file__).resolve().parents[1]
+MODULE_PATH = ROOT / "scripts" / "archive" / "research-debug" / "reverse_engineered_strategy_dry_run.py"
+SPEC = importlib.util.spec_from_file_location("archived_reverse_engineered_strategy_dry_run", MODULE_PATH)
+assert SPEC is not None
+assert SPEC.loader is not None
+reverse_engineered_strategy_dry_run = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = reverse_engineered_strategy_dry_run
+SPEC.loader.exec_module(reverse_engineered_strategy_dry_run)
+
+ProfileSnapshot = reverse_engineered_strategy_dry_run.ProfileSnapshot
+TradeEvent = reverse_engineered_strategy_dry_run.TradeEvent
+infer_strategy_params = reverse_engineered_strategy_dry_run.infer_strategy_params
+run_reverse_strategy_dry_run = reverse_engineered_strategy_dry_run.run_reverse_strategy_dry_run
 
 
 class ReverseEngineeredStrategyTests(unittest.TestCase):

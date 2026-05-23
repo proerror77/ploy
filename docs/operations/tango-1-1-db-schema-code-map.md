@@ -554,9 +554,9 @@ Referenced files:
 - `migrations/016_security_fixes_legacy.sql`
 - `migrations/019_data_integrity.sql`
 - `migrations/022_order_strategy_tracking.sql`
-- `scripts/copycat_dry_run.py`
+- `scripts/archive/research-debug/copycat_dry_run.py`
 - `scripts/dry-run-platform-smoke.sh`
-- `scripts/reverse_engineered_strategy_dry_run.py`
+- `scripts/archive/research-debug/reverse_engineered_strategy_dry_run.py`
 - `src/adapters/kalshi_rest.rs`
 - `src/adapters/polymarket_clob.rs`
 - `src/adapters/polymarket_official.rs`
@@ -623,8 +623,8 @@ Referenced files:
 - `migrations/013_schema_repair_and_observability.sql`
 - `migrations/019_data_integrity.sql`
 - `migrations/021_backtest_tables.sql`
-- `scripts/copycat_dry_run.py`
-- `scripts/reverse_engineered_strategy_dry_run.py`
+- `scripts/archive/research-debug/copycat_dry_run.py`
+- `scripts/archive/research-debug/reverse_engineered_strategy_dry_run.py`
 - `src/adapters/kalshi_rest.rs`
 - `src/adapters/onchain_indexer.rs`
 - `src/adapters/polymarket_clob.rs`
@@ -795,7 +795,7 @@ Referenced files:
 - `scripts/ploy_maintenance.sh`
 - `scripts/pm_bursts_watch.sh`
 - `scripts/pm_trades_watch.sh`
-- `scripts/reverse_engineered_strategy_dry_run.py`
+- `scripts/archive/research-debug/reverse_engineered_strategy_dry_run.py`
 - `scripts/train_crypto_binance_threshold_tcn_onnx_from_db.py`
 - `scripts/train_crypto_lob_tick_settlement_onnx_from_db.py`
 - `src/adapters/postgres.rs`

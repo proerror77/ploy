@@ -58,10 +58,14 @@ collection behavior.
 
 | Surface | Status | Reason |
 | --- | --- | --- |
-| `scripts/reverse_engineered_strategy_dry_run.py` | archive candidate | Research prototype, not canonical runtime. |
-| `scripts/copycat_dry_run.py` | archive candidate | Research prototype; future copy-trading work should use canonical `MarketUpdate`/runtime path. |
-| `scripts/install-service.sh` / `scripts/install-platform-service.sh` | archive candidate | Keep only if runbooks still reference them; otherwise workflow/systemd install owns service deployment. |
+| `scripts/install-service.sh` | legacy host-support installer / archive candidate | Not referenced by active workflows, tests, or runbooks; archive only after confirming maintenance/watchdog unit ownership. |
 | `scripts/train_crypto_*_onnx_from_db.py` | research prototype | Keep only while ML lane is active; otherwise archive under research prototypes. `scripts/train_crypto_lob_mlp_onnx_from_db.py` has been archived in favor of `scripts/train_crypto_lob_tcn_onnx_from_db.py`. |
+
+## Platform Release / Host Install
+
+| Surface | Status | Owner | Notes |
+| --- | --- | --- | --- |
+| `scripts/install-platform-service.sh` | canonical platform release installer | release-platform | Active `release-platform.yml` bundle/install/execute path; guarded by `tests/platform_release_workflow.rs`; do not archive. |
 
 ## Archived Legacy Research Scripts
 
@@ -69,6 +73,8 @@ collection behavior.
 | --- | --- | --- |
 | `scripts/simulate_backtest.py` | `scripts/archive/research-debug/simulate_backtest.py` | Legacy standalone simulator; canonical evidence is produced by Rust/backtest and hosted snapshot-backed workflows. |
 | `scripts/train_crypto_lob_mlp_onnx_from_db.py` | `scripts/archive/research-debug/train_crypto_lob_mlp_onnx_from_db.py` | Self-deprecated MLP trainer; active LOB ML docs point to the TCN training entry. |
+| `scripts/copycat_dry_run.py` | `scripts/archive/research-debug/copycat_dry_run.py` | Public-profile copy-trading prototype; future copy-trading work should use canonical `MarketUpdate`/runtime path and runtime evidence. |
+| `scripts/reverse_engineered_strategy_dry_run.py` | `scripts/archive/research-debug/reverse_engineered_strategy_dry_run.py` | Public-profile reverse-engineering prototype; not a canonical research, replay, or dry-run handoff path. |
 | `scripts/check_db.rs` | `scripts/archive/legacy-research-tools/check_db.rs` | Duplicate DB diagnostic; canonical ops path is `/opt/ploy/bin/ploy-runner check-db`. |
 | `scripts/check_db_data.rs` | `scripts/archive/legacy-research-tools/check_db_data.rs` | Duplicate DB diagnostic; canonical ops path is `/opt/ploy/bin/ploy-runner check-db`. |
 | `scripts/collect_data.py` | `scripts/archive/legacy-research-tools/collect_data.py` | Generic Binance kline CSV collector; research now starts from retained snapshot artifacts. |
