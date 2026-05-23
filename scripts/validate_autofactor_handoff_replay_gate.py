@@ -72,6 +72,27 @@ def validate_handoff_payload(handoff: dict[str, Any]) -> list[str]:
     replay_runtime_score = str(replay.get("runtime_score") or "")
     if not replay_runtime_score:
         blockers.append("candidate_strategy_replay_missing_runtime_score")
+    source_factor = replay.get("source_factor")
+    if not isinstance(source_factor, dict):
+        source_factor = {}
+    source_target = str(source_factor.get("target") or "")
+    source_horizon = str(source_factor.get("horizon") or "")
+    if not source_target:
+        blockers.append("candidate_strategy_replay_missing_source_target")
+    if not source_horizon:
+        blockers.append("candidate_strategy_replay_missing_source_horizon")
+    contract_target = str(contract.get("target") or "")
+    contract_horizon = str(contract.get("horizon") or "")
+    if contract_target and source_target and contract_target != source_target:
+        blockers.append(
+            "candidate_strategy_replay_contract_target_mismatch:"
+            f"{contract_target}!={source_target}"
+        )
+    if contract_horizon and source_horizon and contract_horizon != source_horizon:
+        blockers.append(
+            "candidate_strategy_replay_contract_horizon_mismatch:"
+            f"{contract_horizon}!={source_horizon}"
+        )
     for index, strategy in enumerate(strategies, start=1):
         if not isinstance(strategy, dict):
             blockers.append(f"handoff_strategy_{index}_invalid")

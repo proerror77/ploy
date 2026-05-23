@@ -724,6 +724,8 @@ fn runtime_candidate_replay_allows_empty_entry_score_override() {
         "--config-path",
         "--runner-source",
         "--runner-git-sha",
+        "--source-target",
+        "--source-horizon",
     ] {
         assert!(
             workflow.contains(needle),

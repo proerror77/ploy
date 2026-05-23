@@ -373,6 +373,8 @@ def build_artifact(
             "one_decision_per_event": trade_count > 0 and max_event_decisions == 1,
             "official_settlement": trade_count > 0 and settled_event_count >= trade_count,
             "full_depth_entry": full_depth_entry,
+            "target": source_target,
+            "horizon": source_horizon,
             "stake_usd": float(stake_usd),
         },
         "acceptance_criteria": {

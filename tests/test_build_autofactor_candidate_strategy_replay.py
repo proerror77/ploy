@@ -177,6 +177,12 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
         self.assertTrue(payload["decision_contract"]["one_decision_per_event"])
         self.assertTrue(payload["decision_contract"]["official_settlement"])
         self.assertTrue(payload["decision_contract"]["full_depth_entry"])
+        self.assertEqual(payload["source_factor"]["horizon"], "5m")
+        self.assertEqual(
+            payload["decision_contract"]["target"],
+            "full_depth_settlement_executable_pnl",
+        )
+        self.assertEqual(payload["decision_contract"]["horizon"], "5m")
         self.assertEqual(payload["metrics"]["trade_count"], 9966)
         self.assertEqual(payload["metrics"]["unique_event_count"], 9966)
         self.assertGreater(payload["metrics"]["total_pnl"], 0)

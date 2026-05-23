@@ -40,9 +40,9 @@ on:
         required: false
         default: "0"
       options_json:
-        description: "Advanced options JSON: full_depth_entry, skip_settlement_exits, three_layer_min_entry_score"
+        description: "Advanced options JSON: full_depth_entry, skip_settlement_exits, three_layer_min_entry_score, source_target, source_horizon"
         required: false
-        default: '{"full_depth_entry":true,"skip_settlement_exits":false}'
+        default: '{"full_depth_entry":true,"skip_settlement_exits":false,"source_target":"full_depth_settlement_executable_pnl","source_horizon":"5m"}'
 concurrency:
   group: runtime-candidate-replay-${{ github.event.inputs.deployment_id }}-${{ github.event.inputs.runtime_score }}
   cancel-in-progress: false
@@ -82,9 +82,12 @@ jobs:
               "full_depth_entry": "true",
               "skip_settlement_exits": "false",
               "three_layer_min_entry_score": "",
+              "source_target": "full_depth_settlement_executable_pnl",
+              "source_horizon": "5m",
           }
           bool_keys = {"full_depth_entry", "skip_settlement_exits"}
           threshold_keys = {"three_layer_min_entry_score"}
+          string_keys = {"source_target", "source_horizon"}
           allowed_thresholds = {Decimal("0.05"), Decimal("0.10"), Decimal("0.15"), Decimal("0.25")}
           raw = os.environ.get("OPTIONS_JSON", "").strip()
           data = json.loads(raw) if raw else {}
@@ -115,10 +118,16 @@ jobs:
                       allowed = ", ".join(str(item) for item in sorted(allowed_thresholds))
                       raise SystemExit(f"options_json value for {key} must be one of: {allowed}")
                   values[key] = format(threshold, "f")
+              elif key in string_keys:
+                  values[key] = str(value).strip()
+                  if not values[key]:
+                      raise SystemExit(f"options_json value for {key} must be non-empty")
 
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
               handle.write(f"REPLAY_FULL_DEPTH_ENTRY={values['full_depth_entry']}\n")
               handle.write(f"REPLAY_SKIP_SETTLEMENT_EXITS={values['skip_settlement_exits']}\n")
+              handle.write(f"REPLAY_SOURCE_TARGET={values['source_target']}\n")
+              handle.write(f"REPLAY_SOURCE_HORIZON={values['source_horizon']}\n")
               handle.write(
                   "REPLAY_THREE_LAYER_MIN_ENTRY_SCORE="
                   f"{values['three_layer_min_entry_score']}\n"
@@ -396,6 +405,8 @@ jobs:
           MIN_ROI: ${{ github.event.inputs.min_roi }}
           FULL_DEPTH_ENTRY: ${{ env.REPLAY_FULL_DEPTH_ENTRY }}
           CONFIGURED_ENTRY_THRESHOLD: ${{ env.REPLAY_THREE_LAYER_MIN_ENTRY_SCORE || '0.25' }}
+          SOURCE_TARGET: ${{ env.REPLAY_SOURCE_TARGET }}
+          SOURCE_HORIZON: ${{ env.REPLAY_SOURCE_HORIZON }}
         run: |
           set -euo pipefail
           args=(
@@ -410,6 +421,8 @@ jobs:
             --config-path "${{ github.event.inputs.config_path }}"
             --runner-source "${GITHUB_WORKFLOW}:${GITHUB_REF_NAME}"
             --runner-git-sha "${GITHUB_SHA}"
+            --source-target "${SOURCE_TARGET}"
+            --source-horizon "${SOURCE_HORIZON}"
             --min-trade-count "${MIN_TRADE_COUNT}"
             --min-fill-rate "${MIN_FILL_RATE}"
             --min-roi "${MIN_ROI}"

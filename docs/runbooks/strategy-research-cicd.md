@@ -286,6 +286,10 @@ top deployable bucket to expose event-level decision fields. Missing
 `top_bucket_unique_event_count` / `top_bucket_max_event_decisions` blocks
 handoff, and `top_bucket_max_event_decisions > 1` blocks handoff because the
 candidate is still relying on repeated rows from the same event.
+The attached runtime replay tape must also carry the same target/horizon as
+the promoted factor row. A 30s repricing replay cannot back a 5m settlement
+handoff, even when the runtime score string and aggregate metrics look
+compatible.
 
 ## Decision Labels
 
