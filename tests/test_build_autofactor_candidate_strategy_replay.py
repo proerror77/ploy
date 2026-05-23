@@ -159,6 +159,62 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
             payload["blocking_risk_flags"],
         )
 
+    def test_registry_contract_prefers_canonical_runtime_inputs(self):
+        report = """# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_unique_event_count,top_bucket_max_event_decisions,complexity
+1,auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity,full_depth_settlement_executable_pnl,candidate,passed,49831,0.110842,0.150273,43,1.064178,0.9535,6,0.8333,1.0000,9966,2.666226,0.6836,0.9000,9966,1,5
+"""
+        runtime_score = (
+            "autofactor_formula:"
+            "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity"
+        )
+        payload, _ = self.run_script(
+            report,
+            registry_preview_payload={
+                "version": "alpha_search_artifacts_v1",
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+                "factors": [
+                    {
+                        "factor_name": (
+                            "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity"
+                        ),
+                        "runtime_contract": {
+                            "version": "autofactor_runtime_contract_v1",
+                            "runtime_score": runtime_score,
+                            "strategy_profile": "settlement_probability",
+                            "strategy_family": "settlement_probability",
+                            "input_names": [
+                                "entry_capacity_score",
+                                "model_full_depth_settlement_edge",
+                                "near_strike_score",
+                            ],
+                            "runtime_input_names": [
+                                "direction_sign",
+                                "distance_over_sigma",
+                                "entry_capacity_ratio",
+                                "settlement_edge",
+                            ],
+                            "blockers": [],
+                        },
+                        "blockers": [],
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(payload["runtime_score"], runtime_score)
+        self.assertIn(
+            "requires_runtime_replay_not_top_bucket_aggregate",
+            payload["blocking_risk_flags"],
+        )
+        self.assertNotIn(
+            "runtime_input_unsupported:near_strike_score",
+            payload["blocking_risk_flags"],
+        )
+
     def test_builds_blocked_aggregate_for_runtime_mappable_settlement_candidate(self):
         payload, markdown = self.run_script(AUTOFACTOR_SETTLEMENT_AUTO_REPORT)
 

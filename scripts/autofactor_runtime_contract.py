@@ -105,8 +105,8 @@ SUPPORTED_RUNTIME_INPUT_NAMES = {
 # them from non-equivalent or placeholder values. Treat them as blocked until
 # research and runtime share the same source definition.
 BLOCKED_RUNTIME_INPUT_NAMES = {
-    "external_pressure": "runtime_input_not_canonical:external_pressure",
-    "iv_change_1m": "runtime_input_placeholder:iv_change_1m",
+    "external_pressure": "runtime_input_semantics_mismatch:external_pressure",
+    "iv_change_1m": "runtime_input_not_supplied:iv_change_1m",
 }
 
 
@@ -198,6 +198,16 @@ def runtime_input_blockers(input_names: list[str]) -> list[str]:
     return blockers
 
 
+def runtime_contract_input_names(contract: dict[str, Any]) -> list[str]:
+    runtime_input_names = contract.get("runtime_input_names")
+    if isinstance(runtime_input_names, list) and runtime_input_names:
+        return [str(v) for v in runtime_input_names if str(v)]
+    legacy_input_names = contract.get("input_names")
+    if isinstance(legacy_input_names, list) and legacy_input_names:
+        return [str(v) for v in legacy_input_names if str(v)]
+    return []
+
+
 @dataclass
 class RuntimeContractResolution:
     factor_name: str
@@ -258,11 +268,10 @@ class RuntimeContractResolver:
             if contract.get("version") != "autofactor_runtime_contract_v1":
                 blockers.append("unsupported_runtime_contract_version")
             blockers.extend(str(v) for v in contract.get("blockers") or [] if str(v))
-            input_names = contract.get("input_names")
-            if not isinstance(input_names, list) or not input_names:
+            input_names = runtime_contract_input_names(contract)
+            if not input_names:
                 blockers.append(f"missing_runtime_contract_input_names:{name}")
-                input_names = []
-            blockers.extend(runtime_input_blockers([str(v) for v in input_names]))
+            blockers.extend(runtime_input_blockers(input_names))
             mapping = {
                 "strategy_profile": str(contract.get("strategy_profile") or ""),
                 "strategy_family": str(contract.get("strategy_family") or ""),
