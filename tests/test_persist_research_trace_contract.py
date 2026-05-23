@@ -242,6 +242,12 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("source_surface_blockers", source)
         self.assertIn("missing_blocks_promotion", source)
 
+    def test_trace_plan_workflow_accepts_candidate_runtime_replay_theme(self) -> None:
+        workflow = TRACE_PLAN_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("candidate_to_runtime_replay", workflow)
+        self.assertIn("continue_search", workflow)
+        self.assertIn("fix_runtime", workflow)
+
     def test_research_trace_plan_workflow_uses_deployed_tango_binary(self) -> None:
         workflow = TRACE_PLAN_WORKFLOW.read_text(encoding="utf-8")
         required = [
