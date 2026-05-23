@@ -64,6 +64,7 @@ when the mismatch is understood and tracked as a follow-up issue.
 | Runtime evidence reset | `.github/workflows/reset-strategy-runtime-evidence.yml` | Backup-first cleanup for contaminated dry-run/paper `strategy_runtime_orders` and `strategy_runtime_fills`; follow `docs/runbooks/strategy-runtime-evidence-reset.md` |
 | Dry-run config sync | `.github/workflows/sync-dryrun-strategy-config-tango-1-1.yml` | Protected config-only sync for a reviewed dry-run strategy TOML; restarts only the target dry-run worker and avoids collector restarts during clean-window waits |
 | Event ML rolling evidence | `.github/workflows/event-ml-rolling-evidence.yml` | Produce event-root rolling ML datasets and compact reports; use `source_dataset_run_id` for the GitHub-hosted artifact path |
+| Research Manager plan | `.github/workflows/research-trace-plan.yml` | Read durable Research OS trace on `tango-1-1` with the deployed `research-trace-plan` binary and emit next-step JSON/Markdown artifacts |
 | Market data audit | `.github/workflows/market-data-gap-audit.yml` | Scheduled/manual Tango data freshness and gap gate |
 | Image build | `.github/workflows/build-push-acr.yml` | Build ACK images; push only immutable checked-out SHA tags |
 | ACK deploy | `.github/workflows/deploy-ack.yml` | Deploy immutable SHA image tags through the protected `ack` environment |
@@ -138,6 +139,11 @@ generation. When that database URL targets Tango's private VPC endpoint, the
 hosted workflow ships the trace input artifacts to `tango-1-1` and runs the
 deployed `/opt/ploy/bin/persist-research-trace` binary there; it must not try
 to open a private PostgreSQL connection directly from a GitHub-hosted runner.
+Any hosted walk-forward path that mutates follow-up state by dispatching a
+chained alpha-search run, opening a dry-run handoff issue, or creating a config
+PR must first write the durable trace marker for the same run. Artifact-only
+runs may still produce reports, summaries, and issue comments, but they cannot
+advance the closed loop.
 
 Use `research_trace_plan` after durable rows exist to generate the next
 Research Manager plan from DB trace:
@@ -148,6 +154,13 @@ rtk cargo run -p ploy-research --example research_trace_plan --features db -- \
   --evidence-stage factor_attribution \
   --output research-trace-plan.json
 ```
+
+For CI evidence, dispatch `.github/workflows/research-trace-plan.yml` instead
+of running a local DB command. That workflow SSHes to `tango-1-1`, runs the
+deployed `/opt/ploy/bin/research-trace-plan` binary against the protected
+research database, uploads `research-trace-plan.json` / `.md`, and can attach
+the plan to a research issue. It is read-only and does not build Rust or mutate
+runtime state.
 
 The current architecture review is
 `docs/reviews/research-data-architecture-review-2026-05-23.md`.

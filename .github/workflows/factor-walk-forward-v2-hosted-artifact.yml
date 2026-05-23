@@ -615,6 +615,12 @@ jobs:
               ./target/fast/examples/persist_research_trace "${trace_args[@]}" --db-url "${RESEARCH_TRACE_DB_URL}"
               ;;
           esac
+          mkdir -p artifacts/research-trace
+          {
+            echo "persisted=true"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "evidence_stages=factor_attribution,walk_forward"
+          } > artifacts/research-trace/persisted.env
           {
             echo "### Durable Research OS trace"
             echo ""
@@ -633,6 +639,10 @@ jobs:
           if [ "${WALK_CREATE_CONFIG_PR:-false}" != "true" ]; then
             echo "create_config_pr is not true; skipping config PR creation."
             exit 0
+          fi
+          if [ ! -f artifacts/research-trace/persisted.env ]; then
+            echo "create_config_pr requires successful durable Research OS trace persistence." >&2
+            exit 2
           fi
           handoff_json="artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json"
           if [ ! -f "${handoff_json}" ]; then
@@ -981,6 +991,10 @@ jobs:
             echo "Missing alpha search chain decision artifact; skipping chained dispatch."
             exit 0
           fi
+          if [ "${WALK_CHAIN_NEXT_RUN:-false}" = "true" ] && [ ! -f artifacts/research-trace/persisted.env ]; then
+            echo "chain_next_run requires successful durable Research OS trace persistence." >&2
+            exit 2
+          fi
           closed_loop_path="artifacts/factor-walk-forward-v2-upload/alpha-search-chain/closed-loop-decision.json"
           if [ ! -f "${closed_loop_path}" ]; then
             echo "Missing closed-loop classifier decision artifact; skipping chained dispatch."
@@ -1099,6 +1113,10 @@ jobs:
           if [ "${WALK_CREATE_HANDOFF_ISSUE:-false}" != "true" ]; then
             echo "create_handoff_issue is not true; skipping handoff issue creation."
             exit 0
+          fi
+          if [ ! -f artifacts/research-trace/persisted.env ]; then
+            echo "create_handoff_issue requires successful durable Research OS trace persistence." >&2
+            exit 2
           fi
           handoff_json="artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json"
           handoff_md="artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.md"
