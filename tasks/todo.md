@@ -13,7 +13,10 @@ request automation, not strategy promotion.
 - [x] Gate hosted runtime replay dispatch on durable trace persistence and
       closed-loop `fix_runtime` action.
 - [x] Validate the batch request builder against run `26343497815` artifacts.
-- [ ] Commit, push, merge, and rerun hosted walk-forward from `main`.
+- [x] Commit, push, merge, and rerun hosted walk-forward from `main`.
+- [x] Feed the best fresh runtime replay artifact back into hosted promotion.
+- [x] Refresh the research/data architecture review with the runtime replay
+      fan-out evidence and remaining blockers.
 
 ### Review
 
@@ -26,6 +29,17 @@ request automation, not strategy promotion.
   `runtime-candidate-replay.yml` requests for
   `tradeable_full_depth_settlement_pnl` / `5m` after filtering
   contract-blocked runtime input mismatches such as `external_pressure`.
+- 2026-05-24: PR #641 merged as
+  `a74f030b7e8c288144b5fd5a35a75da9b589bc78`. Hosted walk-forward run
+  `26344523079` persisted trace and automatically dispatched five runtime
+  candidate replay runs: `26344588318`, `26344588684`, `26344589064`,
+  `26344589439`, and `26344589743`.
+- 2026-05-24: The replay batch succeeded with `basis=runtime_market_update_replay`
+  and fill rate `1.0`, but trade counts were still too small:
+  `29`, `29`, `8`, `16`, and `15` trades. Replay-fed promotion run
+  `26344749058` consumed run `26344588318` and correctly changed the
+  closed-loop blocker to `fix_data`: sampled CLOB execution surface, 29<50
+  trades, and missing official settlement for 4 of 29 traded events.
 
 ## Current Session - Sweep Target Registry Preview Fix (2026-05-24)
 
@@ -39,7 +53,7 @@ Evidence stage: `factor_attribution` / `walk_forward` recovery with
 - [x] Make sweep registry preview selection target-aware for candidate replay
       and promotion.
 - [x] Add regression coverage for multiple alpha-search target previews.
-- [ ] Commit, push, merge, and rerun hosted walk-forward from `main`.
+- [x] Commit, push, merge, and rerun hosted walk-forward from `main`.
 
 ### Review
 
@@ -66,7 +80,7 @@ promotion.
       the aggregate artifact lacks runtime replay provenance fields.
 - [x] Include source target/horizon in generated runtime replay requests.
 - [x] Dispatch `runtime-candidate-replay.yml` for the selected runtime score.
-- [ ] Commit, push, merge, and feed runtime replay evidence back into promotion.
+- [x] Commit, push, merge, and feed runtime replay evidence back into promotion.
 
 ### Review
 
