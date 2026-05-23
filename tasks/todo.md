@@ -1,3 +1,376 @@
+# FactorEvolve Crypto Re-Architecture Plan (2026-05-18)
+
+## Goal
+
+Turn the FactorEvolve Crypto / LOB Factor Research OS PRD into the canonical
+Ploy research re-architecture plan before implementation starts.
+
+## Files / Ownership
+
+- `docs/superpowers/plans/2026-05-18-factor-evolve-crypto-rearchitecture.md`
+  - Owner: implementation plan for registry/trace, LOB local book, Research
+    Manager typed planning, alpha-search artifacts, dry-run feedback, portfolio
+    builder, data-surface gates, and daily research orchestration.
+- `tasks/todo.md`
+  - Owner: current session tracking pointer and remote baseline summary.
+
+## Tasks
+
+- [x] Check remote GitHub Actions, public API surface, and `tango-1-1` runtime
+      health before planning.
+- [x] Compare the current system against the PRD and identify aligned parts and
+      missing parts.
+- [x] Save the FactorEvolve re-architecture plan under
+      `docs/superpowers/plans/2026-05-18-factor-evolve-crypto-rearchitecture.md`.
+- [x] Add this plan pointer to `tasks/todo.md`.
+- [x] Start implementation from the plan after explicit continuation.
+
+## Review
+
+- 2026-05-18: Remote baseline checked: `Test`, hosted factor walk-forward, and
+  runtime replay had recent successful runs; `ployd.service` on `tango-1-1`
+  was active with DB connected, zero active alerts, zero stale sources, and
+  expected collectors/timers active.
+- 2026-05-18: Current system is partially aligned with the PRD: constrained
+  factor AST/search artifacts and deterministic promotion gates exist, but
+  durable registry/trace tables, sequence-correct Binance futures local book,
+  typed Research Manager surface, first-class Portfolio Builder, and complete
+  external data surfaces are still missing.
+- 2026-05-18: Planning found one urgent operational gap: the public dry-run
+  report did not clearly show the currently running settlement-probability
+  dry-run when it had no recent closed trades. The plan recommends fixing that
+  reporting gap first if operator visibility is the priority.
+- 2026-05-21: Began the data-layer cutover with Agent Team support. The first
+  implementation slice adds durable registry/trace contracts, sequence-correct
+  Binance futures local-book validation, typed Research Manager and portfolio
+  contracts, alpha-search registry preview artifacts, data-surface gates, and
+  zero-trade running dry-run strategy visibility without enabling deployment or
+  live trading paths.
+- 2026-05-23: Agent Team architecture/data-layer review found the remaining
+  ambiguity was not factor generation but data-product semantics: sampled
+  research snapshots were being discussed as if they were full-resolution replay
+  data. The fix adds explicit source-surface/input-artifact fields to the
+  research snapshot manifest, documents the four data-product layers, and
+  extends the durable Research OS migration with dataset windows, runtime
+  contracts, blockers, and promotion decisions.
+- 2026-05-23: Verification for this repair slice passed:
+  `python3 -m unittest tests.test_factor_research_os_registry tests.test_replay_backtest_evidence_contract`,
+  YAML parse for `backtest.yml` and `deploy-tango-1-1.yml`, `rtk git diff --check`,
+  and `CARGO_TARGET_DIR=/tmp/ploy-research-snapshot-contract /opt/homebrew/bin/timeout 240 rtk cargo test -p ploy-research research_snapshot --lib`.
+- 2026-05-23: Closed two Research OS P0 trace-quality gaps from the Agent Team
+  review. Failed hosted walk-forward sweeps now skip durable Research OS
+  persistence and handoff/config side effects unless a sweep-success marker is
+  present, and factor registry/runtime contract persistence now carries target
+  horizon instead of collapsing all factors to `5m`. Verification passed:
+  `python3 -m unittest tests.test_persist_research_trace_contract tests.test_factor_research_os_registry tests.test_replay_backtest_evidence_contract tests.test_ploy_maintenance_defaults`,
+  `CARGO_TARGET_DIR=/tmp/ploy-alpha-horizon /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research alpha_search --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-persist-trace-horizon /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research --example persist_research_trace --features db --no-default-features`,
+  `CARGO_TARGET_DIR=/tmp/ploy-research-os-registry /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research target_horizon_contract_covers_reprice_and_settlement_targets --lib`,
+  workflow YAML parse, and `rtk git diff --check`.
+
+# Seven-Layer Trading Agent Archive And Gap Assessment (2026-05-18)
+
+## Goal
+
+Archive the user's seven-layer trading-agent theory inside the repo, map each
+layer to current `ploy` trading/research surfaces, and define the next
+research/R&D path without changing runtime behavior.
+
+## Files / Ownership
+
+- `docs/notes/seven-layer-agent-framework.md`
+  - Owner: canonical archive for the seven-layer theory, current repo mapping,
+    and research sequencing.
+- `.omx/wiki/seven-layer-agent-framework.md`
+  - Owner: local project knowledge entry pointing back to the archive.
+
+## Tasks
+
+- [x] Transcribe the seven layers into a searchable project document.
+- [x] Map current repo code/research surfaces to each layer.
+- [x] Mark each layer as applied, partial, or missing.
+- [x] Define the recommended research order using current project semantics.
+- [x] Verify the archive and note the conclusion in `## Review`.
+
+## Review
+
+- 2026-05-18: Added `docs/notes/seven-layer-agent-framework.md` as the
+  canonical archive for the user's seven-layer theory. It transcribes the image
+  into searchable text and separates the theory from existing repo semantics.
+- 2026-05-18: Assessment result: the theory is partially present in `ploy`, but
+  not yet implemented as a first-class seven-layer framework. Strongest current
+  alignment is price-volume dynamics, stability/regime gating, and bounded
+  geometry/factor fusion. Weakest current alignment is fragility, multi-scale
+  complexity, and morphology/herd modeling.
+- 2026-05-18: Added `.omx/wiki/seven-layer-agent-framework.md` and
+  `.omx/wiki/index.md` so the theory is also retrievable from the local project
+  knowledge surface.
+- 2026-05-18: Recommended next R&D order is taxonomy -> coverage audit ->
+  per-layer factor attribution -> controlled fusion -> runtime compression,
+  aligned with `docs/PROJECT_SEMANTICS.md` and
+  `docs/runbooks/event-ml-automl-workflow.md`.
+
+# Alpha Search Closed-Loop Agent (2026-05-18)
+
+## Goal
+
+Turn PM5D alpha-search artifacts into an explicit closed-loop decision so a
+failed search produces the next research action instead of silently stopping.
+
+## Files / Ownership
+
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: read alpha-search artifacts, classify stop/blocker reasons, and
+    write next-action JSON/Markdown plus a typed LLM-prior draft when revision
+    is appropriate.
+- `tests/test_alpha_search_closed_loop_agent.py`
+  - Owner: lightweight unit tests for ready handoff, continuing search,
+    stagnation, missing plans, and prior generation.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document the closed-loop agent boundary and usage.
+- `crates/ploy-research/src/autofactor.rs` and
+  `scripts/evaluate_autofactor_strategy_promotion.py`
+  - Owner: machine gate for event-level one-decision promotion.
+
+## Tasks
+
+- [x] Confirm event-level backtest/search-tree architecture gates.
+- [x] Add closed-loop artifact classifier and prior-draft generator.
+- [x] Add focused Python tests.
+- [x] Document the closed-loop workflow.
+- [x] Run lightweight validation.
+
+## Review
+
+- 2026-05-18: Agent-team review found the PM5D research mainline is usable for
+  alpha search only through the snapshot -> hosted factor walk-forward ->
+  alpha_search/MCTS -> AutoFactor promotion -> recorded replay parity path.
+  Legacy `backtest.yml` remains diagnostic/blocked for PM5D promotion because
+  it does not consume the full-depth CLOB lake or prove runtime scorer parity.
+- 2026-05-18: Added `scripts/alpha_search_closed_loop_agent.py`. It reads
+  `search-feedback.json`, `mcts-expansion-plan.json`,
+  `autofactor-strategy-handoff.json`, promotion blockers, and
+  `chain-decision.json`, then emits a machine-readable next action:
+  `ready_handoff`, `continue_search`, `revise_prior`, `fix_data`,
+  `fix_runtime`, or `fix_workflow`.
+- 2026-05-18: Stagnant or empty MCTS searches now become `revise_prior`, not a
+  silent terminal stop. The script writes a bounded typed `next-llm-prior.json`
+  draft using existing allowed mutation types and does not call an external
+  LLM, edit runtime config, or claim profitability.
+- 2026-05-18: Wired the hosted artifact workflow to upload
+  `closed-loop-decision.json/md`, store `next-llm-prior.json` under the target
+  alpha-search artifact, and automatically consume a prior generated by the
+  previous run when no explicit `alpha_search_llm_prior_json` is supplied.
+- 2026-05-18: Added promotion-grade event decision fields to AutoFactor reports:
+  `top_bucket_unique_event_count` and `top_bucket_max_event_decisions`.
+  `evaluate_autofactor_strategy_promotion.py` now blocks missing event-decision
+  evidence and blocks any candidate whose top bucket repeats the same event.
+- 2026-05-18: Lightweight validation passed:
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent`,
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
+  Ruby YAML parse for `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml`,
+  `python3 -m unittest tests.test_autofactor_strategy_promotion tests.test_alpha_search_closed_loop_agent`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-event-gate /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research autofactor --lib`,
+  and `rtk git diff --check`.
+
+# CLOB Orderbook Full-Fidelity Cold Archive (2026-05-16)
+
+## Goal
+
+Preserve full-resolution Polymarket orderbook snapshots while moving old data
+out of PostgreSQL hot storage into compressed Parquet/ZSTD archives.
+
+## Files / Ownership
+
+- `scripts/export_clob_orderbook_snapshots_parquet.sh`
+  - Owner: hourly full-fidelity Parquet/ZSTD export with row-count manifest and
+    success markers under `/opt/ploy/data/lake/orderbook_snapshots`.
+- `deployment/systemd/ploy-orderbook-snapshot-archive.{service,timer}`
+  - Owner: run the completed-hour archive job on `tango-1-1`.
+- `scripts/ploy_maintenance.sh`
+  - Owner: only prune old `clob_orderbook_snapshots` rows/partitions when the
+    corresponding archive date is marked complete.
+- `scripts/ploy_orderbook_snapshot_retention.sh`
+  - Owner: Tango split-retention path with the same archive-complete gate.
+- `.github/workflows/deploy-tango-1-1.yml` and
+  `scripts/ci/deploy_tango_cloud_assist.py`
+  - Owner: ship and enable the archive timer during normal Tango deploys.
+- `tests/test_ploy_maintenance_defaults.py`
+  - Owner: regression coverage for archive-gated cleanup.
+
+## Tasks
+
+- [x] Add the full-fidelity hourly Parquet/ZSTD export script.
+- [x] Add systemd service/timer for completed-hour archive export.
+- [x] Gate hot snapshot cleanup on completed archive markers.
+- [x] Bring the split orderbook snapshot retention timer under the same gate.
+- [x] Wire deploy bundle and Cloud Assistant fallback.
+- [x] Run lightweight local validation.
+- [x] Install/run once on `tango-1-1`.
+- [x] Verify archive files, row counts, timer state, collector health, and disk.
+
+## Review
+
+- 2026-05-16: Added hourly full-fidelity archive export for
+  `clob_orderbook_snapshots`. The cold path is
+  `/opt/ploy/data/lake/orderbook_snapshots/date=YYYY-MM-DD/hour=HH/`, with
+  `snapshots.parquet`, `manifest.json`, and `_SUCCESS` markers. The export keeps
+  all stored fields: `id`, `domain`, `token_id`, `market`, `bids`, `asks`,
+  `book_timestamp`, `hash`, `source`, `context`, and `received_at`.
+- 2026-05-16: Added `ploy-orderbook-snapshot-archive.{service,timer}` and
+  deployed it to `tango-1-1`. DuckDB is forced to `threads=1`,
+  `pg_connection_limit=1`, and `pg_use_ctid_scan=false`; the first parallel
+  attempt was stopped because ctid scanning saturated CPU.
+- 2026-05-16: Added archive gates to both the general maintenance script and
+  the split Tango orderbook retention script. Default cleanup requires
+  `PLOY_CLOB_BOOK_REQUIRE_ARCHIVE=true`, so old snapshot rows/partitions are
+  pruned only for dates with completed lake archive markers.
+- 2026-05-16: Verification passed:
+  `bash -n scripts/export_clob_orderbook_snapshots_parquet.sh scripts/ploy_maintenance.sh scripts/ploy_orderbook_snapshot_retention.sh`,
+  `python3 -m unittest tests.test_ploy_maintenance_defaults`, workflow YAML
+  parse for `.github/workflows/deploy-tango-1-1.yml`, and
+  `rtk git diff --check`.
+- 2026-05-16: Remote smoke export on `tango-1-1` for `2026-05-16 07:00-08:00`
+  wrote 75,248 full-fidelity rows to a 6.0 MB ZSTD Parquet file. Manifest row
+  count matched `duckdb read_parquet(...)`, SHA256 matched, archive and
+  retention timers were active, `ployd` and `ploy-quote-collector` were active,
+  `/health` reported `database_connected=true`, `error_count_1h=0`,
+  `active_alert_count=0`, and root disk was 36% used with 304 GB free.
+
+# CLOB Orderbook Archive Gap Filler (2026-05-17)
+
+## Goal
+
+Make the cold archive final enough for ongoing operation: the timer must fill
+missing completed hours sequentially, not only export the latest completed hour,
+so each day can eventually reach 24 hour markers and unlock archive-gated hot
+partition cleanup.
+
+## Files / Ownership
+
+- `scripts/archive_clob_orderbook_snapshots_backfill.sh`
+  - Owner: bounded sequential gap fill for recent completed hours.
+- `deployment/systemd/ploy-orderbook-snapshot-archive.service`
+  - Owner: run the gap filler by default with safe per-run limits.
+- `.github/workflows/deploy-tango-1-1.yml` and
+  `scripts/ci/deploy_tango_cloud_assist.py`
+  - Owner: ship the gap filler to Tango deploys.
+- `tests/test_ploy_maintenance_defaults.py`
+  - Owner: static regression coverage that archive export stays single-threaded
+    and timer uses the gap filler.
+- `docs/runbooks/orderbook-snapshot-archive.md`
+  - Owner: final operator runbook for full-fidelity hot/cold orderbook storage.
+
+## Tasks
+
+- [x] Add bounded sequential gap filler for missing completed hours.
+- [x] Point the archive systemd service at the gap filler.
+- [x] Ship the new script in deploy and Cloud Assistant paths.
+- [x] Extend lightweight tests.
+- [x] Run local syntax/tests.
+- [x] Deploy to `tango-1-1` and execute one bounded backfill pass.
+- [x] Verify hour markers, timer health, CPU/disk/collector health.
+- [x] Document the final operator policy and verification commands.
+
+## Review
+
+- 2026-05-17: Added `archive_clob_orderbook_snapshots_backfill.sh`, a bounded
+  sequential gap filler. It skips existing hourly `_SUCCESS` markers, exports
+  missing completed hours oldest-first, and defaults to at most 6 missing hours
+  per run over the last 72 hours.
+- 2026-05-17: Changed `ploy-orderbook-snapshot-archive.service` to run the gap
+  filler instead of only the latest-hour export. The timer therefore repairs
+  missed hours and lets each date eventually reach a day-level `_SUCCESS`.
+- 2026-05-17: Added `docs/runbooks/orderbook-snapshot-archive.md` with the
+  final hot/cold storage policy, paths, safety rules, manual gap-fill commands,
+  retention gate, and verification commands.
+- 2026-05-17: Verification passed locally:
+  `bash -n scripts/archive_clob_orderbook_snapshots_backfill.sh scripts/export_clob_orderbook_snapshots_parquet.sh scripts/ploy_maintenance.sh scripts/ploy_orderbook_snapshot_retention.sh`,
+  `python3 -m unittest tests.test_ploy_maintenance_defaults`, deploy workflow
+  YAML parse, and `rtk git diff --check`.
+- 2026-05-17: Deployed updated scripts and systemd units to `tango-1-1`.
+  Backfilled `2026-05-14` in three bounded passes. Archive completeness was
+  verified with 24 hourly markers, day-level `_SUCCESS`, and Parquet row count
+  `1,716,990`, matching PostgreSQL partition row count `1,716,990`.
+- 2026-05-17: Ran archive-gated retention after the row-count match. It dropped
+  `clob_orderbook_snapshots_v2_20260514`; the follow-up dry-run had no old
+  partitions left. Post-checks showed archive and retention timers enabled,
+  `ployd` and `ploy-quote-collector` active, no failed systemd units, `/health`
+  with `database_connected=true`, `error_count_1h=0`, `active_alert_count=0`,
+  root disk 35% used with 311 GB free, and CPU average idle 63.23%.
+
+# Rust-First CI Python Surface Cleanup (2026-05-14)
+
+## Goal
+
+Keep the required PR `Test` workflow aligned with the Rust workspace contract
+while isolating legacy Python research/operator helpers from the main CI gate.
+
+## Files / Ownership
+
+- `.github/workflows/test.yml`
+  - Owner: Rust, frontend/sidecar, workflow lint, audit, and integration gates
+    only.
+- `.github/workflows/legacy-python-tools.yml`
+  - Owner: non-required compatibility checks for remaining Python helper
+    scripts and tests.
+- `docs/runbooks/ci-language-policy.md`
+  - Owner: document the Rust-first CI boundary and the migration path for
+    remaining Python surfaces.
+
+## Tasks
+
+- [x] Remove the Python unittest job from the required `Test` workflow.
+- [x] Add an isolated legacy Python tools workflow with path-scoped triggers.
+- [x] Document the current Python surface and Rust-first CI rule.
+- [x] Validate workflow syntax and diff hygiene without running heavy Rust
+      builds locally.
+
+## Review
+
+- 2026-05-14: Removed `python-script-tests` from the required `Test` workflow.
+  Existing Python helper coverage is now isolated in
+  `.github/workflows/legacy-python-tools.yml`, which runs only for Python
+  helper/test/Dockerfile changes or manual dispatch.
+- 2026-05-14: Documented the Rust-first CI boundary in
+  `docs/runbooks/ci-language-policy.md` and linked the legacy workflow from the
+  strategy research workflow map. Current inventory is 46 Python helper scripts
+  and 23 Python unit test files.
+- 2026-05-14: Lightweight verification passed: Ruby YAML parse for all
+  workflows, absence of the removed Python unittest job in `test.yml`, and
+  `rtk git diff --check`. No local Rust build/test was run.
+- 2026-05-14: GitHub branch protection for `main` currently requires Rust,
+  lint, audit, frontend/sidecar, integration, and commit-hygiene checks only;
+  it does not list the removed Python script test job as a required status.
+
+# Tango-1-1 Storage Retention Hardening (2026-05-14)
+
+## Goal
+
+Turn the emergency Tango cleanup into durable maintenance so high-frequency DB
+tables, logs, deploy temps, replay recordings, and parquet artifacts cannot fill
+the root disk again.
+
+## Files / Ownership
+
+- `scripts/ploy_maintenance.sh`
+  - Owner: DB partition retention, bounded snapshot cleanup, log/data artifact
+    pruning, and hard caps.
+- `deployment/ploy-maintenance.service`
+  - Owner: grant maintenance write access only to required runtime data paths.
+- `tests/test_ploy_maintenance_defaults.py`
+  - Owner: regression coverage for retention defaults and hardening hooks.
+
+## Tasks
+
+- [ ] Add partition-drop retention for date-partitioned high-volume tables.
+- [ ] Replace unbounded snapshot DELETE with bounded batches.
+- [ ] Add hard retention/caps for logs, tmp, recordings, and parquet artifacts.
+- [ ] Update systemd write paths for data cleanup.
+- [ ] Run focused tests and syntax checks.
+- [ ] Apply the script/config to `tango-1-1` and run maintenance once.
+- [ ] Verify disk/CPU/log health after the hardened maintenance run.
+
 # Recorded Replay Partial-Fill Cancel Parity (2026-05-13)
 
 ## Goal
@@ -15914,3 +16287,143 @@ trade lifecycle for PM5D binary-option events.
   `.github/workflows/deploy-tango-1-1.yml` did not yet include migration 041 in
   `DEPLOY_MIGRATIONS`; added a separate workflow-only fix before triggering any
   tango deploy.
+
+# Replay Backtest Evidence Stage Hardening (2026-05-17)
+
+## Goal
+
+Make replay/backtest artifacts self-describing enough that a profitable run
+cannot be mistaken for dry-run or live promotion evidence without the required
+full-depth, settlement, and parity gates.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/examples/run_backtest.rs`
+  - Owner: machine-readable evidence stage, data surface, and promotion-gate
+    metadata in `strategy_backtest_evaluation`.
+- `.github/workflows/backtest.yml`
+  - Owner: workflow summary and issue comment must report the same gate fields
+    instead of implying canonical promotion evidence.
+- `.github/workflows/optimize.yml`
+  - Owner: input copy should preserve the snapshot/debug distinction for
+    optimizer runs.
+- `docs/runbooks/strategy-research-cicd.md`
+  - Owner: operator-facing replay/backtest caveat for legacy Parquet versus
+    full-depth lake data.
+- `tests/test_replay_backtest_evidence_contract.py`
+  - Owner: lightweight static coverage for the evidence contract.
+
+## Tasks
+
+- [x] Add machine-readable evidence-stage and promotion-gate fields to
+      `run_backtest`.
+- [x] Surface the fields in the backtest workflow summary and issue comments.
+- [x] Clarify optimizer/backtest workflow copy around snapshot-backed versus
+      debug Parquet data.
+- [x] Add lightweight static tests for the artifact/workflow contract.
+- [x] Run focused verification without heavy local Rust builds.
+
+## Review
+
+- 2026-05-17: `run_backtest` now writes `evidence_stage`,
+  `promotion_ready=false`, `promotion_decision`, `source`, `data_surfaces`,
+  `blocking_risk_flags`, and `advisory_flags` into
+  `strategy_backtest_evaluation`. Backtest metrics can still return
+  `canonical_result=continue`, but promotion stays blocked until full-depth CLOB
+  fillability, official settlement, replay/dry-run parity, and runtime scorer
+  parity are present.
+- 2026-05-17: `backtest.yml` now describes `data_dir` as a diagnostic legacy
+  quote-tick Parquet stream, surfaces the new gate fields in the run summary and
+  issue comments, and applies `parity:blocked` when parity blockers remain.
+  `optimize.yml` copy now calls `data_dir` diagnostic to preserve the
+  snapshot-backed/debug distinction.
+- 2026-05-17: Added `tests/test_replay_backtest_evidence_contract.py` and
+  documented the replay/backtest caveat in
+  `docs/runbooks/strategy-research-cicd.md`. Verification passed:
+  `python3 -m unittest tests.test_replay_backtest_evidence_contract`, Ruby YAML
+  parse for `.github/workflows/backtest.yml` and
+  `.github/workflows/optimize.yml`, and `rtk git diff --check`. No heavy local
+  Rust build was run.
+
+# Research OS Durable Trace Writer (2026-05-23)
+
+## Goal
+
+Restore the research chain by cutting artifact-only AutoFactor state away from
+runtime promotion decisions and persisting snapshot/search output into durable,
+queryable Research OS tables.
+
+## Files / Ownership
+
+- `crates/ploy-research/examples/persist_research_trace.rs`
+  - Owner: DB writer for `research_dataset_snapshots`, `factor_registry`,
+    `factor_evaluations`, and append-only `experiment_trace`.
+- `crates/ploy-research/src/research_os/registry.rs`
+  - Owner: Rust structs matching durable runtime contract and promotion fields.
+- `docs/runbooks/strategy-research-cicd.md`
+  - Owner: operator-facing contract for durable trace versus promotion evidence.
+- `tests/test_persist_research_trace_contract.py`
+  - Owner: static guard that writer stays fail-closed and is registered.
+- `docs/reviews/research-data-architecture-review-2026-05-23.md`
+  - Owner: current data/research chain review and remaining architecture risks.
+
+## Tasks
+
+- [x] Make sampled snapshot/source-surface semantics explicit in manifest and
+      runbook.
+- [x] Add migration 043 for dataset snapshots, runtime contract, and promotion
+      trace constraints.
+- [x] Add a durable writer that can ingest snapshot manifests and alpha-search
+      artifacts.
+- [x] Add evidence-stage/evaluation-kind boundaries and target/horizon-aware
+      factor identity so sampled factor attribution cannot masquerade as replay.
+- [x] Wire the writer into the hosted research workflow behind an explicit
+      `persist_research_trace` option and protected DB secret gate.
+- [x] Add query/report surfaces for Research Manager to plan from durable trace
+      instead of scattered artifacts.
+- [x] Make legacy `ploy-ci-1` direct-DB factor review/walk-forward branches
+      debug-only so default research dispatches use snapshot artifacts.
+- [x] Review the current data and research architecture after the trace
+      migration.
+
+## Review
+
+- 2026-05-23: Added `persist_research_trace` as a `db`-gated
+  `ploy-research` example. It persists snapshot manifests into
+  `research_dataset_snapshots`, alpha-search preview factors into
+  `factor_registry` / `factor_evaluations`, and artifacts into append-only
+  `experiment_trace`.
+- 2026-05-23: Architecture review found that `dsl_hash` alone would collapse
+  the same AST across target/horizon and that evaluation rows needed a typed
+  stage boundary. Migration 043 now replaces the `dsl_hash`-only unique index
+  with `(dsl_hash, target, horizon)`, adds `evidence_stage`,
+  `evaluation_kind`, and `candidate_replay_id`, and adds typed trace projection
+  fields for `data_snapshot_id`, `dsl_hash`, `artifact_kind`, and
+  `promotion_decision`.
+- 2026-05-23: The writer records alpha-search output as
+  `factor_attribution` / `alpha_search_preview`; it does not write
+  `dry_run_candidate`, `live_candidate`, `ready`, `dry_run`, or `promoted`.
+  Candidate replay remains a separate future layer with its own
+  `candidate_replay_id`.
+- 2026-05-23: `factor-walk-forward-v2-hosted-artifact.yml` now builds
+  `persist_research_trace` and can persist durable Research OS rows only when
+  `options_json.persist_research_trace=true` and
+  `RESEARCH_OS_DATABASE_URL`/`PLOY_DATABASE_URL` is available. The default path
+  remains read-only. `deploy-tango-1-1.yml` now packages
+  `persist-research-trace` into `/opt/ploy/bin` through both SSH and Cloud
+  Assistant deploy paths.
+- 2026-05-23: Added `research_trace_plan`, a DB-backed Research Manager entry
+  that reads `experiment_trace`, `factor_registry`, `factor_evaluations`, and
+  `research_dataset_snapshots`, then emits a typed next-research plan through
+  the existing planner.
+- 2026-05-23: Legacy `factor-review-v2.yml` and `factor-walk-forward-v2.yml`
+  no longer run their `ploy-ci-1` direct-DB branches by default when
+  `snapshot_run_id` is omitted. They now fail closed with instructions to use
+  `research-snapshot.yml` plus hosted artifact workflows; direct DB is retained
+  only behind explicit `allow_direct_db_debug=true`.
+- 2026-05-23: Added
+  `docs/reviews/research-data-architecture-review-2026-05-23.md`. Review
+  verdict: the architecture now separates raw surfaces, sampled snapshots,
+  alpha-search, durable trace, and planning, but it is not yet fully automatic
+  until migration 043 is deployed, one persisted hosted run is observed, and
+  candidate replay tapes become a first-class durable layer.
