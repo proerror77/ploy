@@ -74,11 +74,19 @@ def _parse_symbols(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-def _dispatch_gh_workflow(workflow: str, ref: str, fields: dict[str, str]) -> None:
+def _dispatch_gh_workflow(workflow: str, ref: str, fields: dict[str, str]) -> dict[str, Any]:
     cmd = ["gh", "workflow", "run", workflow, "--ref", ref]
     for key, value in fields.items():
         cmd.extend(["-f", f"{key}={value}"])
-    subprocess.run(cmd, check=True)
+    completed = subprocess.run(cmd, text=True, capture_output=True)
+    return {
+        "workflow": workflow,
+        "ref": ref,
+        "ok": completed.returncode == 0,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout.strip(),
+        "stderr": completed.stderr.strip(),
+    }
 
 
 def _research_snapshot_dispatch(
@@ -355,6 +363,7 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
         "blocked_dispatches": blocked_dispatches,
         "typed_prior": typed_prior,
         "side_effects_enabled": mode == "execute",
+        "dispatch_attempts": [],
     }
 
 
@@ -378,6 +387,11 @@ def render_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- `{item['workflow']}`: `{status}`; blockers: `{blockers}`")
     if payload.get("typed_prior"):
         lines.extend(["", "## Typed Prior", "", "- `research_manager_typed_prior.v1` generated"])
+    if payload.get("dispatch_attempts"):
+        lines.extend(["", "## Dispatch Attempts", ""])
+        for item in payload["dispatch_attempts"]:
+            status = "ok" if item.get("ok") else "failed"
+            lines.append(f"- `{item['workflow']}`: `{status}`")
     return "\n".join(lines) + "\n"
 
 
@@ -420,6 +434,13 @@ def main() -> None:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     payload = build_executor_payload(args, _load_json(args.plan_json))
+    if payload["side_effects_enabled"]:
+        attempts = []
+        for item in payload["dispatches"]:
+            if item["ready"]:
+                attempts.append(_dispatch_gh_workflow(item["workflow"], args.git_ref, item["fields"]))
+        payload["dispatch_attempts"] = attempts
+
     _write_json(args.output_dir / "research-manager-executor.json", payload)
     (args.output_dir / "research-manager-executor.md").write_text(
         render_markdown(payload),
@@ -427,11 +448,6 @@ def main() -> None:
     )
     if payload.get("typed_prior"):
         _write_json(args.output_dir / "next-llm-prior.json", payload["typed_prior"])
-
-    if payload["side_effects_enabled"]:
-        for item in payload["dispatches"]:
-            if item["ready"]:
-                _dispatch_gh_workflow(item["workflow"], args.git_ref, item["fields"])
 
 
 if __name__ == "__main__":
