@@ -358,9 +358,9 @@ handoff can be ready. The generated PR updates only
 `three_layer_autofactor_runtime_score`; deployment remains a separate explicit
 dry-run step from `main`.
 
-For the full settlement-probability PRD gate, prefer passing an existing full
-snapshot artifact into the orchestrator so downstream AutoFactor mining and
-promotion run on GitHub-hosted runners:
+For the full settlement-probability PRD gate, prefer passing an existing
+complete sampled research snapshot artifact into the orchestrator so downstream
+AutoFactor mining and promotion run on GitHub-hosted runners:
 
 ```bash
 gh workflow run settlement-probability-prd-gate.yml \
