@@ -34,7 +34,7 @@ on:
       options_json:
         description: "Advanced options JSON: walk windows, factor filters, event-complete gates, replay parity, promotion gate, durable trace persistence, optional issue/config handoff"
         required: false
-        default: '{"train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":"","pm_book_sample_secs":"","observation_sample_secs":"","max_quote_age_secs":"","top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","candidate_strategy_replay_json":"","candidate_strategy_replay_run_id":"","candidate_strategy_replay_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":"","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"persist_research_trace":true,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
+        default: '{"train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":"","pm_book_sample_secs":"","observation_sample_secs":"","max_quote_age_secs":"","top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","candidate_strategy_replay_json":"","candidate_strategy_replay_run_id":"","candidate_strategy_replay_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":"","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"persist_research_trace":true,"dispatch_runtime_replay_requests":true,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
       sweep_json:
         description: "Optional JSON array of walk-forward option overrides to run in one job after one download/build"
         required: false
@@ -119,10 +119,11 @@ jobs:
               "create_handoff_issue": "false",
               "create_config_pr": "false",
               "persist_research_trace": "true",
+              "dispatch_runtime_replay_requests": "true",
               "strategy_config": "config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
               "fail_if_blocked": "false",
           }
-          bool_keys = {"chain_next_run", "create_handoff_issue", "create_config_pr", "persist_research_trace", "fail_if_blocked", "require_deribit"}
+          bool_keys = {"chain_next_run", "create_handoff_issue", "create_config_pr", "persist_research_trace", "dispatch_runtime_replay_requests", "fail_if_blocked", "require_deribit"}
           choices = {
               "report_suite": {"core", "full"},
               "data_quality_mode": {"strict_continuous", "event_complete"},
@@ -1013,6 +1014,82 @@ jobs:
           path: artifacts/factor-walk-forward-v2-upload/
           compression-level: 0
           retention-days: 14
+
+      - name: Dispatch runtime replay requests
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          closed_loop_path="artifacts/factor-walk-forward-v2-upload/alpha-search-chain/closed-loop-decision.json"
+          if [ "${WALK_DISPATCH_RUNTIME_REPLAY_REQUESTS:-true}" != "true" ]; then
+            echo "Runtime replay request dispatch disabled by options_json."
+            exit 0
+          fi
+          if [ ! -f artifacts/research-trace/persisted.env ]; then
+            echo "Runtime replay request dispatch requires successful durable Research OS trace persistence." >&2
+            exit 2
+          fi
+          if [ ! -f "${closed_loop_path}" ]; then
+            echo "Missing closed-loop classifier decision artifact; skipping runtime replay dispatch."
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          path = Path("artifacts/factor-walk-forward-v2-upload/alpha-search-chain/closed-loop-decision.json")
+          decision = json.loads(path.read_text(encoding="utf-8"))
+          requests = decision.get("runtime_replay_requests") or []
+          if not isinstance(requests, list) or not requests:
+              print("No runtime replay requests in closed-loop decision.")
+              raise SystemExit(0)
+          if decision.get("action") != "fix_runtime":
+              print(f"Closed-loop action is {decision.get('action')}; skipping runtime replay dispatch.")
+              raise SystemExit(0)
+          for index, request in enumerate(requests, start=1):
+              if not isinstance(request, dict):
+                  continue
+              if request.get("workflow") != "runtime-candidate-replay.yml":
+                  raise SystemExit(f"unsupported runtime replay workflow at index {index}: {request.get('workflow')}")
+              inputs = request.get("inputs")
+              if not isinstance(inputs, dict):
+                  raise SystemExit(f"runtime replay request {index} has no inputs object")
+              required = [
+                  "deployment_id",
+                  "config_path",
+                  "recording_path",
+                  "runtime_score",
+                  "strategy_profile",
+                  "min_trade_count",
+                  "min_fill_rate",
+                  "min_roi",
+                  "options_json",
+              ]
+              missing = [key for key in required if not str(inputs.get(key) or "")]
+              if missing:
+                  raise SystemExit(f"runtime replay request {index} missing inputs: {', '.join(missing)}")
+              command = [
+                  "gh",
+                  "workflow",
+                  "run",
+                  "runtime-candidate-replay.yml",
+                  "--ref",
+                  os.environ["GITHUB_REF_NAME"],
+              ]
+              for key in required:
+                  command.extend(["-f", f"{key}={inputs[key]}"])
+              issue_number = str(inputs.get("issue_number") or os.environ.get("WALK_ISSUE_NUMBER") or "").strip()
+              if issue_number:
+                  command.extend(["-f", f"issue_number={issue_number}"])
+              print(
+                  "Dispatching runtime replay request "
+                  f"{index}/{len(requests)}: {inputs['runtime_score']}"
+              )
+              subprocess.run(command, check=True)
+          PY
 
       - name: Dispatch chained alpha search run
         if: always()

@@ -745,6 +745,41 @@ fn factor_research_workflows_thread_pm_book_sample_cadence() {
 }
 
 #[test]
+fn hosted_factor_walk_forward_dispatches_runtime_replay_requests() {
+    let hosted = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "dispatch_runtime_replay_requests",
+        "Dispatch runtime replay requests",
+        "runtime_replay_requests",
+        "runtime-candidate-replay.yml",
+        "Runtime replay request dispatch requires successful durable Research OS trace persistence",
+        "decision.get(\"action\") != \"fix_runtime\"",
+        "gh",
+        "workflow",
+        "run",
+        "--ref",
+        "GITHUB_REF_NAME",
+        "deployment_id",
+        "runtime_score",
+        "options_json",
+    ] {
+        if !hosted.contains(needle) {
+            offenders.push(format!(
+                "factor-walk-forward-v2-hosted-artifact.yml: missing `{needle}`"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "hosted runtime replay request dispatch guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn runtime_candidate_replay_allows_empty_entry_score_override() {
     let workflow = workflow_contents(".github/workflows/runtime-candidate-replay.yml");
     assert!(

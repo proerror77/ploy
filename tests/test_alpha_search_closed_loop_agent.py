@@ -714,6 +714,101 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             )
             self.assertEqual(request["inputs"]["runtime_score"], better_runtime_score)
 
+    def test_fix_runtime_includes_batch_runtime_replay_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            scores = [
+                (
+                    "mut_settlement_capacity",
+                    "autofactor_formula:mut_settlement_capacity",
+                    6.0,
+                    0.75,
+                    [],
+                ),
+                (
+                    "mut_external_entry_quality",
+                    "autofactor_formula:mut_external_entry_quality",
+                    3.0,
+                    0.90,
+                    [],
+                ),
+                (
+                    "mut_contract_blocked_external_pressure",
+                    "autofactor_formula:mut_contract_blocked_external_pressure",
+                    10.0,
+                    1.00,
+                    ["runtime_input_semantics_mismatch:external_pressure"],
+                ),
+                (
+                    "mut_duplicate_score",
+                    "autofactor_formula:mut_external_entry_quality",
+                    1.0,
+                    0.50,
+                    [],
+                ),
+            ]
+            path = artifact(
+                Path(tmp),
+                target="tradeable_full_depth_settlement_pnl",
+                promotion={
+                    "decision": "blocked",
+                    "required_strategy_profile": "settlement_probability",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "requires_runtime_replay_not_top_bucket_aggregate",
+                                "candidate_strategy_replay_not_runtime_replay:factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
+                            ]
+                            + blockers,
+                            "factor": {
+                                "name": name,
+                                "target": "tradeable_full_depth_settlement_pnl",
+                                "decision": "candidate",
+                                "reason": "passed",
+                                "top_bucket_avg_label": avg_label,
+                                "top_bucket_full_depth_entry_fill_rate": fill_rate,
+                                "top_bucket_n": 400,
+                                "positive_window_ratio": 0.75,
+                                "symbol_positive_ratio": 1.0,
+                                "spearman_ic": 0.10,
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": runtime_score,
+                                "strategy_profile": "settlement_probability",
+                            },
+                        }
+                        for name, runtime_score, avg_label, fill_rate, blockers in scores
+                    ],
+                    "candidate_strategy_replay": {
+                        "basis": "factor_walk_forward_top_bucket_aggregate",
+                        "runtime_score": "autofactor_formula:mut_external_entry_quality",
+                        "strategy_profile": "settlement_probability",
+                    },
+                },
+            )
+
+            decision = agent.closed_loop_decision(
+                [agent.load_artifact(path, "tradeable_full_depth_settlement_pnl")]
+            )
+            requests = decision["runtime_replay_requests"]
+
+        self.assertEqual(decision["decision"], "fix_runtime")
+        self.assertEqual([item["source_factor"] for item in requests], [
+            "mut_settlement_capacity",
+            "mut_external_entry_quality",
+        ])
+        self.assertEqual(
+            [item["inputs"]["runtime_score"] for item in requests],
+            [
+                "autofactor_formula:mut_settlement_capacity",
+                "autofactor_formula:mut_external_entry_quality",
+            ],
+        )
+        for request in requests:
+            self.assertEqual(
+                json.loads(request["inputs"]["options_json"])["source_target"],
+                "tradeable_full_depth_settlement_pnl",
+            )
+
     def test_fix_runtime_request_prefers_feedback_best_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             best_runtime_score = "autofactor_formula:mut_spread_adjusted_external_move_near_strike"

@@ -1,5 +1,32 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Batch Runtime Replay Request Dispatch (2026-05-24)
+
+Evidence stage: `walk_forward` -> `runtime_parity` / `executable_replay`
+request automation, not strategy promotion.
+
+### Tasks
+
+- [x] Preserve the legacy single `runtime_replay_request` field for consumers.
+- [x] Emit a deduped batch of runtime replay requests from unblocked
+      runtime-mapped candidates.
+- [x] Gate hosted runtime replay dispatch on durable trace persistence and
+      closed-loop `fix_runtime` action.
+- [x] Validate the batch request builder against run `26343497815` artifacts.
+- [ ] Commit, push, merge, and rerun hosted walk-forward from `main`.
+
+### Review
+
+- 2026-05-24: The current blocker after PR #639/#640 is no longer missing
+  runtime contracts or closed-loop routing. Runtime replay evidence exists, but
+  each replay still has too few trades for promotion, so the hosted workflow now
+  needs to automatically fan out the top runtime-mappable candidates instead of
+  requiring manual one-by-one dispatch.
+- 2026-05-24: Local simulation against run `26343497815` produced five
+  `runtime-candidate-replay.yml` requests for
+  `tradeable_full_depth_settlement_pnl` / `5m` after filtering
+  contract-blocked runtime input mismatches such as `external_pressure`.
+
 ## Current Session - Sweep Target Registry Preview Fix (2026-05-24)
 
 Evidence stage: `factor_attribution` / `walk_forward` recovery with
