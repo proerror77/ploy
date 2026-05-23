@@ -1,5 +1,28 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Sweep Target Registry Preview Fix (2026-05-24)
+
+Evidence stage: `factor_attribution` / `walk_forward` recovery with
+`runtime_parity` gate wiring, not strategy promotion.
+
+### Tasks
+
+- [x] Reconfirm project semantics and event ML AutoFactor workflow gates.
+- [x] Root-cause hosted sweep promotion missing runtime contracts after PR #638.
+- [x] Make sweep registry preview selection target-aware for candidate replay
+      and promotion.
+- [x] Add regression coverage for multiple alpha-search target previews.
+- [ ] Commit, push, merge, and rerun hosted walk-forward from `main`.
+
+### Review
+
+- 2026-05-24: Hosted walk-forward run `26343153749` persisted durable trace and
+  produced unblocked typed runtime contracts for
+  `tradeable_full_depth_settlement_pnl`, but promotion/candidate replay still
+  reported `missing_runtime_contract:*`. Root cause was the sweep wrapper
+  selecting the first `alpha-search/**/factor-registry-preview.json` by sorted
+  path instead of the preview matching `--allowed-target`.
+
 ## Current Session - Runtime Chain Data Review (2026-05-24)
 
 Evidence stage: `runtime_parity` recovery / deploy data-layer health, not
