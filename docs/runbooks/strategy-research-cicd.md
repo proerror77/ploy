@@ -130,15 +130,15 @@ attached through the later gates. Candidate replay tapes must use their own
 `candidate_replay_id` instead of being collapsed into the sampled research
 snapshot identity.
 
-Hosted walk-forward can run the writer automatically only when explicitly
-requested with `options_json.persist_research_trace=true` and a protected
-database secret is available. It checks `RESEARCH_OS_DATABASE_URL`,
-`PLOY_DATABASE_URL`, `PLOY_RESEARCH_DATABASE_URL`, then `PLOY_DB_URL`. The
-default remains false so ordinary research runs stay read-only artifact
-generation. When that database URL targets Tango's private VPC endpoint, the
-hosted workflow ships the trace input artifacts to `tango-1-1` and runs the
-deployed `/opt/ploy/bin/persist-research-trace` binary there; it must not try
-to open a private PostgreSQL connection directly from a GitHub-hosted runner.
+Hosted walk-forward runs the writer by default and requires a protected
+database secret unless the dispatch explicitly sets
+`options_json.persist_research_trace=false` for a read-only diagnostic run. It
+checks `RESEARCH_OS_DATABASE_URL`, `PLOY_DATABASE_URL`,
+`PLOY_RESEARCH_DATABASE_URL`, then `PLOY_DB_URL`. When that database URL
+targets Tango's private VPC endpoint, the hosted workflow ships the trace input
+artifacts to `tango-1-1` and runs the deployed
+`/opt/ploy/bin/persist-research-trace` binary there; it must not try to open a
+private PostgreSQL connection directly from a GitHub-hosted runner.
 Any hosted walk-forward path that mutates follow-up state by dispatching a
 chained alpha-search run, opening a dry-run handoff issue, or creating a config
 PR must first write the durable trace marker for the same run. Artifact-only

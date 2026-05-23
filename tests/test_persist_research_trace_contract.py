@@ -99,10 +99,11 @@ class PersistResearchTraceContractTest(unittest.TestCase):
                         offenders.append(f"{path.relative_to(ROOT)}: {needle}")
         self.assertEqual([], offenders)
 
-    def test_hosted_walk_forward_can_persist_trace_when_explicitly_enabled(self) -> None:
+    def test_hosted_walk_forward_persists_trace_by_default(self) -> None:
         workflow = HOSTED_WALK.read_text(encoding="utf-8")
         required_snippets = [
-            '"persist_research_trace": "false"',
+            '"persist_research_trace":true',
+            '"persist_research_trace": "true"',
             "WALK_PERSIST_RESEARCH_TRACE",
             "--example persist_research_trace",
             "Persist Research OS trace",
