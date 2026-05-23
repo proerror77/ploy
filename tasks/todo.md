@@ -1,3 +1,53 @@
+# Research Trace Plan Manager Workflow (2026-05-23)
+
+## Goal
+
+Turn the durable Research OS trace that was just persisted from hosted
+walk-forward evidence into a runnable Research Manager planning artifact, then
+continue legacy cleanup and data/research review.
+
+Evidence stage: `factor_attribution` / `walk_forward` planning over durable
+trace, not dry-run promotion.
+
+## Files / Ownership
+
+- `.github/workflows/research-trace-plan.yml`
+  - Owner: read-only CI entrypoint that runs deployed `research-trace-plan` on
+    `tango-1-1` and uploads plan artifacts.
+- `docs/runbooks/strategy-research-cicd.md`
+  - Owner: canonical runbook wiring for durable trace -> Research Manager plan.
+- `tests/test_persist_research_trace_contract.py`
+  - Owner: regression coverage that the workflow uses deployed Tango binaries
+    and does not reintroduce local/hosted DB execution.
+- `tasks/todo.md`
+  - Owner: session tracking and final evidence.
+
+## Tasks
+
+- [x] Confirm current project semantics and event ML research workflow gates.
+- [x] Confirm hosted trace persistence succeeded from `main` run `26327836283`.
+- [x] Add read-only `research-trace-plan.yml` workflow.
+- [x] Validate workflow syntax, actionlint, and contract tests.
+- [ ] Merge workflow and dispatch it from `main`.
+- [ ] Verify `research-trace-plan.json` contains a valid next-plan theme.
+- [x] Apply high-priority legacy cleanup: block chain dispatch, handoff issue,
+      and config PR unless durable trace persistence succeeded.
+- [ ] Apply remaining high-priority data/research cleanup based on audit results.
+
+## Review
+
+- 2026-05-23: Hosted walk-forward run `26327836283` succeeded and the
+  `Persist Research OS trace` step printed `persist_research_trace: persisted`.
+- 2026-05-23: Focused validation passed: YAML parse for
+  `.github/workflows/research-trace-plan.yml`,
+  actionlint `v1.7.7`, extracted shell `bash -n`, `python3 -m unittest
+  tests.test_persist_research_trace_contract`, and `rtk git diff --check`.
+- 2026-05-23: Legacy cleanup started from parallel architecture audit. Hosted
+  walk-forward now writes `artifacts/research-trace/persisted.env` only after
+  `persist_research_trace` succeeds. `chain_next_run`, `create_handoff_issue`,
+  and `create_config_pr` fail closed without that marker, so artifact-only
+  research can no longer mutate follow-up state outside durable trace lineage.
+
 # Runtime Candidate Replay Empty Override Repair (2026-05-23)
 
 ## Goal

@@ -8,6 +8,7 @@ TRACE_PLAN = ROOT / "crates" / "ploy-research" / "examples" / "research_trace_pl
 CARGO = ROOT / "crates" / "ploy-research" / "Cargo.toml"
 RUNBOOK = ROOT / "docs" / "runbooks" / "strategy-research-cicd.md"
 HOSTED_WALK = ROOT / ".github" / "workflows" / "factor-walk-forward-v2-hosted-artifact.yml"
+TRACE_PLAN_WORKFLOW = ROOT / ".github" / "workflows" / "research-trace-plan.yml"
 TANGO_DEPLOY = ROOT / ".github" / "workflows" / "deploy-tango-1-1.yml"
 LEGACY_FACTOR_REVIEW = ROOT / ".github" / "workflows" / "factor-review-v2.yml"
 LEGACY_WALK_FORWARD = ROOT / ".github" / "workflows" / "factor-walk-forward-v2.yml"
@@ -82,6 +83,10 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "tango-1-1:${remote_dir}/input.tar",
             "/opt/ploy/bin/persist-research-trace",
             'DATABASE_URL="${db_url}" "${persist_bin}"',
+            "artifacts/research-trace/persisted.env",
+            "create_config_pr requires successful durable Research OS trace persistence.",
+            "chain_next_run requires successful durable Research OS trace persistence.",
+            "create_handoff_issue requires successful durable Research OS trace persistence.",
             "--alpha-search-dir artifacts/factor-walk-forward-v2/alpha-search",
             "--registry-json artifacts/factor-walk-forward-v2/autofactor-factor-registry.json",
             "--promotion-json artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.json",
@@ -115,6 +120,27 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("GROUP BY run_id", source)
         self.assertIn("source_surface_blockers", source)
         self.assertIn("missing_blocks_promotion", source)
+
+    def test_research_trace_plan_workflow_uses_deployed_tango_binary(self) -> None:
+        workflow = TRACE_PLAN_WORKFLOW.read_text(encoding="utf-8")
+        required = [
+            "Research Trace Plan",
+            "Build Research Manager plan from durable trace",
+            "/opt/ploy/bin/research-trace-plan",
+            "RESEARCH_OS_DATABASE_URL",
+            "PLOY_DATABASE_URL",
+            "PLOY_RESEARCH_DATABASE_URL",
+            "PLOY_DB_URL",
+            "research-trace-plan.json",
+            "research-trace-plan.md",
+            "actions/upload-artifact@v4",
+            "gh issue comment",
+        ]
+        for snippet in required:
+            self.assertIn(snippet, workflow)
+        self.assertNotIn("cargo build", workflow)
+        self.assertNotIn("cargo run", workflow)
+        self.assertNotIn("StrictHostKeyChecking no", workflow)
 
     def test_legacy_db_workflows_are_debug_only(self) -> None:
         for path in [LEGACY_FACTOR_REVIEW, LEGACY_WALK_FORWARD]:
