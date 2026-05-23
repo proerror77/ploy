@@ -8,7 +8,7 @@ on:
         required: true
         default: "main"
       snapshot_run_id:
-        description: "Research Snapshot or downstream run id that owns a full research snapshot artifact"
+        description: "Research Snapshot or downstream run id that owns a complete sampled research snapshot artifact"
         required: true
       snapshot_artifact_name:
         description: "Snapshot artifact name; defaults to research-snapshot-<snapshot_run_id>"
@@ -207,7 +207,7 @@ jobs:
               --require quality.md
           fi
 
-      - name: Validate full snapshot payload
+      - name: Validate complete sampled snapshot payload
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -227,10 +227,10 @@ jobs:
           missing = [path for path in required if not path or not (root / path).exists()]
           if missing:
               raise SystemExit(
-                  "research snapshot artifact has manifest/quality but is missing full payload: "
+                  "research snapshot artifact has manifest/quality but is missing complete sampled payload: "
                   + ", ".join(missing)
               )
-          print("full research snapshot payload present: " + ", ".join(required))
+          print("complete sampled research snapshot payload present: " + ", ".join(required))
           PY
 
       - name: Resolve snapshot-bound options

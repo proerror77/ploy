@@ -69,6 +69,30 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         ]:
             self.assertIn(category, source)
 
+    def test_sampled_snapshot_contract_avoids_full_data_language(self) -> None:
+        forbidden = [
+            "full research snapshot",
+            "full snapshot",
+            "full-snapshot",
+            "full payload",
+            "full research-snapshot",
+        ]
+        roots = ["docs", ".github", "scripts", "crates", "tests"]
+        offenders: list[str] = []
+        for root in roots:
+            for path in (ROOT / root).rglob("*"):
+                if path == Path(__file__):
+                    continue
+                if not path.is_file() or "target" in path.parts:
+                    continue
+                if path.suffix not in {".md", ".py", ".rs", ".yml", ".yaml", ".js"}:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore").lower()
+                for needle in forbidden:
+                    if needle in text:
+                        offenders.append(f"{path.relative_to(ROOT)}: {needle}")
+        self.assertEqual([], offenders)
+
     def test_hosted_walk_forward_can_persist_trace_when_explicitly_enabled(self) -> None:
         workflow = HOSTED_WALK.read_text(encoding="utf-8")
         required_snippets = [

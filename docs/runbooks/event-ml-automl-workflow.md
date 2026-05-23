@@ -308,15 +308,16 @@ compiles a new snapshot. It downloads `research-snapshot-<snapshot-run-id>` by
 default, with downstream embedded snapshot fallbacks from
 `factor-walk-forward-v2-<snapshot-run-id>` or
 `factor-review-v2-<snapshot-run-id>`. It fails before the Rust build if the
-artifact only has provenance files and is missing the full payload required by
-`load_research_snapshot`: observations, Deribit rows, and Polymarket full-book
-rows.
+artifact only has provenance files and is missing the complete sampled payload
+required by `load_research_snapshot`: observations, Deribit rows, and
+Polymarket full-book rows.
 
 The legacy `factor-walk-forward-v2.yml` entrypoint now follows the same rule:
 when `snapshot_run_id` is supplied it does not run the self-hosted job, and
 instead dispatches `factor-walk-forward-v2-hosted-artifact.yml` from
 `ubuntu-latest`. The self-hosted `ploy-ci-1` branch remains only for fresh
-DB/private-network snapshot compilation when no full snapshot artifact exists.
+DB/private-network snapshot compilation when no complete sampled snapshot
+artifact exists.
 `factor-review-v2.yml` has the same routing behavior for snapshot-backed factor
 diagnostics.
 
@@ -361,7 +362,7 @@ promotion run on GitHub-hosted runners:
 ```bash
 gh workflow run settlement-probability-prd-gate.yml \
   -f git_ref=main \
-  -f snapshot_run_id=<full-snapshot-run-id> \
+  -f snapshot_run_id=<sampled-snapshot-run-id> \
   -f start_date=2026-05-01 \
   -f end_date=2026-05-05 \
   -f symbols=BTCUSDT,ETHUSDT \

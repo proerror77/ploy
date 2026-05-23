@@ -22,7 +22,7 @@ on:
         required: true
         default: "15"
       snapshot_run_id:
-        description: "Existing run id with a full research-snapshot artifact; skips legacy ploy-ci-1 snapshot build"
+        description: "Existing run id with a complete sampled research-snapshot artifact; skips legacy ploy-ci-1 snapshot build"
         required: false
         default: ""
       issue_number:

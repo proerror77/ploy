@@ -36,6 +36,8 @@ trace, not dry-run promotion.
       cannot be silently reused for full-depth execution claims.
 - [x] Trace-gate standalone AutoFactor promotion side effects so old/debug
       artifacts can no longer create handoff issues or config PRs.
+- [x] Remove misleading `full snapshot` / `full payload` language from active
+      sampled research snapshot contracts.
 - [ ] Apply remaining high-priority data/research cleanup based on audit results.
 
 ## Review
@@ -80,6 +82,12 @@ trace, not dry-run promotion.
   --example factor_review_v2 --example factor_walk_forward_v2`; and `rtk git
   diff --check`. `actionlint` was not installed in this worktree/PATH, so it
   was not run for this slice.
+- 2026-05-23: Active workflow/docs/script contracts now call retained
+  snapshots `complete sampled research snapshot` artifacts instead of `full`
+  snapshots/full payloads. Added a regression test so active docs, workflows,
+  scripts, crates, and tests do not reintroduce that language. Validation
+  passed: YAML parse for touched workflows, `python3 -m unittest
+  tests.test_persist_research_trace_contract`, and `rtk git diff --check`.
 
 # Runtime Candidate Replay Empty Override Repair (2026-05-23)
 

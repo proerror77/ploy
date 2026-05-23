@@ -42,7 +42,7 @@ promotion half:
 - `factor-walk-forward-v2.yml`: self-hosted research path for fresh DB-adjacent
   snapshot and walk-forward evidence.
 - `factor-walk-forward-v2-hosted-artifact.yml`: GitHub-hosted path that consumes
-  a retained full research snapshot artifact, emits alpha-search artifacts, and
+  a retained complete sampled research snapshot artifact, emits alpha-search artifacts, and
   can chain bounded follow-up search runs.
 - `autofactor-strategy-promotion.yml`: evaluator for existing
   `factor-walk-forward-v2-*` artifacts.
@@ -347,7 +347,7 @@ dimension such as capacity, stability, or overfit risk.
 ## Workflow Roles
 
 - `factor-walk-forward-v2-hosted-artifact.yml` should be the default efficient
-  search surface once a full snapshot artifact exists.
+  search surface once a complete sampled snapshot artifact exists.
 - `factor-walk-forward-v2.yml` should be used when a fresh DB-adjacent snapshot
   or data audit is required.
 - `pm5d-execution` settlement-probability searches should not require Deribit by

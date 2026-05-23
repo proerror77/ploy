@@ -53,7 +53,7 @@ when the mismatch is understood and tracked as a follow-up issue.
 | PR validation | `.github/workflows/test.yml` | Required Rust-first Platform CI gate for code, contracts, frontend, integration, dependency audit, and workflow lint |
 | Legacy Python compatibility | `.github/workflows/legacy-python-tools.yml` | Isolated, path-scoped checks for remaining Python helper scripts; not part of the Rust-first required CI contract |
 | Research snapshot | `.github/workflows/research-snapshot.yml` | Compile reusable research evidence from remote data |
-| Factor diagnostics | `.github/workflows/factor-review-v2-hosted-artifact.yml` | GitHub-hosted factor review from a retained full research snapshot artifact |
+| Factor diagnostics | `.github/workflows/factor-review-v2-hosted-artifact.yml` | GitHub-hosted factor review from a retained complete sampled research snapshot artifact |
 | Legacy factor diagnostics | `.github/workflows/factor-review-v2.yml` | Compatibility router to hosted artifacts; direct `ploy-ci-1` DB mode is debug-only and blocked by default |
 | Walk-forward diagnostics | `.github/workflows/factor-walk-forward-v2.yml` | Compatibility router to hosted artifacts; direct `ploy-ci-1` DB mode is debug-only and blocked by default |
 | Parameter optimization | `.github/workflows/optimize.yml` | Bounded train/validation optimization from a snapshot or explicit debug data source |
@@ -343,7 +343,7 @@ different.
   Use `factor-review-v2-hosted-artifact.yml`,
   `factor-walk-forward-v2-hosted-artifact.yml`, or
   `settlement-probability-prd-gate.yml` with `snapshot_run_id`, when a retained
-  full research snapshot artifact already exists.
+  complete sampled research snapshot artifact already exists.
 - For settlement-probability searches using the `pm5d-execution` data profile,
   Deribit IV/Greeks are not a required promotion surface. Set
   `options_json.require_deribit=true` only for PRD or volatility hypotheses that
@@ -359,8 +359,8 @@ different.
   touch `ploy-ci-1`.
 - `ploy-ci-1` is now a legacy DB-adjacent fallback for compiling fresh research
   snapshots from Tango PostgreSQL. Do not route AutoFactor mining,
-  walk-forward promotion, or dry-run handoff checks to `ploy-ci-1` when a full
-  snapshot artifact can be reused on `ubuntu-latest`.
+  walk-forward promotion, or dry-run handoff checks to `ploy-ci-1` when a
+  complete sampled snapshot artifact can be reused on `ubuntu-latest`.
 - Legacy `ploy-ci-1` research workflows read Tango PostgreSQL through GitHub
   Actions secrets `PLOY_RESEARCH_DATABASE_URL` and `PLOY_DB_URL`; verify the
   private endpoint with Aliyun CLI before changing those secrets.
