@@ -204,6 +204,13 @@ class CandidateStrategyReplay:
     runtime_score: str = ""
     strategy_profile: str = ""
     basis: str = ""
+    candidate_replay_id: str = ""
+    identity: dict[str, Any] = field(default_factory=dict)
+    promotion_decision: str = ""
+    source_workflow: str = ""
+    workflow_run_id: str = ""
+    workflow_run_url: str = ""
+    artifact_name: str = ""
     blockers: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     decision_contract: dict[str, Any] = field(default_factory=dict)
@@ -367,6 +374,13 @@ def load_candidate_strategy_replay(path: str | None) -> CandidateStrategyReplay:
         runtime_score=str(payload.get("runtime_score", "")),
         strategy_profile=str(payload.get("strategy_profile", "")),
         basis=str(payload.get("basis", "")),
+        candidate_replay_id=str(payload.get("candidate_replay_id", "")),
+        identity=payload.get("identity") if isinstance(payload.get("identity"), dict) else {},
+        promotion_decision=str(payload.get("promotion_decision", "")),
+        source_workflow=str(payload.get("source_workflow", "")),
+        workflow_run_id=str(payload.get("workflow_run_id", "")),
+        workflow_run_url=str(payload.get("workflow_run_url", "")),
+        artifact_name=str(payload.get("artifact_name", "")),
         blockers=[str(item) for item in blockers],
         metrics=metrics,
         decision_contract=contract,
@@ -403,6 +417,36 @@ def candidate_strategy_replay_blockers(
             "candidate_strategy_replay_not_runtime_replay:"
             f"{replay.basis or '<missing>'}!=runtime_market_update_replay"
         )
+    if not replay.candidate_replay_id:
+        blockers.append("candidate_strategy_replay_missing_candidate_replay_id")
+    elif not replay.candidate_replay_id.startswith("candidate_replay:"):
+        blockers.append(
+            "candidate_strategy_replay_invalid_candidate_replay_id:"
+            f"{replay.candidate_replay_id}"
+        )
+    else:
+        digest = replay.candidate_replay_id.split(":", 1)[1]
+        if len(digest) < 16 or any(ch not in "0123456789abcdef" for ch in digest.lower()):
+            blockers.append(
+                "candidate_strategy_replay_invalid_candidate_replay_id:"
+                f"{replay.candidate_replay_id}"
+            )
+    if not replay.identity:
+        blockers.append("candidate_strategy_replay_missing_identity")
+    elif replay.identity.get("basis") != "runtime_market_update_replay":
+        blockers.append(
+            "candidate_strategy_replay_identity_basis_mismatch:"
+            f"{replay.identity.get('basis') or '<missing>'}!=runtime_market_update_replay"
+        )
+    provenance_fields = {
+        "source_workflow": replay.source_workflow,
+        "workflow_run_id": replay.workflow_run_id,
+        "workflow_run_url": replay.workflow_run_url,
+        "artifact_name": replay.artifact_name,
+    }
+    for field_name, value in provenance_fields.items():
+        if not value:
+            blockers.append(f"candidate_strategy_replay_missing_{field_name}")
 
     if replay.strategy_profile != required_strategy_profile:
         blockers.append(
@@ -915,6 +959,7 @@ def render_handoff_markdown(handoff: dict[str, Any]) -> str:
         f"Allowed targets: `{', '.join(handoff['allowed_targets'])}`",
         f"Avg entry sweep slip bps: `{handoff['execution_quality'].get('avg_entry_sweep_slip_bps')}`",
         f"Candidate strategy replay ready: `{str(handoff['candidate_strategy_replay'].get('ready')).lower()}`",
+        f"Candidate strategy replay id: `{handoff['candidate_strategy_replay'].get('candidate_replay_id')}`",
         f"Candidate strategy replay runtime score: `{handoff['candidate_strategy_replay'].get('runtime_score')}`",
         "",
     ]
@@ -1010,6 +1055,7 @@ def render_markdown(result: dict[str, Any]) -> str:
         "",
         f"- Ready: `{str(result['candidate_strategy_replay']['ready']).lower()}`",
         f"- Evidence: `{result['candidate_strategy_replay']['evidence']}`",
+        f"- Candidate replay id: `{result['candidate_strategy_replay']['candidate_replay_id']}`",
         f"- Runtime score: `{result['candidate_strategy_replay']['runtime_score']}`",
         "",
         "## Qualified Strategies",

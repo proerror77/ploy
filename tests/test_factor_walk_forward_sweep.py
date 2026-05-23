@@ -89,11 +89,23 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
                 {
                     "schema_version": 1,
                     "kind": "autofactor_candidate_strategy_replay",
+                    "candidate_replay_id": "candidate_replay:fedcba98765432100123456789abcdef",
+                    "identity": {
+                        "basis": "runtime_market_update_replay",
+                        "runtime_score": runtime_score,
+                        "strategy_profile": "settlement_probability",
+                        "workflow_run_id": "26306734877",
+                    },
                     "evidence_stage": "executable_replay",
                     "basis": "runtime_market_update_replay",
                     "strategy_profile": "settlement_probability",
                     "runtime_score": runtime_score,
                     "promotion_ready": True,
+                    "promotion_decision": "promote_to_runtime",
+                    "source_workflow": "runtime-candidate-replay.yml",
+                    "workflow_run_id": "26306734877",
+                    "workflow_run_url": "https://github.com/proerror77/ploy/actions/runs/26306734877",
+                    "artifact_name": "runtime-candidate-replay-26306734877",
                     "decision_contract": {
                         "event_level": True,
                         "one_decision_per_event": True,
