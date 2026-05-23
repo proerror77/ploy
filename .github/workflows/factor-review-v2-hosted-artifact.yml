@@ -289,6 +289,9 @@ jobs:
             echo "- Stake: ${{ github.event.inputs.stake_usd }}U"
             echo "- Runner: \`ubuntu-latest\`"
             echo "- Factor filter: ${FACTOR_FACTOR_NAME_FILTER:-<none>}"
+            echo "- Evidence stage: \`factor_attribution\`"
+            echo "- Promotion ready: \`false\`"
+            echo "- Promotion decision: \`do_not_promote_from_factor_review\`"
             if [ -f artifacts/research-snapshot/quality.md ]; then
               echo ""
               echo "### Snapshot Quality"
@@ -344,6 +347,34 @@ jobs:
             echo "full_snapshot_embedded=false"
             echo "runner=ubuntu-latest"
           } > artifacts/factor-review-v2-upload/snapshot-provenance/source.txt
+          cat > artifacts/factor-review-v2-upload/evidence-stage.json <<EOF
+          {
+            "schema_version": 1,
+            "kind": "research_evidence_stage",
+            "workflow": "factor-review-v2-hosted-artifact.yml",
+            "run_id": "${GITHUB_RUN_ID}",
+            "source_snapshot_run_id": "${{ github.event.inputs.snapshot_run_id }}",
+            "evidence_stage": "factor_attribution",
+            "promotion_ready": false,
+            "promotion_decision": "do_not_promote_from_factor_review",
+            "allowed_next_stage": "walk_forward",
+            "blocked_next_stages": ["dry_run_candidate", "live_candidate"],
+            "reason": "Factor review ranks attribution buckets only; promotion requires walk-forward, executable replay, and runtime parity."
+          }
+          EOF
+          cat > artifacts/factor-review-v2-upload/evidence-stage.md <<EOF
+          # Factor Review Evidence Stage
+
+          - Evidence stage: \`factor_attribution\`
+          - Promotion ready: \`false\`
+          - Promotion decision: \`do_not_promote_from_factor_review\`
+          - Allowed next stage: \`walk_forward\`
+          - Blocked next stages: \`dry_run_candidate\`, \`live_candidate\`
+
+          Factor review ranks attribution buckets only. It is not a dry-run or
+          live promotion input without walk-forward, executable replay, and
+          runtime parity evidence.
+          EOF
           for file in manifest.json quality.md data-gap-audit.md data-gap-audit.json compile.log; do
             if [ -f "artifacts/research-snapshot/${file}" ]; then
               cp "artifacts/research-snapshot/${file}" \
