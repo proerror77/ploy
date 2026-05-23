@@ -65,8 +65,10 @@ trace, not dry-run promotion.
 - [x] Apply side-effect replay validator so ready AutoFactor handoffs cannot
       create dry-run issues/config PRs or satisfy the PRD gate without runtime
       replay evidence.
-- [ ] Apply remaining high-priority data/research cleanup based on audit
-      results: multi-horizon accounting gates.
+- [x] Apply multi-horizon accounting gate so runtime replay target/horizon must
+      match the promoted AutoFactor row before handoff.
+- [ ] Apply remaining high-priority cleanup: generated shared label/accounting
+      catalog and legacy terminology/API cleanup.
 
 ## Review
 
@@ -174,6 +176,11 @@ trace, not dry-run promotion.
   A ready handoff must now embed a ready `runtime_market_update_replay` from
   `runtime-candidate-replay.yml` with matching selected strategy runtime score
   before it can create dry-run follow-up state.
+- 2026-05-23: Added target/horizon accounting gates to AutoFactor replay
+  handoff. Runtime replay and aggregate diagnostic artifacts now carry
+  target/horizon in `source_factor` / `decision_contract`, and promotion blocks
+  replay tapes whose target or horizon differs from the factor row being
+  promoted.
 
 # Candidate Replay Durable Trace (2026-05-23)
 

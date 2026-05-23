@@ -191,11 +191,18 @@ DEFAULT_REPLAY_PAYLOAD = {
     "workflow_run_id": "26306734877",
     "workflow_run_url": "https://github.com/proerror77/ploy/actions/runs/26306734877",
     "artifact_name": "runtime-candidate-replay-26306734877",
+    "source_factor": {
+        "name": "auto_settlement_conservative_settlement_edge",
+        "target": "full_depth_settlement_executable_pnl",
+        "horizon": "5m",
+    },
     "decision_contract": {
         "event_level": True,
         "one_decision_per_event": True,
         "official_settlement": True,
         "full_depth_entry": True,
+        "target": "full_depth_settlement_executable_pnl",
+        "horizon": "5m",
         "max_sweep_levels": 3,
         "stake_usd": 15,
     },
@@ -208,6 +215,19 @@ DEFAULT_REPLAY_PAYLOAD = {
     },
     "blocking_risk_flags": [],
 }
+
+
+def replay_for_target(runtime_score: str, target: str = "full_depth_settlement_executable_pnl") -> dict:
+    payload = dict(DEFAULT_REPLAY_PAYLOAD)
+    payload["runtime_score"] = runtime_score
+    payload["identity"] = dict(DEFAULT_REPLAY_PAYLOAD["identity"])
+    payload["identity"]["runtime_score"] = runtime_score
+    payload["source_factor"] = dict(DEFAULT_REPLAY_PAYLOAD["source_factor"])
+    payload["source_factor"]["target"] = target
+    payload["decision_contract"] = dict(DEFAULT_REPLAY_PAYLOAD["decision_contract"])
+    payload["decision_contract"]["target"] = target
+    return payload
+
 
 SAMPLED_EXECUTION_SNAPSHOT_MANIFEST = {
     "schema_version": "research_snapshot_manifest_v1",
@@ -465,7 +485,11 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
 
     def test_uses_top_bucket_execution_quality_before_global_slippage(self):
         _, payload, _, handoff, _ = self.run_script(
-            HIGH_SLIPPAGE_HEALTH + READY_GATE + AUTOFACTOR_TOP_BUCKET_EXECUTION_REPORT
+            HIGH_SLIPPAGE_HEALTH + READY_GATE + AUTOFACTOR_TOP_BUCKET_EXECUTION_REPORT,
+            replay_payload=replay_for_target(
+                "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                "tradeable_full_depth_settlement_pnl",
+            ),
         )
 
         self.assertEqual(payload["decision"], "qualified")
@@ -476,7 +500,11 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
 
     def test_blocks_top_bucket_slippage_and_level_count(self):
         _, payload, _, handoff, _ = self.run_script(
-            LOW_SLIPPAGE_HEALTH + READY_GATE + AUTOFACTOR_TOP_BUCKET_BAD_EXECUTION_REPORT
+            LOW_SLIPPAGE_HEALTH + READY_GATE + AUTOFACTOR_TOP_BUCKET_BAD_EXECUTION_REPORT,
+            replay_payload=replay_for_target(
+                "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                "tradeable_full_depth_settlement_pnl",
+            ),
         )
 
         self.assertEqual(payload["decision"], "blocked")
@@ -489,7 +517,11 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         _, payload, _, handoff, _ = self.run_script(
             LOW_SLIPPAGE_HEALTH
             + GLOBAL_FILLABILITY_BLOCKED_GATE
-            + AUTOFACTOR_TOP_BUCKET_EXECUTION_REPORT
+            + AUTOFACTOR_TOP_BUCKET_EXECUTION_REPORT,
+            replay_payload=replay_for_target(
+                "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                "tradeable_full_depth_settlement_pnl",
+            ),
         )
 
         self.assertEqual(payload["decision"], "qualified")
@@ -502,6 +534,10 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             LOW_SLIPPAGE_HEALTH
             + GLOBAL_FILLABILITY_BLOCKED_GATE
             + AUTOFACTOR_TOP_BUCKET_EXECUTION_REPORT,
+            replay_payload=replay_for_target(
+                "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                "tradeable_full_depth_settlement_pnl",
+            ),
             snapshot_manifest_payload=SAMPLED_EXECUTION_SNAPSHOT_MANIFEST,
         )
 
@@ -529,10 +565,9 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         )
 
     def test_qualifies_predictive_external_formula_when_gate_is_ready(self):
-        replay = {
-            **DEFAULT_REPLAY_PAYLOAD,
-            "runtime_score": "autofactor_formula:amplitude_weighted_momentum_30s_sigma",
-        }
+        replay = replay_for_target(
+            "autofactor_formula:amplitude_weighted_momentum_30s_sigma"
+        )
         _, payload, registry, handoff, handoff_md = self.run_script(
             READY_GATE + AUTOFACTOR_PREDICTIVE_EXTERNAL_REPORT,
             replay_payload=replay,
@@ -552,10 +587,9 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertIn("amplitude_weighted_momentum_30s_sigma", handoff_md)
 
     def test_qualifies_runtime_supported_predictive_formula_mutation(self):
-        replay = {
-            **DEFAULT_REPLAY_PAYLOAD,
-            "runtime_score": "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted",
-        }
+        replay = replay_for_target(
+            "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_spread_adjusted"
+        )
         _, payload, registry, handoff, handoff_md = self.run_script(
             READY_GATE + AUTOFACTOR_PREDICTIVE_MUTATION_REPORT,
             replay_payload=replay,
@@ -588,10 +622,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "autofactor_formula:"
             "llm_mut_spread_adjusted_external_move_near_strike_runtime_pass_through_add_spread_penalty"
         )
-        replay = {
-            **DEFAULT_REPLAY_PAYLOAD,
-            "runtime_score": runtime_score,
-        }
+        replay = replay_for_target(runtime_score)
         _, payload, registry, handoff, handoff_md = self.run_script(
             READY_GATE + AUTOFACTOR_LLM_RUNTIME_PASS_THROUGH_MUTATION_REPORT,
             replay_payload=replay,
@@ -612,10 +643,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertIn("runtime_pass_through_add_spread_penalty", handoff_md)
 
     def test_qualifies_poly_lag_pressure_predictive_formula_mutation(self):
-        replay = {
-            **DEFAULT_REPLAY_PAYLOAD,
-            "runtime_score": "autofactor_formula:mut_poly_lag_pressure_spread_adjusted",
-        }
+        replay = replay_for_target("autofactor_formula:mut_poly_lag_pressure_spread_adjusted")
         _, payload, registry, handoff, handoff_md = self.run_script(
             READY_GATE + AUTOFACTOR_POLY_LAG_PRESSURE_REPORT,
             replay_payload=replay,
@@ -639,10 +667,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "autofactor_formula:"
             "mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted"
         )
-        replay = {
-            **DEFAULT_REPLAY_PAYLOAD,
-            "runtime_score": runtime_score,
-        }
+        replay = replay_for_target(runtime_score)
         _, payload, registry, handoff, handoff_md = self.run_script(
             READY_GATE + AUTOFACTOR_COMPOSED_MODEL_REPORT,
             replay_payload=replay,
@@ -662,10 +687,10 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         )
 
     def test_qualifies_tradeable_hard_gate_predictive_formula_when_gate_is_ready(self):
-        replay = {
-            **DEFAULT_REPLAY_PAYLOAD,
-            "runtime_score": "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
-        }
+        replay = replay_for_target(
+            "autofactor_formula:mut_amplitude_weighted_momentum_30s_sigma_full_depth_entry_gate",
+            "tradeable_full_depth_settlement_pnl",
+        )
         _, payload, registry, handoff, handoff_md = self.run_script(
             READY_GATE + AUTOFACTOR_TRADEABLE_HARD_GATE_REPORT,
             replay_payload=replay,
@@ -718,11 +743,13 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertIn("Promote AutoFactor strategy handoff to dry-run", handoff_md)
 
     def test_qualifies_when_allowed_target_and_runtime_profile_match(self):
-        replay = {
-            **DEFAULT_REPLAY_PAYLOAD,
-            "strategy_profile": "repricing_momentum",
-            "runtime_score": "spread_adjusted_external_move_score",
-        }
+        replay = replay_for_target(
+            "spread_adjusted_external_move_score",
+            "full_depth_reprice_pnl_10s",
+        )
+        replay["strategy_profile"] = "repricing_momentum"
+        replay["source_factor"]["horizon"] = "10s"
+        replay["decision_contract"]["horizon"] = "10s"
         _, payload, registry, handoff, handoff_md = self.run_script(
             READY_GATE + AUTOFACTOR_REPORT,
             "--allowed-target",
@@ -903,6 +930,29 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
             first["blockers"],
         )
+
+    def test_blocks_runtime_replay_from_wrong_horizon(self):
+        replay = replay_for_target(
+            "autofactor_formula:auto_settlement_conservative_settlement_edge",
+            "full_depth_reprice_pnl_30s",
+        )
+        replay["source_factor"]["horizon"] = "30s"
+        replay["decision_contract"]["horizon"] = "30s"
+
+        _, payload, _, handoff, _ = self.run_script(
+            READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            replay_payload=replay,
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        blockers = payload["evaluated_factors"][0]["blockers"]
+        self.assertIn(
+            "candidate_strategy_replay_target_mismatch:"
+            "full_depth_reprice_pnl_30s!=full_depth_settlement_executable_pnl",
+            blockers,
+        )
+        self.assertIn("candidate_strategy_replay_horizon_mismatch:30s!=5m", blockers)
 
     def test_blocks_legacy_runtime_replay_without_durable_provenance(self):
         replay = {

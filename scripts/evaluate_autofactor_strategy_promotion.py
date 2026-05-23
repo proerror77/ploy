@@ -73,6 +73,7 @@ class CandidateStrategyReplay:
     workflow_run_id: str = ""
     workflow_run_url: str = ""
     artifact_name: str = ""
+    source_factor: dict[str, Any] = field(default_factory=dict)
     blockers: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     decision_contract: dict[str, Any] = field(default_factory=dict)
@@ -154,6 +155,20 @@ def parse_int(raw: str) -> int:
 
 def finite_or_none(value: float) -> float | None:
     return value if value == value else None
+
+
+def target_horizon(target: str) -> str:
+    if "reprice_pnl_5s" in target:
+        return "5s"
+    if "reprice_pnl_10s" in target:
+        return "10s"
+    if "reprice_pnl_30s" in target:
+        return "30s"
+    if "reprice_pnl_60s" in target:
+        return "60s"
+    if "settlement" in target:
+        return "5m"
+    return "unknown"
 
 
 def parse_promotion_gate(report_text: str) -> PromotionGate:
@@ -244,6 +259,9 @@ def load_candidate_strategy_replay(path: str | None) -> CandidateStrategyReplay:
         workflow_run_id=str(payload.get("workflow_run_id", "")),
         workflow_run_url=str(payload.get("workflow_run_url", "")),
         artifact_name=str(payload.get("artifact_name", "")),
+        source_factor=payload.get("source_factor")
+        if isinstance(payload.get("source_factor"), dict)
+        else {},
         blockers=[str(item) for item in blockers],
         metrics=metrics,
         decision_contract=contract,
@@ -267,6 +285,8 @@ def candidate_strategy_replay_blockers(
     replay: CandidateStrategyReplay,
     *,
     mapping: dict[str, str] | None,
+    expected_target: str,
+    expected_horizon: str,
     required_strategy_profile: str,
     min_replay_trade_count: int,
     min_replay_fill_rate: float,
@@ -310,6 +330,35 @@ def candidate_strategy_replay_blockers(
     for field_name, value in provenance_fields.items():
         if not value:
             blockers.append(f"candidate_strategy_replay_missing_{field_name}")
+
+    source_target = str(replay.source_factor.get("target") or "")
+    source_horizon = str(replay.source_factor.get("horizon") or "")
+    if not source_target:
+        blockers.append("candidate_strategy_replay_missing_source_target")
+    elif source_target != expected_target:
+        blockers.append(
+            "candidate_strategy_replay_target_mismatch:"
+            f"{source_target}!={expected_target}"
+        )
+    if not source_horizon:
+        blockers.append("candidate_strategy_replay_missing_source_horizon")
+    elif source_horizon != expected_horizon:
+        blockers.append(
+            "candidate_strategy_replay_horizon_mismatch:"
+            f"{source_horizon}!={expected_horizon}"
+        )
+    contract_target = replay.decision_contract.get("target")
+    contract_horizon = replay.decision_contract.get("horizon")
+    if contract_target is not None and contract_target != expected_target:
+        blockers.append(
+            "candidate_strategy_replay_contract_target_mismatch:"
+            f"{contract_target}!={expected_target}"
+        )
+    if contract_horizon is not None and contract_horizon != expected_horizon:
+        blockers.append(
+            "candidate_strategy_replay_contract_horizon_mismatch:"
+            f"{contract_horizon}!={expected_horizon}"
+        )
 
     if replay.strategy_profile != required_strategy_profile:
         blockers.append(
@@ -614,6 +663,8 @@ def evaluate(
             candidate_strategy_replay_blockers(
                 candidate_strategy_replay,
                 mapping=mapping,
+                expected_target=row.target,
+                expected_horizon=target_horizon(row.target),
                 required_strategy_profile=required_strategy_profile,
                 min_replay_trade_count=min_replay_trade_count,
                 min_replay_fill_rate=min_replay_fill_rate,

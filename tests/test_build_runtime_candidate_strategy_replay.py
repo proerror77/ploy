@@ -136,6 +136,10 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
             "--full-depth-entry",
             "--min-trade-count",
             "2",
+            "--source-target",
+            "full_depth_settlement_executable_pnl",
+            "--source-horizon",
+            "5m",
         )
 
         self.assertTrue(payload["promotion_ready"])
@@ -146,6 +150,10 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         self.assertEqual(payload["source_workflow"], "runtime-candidate-replay.yml")
         self.assertEqual(payload["identity"]["runtime_score"], payload["runtime_score"])
         self.assertEqual(payload["identity"]["basis"], "runtime_market_update_replay")
+        self.assertEqual(payload["source_factor"]["target"], "full_depth_settlement_executable_pnl")
+        self.assertEqual(payload["source_factor"]["horizon"], "5m")
+        self.assertEqual(payload["decision_contract"]["target"], "full_depth_settlement_executable_pnl")
+        self.assertEqual(payload["decision_contract"]["horizon"], "5m")
         self.assertEqual(len(payload["runtime_evaluation_sha256"]), 64)
         self.assertEqual(payload["metrics"]["trade_count"], 2)
         self.assertEqual(payload["metrics"]["unique_event_count"], 2)

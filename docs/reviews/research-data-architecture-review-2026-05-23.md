@@ -113,12 +113,15 @@ reserved for `executable_replay` evidence.
    need one generated/shared source for feature names, horizons, LOB surfaces,
    blocker semantics, and strategy profile/family mapping.
 
-6. **Multi-horizon label/accounting is not a single hard gate yet.**
+6. **Multi-horizon label/accounting now has a promotion handoff gate, but the
+   label engine still needs a shared generated catalog.**
 
-   Reports compute event-level fields such as unique event count and max event
-   decisions, but the final persisted approval layer still needs to enforce the
-   one-event-one-decision accounting contract across 30s / 60s / 5m / 15m
-   horizons.
+   AutoFactor promotion now checks that the candidate runtime replay tape's
+   `source_factor.target/horizon` matches the factor row being promoted, and
+   runtime/aggregate replay artifacts write the same target/horizon into their
+   decision contract. The remaining architecture gap is consolidating 30s /
+   60s / 5m / 15m label definitions into one generated catalog shared by Rust
+   research, runtime replay builders, and persistence.
 
 7. **DuckDB should remain a query accelerator, not durable state.**
 
@@ -138,7 +141,7 @@ reserved for `executable_replay` evidence.
 | P1 | Add Research Manager action executor | Plan output can open/link issues and dispatch bounded hosted research reruns without manual artifact reading |
 | P1 | Promote runtime input canonicalization to a shared generated contract | Rust runtime scoring, Rust alpha-search, and Python promotion/replay use one source of truth instead of mirrored catalogs |
 | P1 | Complete full-depth executable evidence layer | Runtime replay or full-depth lake evidence replaces sampled snapshot rows for executable handoff |
-| P1 | Enforce multi-horizon accounting at persisted approval layer | Multi-decision or horizon-mixed artifacts are blocked before handoff |
+| P1 | Generate shared label/accounting catalog | Runtime, research, replay, and trace persistence derive target/horizon/accounting metadata from one source |
 
 ## Verdict
 

@@ -82,6 +82,7 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self,
         tmp: Path,
         runtime_score: str = "autofactor_formula:auto_settlement_conservative_settlement_edge",
+        target: str = "full_depth_settlement_executable_pnl",
     ) -> Path:
         replay = tmp / f"candidate-strategy-replay-{runtime_score.replace(':', '_')}.json"
         replay.write_text(
@@ -106,11 +107,17 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
                     "workflow_run_id": "26306734877",
                     "workflow_run_url": "https://github.com/proerror77/ploy/actions/runs/26306734877",
                     "artifact_name": "runtime-candidate-replay-26306734877",
+                    "source_factor": {
+                        "target": target,
+                        "horizon": "5m",
+                    },
                     "decision_contract": {
                         "event_level": True,
                         "one_decision_per_event": True,
                         "official_settlement": True,
                         "full_depth_entry": True,
+                        "target": target,
+                        "horizon": "5m",
                     },
                     "metrics": {
                         "trade_count": 100,
@@ -428,6 +435,7 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
                         self.replay_file(
                             tmp,
                             "autofactor_formula:mut_spread_adjusted_external_move_full_depth_entry_gate",
+                            "tradeable_full_depth_settlement_pnl",
                         )
                     ),
                     "--allowed-target",

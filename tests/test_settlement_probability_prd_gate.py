@@ -31,11 +31,17 @@ def ready_handoff() -> dict:
             "artifact_name": "runtime-candidate-replay-26306734877",
             "candidate_replay_id": "candidate_replay:0123456789abcdef0123456789abcdef",
             "runtime_score": runtime_score,
+            "source_factor": {
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+            },
             "decision_contract": {
                 "event_level": True,
                 "one_decision_per_event": True,
                 "official_settlement": True,
                 "full_depth_entry": True,
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
             },
         },
         "strategies": [{"runtime_score": runtime_score}],

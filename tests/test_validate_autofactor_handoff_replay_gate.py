@@ -25,11 +25,17 @@ def ready_handoff() -> dict:
             "artifact_name": "runtime-candidate-replay-26306734877",
             "candidate_replay_id": "candidate_replay:0123456789abcdef0123456789abcdef",
             "runtime_score": runtime_score,
+            "source_factor": {
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+            },
             "decision_contract": {
                 "event_level": True,
                 "one_decision_per_event": True,
                 "official_settlement": True,
                 "full_depth_entry": True,
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
             },
         },
         "strategies": [
@@ -111,6 +117,18 @@ class ValidateAutoFactorHandoffReplayGateTests(unittest.TestCase):
             "candidate_strategy_replay_runtime_score_mismatch:"
             "strategy_1:autofactor_formula:auto_settlement_conservative_settlement_edge!="
             "autofactor_formula:other",
+            payload["blockers"],
+        )
+
+    def test_blocks_contract_horizon_mismatch(self):
+        handoff = ready_handoff()
+        handoff["candidate_strategy_replay"]["decision_contract"]["horizon"] = "30s"
+
+        payload, _ = self.run_script(handoff, check=False)
+
+        self.assertFalse(payload["ready"])
+        self.assertIn(
+            "candidate_strategy_replay_contract_horizon_mismatch:30s!=5m",
             payload["blockers"],
         )
 
