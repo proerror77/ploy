@@ -1,5 +1,48 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research/Data Architecture Current Review (2026-05-24)
+
+Evidence stage: architecture/data-plane cleanup and research workflow review
+after restored `walk_forward -> runtime_parity` automation; no strategy
+promotion.
+
+### Tasks
+
+- [x] Start a fresh review branch from current `origin/main`.
+- [x] Reconfirm project semantics and Event ML / AutoFactor workflow gates.
+- [x] Record the current restored chain and the latest legacy cleanup merge
+      evidence.
+- [x] Separate "automatic research/replay works" from "tradable strategy
+      discovered".
+- [x] Refresh the remaining data/research blockers and next work queue.
+- [x] Remove the remaining active runbook reference to an existing "full
+      snapshot" artifact in favor of complete sampled research snapshot
+      terminology.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+### Review
+
+- 2026-05-24: Current `main` is
+  `1126c2d1fb6e3bbaafb884b67b8c9396667c7367`. The restored research chain can
+  run snapshot-backed factor attribution, persist Research OS trace, dispatch
+  runtime replay/parity evidence, and reject weak candidates. It has not proven
+  a dry-run-ready or tradable strategy.
+- 2026-05-24: The next data-layer blockers remain full-depth executable
+  evidence replacing sampled `clob_orderbook_snapshots`, complete official
+  settlement coverage for traded replay events, enough distinct event trades
+  without lowering gates, and machine-readable blocker-to-next-action feedback
+  for Research Manager.
+- 2026-05-24: Legacy cleanup audit found the next low-risk code cleanup is the
+  historical quote backfill script family. Keep
+  `archive_clob_orderbook_snapshots_backfill.sh`, `run_factor_research*.sh`,
+  and `train_crypto_lob_tcn_onnx_from_db.py` active for now because they still
+  have deploy, break-glass, or ML-doc ownership.
+- 2026-05-24: Focused validation passed:
+  `python3 -m unittest tests.test_persist_research_trace_contract
+  tests.test_factor_research_os_registry`, active-doc full-snapshot terminology
+  check, and `rtk git diff --check`.
+
 ## Current Session - Legacy Host Installer Cleanup (2026-05-24)
 
 Evidence stage: architecture/data-plane cleanup after restored
@@ -14,7 +57,7 @@ Evidence stage: architecture/data-plane cleanup after restored
       `release-platform.yml` and `install-platform-service.sh`.
 - [x] Archive the legacy `install-service.sh` entrypoint.
 - [x] Run focused validation.
-- [ ] Commit, push, open PR, wait for CI, and merge.
+- [x] Commit, push, open PR, wait for CI, and merge.
 
 ### Review
 
@@ -30,6 +73,8 @@ Evidence stage: architecture/data-plane cleanup after restored
   `rtk cargo test --locked --test platform_release_workflow
   release_platform_workflow_builds_new_workspace_binaries -- --exact`, active
   legacy installer reference check, and `rtk git diff --check`.
+- 2026-05-24: PR #645 merged to `main` as
+  `1126c2d1fb6e3bbaafb884b67b8c9396667c7367`.
 
 ## Current Session - Archived Dry-Run Prototype Cleanup (2026-05-24)
 
@@ -46,7 +91,7 @@ Evidence stage: architecture/data-plane cleanup after restored
 - [x] Keep `install-platform-service.sh` marked as active release installer and
       leave `install-service.sh` as the next host-support archive candidate.
 - [x] Run focused validation.
-- [ ] Commit, push, open PR, wait for CI, and merge.
+- [x] Commit, push, open PR, wait for CI, and merge.
 
 ### Review
 
@@ -68,6 +113,8 @@ Evidence stage: architecture/data-plane cleanup after restored
   `python3 -m py_compile` for the archived scripts and tests, root-script
   absence/archive-presence check, active import absence check, and
   `rtk git diff --check`.
+- 2026-05-24: PR #644 merged to `main` as
+  `a913efd2e165b430a1096c4385149bf86d375cac`.
 
 ## Current Session - Legacy Research Tool Cleanup (2026-05-24)
 
@@ -83,7 +130,7 @@ Evidence stage: architecture/data-plane cleanup after restored
 - [x] Update active collector/research docs away from legacy `ploy collect` and
       `ploy strategy backfill-*` guidance.
 - [x] Run focused validation.
-- [ ] Commit, push, open PR, wait for CI, and merge.
+- [x] Commit, push, open PR, wait for CI, and merge.
 
 ### Review
 
@@ -96,6 +143,8 @@ Evidence stage: architecture/data-plane cleanup after restored
   scripts, `bash -n` for archived shell scripts, `python3 -m unittest
   tests.test_persist_research_trace_contract`, root-script absence check for
   the archived files, and `rtk git diff --check`.
+- 2026-05-24: PR #643 merged to `main` as
+  `54acdf3041a686ac0b4211705abb8cfa9ec9d404`.
 
 ## Current Session - Batch Runtime Replay Request Dispatch (2026-05-24)
 

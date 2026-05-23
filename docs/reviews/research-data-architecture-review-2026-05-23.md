@@ -1,5 +1,8 @@
 # Research Data Architecture Review - 2026-05-23
 
+Last updated: 2026-05-24 against `main`
+`1126c2d1fb6e3bbaafb884b67b8c9396667c7367`.
+
 ## Scope
 
 This review covers the PM5D / AutoFactor research chain after the Research OS
@@ -27,6 +30,7 @@ reserved for `executable_replay` evidence.
 | Research Manager | `research_trace_plan` can read durable DB trace and emit next-plan JSON; `research-manager-execute-plan.yml` and hosted walk-forward can dispatch bounded follow-up evidence | Main runs have proven executor dispatch, recorded replay parity, and closed-loop runtime replay fan-out |
 | Legacy research paths | Factor routers and Event ML rolling evidence are artifact-backed only | Former direct `ploy-ci-1` DB execution/export branches have been removed from the active research chain |
 | Diagnostic backtest | `backtest.yml` now emits `evidence-stage` artifacts with `promotion_ready=false` | Useful diagnostic replay/backtest surface; not promotion evidence |
+| Legacy repo entrypoints | Low-risk local CSV/discovery/debug helpers, public-profile dry-run prototypes, and the legacy host-support installer are archived under `scripts/archive/` | Active docs now point to artifact-backed research, canonical platform release, and runtime replay surfaces |
 
 ## Fixed In This Migration
 
@@ -94,6 +98,24 @@ reserved for `executable_replay` evidence.
    semantic mismatches such as `external_pressure`, are excluded before
    dispatch.
 
+10. **Legacy research and host-support entrypoints are cut out of active
+    paths.**
+
+    PRs `#643`, `#644`, and `#645` archived duplicate DB diagnostics, local CSV
+    collectors, market-discovery prototypes, public-profile dry-run scripts,
+    manual root-runtime deploy helpers, and the old `install-service.sh`
+    entrypoint. `release-platform.yml` and `install-platform-service.sh` now own
+    platform service plus maintenance/watchdog timer installation.
+
+11. **The active release path preserves host guardrails while removing the old
+    installer.**
+
+    `install-platform-service.sh` now installs `ployd.service`,
+    `ploy-maintenance.timer`, and `ploy-platform-watchdog.timer`. The release
+    workflow bundles the timer units and support scripts, installs them on the
+    host, and verifies timer status after deploy. The legacy installer remains
+    archived for historical context only.
+
 ## Current Verified Runs
 
 | Run | Git ref / source | Result | Meaning |
@@ -107,6 +129,14 @@ reserved for `executable_replay` evidence.
 | `26344523079` | `main` at `a74f030b7e8c288144b5fd5a35a75da9b589bc78` | Hosted walk-forward succeeded; `persisted=true`; dispatched five runtime replay requests from `runtime_replay_requests` | Snapshot -> walk-forward -> durable trace -> runtime replay fan-out is working |
 | `26344588318` / `26344588684` / `26344589064` / `26344589439` / `26344589743` | runtime candidate replay batch | All succeeded with `basis=runtime_market_update_replay`; trade counts were `29`, `29`, `8`, `16`, and `15`; fill rate was `1.0` for all | Runtime replay automation works, but every candidate remains below the 50-trade promotion gate |
 | `26344749058` | `main` hosted walk-forward with replay `26344588318` | Succeeded; consumed true runtime replay evidence; closed-loop action became `fix_data` with zero replay requests | Promotion now sees runtime replay evidence and blocks on data/trade-count/settlement gates instead of runtime provenance |
+
+## Repository Cleanup Evidence
+
+| PR | Merge commit | Scope | Meaning |
+| --- | --- | --- | --- |
+| `#643` | `54acdf3041a686ac0b4211705abb8cfa9ec9d404` | Archived duplicate research/debug collectors and manual root-runtime deploy helpers | Active scripts no longer present these legacy paths as current research or deployment entrypoints |
+| `#644` | `a913efd2e165b430a1096c4385149bf86d375cac` | Archived public-profile copycat and reverse-engineered dry-run prototypes | Profile scraping prototypes are no longer active strategy research or dry-run surfaces |
+| `#645` | `1126c2d1fb6e3bbaafb884b67b8c9396667c7367` | Moved maintenance/watchdog ownership into platform release and archived `install-service.sh` | Canonical platform deploy preserves host-support timers without the legacy installer |
 
 The current walk-forward/runtime replay evidence is deliberately blocked:
 
@@ -136,6 +166,11 @@ The current walk-forward/runtime replay evidence is deliberately blocked:
    remaining discovery gap is denser candidate formation over more event tape,
    not lowering thresholds.
 
+   Current answer to "can it automatically research/backtest/discover
+   strategies": it can automatically produce factor attribution, persist trace,
+   fan out runtime replay, and reject weak candidates. It has not yet proven an
+   automatically tradable strategy.
+
 2. **Feature snapshots are still sampled research products, not full execution
    tapes.**
 
@@ -146,6 +181,10 @@ The current walk-forward/runtime replay evidence is deliberately blocked:
    full-depth fillability blockers. The remaining data-layer gap is the
    positive replacement: durable full-depth lake/runtime replay evidence must
    become the normal executable handoff source.
+
+   The orderbook snapshot archive exists and is deployed, but the AutoFactor
+   handoff path still treats sampled `clob_orderbook_snapshots` as a blocker
+   instead of consuming a promotion-grade full-depth execution tape by default.
 
 3. **Runtime input canonicalization is now gated for AutoFactor promotion/replay,
    but not yet a shared cross-language source of truth.**
@@ -176,6 +215,16 @@ The current walk-forward/runtime replay evidence is deliberately blocked:
    DuckDB can be used for local Parquet scans, but not as the authoritative
    strategy discovery state layer.
 
+6. **Legacy one-shot repair and ML prototype scripts still need ownership
+   decisions.**
+
+   The remaining active Python/shell helpers are not all wrong. Some are still
+   deployed collector/repair surfaces, while others are break-glass or
+   prototype paths. The current inventory keeps direct-DB factor research as an
+   explicit ACK-only exception and keeps ONNX trainer scripts active only while
+   the ML lane still references them. These should be retired only after a
+   replacement or explicit archive decision exists.
+
 ## Required Next Work
 
 | Priority | Work | Done when |
@@ -184,9 +233,11 @@ The current walk-forward/runtime replay evidence is deliberately blocked:
 | P0 | Repair or replace sampled execution-surface evidence | Full-depth CLOB lake or runtime replay evidence replaces sampled `clob_orderbook_snapshots` for executable handoff |
 | P0 | Complete official settlement coverage for runtime replay candidates | Runtime replay artifacts include official settlement for all traded events before any handoff can become ready |
 | P0 | Keep Research Manager candidate replay contract-driven | Executor replays only explicit or trace-derived unblocked runtime contracts and fails closed without one |
+| P0 | Convert runtime replay blockers into next search mutations | `fix_data`, `trade_count_too_small`, settlement gaps, and sampled execution-surface blockers produce machine-readable next actions instead of manual interpretation |
 | P1 | Promote runtime input canonicalization to a generated shared contract | Rust runtime scoring, Rust alpha-search, and Python promotion/replay use one source of truth instead of mirrored catalogs |
 | P1 | Complete full-depth executable evidence layer | Runtime replay or full-depth lake evidence replaces sampled snapshot rows for executable handoff |
 | P1 | Generate shared non-AutoFactor label contracts | Runtime, research, replay, and trace persistence derive 30s / 60s / 5m / 15m label definitions from one source |
+| P1 | Finish remaining legacy ownership decisions | One-shot quote backfills, direct-DB debug runners, and DB-backed ML trainers are either proven active, moved behind stronger break-glass gates, or archived |
 
 ## Verdict
 
