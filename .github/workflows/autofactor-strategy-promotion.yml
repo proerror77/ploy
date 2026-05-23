@@ -238,6 +238,8 @@ jobs:
             echo "Handoff status is ${status}; no dry-run issue will be created."
             exit 0
           fi
+          python3 scripts/validate_autofactor_handoff_replay_gate.py \
+            --handoff-json "${handoff_json}"
           title="Promote AutoFactor strategy handoff to dry-run"
           gh issue create \
             --title "${title}" \
@@ -282,6 +284,8 @@ jobs:
             echo "Handoff status is ${status}; no config PR will be created."
             exit 0
           fi
+          python3 scripts/validate_autofactor_handoff_replay_gate.py \
+            --handoff-json "${handoff_json}"
           mkdir -p artifacts/autofactor-config-handoff
           python3 scripts/apply_autofactor_handoff_to_config.py \
             --handoff-json "${handoff_json}" \

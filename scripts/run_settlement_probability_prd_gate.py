@@ -33,6 +33,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from validate_autofactor_handoff_replay_gate import validate_handoff_payload
+except ModuleNotFoundError:  # unittest imports this file as scripts.<module>.
+    from scripts.validate_autofactor_handoff_replay_gate import validate_handoff_payload
+
 
 RESEARCH_SNAPSHOT_WORKFLOW = "research-snapshot.yml"
 HOSTED_WALK_FORWARD_WORKFLOW = "factor-walk-forward-v2-hosted-artifact.yml"
@@ -269,7 +274,25 @@ def download_and_evaluate_promotion_gate(walk_run_id: int) -> PromotionGateEvalu
                 evidence=f"missing report artifact file: {report_path}",
                 blocked_gates=("missing_report_artifact",),
             )
-        return parse_promotion_gate(report_path.read_text(encoding="utf-8"))
+        gate = parse_promotion_gate(report_path.read_text(encoding="utf-8"))
+        if not gate.ready:
+            return gate
+        handoff_path = output_dir / "factor-walk-forward-v2" / "autofactor-strategy-handoff.json"
+        if not handoff_path.is_file():
+            return PromotionGateEvaluation(
+                ready=False,
+                evidence=gate.evidence,
+                blocked_gates=("missing_autofactor_strategy_handoff",),
+            )
+        handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+        replay_blockers = validate_handoff_payload(handoff)
+        if replay_blockers:
+            return PromotionGateEvaluation(
+                ready=False,
+                evidence=gate.evidence,
+                blocked_gates=tuple(f"handoff_replay_gate:{item}" for item in replay_blockers),
+            )
+        return gate
 
 
 def parse_args() -> argparse.Namespace:
