@@ -394,6 +394,7 @@ jobs:
             args+=(--fail-if-blocked)
           fi
           python3 scripts/run_factor_walk_forward_sweep.py "${args[@]}"
+          touch artifacts/factor-walk-forward-v2/.sweep-success
 
       - name: Persist Research OS trace
         if: always()
@@ -412,6 +413,10 @@ jobs:
           if [ ! -f artifacts/research-snapshot/manifest.json ]; then
             echo "research snapshot manifest is required for durable trace persistence." >&2
             exit 2
+          fi
+          if [ ! -f artifacts/factor-walk-forward-v2/.sweep-success ]; then
+            echo "walk-forward sweep did not complete; skipping durable Research OS persistence."
+            exit 0
           fi
 
           trace_args=(
@@ -450,6 +455,10 @@ jobs:
           set -euo pipefail
           if [ "${WALK_CREATE_CONFIG_PR}" != "true" ]; then
             echo "create_config_pr is not true; skipping config PR creation."
+            exit 0
+          fi
+          if [ ! -f artifacts/factor-walk-forward-v2/.sweep-success ]; then
+            echo "walk-forward sweep did not complete; skipping config PR creation."
             exit 0
           fi
           handoff_json="artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json"
@@ -648,7 +657,9 @@ jobs:
 
           chain_next = os.environ.get("WALK_CHAIN_NEXT_RUN", "").lower() == "true"
           raw_remaining = os.environ.get("WALK_CHAIN_REMAINING", "")
-          if not chain_next:
+          if not Path("artifacts/factor-walk-forward-v2/.sweep-success").exists():
+              decision["reason"] = "walk_forward_sweep_failed"
+          elif not chain_next:
               decision["reason"] = "chain_next_run_false"
           else:
               try:
@@ -902,6 +913,10 @@ jobs:
           set -euo pipefail
           if [ "${WALK_CREATE_HANDOFF_ISSUE}" != "true" ]; then
             echo "create_handoff_issue is not true; skipping handoff issue creation."
+            exit 0
+          fi
+          if [ ! -f artifacts/factor-walk-forward-v2/.sweep-success ]; then
+            echo "walk-forward sweep did not complete; skipping handoff issue creation."
             exit 0
           fi
           handoff_json="artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json"

@@ -59,6 +59,8 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         required_snippets = [
             '"persist_research_trace": "false"',
             "WALK_PERSIST_RESEARCH_TRACE",
+            "touch artifacts/factor-walk-forward-v2/.sweep-success",
+            "walk-forward sweep did not complete; skipping durable Research OS persistence.",
             "--example persist_research_trace",
             "Persist Research OS trace",
             "RESEARCH_OS_DATABASE_URL",
@@ -70,6 +72,16 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, workflow)
+
+    def test_hosted_walk_forward_side_effects_require_sweep_success(self) -> None:
+        workflow = HOSTED_WALK.read_text(encoding="utf-8")
+        self.assertIn('decision["reason"] = "walk_forward_sweep_failed"', workflow)
+        self.assertIn("skipping config PR creation", workflow)
+        self.assertIn("skipping handoff issue creation", workflow)
+        self.assertGreaterEqual(
+            workflow.count("artifacts/factor-walk-forward-v2/.sweep-success"),
+            4,
+        )
 
     def test_tango_deploy_installs_persist_trace_binary(self) -> None:
         workflow = TANGO_DEPLOY.read_text(encoding="utf-8")

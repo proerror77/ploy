@@ -5,8 +5,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::autofactor::{
-    factor_expr_hash, AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr,
+    AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr, factor_expr_hash,
 };
+use crate::research_os::registry::horizon_for_target;
 
 const ALPHA_SEARCH_ARTIFACT_VERSION: &str = "alpha_search_artifacts_v1";
 
@@ -218,6 +219,7 @@ struct FactorRegistryPreviewRow {
 struct RuntimeContractPreview {
     dsl_hash: String,
     ast_json: FactorExpr,
+    horizon: String,
     runtime_score: Option<String>,
     strategy_profile: Option<String>,
     strategy_family: Option<String>,
@@ -459,7 +461,8 @@ fn factor_registry_preview(
     let mut factors = Vec::with_capacity(reports.len());
     for report in reports {
         let dsl_hash = factor_expr_hash(&report.expr)?;
-        let runtime_contract = runtime_contract_preview(report, &dsl_hash);
+        let effective_target = report.target.as_deref().unwrap_or(target);
+        let runtime_contract = runtime_contract_preview(report, &dsl_hash, effective_target);
         let mut blockers = Vec::new();
         if report.decision == AutoFactorDecision::Reject {
             blockers.push(format!("autofactor_rejected:{}", report.reason));
@@ -507,7 +510,11 @@ fn registry_status(decision: AutoFactorDecision) -> &'static str {
     }
 }
 
-fn runtime_contract_preview(report: &AutoFactorReport, dsl_hash: &str) -> RuntimeContractPreview {
+fn runtime_contract_preview(
+    report: &AutoFactorReport,
+    dsl_hash: &str,
+    target: &str,
+) -> RuntimeContractPreview {
     let ast_input_names = report.expr.input_names().into_iter().collect::<Vec<_>>();
     let mut blockers = Vec::new();
     let mapping = runtime_mapping_for_factor(&report.name);
@@ -520,6 +527,7 @@ fn runtime_contract_preview(report: &AutoFactorReport, dsl_hash: &str) -> Runtim
     RuntimeContractPreview {
         dsl_hash: dsl_hash.to_string(),
         ast_json: report.expr.clone(),
+        horizon: horizon_for_target(target).to_string(),
         runtime_score: mapping.runtime_score,
         strategy_profile: mapping.strategy_profile,
         strategy_family: mapping.strategy_family,
@@ -586,7 +594,11 @@ fn default_hypotheses(target: &str) -> Vec<PriorHypothesis> {
                 id: "settlement_edge_after_execution_cost",
                 hypothesis: "Settlement probability edge is valuable only after full-depth executable entry cost and PM fee are deducted.",
                 expected_mechanism: "True q minus sweep price should rank event-side decisions when depth and quote freshness are adequate.",
-                required_surfaces: vec!["polymarket_full_clob_depth", "official_settlement", "probability_state"],
+                required_surfaces: vec![
+                    "polymarket_full_clob_depth",
+                    "official_settlement",
+                    "probability_state",
+                ],
             },
             PriorHypothesis {
                 id: "capacity_and_near_strike_gate",
@@ -845,11 +857,7 @@ fn normalized_positive(value: f64) -> f64 {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() {
-        value
-    } else {
-        0.0
-    }
+    if value.is_finite() { value } else { 0.0 }
 }
 
 #[cfg(test)]
@@ -900,18 +908,22 @@ mod tests {
         )
         .expect("write artifacts");
         assert_eq!(summary.candidate_count, 1);
-        assert!(tmp
-            .join("full_depth_settlement_executable_pnl/search-space.json")
-            .exists());
-        assert!(tmp
-            .join("full_depth_settlement_executable_pnl/tree-trace.json")
-            .exists());
-        assert!(tmp
-            .join("full_depth_settlement_executable_pnl/mcts-expansion-plan.json")
-            .exists());
-        assert!(tmp
-            .join("full_depth_settlement_executable_pnl/mcts-state.json")
-            .exists());
+        assert!(
+            tmp.join("full_depth_settlement_executable_pnl/search-space.json")
+                .exists()
+        );
+        assert!(
+            tmp.join("full_depth_settlement_executable_pnl/tree-trace.json")
+                .exists()
+        );
+        assert!(
+            tmp.join("full_depth_settlement_executable_pnl/mcts-expansion-plan.json")
+                .exists()
+        );
+        assert!(
+            tmp.join("full_depth_settlement_executable_pnl/mcts-state.json")
+                .exists()
+        );
         let registry_preview_raw = std::fs::read_to_string(
             tmp.join("full_depth_settlement_executable_pnl/factor-registry-preview.json"),
         )
@@ -927,9 +939,67 @@ mod tests {
             factor["runtime_contract"]["strategy_profile"],
             "settlement_probability"
         );
+        assert_eq!(factor["runtime_contract"]["horizon"], "5m");
         assert_eq!(
             factor["runtime_contract"]["ast_input_names"][0],
             "conservative_settlement_edge"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn registry_preview_runtime_contract_uses_target_horizon() {
+        let tmp = std::env::temp_dir().join(format!(
+            "ploy-alpha-search-horizon-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let report = AutoFactorReport {
+            name: "spread_adjusted_external_move".to_string(),
+            target: Some("full_depth_reprice_pnl_30s".to_string()),
+            expr: FactorExpr::Input("spread_adjusted_external_move".to_string()),
+            n: 100,
+            pearson_ic: 0.2,
+            spearman_ic: 0.25,
+            window_count: 3,
+            window_ic_mean: 0.2,
+            icir: 1.2,
+            positive_window_ratio: 1.0,
+            symbol_count: 2,
+            symbol_ic_mean: 0.18,
+            symbol_icir: 1.0,
+            symbol_positive_ratio: 1.0,
+            bucket_avg_labels: vec![-0.1, 0.0, 0.2],
+            bottom_bucket_n: 20,
+            bottom_bucket_avg_label: -0.1,
+            top_bucket_n: 20,
+            top_bucket_avg_label: 0.2,
+            top_bucket_positive_label_rate: 0.7,
+            top_bucket_full_depth_entry_fill_rate: 1.0,
+            top_bucket_unique_event_count: 20,
+            top_bucket_max_event_decisions: 1,
+            monotonicity_score: 1.0,
+            complexity: 1,
+            decision: AutoFactorDecision::Candidate,
+            reason: "passed".to_string(),
+        };
+        write_alpha_search_artifacts(
+            &tmp,
+            "full_depth_reprice_pnl_30s",
+            &["spread_adjusted_external_move".to_string()],
+            &[report],
+            &AutoFactorOptions::default(),
+        )
+        .expect("write artifacts");
+        let registry_preview_raw = std::fs::read_to_string(
+            tmp.join("full_depth_reprice_pnl_30s/factor-registry-preview.json"),
+        )
+        .expect("registry preview");
+        let registry_preview: serde_json::Value =
+            serde_json::from_str(&registry_preview_raw).expect("registry preview json");
+        assert_eq!(
+            registry_preview["factors"][0]["runtime_contract"]["horizon"],
+            "30s"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }

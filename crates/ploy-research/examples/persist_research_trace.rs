@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use ploy_research::ResearchSnapshotManifest;
+use ploy_research::research_os::registry::horizon_for_target;
 use ploy_research::research_os::trace::trace_hash;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -22,7 +23,6 @@ const WRITER_AGENT: &str = "persist_research_trace";
 const EVALUATOR_VERSION: &str = "persist_research_trace_v1";
 const EVIDENCE_STAGE: &str = "factor_attribution";
 const EVALUATION_KIND: &str = "alpha_search_preview";
-const FACTOR_HORIZON: &str = "5m";
 
 #[derive(Debug, Clone)]
 struct TracePlan {
@@ -338,6 +338,12 @@ fn factor_preview_row(
         .filter(|value| !value.is_empty())
         .unwrap_or("autofactor")
         .to_string();
+    let horizon = runtime_contract
+        .get("horizon")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| horizon_for_target(&target))
+        .to_string();
 
     Ok(FactorPreviewRow {
         factor_name,
@@ -346,7 +352,7 @@ fn factor_preview_row(
         ast_json,
         runtime_contract,
         factor_family,
-        horizon: FACTOR_HORIZON.to_string(),
+        horizon,
         registry_status: decision.registry_status,
         promotion_decision: decision.promotion_decision,
         promotion_status: decision.promotion_status,
@@ -819,5 +825,45 @@ mod tests {
             &json!({"blockers": ["a", "c"]}),
         );
         assert_eq!(blockers, json!(["a", "b", "c"]));
+    }
+
+    #[test]
+    fn factor_preview_row_preserves_runtime_contract_horizon() {
+        let factor = json!({
+            "factor_name": "repricing_gap_side_30s",
+            "target": "full_depth_reprice_pnl_30s",
+            "dsl_hash": "abc",
+            "runtime_contract": {
+                "horizon": "30s",
+                "strategy_family": "repricing"
+            }
+        });
+        let row = factor_preview_row(
+            &factor,
+            "tradeable_full_depth_settlement_pnl",
+            Path::new("preview.json"),
+        )
+        .expect("factor row");
+        assert_eq!(row.horizon, "30s");
+        assert_eq!(row.factor_family, "repricing");
+    }
+
+    #[test]
+    fn factor_preview_row_derives_horizon_from_target_when_contract_omits_it() {
+        let factor = json!({
+            "factor_name": "repricing_gap_side_60s",
+            "target": "full_depth_reprice_pnl_60s",
+            "dsl_hash": "abc",
+            "runtime_contract": {
+                "strategy_family": "repricing"
+            }
+        });
+        let row = factor_preview_row(
+            &factor,
+            "tradeable_full_depth_settlement_pnl",
+            Path::new("preview.json"),
+        )
+        .expect("factor row");
+        assert_eq!(row.horizon, "60s");
     }
 }

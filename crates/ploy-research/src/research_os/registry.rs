@@ -1,6 +1,28 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub fn horizon_for_target(target: &str) -> &'static str {
+    match target {
+        "reprice_pnl_5s" | "full_depth_reprice_pnl_5s" | "tradeable_full_depth_reprice_pnl_5s" => {
+            "5s"
+        }
+        "reprice_pnl_10s"
+        | "full_depth_reprice_pnl_10s"
+        | "tradeable_full_depth_reprice_pnl_10s" => "10s",
+        "reprice_pnl_30s"
+        | "full_depth_reprice_pnl_30s"
+        | "tradeable_full_depth_reprice_pnl_30s" => "30s",
+        "reprice_pnl_60s"
+        | "full_depth_reprice_pnl_60s"
+        | "tradeable_full_depth_reprice_pnl_60s" => "60s",
+        "settlement_pnl"
+        | "settlement_executable_pnl"
+        | "full_depth_settlement_executable_pnl"
+        | "tradeable_full_depth_settlement_pnl" => "5m",
+        _ => "5m",
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FactorLifecycleStatus {
@@ -87,5 +109,20 @@ mod tests {
         assert_eq!(raw, "\"dry_run\"");
         let parsed: FactorLifecycleStatus = serde_json::from_str("\"candidate\"").expect("parse");
         assert_eq!(parsed, FactorLifecycleStatus::Candidate);
+    }
+
+    #[test]
+    fn target_horizon_contract_covers_reprice_and_settlement_targets() {
+        assert_eq!(horizon_for_target("reprice_pnl_5s"), "5s");
+        assert_eq!(horizon_for_target("full_depth_reprice_pnl_10s"), "10s");
+        assert_eq!(
+            horizon_for_target("tradeable_full_depth_reprice_pnl_30s"),
+            "30s"
+        );
+        assert_eq!(horizon_for_target("full_depth_reprice_pnl_60s"), "60s");
+        assert_eq!(
+            horizon_for_target("tradeable_full_depth_settlement_pnl"),
+            "5m"
+        );
     }
 }
