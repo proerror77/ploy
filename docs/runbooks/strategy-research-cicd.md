@@ -134,7 +134,10 @@ requested with `options_json.persist_research_trace=true` and a protected
 database secret is available. It checks `RESEARCH_OS_DATABASE_URL`,
 `PLOY_DATABASE_URL`, `PLOY_RESEARCH_DATABASE_URL`, then `PLOY_DB_URL`. The
 default remains false so ordinary research runs stay read-only artifact
-generation.
+generation. When that database URL targets Tango's private VPC endpoint, the
+hosted workflow ships the trace input artifacts to `tango-1-1` and runs the
+deployed `/opt/ploy/bin/persist-research-trace` binary there; it must not try
+to open a private PostgreSQL connection directly from a GitHub-hosted runner.
 
 Use `research_trace_plan` after durable rows exist to generate the next
 Research Manager plan from DB trace:

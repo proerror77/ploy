@@ -52,6 +52,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  DEPLOY_HOST: ${{ vars.TANGO_1_1_HOST || vars.ALIYUN_ECS_HOST || secrets.TANGO_1_1_HOST || secrets.ALIYUN_ECS_HOST }}
+  DEPLOY_ROOT: ${{ vars.PLOY_DEPLOY_ROOT || '/opt/ploy' }}
 
 jobs:
   walk-forward:
@@ -482,6 +484,10 @@ jobs:
         if: always()
         env:
           RESEARCH_TRACE_DB_URL: ${{ secrets.RESEARCH_OS_DATABASE_URL || secrets.PLOY_DATABASE_URL || secrets.PLOY_RESEARCH_DATABASE_URL || secrets.PLOY_DB_URL }}
+          TANGO_1_1_SSH_KEY: ${{ secrets.TANGO_1_1_SSH_KEY }}
+          TANGO_SSH_KEY: ${{ secrets.TANGO_SSH_KEY }}
+          ALIYUN_ECS_SSH_KEY: ${{ secrets.ALIYUN_ECS_SSH_KEY }}
+          TANGO_1_1_KNOWN_HOSTS: ${{ secrets.TANGO_1_1_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
           if [ "${WALK_PERSIST_RESEARCH_TRACE}" != "true" ]; then
@@ -498,10 +504,17 @@ jobs:
             exit 2
           fi
 
+          db_host="$(python3 - <<'PY'
+          import os
+          from urllib.parse import urlparse
+
+          print(urlparse(os.environ["RESEARCH_TRACE_DB_URL"]).hostname or "")
+          PY
+          )"
+
           trace_args=(
             --run-id "${GITHUB_RUN_ID}"
             --snapshot-dir artifacts/research-snapshot
-            --db-url "${RESEARCH_TRACE_DB_URL}"
           )
           if [ -d artifacts/factor-walk-forward-v2/alpha-search ]; then
             trace_args+=(--alpha-search-dir artifacts/factor-walk-forward-v2/alpha-search)
@@ -516,7 +529,92 @@ jobs:
             trace_args+=(--handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json)
           fi
 
-          ./target/fast/examples/persist_research_trace "${trace_args[@]}"
+          case "${db_host}" in
+            172.16.*|10.*|192.168.*)
+              if [ -z "${DEPLOY_HOST}" ]; then
+                echo "Research trace DB host ${db_host} is private, but DEPLOY_HOST is not configured for remote persistence." >&2
+                exit 2
+              fi
+              install -m 700 -d ~/.ssh
+              selected_key=""
+              if [ -n "${TANGO_1_1_SSH_KEY}" ]; then
+                selected_key="${TANGO_1_1_SSH_KEY}"
+              elif [ -n "${TANGO_SSH_KEY}" ]; then
+                selected_key="${TANGO_SSH_KEY}"
+              elif [ -n "${ALIYUN_ECS_SSH_KEY}" ]; then
+                selected_key="${ALIYUN_ECS_SSH_KEY}"
+              else
+                echo "Research trace DB host ${db_host} is private, but no tango SSH key secret is available." >&2
+                exit 2
+              fi
+              printf '%s\n' "${selected_key}" > ~/.ssh/tango_1_1_key
+              chmod 600 ~/.ssh/tango_1_1_key
+              ssh-keygen -y -f ~/.ssh/tango_1_1_key >/dev/null
+              if [ -n "${TANGO_1_1_KNOWN_HOSTS}" ]; then
+                printf '%s\n' "${TANGO_1_1_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+                host_key_checking="yes"
+              else
+                ssh-keyscan "${DEPLOY_HOST}" | sed 's/^[^ ]*/tango-1-1/' > ~/.ssh/known_hosts
+                host_key_checking="yes"
+              fi
+              chmod 600 ~/.ssh/known_hosts
+              cat > ~/.ssh/config <<EOF
+          Host tango-1-1
+            HostName ${DEPLOY_HOST}
+            User root
+            IdentityFile ~/.ssh/tango_1_1_key
+            HostKeyAlias tango-1-1
+            StrictHostKeyChecking ${host_key_checking}
+            UserKnownHostsFile ~/.ssh/known_hosts
+            ServerAliveInterval 30
+            ServerAliveCountMax 20
+            ConnectTimeout 30
+          EOF
+              # shellcheck disable=SC2153
+              remote_dir="${DEPLOY_ROOT}/tmp/research-trace-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              rm -rf /tmp/research-trace-input
+              mkdir -p /tmp/research-trace-input
+              cp -R artifacts/research-snapshot /tmp/research-trace-input/
+              if [ -d artifacts/factor-walk-forward-v2 ]; then
+                cp -R artifacts/factor-walk-forward-v2 /tmp/research-trace-input/
+              fi
+              tar -C /tmp/research-trace-input -cf /tmp/research-trace-input.tar .
+              # shellcheck disable=SC2029
+              ssh tango-1-1 "rm -rf '${remote_dir}' && mkdir -p '${remote_dir}'"
+              scp /tmp/research-trace-input.tar "tango-1-1:${remote_dir}/input.tar"
+              # shellcheck disable=SC2029
+              ssh tango-1-1 /bin/bash -s -- "${remote_dir}" "${GITHUB_RUN_ID}" "${RESEARCH_TRACE_DB_URL}" <<'EOF'
+          set -euo pipefail
+          remote_dir="$1"
+          run_id="$2"
+          db_url="$3"
+          trap 'rm -rf "${remote_dir}"' EXIT
+          tar -C "${remote_dir}" -xf "${remote_dir}/input.tar"
+          persist_bin="/opt/ploy/bin/persist-research-trace"
+          test -x "${persist_bin}"
+          trace_args=(
+            --run-id "${run_id}"
+            --snapshot-dir "${remote_dir}/research-snapshot"
+          )
+          if [ -d "${remote_dir}/factor-walk-forward-v2/alpha-search" ]; then
+            trace_args+=(--alpha-search-dir "${remote_dir}/factor-walk-forward-v2/alpha-search")
+          fi
+          if [ -f "${remote_dir}/factor-walk-forward-v2/autofactor-factor-registry.json" ]; then
+            trace_args+=(--registry-json "${remote_dir}/factor-walk-forward-v2/autofactor-factor-registry.json")
+          fi
+          if [ -f "${remote_dir}/factor-walk-forward-v2/autofactor-strategy-promotion.json" ]; then
+            trace_args+=(--promotion-json "${remote_dir}/factor-walk-forward-v2/autofactor-strategy-promotion.json")
+          fi
+          if [ -f "${remote_dir}/factor-walk-forward-v2/autofactor-strategy-handoff.json" ]; then
+            trace_args+=(--handoff-json "${remote_dir}/factor-walk-forward-v2/autofactor-strategy-handoff.json")
+          fi
+          DATABASE_URL="${db_url}" "${persist_bin}" "${trace_args[@]}"
+          EOF
+              ;;
+            *)
+              ./target/fast/examples/persist_research_trace "${trace_args[@]}" --db-url "${RESEARCH_TRACE_DB_URL}"
+              ;;
+          esac
           {
             echo "### Durable Research OS trace"
             echo ""
