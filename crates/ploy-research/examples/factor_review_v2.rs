@@ -128,6 +128,9 @@ async fn main() {
     let lob_sample_secs: i32 = flag_value(&args, "--lob-sample-secs")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(5);
+    let pm_book_sample_secs: i32 = flag_value(&args, "--pm-book-sample-secs")
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(lob_sample_secs);
     let max_quote_age_secs: i64 = flag_value(&args, "--max-quote-age-secs")
         .and_then(|raw| raw.parse().ok())
         .unwrap_or(30);
@@ -155,12 +158,13 @@ async fn main() {
     };
 
     eprintln!(
-        "factor_review_v2: {} -> {} for {:?}, stake_usd={:.2}, observation_sample_secs={}, factor_name_filter={}",
+        "factor_review_v2: {} -> {} for {:?}, stake_usd={:.2}, observation_sample_secs={}, pm_book_sample_secs={}, factor_name_filter={}",
         start,
         end,
         symbols,
         options.stake_usd,
         observation_sample_secs,
+        pm_book_sample_secs,
         factor_name_filter.as_deref().unwrap_or("<none>")
     );
 
@@ -187,6 +191,7 @@ async fn main() {
                 start,
                 end,
                 lob_sample_secs,
+                pm_book_sample_secs,
                 observation_sample_secs,
                 max_quote_age_secs,
                 stake_usd: options.stake_usd,
@@ -298,10 +303,15 @@ async fn main() {
         eprintln!("lob_snapshots: {}", all_lob_snapshots.len());
 
         let started = std::time::Instant::now();
-        let all_pm_book_snapshots =
-            load_research_pm_book_snapshots_sampled(&pool, &symbols, start, end, lob_sample_secs)
-                .await
-                .expect("bulk PM book snapshot load failed");
+        let all_pm_book_snapshots = load_research_pm_book_snapshots_sampled(
+            &pool,
+            &symbols,
+            start,
+            end,
+            pm_book_sample_secs,
+        )
+        .await
+        .expect("bulk PM book snapshot load failed");
         phase_timings.push((
             "pm_book_snapshots",
             started.elapsed().as_millis(),

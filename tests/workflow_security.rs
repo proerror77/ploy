@@ -138,7 +138,9 @@ fn factor_evolve_daily_search_passes_snapshot_quote_age() {
         "-f options_json=\"$(cat artifacts/factor-evolve-daily/hosted-options.json)\"",
     ] {
         if !workflow.contains(needle) {
-            offenders.push(format!("missing daily workflow quote-age handoff: {needle}"));
+            offenders.push(format!(
+                "missing daily workflow quote-age handoff: {needle}"
+            ));
         }
     }
 
@@ -393,7 +395,9 @@ fn recorded_replay_parity_supports_auto_window() {
                 .to_string(),
         );
     }
-    if workflow.contains("-v token_ids_json=") || workflow.contains("jsonb_array_elements_text(:'token_ids_json'") {
+    if workflow.contains("-v token_ids_json=")
+        || workflow.contains("jsonb_array_elements_text(:'token_ids_json'")
+    {
         offenders.push(
             "recorded-replay-parity.yml: token ids must not be passed as one large psql argv value"
                 .to_string(),
@@ -422,7 +426,8 @@ fn recorded_replay_parity_supports_auto_window() {
 
 #[test]
 fn hosted_factor_walk_forward_uploads_alpha_chain_summary() {
-    let workflow = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
+    let workflow =
+        workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
     let mut offenders = Vec::new();
 
     for needle in [
@@ -465,13 +470,17 @@ fn factor_walk_forward_wires_alpha_prior_and_state_inputs() {
     let mut offenders = Vec::new();
 
     for (name, workflow) in [
-        ("factor-walk-forward-v2-hosted-artifact.yml", hosted.as_str()),
+        (
+            "factor-walk-forward-v2-hosted-artifact.yml",
+            hosted.as_str(),
+        ),
         ("factor-walk-forward-v2.yml", self_hosted.as_str()),
     ] {
         for needle in [
             "alpha_search_llm_prior_json",
             "alpha_search_state_json",
             "require_deribit",
+            "pm_book_sample_secs",
             "train_window_hours",
             "test_window_hours",
             "step_hours",
@@ -479,6 +488,7 @@ fn factor_walk_forward_wires_alpha_prior_and_state_inputs() {
             "--alpha-search-state-json",
             "--alpha-search-llm-prior-json",
             "--require-deribit",
+            "--pm-book-sample-secs",
         ] {
             if !workflow.contains(needle) {
                 offenders.push(format!("{name}: missing `{needle}`"));
@@ -497,6 +507,7 @@ fn factor_walk_forward_wires_alpha_prior_and_state_inputs() {
         "alpha_search_llm_prior_json",
         "alpha_search_state_json",
         "require_deribit",
+        "pm_book_sample_secs",
         "train_window_hours",
         "test_window_hours",
         "step_hours",
@@ -517,7 +528,8 @@ fn factor_walk_forward_wires_alpha_prior_and_state_inputs() {
 
 #[test]
 fn hosted_factor_walk_forward_splits_replay_parity_artifact_suffix() {
-    let workflow = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
+    let workflow =
+        workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
     let mut offenders = Vec::new();
 
     for needle in [
@@ -575,8 +587,9 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
                 .to_string(),
         );
     }
-    if !hosted.contains("--strip-prefix \"factor-walk-forward-v2/alpha-search/${WALK_ALPHA_SEARCH_PLAN_TARGET}\"")
-        || !hosted.contains("--require mcts-expansion-plan.json")
+    if !hosted.contains(
+        "--strip-prefix \"factor-walk-forward-v2/alpha-search/${WALK_ALPHA_SEARCH_PLAN_TARGET}\"",
+    ) || !hosted.contains("--require mcts-expansion-plan.json")
     {
         offenders.push(
             "factor-walk-forward-v2-hosted-artifact.yml: alpha search plan artifact contract was weakened"
@@ -604,6 +617,76 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
     assert!(
         offenders.is_empty(),
         "hosted factor walk-forward candidate replay feedback guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn factor_research_workflows_thread_pm_book_sample_cadence() {
+    let hosted_walk =
+        workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
+    let walk_router = workflow_contents(".github/workflows/factor-walk-forward-v2.yml");
+    let hosted_review = workflow_contents(".github/workflows/factor-review-v2-hosted-artifact.yml");
+    let review_router = workflow_contents(".github/workflows/factor-review-v2.yml");
+    let sweep = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/run_factor_walk_forward_sweep.py"),
+    )
+    .expect("read sweep runner");
+    let mut offenders = Vec::new();
+
+    for (name, content) in [
+        (
+            "factor-walk-forward-v2-hosted-artifact.yml",
+            hosted_walk.as_str(),
+        ),
+        ("factor-walk-forward-v2.yml", walk_router.as_str()),
+        (
+            "factor-review-v2-hosted-artifact.yml",
+            hosted_review.as_str(),
+        ),
+        ("factor-review-v2.yml", review_router.as_str()),
+    ] {
+        for needle in ["pm_book_sample_secs", "--pm-book-sample-secs"] {
+            if !content.contains(needle) {
+                offenders.push(format!("{name}: missing `{needle}`"));
+            }
+        }
+    }
+
+    for needle in [
+        "\"WALK_PM_BOOK_SAMPLE_SECS\": \"pm_book_sample_secs\"",
+        "manifest_key == \"pm_book_sample_secs\"",
+        "manifest.get(\"lob_sample_secs\")",
+    ] {
+        if !hosted_walk.contains(needle) {
+            offenders.push(format!(
+                "factor-walk-forward-v2-hosted-artifact.yml: missing `{needle}`"
+            ));
+        }
+    }
+
+    for needle in [
+        "\"FACTOR_PM_BOOK_SAMPLE_SECS\": \"pm_book_sample_secs\"",
+        "manifest_key == \"pm_book_sample_secs\"",
+        "manifest.get(\"lob_sample_secs\")",
+    ] {
+        if !hosted_review.contains(needle) {
+            offenders.push(format!(
+                "factor-review-v2-hosted-artifact.yml: missing `{needle}`"
+            ));
+        }
+    }
+
+    if !sweep.contains("\"pm_book_sample_secs\"") || !sweep.contains("--pm-book-sample-secs") {
+        offenders.push(
+            "run_factor_walk_forward_sweep.py: missing pm_book_sample_secs pass-through"
+                .to_string(),
+        );
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "PM book sample cadence workflow wiring guard failed:\n{}",
         offenders.join("\n")
     );
 }
@@ -648,9 +731,7 @@ fn tango_deploy_keeps_pm5d_live_paused() {
         "observed=Paused",
     ] {
         if !cloud_assist.contains(needle) {
-            offenders.push(format!(
-                "deploy_tango_cloud_assist.py: missing `{needle}`"
-            ));
+            offenders.push(format!("deploy_tango_cloud_assist.py: missing `{needle}`"));
         }
     }
 

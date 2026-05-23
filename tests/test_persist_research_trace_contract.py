@@ -8,6 +8,7 @@ TRACE_PLAN = ROOT / "crates" / "ploy-research" / "examples" / "research_trace_pl
 CARGO = ROOT / "crates" / "ploy-research" / "Cargo.toml"
 RUNBOOK = ROOT / "docs" / "runbooks" / "strategy-research-cicd.md"
 HOSTED_WALK = ROOT / ".github" / "workflows" / "factor-walk-forward-v2-hosted-artifact.yml"
+AUTOFACTOR_PROMOTION = ROOT / ".github" / "workflows" / "autofactor-strategy-promotion.yml"
 TRACE_PLAN_WORKFLOW = ROOT / ".github" / "workflows" / "research-trace-plan.yml"
 TANGO_DEPLOY = ROOT / ".github" / "workflows" / "deploy-tango-1-1.yml"
 LEGACY_FACTOR_REVIEW = ROOT / ".github" / "workflows" / "factor-review-v2.yml"
@@ -84,6 +85,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "/opt/ploy/bin/persist-research-trace",
             'DATABASE_URL="${db_url}" "${persist_bin}"',
             "artifacts/research-trace/persisted.env",
+            "artifacts/factor-walk-forward-v2-upload/research-trace/persisted.env",
             "create_config_pr requires successful durable Research OS trace persistence.",
             "chain_next_run requires successful durable Research OS trace persistence.",
             "create_handoff_issue requires successful durable Research OS trace persistence.",
@@ -91,6 +93,22 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "--registry-json artifacts/factor-walk-forward-v2/autofactor-factor-registry.json",
             "--promotion-json artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.json",
             "--handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json",
+        ]
+        for snippet in required_snippets:
+            self.assertIn(snippet, workflow)
+
+    def test_standalone_autofactor_promotion_side_effects_require_trace(self) -> None:
+        workflow = AUTOFACTOR_PROMOTION.read_text(encoding="utf-8")
+        required_snippets = [
+            "SOURCE_TRACE_MARKER_PATH",
+            "*/research-trace/persisted.env",
+            "*/snapshot-provenance/source.txt",
+            "*/snapshot-provenance/manifest.json",
+            "AutoFactor promotion side effects require successful durable Research OS trace persistence.",
+            "AutoFactor promotion side effects reject legacy/debug/self-hosted source artifacts.",
+            "direct_db_debug=true|canonical_result=no|registry=runner-local|runner=self-hosted|runner=ploy-ci-1",
+            "create_handoff_issue requires successful durable Research OS trace persistence.",
+            "create_config_pr requires successful durable Research OS trace persistence.",
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, workflow)

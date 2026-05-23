@@ -147,6 +147,7 @@ pub struct ResearchSnapshotRequest<'a> {
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
     pub lob_sample_secs: i32,
+    pub pm_book_sample_secs: i32,
     pub observation_sample_secs: i64,
     pub max_quote_age_secs: i64,
     pub stake_usd: f64,
@@ -294,6 +295,25 @@ fn validate_snapshot_request_with_window_mode(
             "snapshot lob_sample_secs {} does not match requested {}",
             manifest.lob_sample_secs,
             request.lob_sample_secs
+        );
+    }
+    let manifest_pm_book_sample_secs = manifest
+        .pm_book_sample_secs
+        .unwrap_or(manifest.lob_sample_secs)
+        .max(1);
+    let requested_pm_book_sample_secs = request.pm_book_sample_secs.max(1);
+    if manifest_pm_book_sample_secs != requested_pm_book_sample_secs {
+        anyhow::bail!(
+            "snapshot pm_book_sample_secs {} does not match requested {}",
+            manifest_pm_book_sample_secs,
+            requested_pm_book_sample_secs
+        );
+    }
+    if i64::from(manifest_pm_book_sample_secs) > request.max_quote_age_secs.max(1) {
+        anyhow::bail!(
+            "snapshot pm_book_sample_secs {} is coarser than requested max_quote_age_secs {}; full-depth execution claims require PM book cadence no coarser than quote-age gate",
+            manifest_pm_book_sample_secs,
+            request.max_quote_age_secs
         );
     }
     if manifest.observation_sample_secs != request.observation_sample_secs {
@@ -1437,6 +1457,7 @@ mod tests {
                 start: loaded.manifest.start,
                 end: loaded.manifest.end,
                 lob_sample_secs: loaded.manifest.lob_sample_secs,
+                pm_book_sample_secs: loaded.manifest.pm_book_sample_secs.unwrap_or(30),
                 observation_sample_secs: loaded.manifest.observation_sample_secs,
                 max_quote_age_secs: loaded.manifest.max_quote_age_secs,
                 stake_usd: loaded.manifest.stake_usd,
@@ -1451,6 +1472,7 @@ mod tests {
                 start: subset_start,
                 end: subset_end,
                 lob_sample_secs: loaded.manifest.lob_sample_secs,
+                pm_book_sample_secs: loaded.manifest.pm_book_sample_secs.unwrap_or(30),
                 observation_sample_secs: loaded.manifest.observation_sample_secs,
                 max_quote_age_secs: loaded.manifest.max_quote_age_secs,
                 stake_usd: loaded.manifest.stake_usd,
@@ -1465,6 +1487,7 @@ mod tests {
                 start: subset_start,
                 end: subset_end,
                 lob_sample_secs: loaded.manifest.lob_sample_secs,
+                pm_book_sample_secs: loaded.manifest.pm_book_sample_secs.unwrap_or(30),
                 observation_sample_secs: loaded.manifest.observation_sample_secs,
                 max_quote_age_secs: loaded.manifest.max_quote_age_secs,
                 stake_usd: loaded.manifest.stake_usd,
@@ -1480,6 +1503,85 @@ mod tests {
         assert!(quality.contains("## Input Artifacts"));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn snapshot_request_rejects_pm_book_cadence_mismatch_or_coarse_execution_gate() {
+        let start = "2026-04-24T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let end = "2026-04-25T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let manifest = ResearchSnapshotManifest {
+            schema_version: RESEARCH_SNAPSHOT_SCHEMA_VERSION.to_string(),
+            snapshot_hash: Some("hash".to_string()),
+            generated_at: Utc::now(),
+            git_sha: Some("test-sha".to_string()),
+            symbols: vec!["BTCUSDT".to_string()],
+            start,
+            end,
+            history_start: start,
+            lob_sample_secs: 30,
+            pm_book_sample_secs: Some(120),
+            observation_sample_secs: 30,
+            max_quote_age_secs: 120,
+            stake_usd: 15.0,
+            require_official_settlement: true,
+            immutable_input: true,
+            source_kind: "unit_test".to_string(),
+            optimizer_data_dir: Some("/tmp/immutable-parquet".to_string()),
+            source_surfaces: vec![],
+            input_artifacts: vec![],
+            data_requirements: vec![],
+            data_audit_status: Some("ok".to_string()),
+            data_audit_report: None,
+            include_deribit: false,
+            artifacts: ResearchSnapshotArtifacts::default(),
+            row_counts: ResearchSnapshotRowCounts::default(),
+            phase_timings: vec![],
+            quality_flags: vec![],
+            pm_book_source: ResearchSnapshotPmBookSource::default(),
+        };
+        let symbols = vec!["BTCUSDT".to_string()];
+
+        let mismatch = validate_snapshot_request_coverage(
+            &manifest,
+            ResearchSnapshotRequest {
+                symbols: &symbols,
+                start,
+                end,
+                lob_sample_secs: 30,
+                pm_book_sample_secs: 30,
+                observation_sample_secs: 30,
+                max_quote_age_secs: 120,
+                stake_usd: 15.0,
+                require_official_settlement: true,
+            },
+        )
+        .expect_err("PM book cadence mismatch should fail closed");
+        assert!(
+            mismatch
+                .to_string()
+                .contains("snapshot pm_book_sample_secs 120 does not match requested 30")
+        );
+
+        let coarse = validate_snapshot_request_coverage(
+            &manifest,
+            ResearchSnapshotRequest {
+                symbols: &symbols,
+                start,
+                end,
+                lob_sample_secs: 30,
+                pm_book_sample_secs: 120,
+                observation_sample_secs: 30,
+                max_quote_age_secs: 30,
+                stake_usd: 15.0,
+                require_official_settlement: true,
+            },
+        )
+        .expect_err("PM book cadence coarser than quote-age gate should fail closed");
+        assert!(
+            coarse
+                .to_string()
+                .contains("full-depth execution claims require PM book cadence")
+        );
     }
 
     #[test]

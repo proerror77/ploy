@@ -142,6 +142,8 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
             "1",
             "--lob-sample-secs",
             "30",
+            "--pm-book-sample-secs",
+            "30",
             "--observation-sample-secs",
             "30",
             "--max-quote-age-secs",

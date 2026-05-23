@@ -76,9 +76,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GIT_REF: ${{ github.event.inputs.git_ref }}
           OPTIONS_JSON: ${{ github.event.inputs.options_json }}
-          LOB_SAMPLE_SECS: ${{ github.event.inputs.lob_sample_secs }}
-          OBSERVATION_SAMPLE_SECS: ${{ github.event.inputs.observation_sample_secs }}
-          MAX_QUOTE_AGE_SECS: ${{ github.event.inputs.max_quote_age_secs }}
         run: |
           set -euo pipefail
           hosted_options="$(python3 - <<'PY'
@@ -87,6 +84,7 @@ jobs:
 
           allowed = {
               "lob_sample_secs",
+              "pm_book_sample_secs",
               "observation_sample_secs",
               "max_quote_age_secs",
               "top_n",
@@ -100,9 +98,6 @@ jobs:
           if not isinstance(data, dict):
               raise SystemExit("options_json must be a JSON object")
           filtered = {key: value for key, value in data.items() if key in allowed}
-          filtered["lob_sample_secs"] = os.environ["LOB_SAMPLE_SECS"]
-          filtered["observation_sample_secs"] = os.environ["OBSERVATION_SAMPLE_SECS"]
-          filtered["max_quote_age_secs"] = os.environ["MAX_QUOTE_AGE_SECS"]
           print(json.dumps(filtered, separators=(",", ":"), sort_keys=True))
           PY
           )"
@@ -188,6 +183,7 @@ jobs:
 
           defaults = {
               "top_n": "50",
+              "pm_book_sample_secs": "30",
               "min_observations": "20",
               "top_quantile": "0.2",
               "factor_name_filter": "",
@@ -466,6 +462,7 @@ jobs:
             --end-date "${{ github.event.inputs.end_date }}" \
             --stake-usd "${{ github.event.inputs.stake_usd }}" \
             --lob-sample-secs "${{ github.event.inputs.lob_sample_secs }}" \
+            --pm-book-sample-secs "${FACTOR_PM_BOOK_SAMPLE_SECS}" \
             --observation-sample-secs "${{ github.event.inputs.observation_sample_secs }}" \
             --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
             --output-dir artifacts/research-snapshot \
@@ -516,6 +513,7 @@ jobs:
             --end-date "${{ github.event.inputs.end_date }}" \
             --stake-usd "${{ github.event.inputs.stake_usd }}" \
             --lob-sample-secs "${{ github.event.inputs.lob_sample_secs }}" \
+            --pm-book-sample-secs "${FACTOR_PM_BOOK_SAMPLE_SECS}" \
             --observation-sample-secs "${{ github.event.inputs.observation_sample_secs }}" \
             --max-quote-age-secs "${{ github.event.inputs.max_quote_age_secs }}" \
             --min-observations "${FACTOR_MIN_OBSERVATIONS}" \

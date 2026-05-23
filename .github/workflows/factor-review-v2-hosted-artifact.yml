@@ -33,7 +33,7 @@ on:
       options_json:
         description: "Advanced options JSON: sampling, top_n, factor filters, issue_number"
         required: false
-        default: '{"lob_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":50,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","issue_number":""}'
+        default: '{"lob_sample_secs":"","pm_book_sample_secs":"","observation_sample_secs":"","max_quote_age_secs":"","top_n":50,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","issue_number":""}'
 
 concurrency:
   group: factor-review-v2-hosted-artifact-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.snapshot_run_id }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}
@@ -70,9 +70,10 @@ jobs:
           import os
 
           defaults = {
-              "lob_sample_secs": "30",
-              "observation_sample_secs": "30",
-              "max_quote_age_secs": "30",
+              "lob_sample_secs": "",
+              "pm_book_sample_secs": "",
+              "observation_sample_secs": "",
+              "max_quote_age_secs": "",
               "top_n": "50",
               "min_observations": "20",
               "top_quantile": "0.2",
@@ -158,6 +159,41 @@ jobs:
           print("full research snapshot payload present: " + ", ".join(required))
           PY
 
+      - name: Resolve snapshot-bound options
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path("artifacts/research-snapshot/manifest.json").read_text(encoding="utf-8"))
+          env_to_manifest = {
+              "FACTOR_LOB_SAMPLE_SECS": "lob_sample_secs",
+              "FACTOR_PM_BOOK_SAMPLE_SECS": "pm_book_sample_secs",
+              "FACTOR_OBSERVATION_SAMPLE_SECS": "observation_sample_secs",
+              "FACTOR_MAX_QUOTE_AGE_SECS": "max_quote_age_secs",
+          }
+          resolved = {}
+          for env_name, manifest_key in env_to_manifest.items():
+              current = os.environ.get(env_name, "").strip()
+              manifest_value = manifest.get(manifest_key)
+              if manifest_key == "pm_book_sample_secs" and manifest_value is None:
+                  manifest_value = manifest.get("lob_sample_secs")
+              if manifest_value is None:
+                  raise SystemExit(f"snapshot manifest missing {manifest_key}")
+              resolved[env_name] = current or str(manifest_value)
+
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              for env_name, value in resolved.items():
+                  handle.write(f"{env_name}={value}\n")
+
+          print(
+              "resolved snapshot-bound review options: "
+              + ", ".join(f"{name}={value}" for name, value in sorted(resolved.items()))
+          )
+          PY
+
       - name: Resolve review window
         env:
           INPUT_START_DATE: ${{ github.event.inputs.start_date }}
@@ -229,6 +265,7 @@ jobs:
             --end-ts "${FACTOR_END_TS}" \
             --stake-usd "${{ github.event.inputs.stake_usd }}" \
             --lob-sample-secs "${FACTOR_LOB_SAMPLE_SECS}" \
+            --pm-book-sample-secs "${FACTOR_PM_BOOK_SAMPLE_SECS}" \
             --observation-sample-secs "${FACTOR_OBSERVATION_SAMPLE_SECS}" \
             --max-quote-age-secs "${FACTOR_MAX_QUOTE_AGE_SECS}" \
             --min-observations "${FACTOR_MIN_OBSERVATIONS}" \

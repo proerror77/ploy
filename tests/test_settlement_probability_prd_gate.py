@@ -53,6 +53,7 @@ class SettlementProbabilityPrdGateTests(unittest.TestCase):
         self.assertEqual(workflow, gate.HOSTED_WALK_FORWARD_WORKFLOW)
         options = json.loads(fields["options_json"])
         self.assertEqual(options["lob_sample_secs"], "")
+        self.assertEqual(options["pm_book_sample_secs"], "")
         self.assertEqual(options["observation_sample_secs"], "")
         self.assertEqual(options["max_quote_age_secs"], "")
         self.assertEqual(options["replay_parity_run_id"], "26301157711")
@@ -87,6 +88,7 @@ class SettlementProbabilityPrdGateTests(unittest.TestCase):
         self.assertEqual(workflow, gate.RESEARCH_SNAPSHOT_WORKFLOW)
         options = json.loads(fields["options_json"])
         self.assertEqual(options["lob_sample_secs"], 30)
+        self.assertEqual(options["pm_book_sample_secs"], 30)
         self.assertEqual(options["observation_sample_secs"], 30)
         self.assertEqual(options["max_quote_age_secs"], 30)
 

@@ -28,10 +28,14 @@ trace, not dry-run promotion.
 - [x] Confirm hosted trace persistence succeeded from `main` run `26327836283`.
 - [x] Add read-only `research-trace-plan.yml` workflow.
 - [x] Validate workflow syntax, actionlint, and contract tests.
-- [ ] Merge workflow and dispatch it from `main`.
-- [ ] Verify `research-trace-plan.json` contains a valid next-plan theme.
+- [x] Merge workflow and dispatch it from `main`.
+- [x] Verify `research-trace-plan.json` contains a valid next-plan theme.
 - [x] Apply high-priority legacy cleanup: block chain dispatch, handoff issue,
       and config PR unless durable trace persistence succeeded.
+- [x] Apply PM book cadence compatibility gate so sampled PM full-book cadence
+      cannot be silently reused for full-depth execution claims.
+- [x] Trace-gate standalone AutoFactor promotion side effects so old/debug
+      artifacts can no longer create handoff issues or config PRs.
 - [ ] Apply remaining high-priority data/research cleanup based on audit results.
 
 ## Review
@@ -47,6 +51,35 @@ trace, not dry-run promotion.
   `persist_research_trace` succeeds. `chain_next_run`, `create_handoff_issue`,
   and `create_config_pr` fail closed without that marker, so artifact-only
   research can no longer mutate follow-up state outside durable trace lineage.
+- 2026-05-23: PR #605 merged to `main` as
+  `e5f472dc540722faaecb8eee68b3c312184a1696`. Research Trace Plan workflow
+  run `26328161347` succeeded after protected environment approval and uploaded
+  `research-trace-plan-26328161347`. The plan payload had
+  `schema_version=research_trace_plan.v1`, `theme=fix_data`,
+  `priority=high`, `candidate_count=0`, and actions
+  `repair_or_exclude_missing_data_surface` / `rerun_snapshot_data_audit`.
+- 2026-05-23: PM book cadence is now a first-class snapshot compatibility
+  field. `ResearchSnapshotRequest` carries `pm_book_sample_secs`; validation
+  rejects cadence mismatches and rejects PM book cadence coarser than
+  `max_quote_age_secs` for full-depth execution claims. Factor review,
+  walk-forward, hosted artifact workflows, legacy debug fallbacks, the
+  settlement PRD gate helper, and the sweep runner all thread
+  `pm_book_sample_secs` separately from Binance LOB cadence.
+- 2026-05-23: Standalone `autofactor-strategy-promotion.yml` side effects now
+  require uploaded `research-trace/persisted.env` plus snapshot provenance
+  (`snapshot-provenance/source.txt` and `manifest.json`) and reject
+  direct-DB/debug/self-hosted markers before creating handoff issues or config
+  PRs. The hosted walk-forward upload now includes the durable trace marker
+  when persistence succeeds.
+- 2026-05-23: Focused validation for the cadence/promotion cleanup passed:
+  YAML parse for touched workflows; `python3 -m unittest
+  tests.test_persist_research_trace_contract tests.test_factor_walk_forward_sweep
+  tests.test_settlement_probability_prd_gate`; `rtk cargo test --locked -p
+  ploy-research research_snapshot --lib`; `rtk cargo test --locked --test
+  workflow_security`; `rtk cargo check --locked -p ploy-research --features db
+  --example factor_review_v2 --example factor_walk_forward_v2`; and `rtk git
+  diff --check`. `actionlint` was not installed in this worktree/PATH, so it
+  was not run for this slice.
 
 # Runtime Candidate Replay Empty Override Repair (2026-05-23)
 
