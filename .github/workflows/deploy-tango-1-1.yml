@@ -673,8 +673,8 @@ jobs:
               "ploy-pm-trade-collector.service" \
               "Polymarket trade collector poll complete" \
               "pm trade collector did not complete a healthy poll after deploy" \
-              20 \
-              3
+              120 \
+              5
 
             if service_exists ployd.service; then
               assert_no_recent_logs \

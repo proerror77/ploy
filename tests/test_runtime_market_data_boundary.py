@@ -67,6 +67,7 @@ class RuntimeMarketDataBoundaryTests(unittest.TestCase):
         self.assertIn("MemoryMax=768M", service_text)
 
         workflow_text = workflow.read_text()
+        cloud_assist_text = (ROOT / "scripts" / "ci" / "deploy_tango_cloud_assist.py").read_text()
         self.assertIn("ploy-market-discovery.service", workflow_text)
         self.assertLess(
             workflow_text.index("systemctl restart ploy-market-discovery.service"),
@@ -78,6 +79,38 @@ class RuntimeMarketDataBoundaryTests(unittest.TestCase):
             workflow_text.index("systemctl restart ploy-pm-trade-collector.service"),
             "market discovery must refresh catalog before trade collector polls",
         )
+        for text, name in (
+            (workflow_text, "deploy-tango-1-1.yml"),
+            (cloud_assist_text, "deploy_tango_cloud_assist.py"),
+        ):
+            discovery_restart = text.index("systemctl restart ploy-market-discovery.service")
+            catalog_wait = text.index(
+                "pm_market_catalog has no active crypto markets after market-discovery restart"
+            )
+            metadata_wait = text.index(
+                "pm_market_metadata has no active crypto markets after market-discovery restart"
+            )
+            trade_restart = text.index("systemctl restart ploy-pm-trade-collector.service")
+            self.assertLess(
+                discovery_restart,
+                catalog_wait,
+                f"{name} must wait for catalog after market discovery restart",
+            )
+            self.assertLess(
+                catalog_wait,
+                trade_restart,
+                f"{name} must wait for catalog before trade collector restart",
+            )
+            self.assertLess(
+                discovery_restart,
+                metadata_wait,
+                f"{name} must wait for metadata after market discovery restart",
+            )
+            self.assertLess(
+                metadata_wait,
+                trade_restart,
+                f"{name} must wait for metadata before trade collector restart",
+            )
 
     def test_pm_trade_deploy_health_uses_collector_poll_not_fresh_insert(self) -> None:
         workflow = ROOT / ".github" / "workflows" / "deploy-tango-1-1.yml"
@@ -89,10 +122,24 @@ class RuntimeMarketDataBoundaryTests(unittest.TestCase):
             self.assertIn("Polymarket trade collector poll complete", text)
             self.assertIn("pm trade collector did not complete a healthy poll after deploy", text)
             self.assertIn("pm trade collector failed after deploy", text)
+            self.assertIn("120", text)
+            self.assertIn("5", text)
             if path.name == "deploy-tango-1-1.yml":
                 self.assertIn('local since="\\${DEPLOY_STARTED_AT}"', text)
+                self.assertIn(
+                    '"pm trade collector did not complete a healthy poll after deploy" \\\n'
+                    "              120 \\\n"
+                    "              5",
+                    text,
+                )
             else:
                 self.assertIn('local since="${{DEPLOY_STARTED_AT}}"', text)
+                self.assertIn(
+                    '"pm trade collector did not complete a healthy poll after deploy" \\\\\n'
+                    "  120 \\\\\n"
+                    "  5",
+                    text,
+                )
             self.assertNotIn(
                 "clob_trade_ticks WHERE received_at >= NOW() - INTERVAL '5 minutes'",
                 text,
