@@ -190,6 +190,7 @@ install -m 0755 ./bin/optimize-backtest "${{DEPLOY_ROOT}}/bin/optimize-backtest"
 install -m 0644 ./config/strategies/*.toml "${{DEPLOY_ROOT}}/config/strategies/"
 install -m 0644 ./config/deployments/*.json "${{DEPLOY_ROOT}}/config/deployments/"
 install -m 0755 ./scripts/*.py "${{DEPLOY_ROOT}}/scripts/"
+install -m 0755 ./scripts/*.sh "${{DEPLOY_ROOT}}/scripts/"
 install -m 0644 ./scripts/*.sql "${{DEPLOY_ROOT}}/scripts/"
 install -m 0755 ./scripts/drills/*.sh "${{DEPLOY_ROOT}}/scripts/drills/"
 for migration in ${{DEPLOY_MIGRATIONS}}; do
@@ -208,11 +209,17 @@ install -m 0644 ./deployment/systemd/ploy-market-discovery.service /etc/systemd/
 install -m 0644 ./deployment/systemd/ploy-pm-trade-collector.service /etc/systemd/system/ploy-pm-trade-collector.service
 install -m 0644 ./deployment/systemd/ploy-polymarket-v2-indexer-import.service /etc/systemd/system/ploy-polymarket-v2-indexer-import.service
 install -m 0644 ./deployment/systemd/ploy-polymarket-v2-indexer-import.timer /etc/systemd/system/ploy-polymarket-v2-indexer-import.timer
+install -m 0644 ./deployment/systemd/ploy-orderbook-snapshot-archive.service /etc/systemd/system/ploy-orderbook-snapshot-archive.service
+install -m 0644 ./deployment/systemd/ploy-orderbook-snapshot-archive.timer /etc/systemd/system/ploy-orderbook-snapshot-archive.timer
+install -m 0644 ./deployment/systemd/ploy-orderbook-snapshot-retention.service /etc/systemd/system/ploy-orderbook-snapshot-retention.service
+install -m 0644 ./deployment/systemd/ploy-orderbook-snapshot-retention.timer /etc/systemd/system/ploy-orderbook-snapshot-retention.timer
 install -m 0644 ./deployment/systemd/polymarket-v2-indexer.service /etc/systemd/system/polymarket-v2-indexer.service
 install -m 0644 ./deployment/env.polymarket-v2-indexer.example "${{DEPLOY_ROOT}}/env.polymarket-v2-indexer.example"
 install -m 0644 ./deployment/systemd/ploy-quote-collector.hardening.conf /etc/systemd/system/ploy-quote-collector.service.d/hardening.conf
 systemctl daemon-reload
 systemctl enable --now ploy-polymarket-v2-indexer-import.timer
+systemctl enable --now ploy-orderbook-snapshot-archive.timer
+systemctl enable --now ploy-orderbook-snapshot-retention.timer
 
 for migration in ${{DEPLOY_MIGRATIONS}}; do
   migration="$(printf '%s' "${{migration}}" | xargs)"
