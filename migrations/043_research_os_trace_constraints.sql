@@ -5,6 +5,68 @@ ALTER TABLE factor_registry
 
 DROP INDEX IF EXISTS idx_factor_registry_dsl_hash;
 
+-- Historical preview runs could insert competing rows before the durable
+-- identity became (dsl_hash, target, horizon). Keep the most promoted row, then
+-- the newest row, and repoint evaluations before enforcing the final key.
+DROP TABLE IF EXISTS tmp_factor_registry_dedup;
+
+CREATE TEMP TABLE tmp_factor_registry_dedup AS
+WITH ranked AS (
+    SELECT
+        factor_id,
+        first_value(factor_id) OVER (
+            PARTITION BY dsl_hash, target, horizon
+            ORDER BY
+                CASE status
+                    WHEN 'production' THEN 0
+                    WHEN 'approved' THEN 1
+                    WHEN 'dry_run' THEN 2
+                    WHEN 'candidate' THEN 3
+                    WHEN 'evaluated' THEN 4
+                    WHEN 'compiled' THEN 5
+                    WHEN 'draft' THEN 6
+                    WHEN 'deprecated' THEN 7
+                    ELSE 8
+                END,
+                created_at DESC,
+                factor_id
+        ) AS survivor_factor_id,
+        row_number() OVER (
+            PARTITION BY dsl_hash, target, horizon
+            ORDER BY
+                CASE status
+                    WHEN 'production' THEN 0
+                    WHEN 'approved' THEN 1
+                    WHEN 'dry_run' THEN 2
+                    WHEN 'candidate' THEN 3
+                    WHEN 'evaluated' THEN 4
+                    WHEN 'compiled' THEN 5
+                    WHEN 'draft' THEN 6
+                    WHEN 'deprecated' THEN 7
+                    ELSE 8
+                END,
+                created_at DESC,
+                factor_id
+        ) AS row_num
+    FROM factor_registry
+)
+SELECT
+    factor_id AS duplicate_factor_id,
+    survivor_factor_id
+FROM ranked
+WHERE row_num > 1;
+
+UPDATE factor_evaluations
+SET factor_id = tmp_factor_registry_dedup.survivor_factor_id
+FROM tmp_factor_registry_dedup
+WHERE factor_evaluations.factor_id = tmp_factor_registry_dedup.duplicate_factor_id;
+
+DELETE FROM factor_registry
+USING tmp_factor_registry_dedup
+WHERE factor_registry.factor_id = tmp_factor_registry_dedup.duplicate_factor_id;
+
+DROP TABLE tmp_factor_registry_dedup;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_factor_registry_dsl_target_horizon
     ON factor_registry(dsl_hash, target, horizon);
 

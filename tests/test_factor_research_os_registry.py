@@ -34,6 +34,9 @@ class FactorResearchOsRegistryMigrationTest(unittest.TestCase):
             r"status TEXT NOT NULL CHECK .*draft.*compiled.*evaluated.*candidate.*dry_run.*approved.*production.*deprecated",
         )
         self.assertIn("dsl_hash TEXT NOT NULL", sql)
+        self.assertNotIn("idx_factor_registry_dsl_hash", MIGRATION_042.read_text(encoding="utf-8"))
+        self.assertIn("tmp_factor_registry_dedup", sql)
+        self.assertIn("UPDATE factor_evaluations", sql)
         self.assertIn("idx_factor_registry_dsl_target_horizon", sql)
         self.assertIn("ON factor_registry(dsl_hash, target, horizon)", sql)
         self.assertIn("ast_json JSONB NOT NULL", sql)

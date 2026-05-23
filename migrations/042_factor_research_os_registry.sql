@@ -20,8 +20,8 @@ CREATE TABLE IF NOT EXISTS factor_registry (
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_factor_registry_dsl_hash
-    ON factor_registry(dsl_hash);
+-- A DSL hash can be reused across distinct targets or horizons. Migration 043
+-- owns the durable uniqueness contract after cleaning historical duplicates.
 CREATE INDEX IF NOT EXISTS idx_factor_registry_status_family
     ON factor_registry(status, factor_family, created_at DESC);
 

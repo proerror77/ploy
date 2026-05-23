@@ -18899,6 +18899,45 @@ Evidence stage: `walk_forward / runtime_parity`.
   `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py tests/test_alpha_search_closed_loop_agent.py`,
   and `ruby -e 'require "yaml"; YAML.load_file(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml"); puts "ok"'`.
 
+# Factor Registry Migration Dedup (2026-05-23)
+
+## Goal
+
+Unblock `deploy-tango-1-1` after Research Manager blocker classification landed
+by making the durable factor registry migrations compatible with historical
+duplicate `dsl_hash` rows.
+
+Evidence stage: `infrastructure/runtime planning repair`; no strategy promotion
+or dry-run readiness is implied.
+
+## Files / Ownership
+
+- `migrations/042_factor_research_os_registry.sql`
+  - Owner: base table creation without invalid `dsl_hash`-only uniqueness.
+- `migrations/043_research_os_trace_constraints.sql`
+  - Owner: historical duplicate consolidation and durable
+    `(dsl_hash, target, horizon)` uniqueness.
+- `tests/test_factor_research_os_registry.py`
+  - Owner: static regression coverage for migration contract.
+- `tasks/todo.md`
+  - Owner: current session tracking.
+
+## Tasks
+
+- [x] Remove the obsolete `dsl_hash`-only unique index from migration 042.
+- [x] Add migration 043 deduplication before creating the composite unique
+      index.
+- [x] Run focused migration/static tests.
+- [ ] Commit, push, open PR, wait for CI, merge, and redeploy main.
+- [ ] Re-run Research Trace Plan after the fixed binary reaches tango-1-1.
+
+## Review
+
+- 2026-05-23: Validation passed:
+  `python3 -m unittest tests.test_factor_research_os_registry tests.test_persist_research_trace_contract`,
+  `python3 -m py_compile tests/test_factor_research_os_registry.py`, and
+  `rtk git diff --check`.
+
 # Runtime Replay Request Candidate Selection (2026-05-20)
 
 ## Goal
