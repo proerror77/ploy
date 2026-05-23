@@ -3,104 +3,155 @@
 ## Scope
 
 This review covers the PM5D / AutoFactor research chain after the Research OS
-trace migration:
+trace migration and the first legacy workflow cutover:
 
 1. Raw source surfaces.
-2. Sampled research snapshots.
+2. Complete sampled research snapshots.
 3. Alpha-search / factor attribution.
 4. Candidate replay and runtime parity.
 5. Durable Research OS trace and Research Manager planning.
 
 It does not approve dry-run or live promotion. The current reviewed stage is
-`factor_attribution` plus research infrastructure.
+`factor_attribution` / `walk_forward` infrastructure, with candidate replay
+reserved for `executable_replay` evidence.
 
 ## Current Shape
 
 | Layer | Current state | Review |
 | --- | --- | --- |
 | Raw source surfaces | Tango PostgreSQL plus cold lake paths for CLOB/orderbook data | Exists, but not all research runners consume raw/full-resolution surfaces directly |
-| Research snapshot | `research_snapshot_compile` emits immutable sampled artifacts with source-surface metadata and canonical `gate_category` values | Canonical factor-search input; not full-resolution replay evidence |
-| Alpha-search | Hosted artifact walk-forward emits registry previews, MCTS tree, search feedback, promotion/handoff artifacts | Usable for factor discovery and attribution |
-| Durable trace | `persist_research_trace` writes snapshot/search artifacts into Research OS tables | Queryable foundation now exists, gated behind explicit workflow option |
-| Research Manager | `research_trace_plan` can read durable DB trace and emit next-plan JSON | Planning surface exists; not yet wired to issue creation or scheduled research |
-| Legacy paths | `factor-review-v2.yml` / `factor-walk-forward-v2.yml` still exist as compatibility routers | Direct `ploy-ci-1` DB branches are debug-only and blocked by default |
+| Research snapshot | `research_snapshot_compile` emits immutable complete sampled artifacts with source-surface metadata and canonical `gate_category` values | Canonical factor-search input; not full-resolution execution replay evidence |
+| Alpha-search | Hosted artifact walk-forward emits registry previews, typed runtime contracts, MCTS tree, search feedback, promotion/handoff artifacts | Usable for factor discovery and attribution |
+| Candidate replay | `candidate_replay_tapes` exists and `persist_research_trace` can link replay artifacts to factor evaluations | Durable replay identity now exists; true runtime replay evidence must still be supplied per candidate |
+| Durable trace | Hosted walk-forward defaults to trace persistence and writes Research OS rows when DB secrets and deployed binaries are available | Queryable foundation exists; current post-PR #615 deploy/run verification is pending |
+| Research Manager | `research_trace_plan` can read durable DB trace and emit next-plan JSON | Planning surface exists; not yet wired to automatic issue creation or workflow dispatch |
+| Legacy research paths | Factor routers and Event ML rolling evidence are artifact-backed only | Former direct `ploy-ci-1` DB execution/export branches have been removed from the active research chain |
+| Diagnostic backtest | `backtest.yml` now emits `evidence-stage` artifacts with `promotion_ready=false` | Useful diagnostic replay/backtest surface; not promotion evidence |
 
-## Main Problems
+## Fixed In This Migration
 
-1. **Candidate replay is still not a first-class durable data product.**
+1. **Backtest evidence can no longer imply promotion.**
 
-   `factor_evaluations.candidate_replay_id` now reserves the boundary, but
-   there is not yet a `candidate_replay_tapes` table or writer. A sampled
-   research snapshot can support factor attribution, but executable claims still
-   need a concrete replay tape with exact `MarketUpdate` sequence, scorer input,
-   executable price, fillability, and event-level accounting.
+   `backtest.yml` publishes an explicit `diagnostic` evidence-stage contract,
+   labels issues with `evidence:diagnostic`, and forces
+   `promotion_ready=false` even if an underlying artifact claims otherwise.
 
-2. **Trace persistence is available but not yet exercised on real production
-   evidence.**
+2. **Factor review is explicitly attribution-only.**
 
-   Hosted walk-forward can persist when
-   `options_json.persist_research_trace=true` and a protected DB secret exists.
-   Until migration 043 is deployed and one real run persists rows, Research
-   Manager planning from DB remains locally verified code rather than observed
-   production behavior.
+   `factor-review-v2-hosted-artifact.yml` publishes machine-readable
+   `factor_attribution` stage artifacts and blocks `dry_run_candidate` /
+   `live_candidate` as next stages.
 
-3. **Raw full-depth CLOB and sampled snapshot semantics are now explicit, but
-   still easy to misuse in downstream reports.**
+3. **Candidate replay is a durable trace object.**
 
-   The manifest records `gate_category`, `raw_full_fidelity`, and
-   `snapshot_sampled`, and the runbook says sampled snapshot is not full data.
-   `research_trace_plan` derives promotion blockers from required execution
-   surfaces that are missing, unmaterialized, or only sampled. Any future report
-   that uses full-depth execution language must cite candidate replay or
-   full-depth lake evidence, not only snapshot rows.
+   Migration `044_candidate_replay_tapes.sql`, the Research OS registry types,
+   and `persist_research_trace` now persist candidate replay identity,
+   provenance, evidence stage, runtime score, strategy profile, metrics,
+   blockers, and links to `factor_evaluations`.
 
-4. **DuckDB is not the canonical stable data layer.**
+4. **AutoFactor side effects require durable trace provenance.**
 
-   The stable source of truth remains PostgreSQL plus retained artifacts/lake
-   files. DuckDB can still be useful as a local query engine over Parquet, but
-   it should not become the durable registry or promotion state. Research OS
-   state belongs in PostgreSQL tables; heavy analytical scans should use
-   immutable Parquet/ZSTD snapshots or lake files.
+   Promotion side effects now require the persisted trace marker plus snapshot
+   provenance and reject direct-DB/debug/self-hosted source markers before
+   handoff issue or config PR creation.
 
-5. **Research Manager is not yet closed-loop automation.**
+5. **Legacy factor direct-DB branches are removed.**
 
-   `research_trace_plan` produces a typed plan from DB trace. It does not yet
-   create GitHub issues, dispatch next hosted runs, or write typed priors back
-   into the alpha-search chain.
+   `factor-review-v2.yml` and `factor-walk-forward-v2.yml` no longer build or
+   run `ploy-research` on `ploy-ci-1`. They route snapshot-backed requests to
+   the GitHub-hosted artifact workflows and fail closed when `snapshot_run_id`
+   is missing.
 
-6. **Legacy diagnostic backtest remains separate from Research OS trace.**
+6. **Legacy Event ML direct-DB export is removed.**
 
-   `backtest.yml` is explicitly non-promotion evidence and still uses legacy
-   quote-tick Parquet semantics. It should not feed promotion unless replay,
-   runtime scorer parity, and full-depth fillability evidence are attached.
+   `event-ml-rolling-evidence.yml` no longer builds the database-backed
+   `factor_research` exporter or runs on `ploy-ci-1`. It requires an existing
+   event-root dataset artifact via `source_dataset_run_id` and fails closed when
+   that artifact provenance is missing.
+
+## Remaining Problems
+
+1. **The post-PR #615 deploy has not completed yet.**
+
+   The required Tango deploy run is still waiting on the protected environment.
+   Until it succeeds, migration `044_candidate_replay_tapes.sql` and the
+   deployed `persist-research-trace` / `research-trace-plan` binaries are not
+   verified for the current `main` SHA.
+
+2. **Trace-backed research has not been rerun from current `main`.**
+
+   Earlier trace persistence was observed, but after the latest evidence-stage
+   and replay provenance changes, the chain still needs a fresh hosted
+   walk-forward run from `main` and a fresh Research Manager plan over the
+   resulting DB trace.
+
+3. **Research Manager is not closed-loop automation.**
+
+   `research_trace_plan` produces a typed plan from DB trace, but it does not
+   yet create GitHub issues, dispatch the next hosted run, or write typed priors
+   back into the alpha-search chain.
+
+4. **Feature snapshots are still sampled research products, not full execution
+   tapes.**
+
+   Snapshot manifests carry source surfaces, cadence, `raw_full_fidelity`,
+   `snapshot_sampled`, and `gate_category`, but the hard boundary still needs
+   to be enforced at every promotion/handoff consumer. Full-depth execution
+   claims must cite candidate replay or full-depth lake evidence, not only
+   sampled snapshot rows.
+
+5. **Runtime input canonicalization remains incomplete.**
+
+   Factor registry contracts now carry typed runtime metadata, but research and
+   runtime still need a single canonical input gate for feature names, horizons,
+   LOB surfaces, blocker semantics, and strategy profile/family mapping.
+
+6. **Multi-horizon label/accounting is not a single hard gate yet.**
+
+   Reports compute event-level fields such as unique event count and max event
+   decisions, but the final persisted approval layer still needs to enforce the
+   one-event-one-decision accounting contract across 30s / 60s / 5m / 15m
+   horizons.
+
+7. **DuckDB should remain a query accelerator, not durable state.**
+
+   Durable research registry, promotion decisions, replay tape identity, and
+   experiment trace belong in PostgreSQL plus immutable artifacts/lake files.
+   DuckDB can be used for local Parquet scans, but not as the authoritative
+   strategy discovery state layer.
 
 ## Required Next Work
 
 | Priority | Work | Done when |
 | --- | --- | --- |
-| P0 | Deploy migration 043 and install `persist-research-trace` / `research-trace-plan` on Tango | `deploy-tango-1-1.yml` succeeds from `main`, remote binaries exist, migration is applied |
-| P0 | Run one hosted walk-forward with `persist_research_trace=true` | DB contains rows for the run in all four Research OS tables |
-| P0 | Run `research-trace-plan` against the DB trace | Plan JSON references latest trace rows and returns `continue_search`, `revise_prior`, `fix_data`, or `fix_runtime` |
-| P1 | Add `candidate_replay_tapes` durable schema and writer | Replay tape identity is separate from sampled snapshot identity and links to `factor_evaluations.candidate_replay_id` |
-| P1 | Wire Research Manager plan to issue/dispatch automation | A durable trace can trigger the next bounded hosted research run without manual artifact reading |
-| P1 | Move remaining diagnostic-only reports behind explicit evidence-stage labels | No artifact can imply dry-run/live readiness without parity gates |
+| P0 | Approve/complete `deploy-tango-1-1.yml` run `26330884546` from `main` | Workflow succeeds for SHA `c2e4fde4c74b44d7e03a49d99142cbb702560122` |
+| P0 | Verify current Tango research deployment | Migration `044_candidate_replay_tapes.sql` is applied and `/opt/ploy/bin/persist-research-trace` / `/opt/ploy/bin/research-trace-plan` are executable |
+| P0 | Run one hosted walk-forward from current `main` with default trace persistence | DB contains current-run rows across Research OS trace tables |
+| P0 | Run `research-trace-plan.yml` against the fresh trace | Plan JSON references latest trace rows and returns `continue_search`, `revise_prior`, `fix_data`, `fix_runtime`, or `fix_workflow` |
+| P1 | Add Research Manager action executor | Plan output can open/link issues and dispatch bounded hosted research reruns without manual artifact reading |
+| P1 | Add runtime input canonicalization gate | Unsupported or mismatched research/runtime feature inputs fail closed before promotion/replay |
+| P1 | Harden feature snapshot contract at consumers | Sampled snapshots cannot be consumed as full-depth execution evidence |
+| P1 | Enforce multi-horizon accounting at persisted approval layer | Multi-decision or horizon-mixed artifacts are blocked before handoff |
 
-## Review Verdict
+## Verdict
 
-The architecture is now moving in the right direction: raw data, sampled
-research snapshots, alpha-search artifacts, durable trace, and planning are
-separated. The system is not yet a fully automatic research/backtest/strategy
-discovery loop because the durable trace has not been production-exercised and
-candidate replay is still not a first-class persisted layer.
+The architecture is now much cleaner than the mixed state: snapshot artifacts,
+factor attribution, durable trace, candidate replay, and diagnostic backtest
+have separate evidence stages and the old direct-DB factor execution branch has
+been cut out of the active workflows.
 
-The next concrete milestone is one end-to-end run:
+The research chain is not fully restored until the current deploy completes and
+one fresh `main` run proves this sequence:
 
 ```text
 research-snapshot.yml
-  -> factor-walk-forward-v2-hosted-artifact.yml with persist_research_trace=true
-  -> research-trace-plan
-  -> next alpha-search issue/run
+  -> factor-walk-forward-v2-hosted-artifact.yml
+  -> persist Research OS trace
+  -> research-trace-plan.yml
+  -> next bounded research issue/run
 ```
 
-Only after that loop is observed should we claim the research chain has been
-restored.
+Only after that observed loop should the system be described as automatic
+research/backtest/strategy discovery. Today it is a mostly separated research
+architecture with the final deploy, rerun, and closed-loop automation still
+pending.

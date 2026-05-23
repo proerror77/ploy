@@ -289,9 +289,9 @@ does not change execution/risk settings, and does not enable live trading.
 If the handoff is blocked or the config already uses the selected score, no PR
 is created.
 
-When the missing piece is a fresh Factor Walk-Forward V2 report and a full
-research snapshot artifact already exists, use the GitHub-hosted artifact-only
-workflow instead of `ploy-ci-1`:
+When the missing piece is a fresh Factor Walk-Forward V2 report and a complete
+sampled research snapshot artifact already exists, use the GitHub-hosted
+artifact-only workflow:
 
 ```bash
 gh workflow run factor-walk-forward-v2-hosted-artifact.yml \
@@ -312,12 +312,11 @@ artifact only has provenance files and is missing the complete sampled payload
 required by `load_research_snapshot`: observations, Deribit rows, and
 Polymarket full-book rows.
 
-The legacy `factor-walk-forward-v2.yml` entrypoint now follows the same rule:
-when `snapshot_run_id` is supplied it does not run the self-hosted job, and
-instead dispatches `factor-walk-forward-v2-hosted-artifact.yml` from
-`ubuntu-latest`. The self-hosted `ploy-ci-1` branch remains only for fresh
-DB/private-network snapshot compilation when no complete sampled snapshot
-artifact exists.
+The `factor-walk-forward-v2.yml` entrypoint now follows the same rule: when
+`snapshot_run_id` is supplied it dispatches
+`factor-walk-forward-v2-hosted-artifact.yml` from `ubuntu-latest`. Requests
+without `snapshot_run_id` fail closed instead of falling back to direct DB
+execution.
 `factor-review-v2.yml` has the same routing behavior for snapshot-backed factor
 diagnostics.
 
@@ -462,33 +461,31 @@ than that are skipped and recorded in `rolling_datasets_report.json`.
 
 ## GitHub Rolling Evidence Workflow
 
-For real remote data, prefer the manual GitHub workflow instead of running
-database-backed research on a local machine:
+For real remote data, use the manual GitHub workflow only after the source
+event-root dataset has already been artifactized:
 
 ```bash
 gh workflow run event-ml-rolling-evidence.yml \
   -f git_ref=main \
+  -f source_dataset_run_id=<run-id-with-event-ml-rolling-datasets-artifact> \
   -f start_date=2026-04-24 \
   -f end_date=2026-04-25 \
   -f symbols=BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,BNBUSDT,XRPUSDT \
-  -f source_windows=450 \
   -f child_window_events=150 \
   -f run_workflow=true
 ```
 
-The workflow builds the required Rust examples on a GitHub-hosted Ubuntu
-runner first, uploads those binaries as an artifact, then chooses one of two
-execution paths:
+The workflow is artifact-backed only. It builds the required Rust examples on a
+GitHub-hosted Ubuntu runner, downloads the existing
+`event-ml-rolling-datasets-<run-id>` artifact, and runs the split plus
+canonical rolling ML workflow entirely on `ubuntu-latest`. If
+`source_dataset_run_id` is empty, the workflow fails closed; the former
+`ploy-ci-1` direct-DB export branch is no longer part of the active research
+chain.
 
-- if `source_dataset_run_id` is set, it downloads the existing
-  `event-ml-rolling-datasets-<run-id>` artifact and runs the split plus
-  canonical rolling ML workflow entirely on `ubuntu-latest`;
-- if `source_dataset_run_id` is empty, it uses the legacy DB-adjacent
-  `ploy-ci-1` phase only to export the source event-root dataset from the
-  private research database.
+Prefer the hosted artifact path for every Event ML rolling evidence run.
 
-Prefer the hosted artifact path whenever a retained dataset artifact is
-available:
+Use a retained dataset artifact directly:
 
 ```bash
 gh workflow run event-ml-rolling-evidence.yml \
@@ -532,30 +529,21 @@ gh workflow run event-ml-rolling-evidence.yml \
 ```
 
 `create_config_pr=true` is supported only on the GitHub-hosted artifact branch.
-The legacy `ploy-ci-1` branch may still export fresh private-DB datasets, but it
-will not open config PRs. The generated PR updates only
+The generated PR updates only
 `three_layer_autofactor_runtime_score` and `three_layer_event_ml_model_path` in
 the dry-run strategy config; it does not deploy and does not enable live
 trading. The config step fails closed unless the handoff is `ready`, replay
 parity is marked ready, the runtime score starts with `event_ml_model:`, and
 `model_artifact_path` is supplied.
 
-The legacy self-hosted phase performs:
-
-1. `factor_research --export-event-dataset`
-2. `event_dataset_rolling_windows`
-3. `event_ml_rolling_workflow`
-
 `event_ml_rolling_workflow` also expects the sibling `event_ml_workflow`
 binary to be present next to it in the downloaded artifact, so rolling windows
-do not spawn nested Cargo builds on either `ploy-ci-1` or GitHub-hosted
-runners.
+do not spawn nested Cargo builds on GitHub-hosted runners.
 
 It uploads a compact report artifact by default and deliberately avoids
-uploading raw Parquet datasets unless `upload_parquet_datasets=true` is passed.
-Keep the default `source_windows=450` / `child_window_events=150` shape for the
-first full run because it should produce three distinct child datasets while
-keeping each child comfortably above the 134-event split-policy floor.
+uploading raw Parquet datasets. Keep `child_window_events=150` for the first
+full run because it should keep each child comfortably above the 134-event
+split-policy floor.
 
 ## Phase 1 - Coverage Diagnostics
 

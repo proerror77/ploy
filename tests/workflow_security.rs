@@ -176,7 +176,9 @@ fn event_ml_rolling_evidence_has_hosted_artifact_lane() {
         "create_handoff_issue",
         "create_config_pr",
         "model_artifact_path",
-        "Skip config PR on legacy DB branch",
+        "Reject missing event-root dataset artifact",
+        "artifact-backed only",
+        "direct DB export is no longer available",
         "Create config PR from ready Event ML handoff",
         "issues: write",
         "pull-requests: write",
@@ -187,13 +189,19 @@ fn event_ml_rolling_evidence_has_hosted_artifact_lane() {
         }
     }
 
-    if !workflow.contains("github.event.inputs.source_dataset_run_id == ''")
-        || !workflow.contains("Generate event ML rolling evidence from DB on ploy-ci-1")
-    {
-        offenders.push(
-            "event-ml-rolling-evidence.yml: legacy DB export must be explicitly isolated"
-                .to_string(),
-        );
+    for forbidden in [
+        "Generate event ML rolling evidence from DB on ploy-ci-1",
+        "runs-on: [self-hosted, ploy-ci-1]",
+        "postgresql://postgres:postgres",
+        "--db-url",
+        "factor_research",
+        "Skip config PR on legacy DB branch",
+    ] {
+        if workflow.contains(forbidden) {
+            offenders.push(format!(
+                "event-ml-rolling-evidence.yml: legacy DB path still contains `{forbidden}`"
+            ));
+        }
     }
 
     for needle in [
@@ -205,6 +213,8 @@ fn event_ml_rolling_evidence_has_hosted_artifact_lane() {
         "create_config_pr",
         "model_artifact_path",
         "workflow stays within GitHub's 10-input dispatch limit",
+        "artifact-backed only",
+        "source_dataset_run_id",
     ] {
         if !runbook.contains(needle) {
             offenders.push(format!("event-ml-automl-workflow.md: missing `{needle}`"));
@@ -472,37 +482,31 @@ fn hosted_factor_walk_forward_uploads_alpha_chain_summary() {
 #[test]
 fn factor_walk_forward_wires_alpha_prior_and_state_inputs() {
     let hosted = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
-    let self_hosted = workflow_contents(".github/workflows/factor-walk-forward-v2.yml");
+    let router = workflow_contents(".github/workflows/factor-walk-forward-v2.yml");
     let mut offenders = Vec::new();
 
-    for (name, workflow) in [
-        (
-            "factor-walk-forward-v2-hosted-artifact.yml",
-            hosted.as_str(),
-        ),
-        ("factor-walk-forward-v2.yml", self_hosted.as_str()),
+    for needle in [
+        "alpha_search_llm_prior_json",
+        "alpha_search_state_json",
+        "require_deribit",
+        "pm_book_sample_secs",
+        "train_window_hours",
+        "test_window_hours",
+        "step_hours",
+        "mcts-state.json",
+        "--alpha-search-state-json",
+        "--alpha-search-llm-prior-json",
+        "--require-deribit",
+        "--pm-book-sample-secs",
     ] {
-        for needle in [
-            "alpha_search_llm_prior_json",
-            "alpha_search_state_json",
-            "require_deribit",
-            "pm_book_sample_secs",
-            "train_window_hours",
-            "test_window_hours",
-            "step_hours",
-            "mcts-state.json",
-            "--alpha-search-state-json",
-            "--alpha-search-llm-prior-json",
-            "--require-deribit",
-            "--pm-book-sample-secs",
-        ] {
-            if !workflow.contains(needle) {
-                offenders.push(format!("{name}: missing `{needle}`"));
-            }
+        if !hosted.contains(needle) {
+            offenders.push(format!(
+                "factor-walk-forward-v2-hosted-artifact.yml: missing `{needle}`"
+            ));
         }
     }
 
-    let route_allowlist = self_hosted
+    let route_allowlist = router
         .split("allowed = {")
         .nth(1)
         .and_then(|tail| tail.split("raw = os.environ").next())
@@ -654,7 +658,12 @@ fn factor_research_workflows_thread_pm_book_sample_cadence() {
         ),
         ("factor-review-v2.yml", review_router.as_str()),
     ] {
-        for needle in ["pm_book_sample_secs", "--pm-book-sample-secs"] {
+        let needles: &[&str] = if name.ends_with("-hosted-artifact.yml") {
+            &["pm_book_sample_secs", "--pm-book-sample-secs"]
+        } else {
+            &["pm_book_sample_secs"]
+        };
+        for needle in needles {
             if !content.contains(needle) {
                 offenders.push(format!("{name}: missing `{needle}`"));
             }
@@ -793,11 +802,11 @@ fn research_issue_workflows_apply_decision_labels() {
             "evidence:parity",
         ),
         (
-            ".github/workflows/factor-review-v2.yml",
+            ".github/workflows/factor-review-v2-hosted-artifact.yml",
             "evidence:factor-review",
         ),
         (
-            ".github/workflows/factor-walk-forward-v2.yml",
+            ".github/workflows/factor-walk-forward-v2-hosted-artifact.yml",
             "evidence:walk-forward",
         ),
         (".github/workflows/optimize.yml", "evidence:optimize"),
@@ -823,24 +832,29 @@ fn research_issue_workflows_apply_decision_labels() {
 #[test]
 fn factor_review_comments_are_factor_attribution_not_deployable_candidates() {
     let hosted = workflow_contents(".github/workflows/factor-review-v2-hosted-artifact.yml");
-    let legacy = workflow_contents(".github/workflows/factor-review-v2.yml");
+    let router = workflow_contents(".github/workflows/factor-review-v2.yml");
     let mut offenders = Vec::new();
 
+    for needle in [
+        "const evidenceStage = \"factor_attribution\"",
+        "- Evidence stage:",
+        "continue-to-walk-forward",
+        "continue-diagnostic-only",
+        "\"evidence:factor-attribution\"",
+    ] {
+        if !hosted.contains(needle) {
+            offenders.push(format!("factor-review-v2-hosted-artifact.yml: missing `{needle}`"));
+        }
+    }
+    if !router.contains("snapshot-backed router only")
+        || !router.contains("factor-review-v2-hosted-artifact.yml")
+    {
+        offenders.push("factor-review-v2.yml: router no longer points only at hosted evidence".to_string());
+    }
     for (name, content) in [
         ("factor-review-v2-hosted-artifact.yml", hosted.as_str()),
-        ("factor-review-v2.yml", legacy.as_str()),
+        ("factor-review-v2.yml", router.as_str()),
     ] {
-        for needle in [
-            "const evidenceStage = \"factor_attribution\"",
-            "- Evidence stage:",
-            "continue-to-walk-forward",
-            "continue-diagnostic-only",
-            "\"evidence:factor-attribution\"",
-        ] {
-            if !content.contains(needle) {
-                offenders.push(format!("{name}: missing `{needle}`"));
-            }
-        }
         for forbidden in [
             "candidate-for-oos-replay-gate",
             "no-deploy-factor-review-only",
@@ -1103,18 +1117,6 @@ fn research_workflows_require_private_tango_db_endpoint() {
     }
     if !backtest.contains("urlparse(os.environ[\"PLOY_RESEARCH_DATABASE_URL\"]).hostname") {
         offenders.push("backtest.yml: must parse the research DB URL host before use".to_string());
-    }
-
-    let factor_review = workflow_contents(".github/workflows/factor-review-v2.yml");
-    if !factor_review
-        .contains("PLOY_DB_URL must target Tango-1-1 private VPC endpoint 172.16.0.204")
-    {
-        offenders.push("factor-review-v2.yml: missing private Tango DB endpoint guard".to_string());
-    }
-    if !factor_review.contains("urlparse(os.environ[\"PLOY_DB_URL\"]).hostname") {
-        offenders.push(
-            "factor-review-v2.yml: must parse the research DB URL host before use".to_string(),
-        );
     }
 
     assert!(
