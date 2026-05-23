@@ -160,6 +160,13 @@ PR must first write the durable trace marker for the same run. Artifact-only
 runs may still produce reports, summaries, and issue comments, but they cannot
 advance the closed loop.
 
+AutoFactor handoff side effects must also pass
+`scripts/validate_autofactor_handoff_replay_gate.py`. A handoff is not allowed
+to open a dry-run issue, create a config PR, or satisfy the settlement PRD gate
+unless its embedded candidate replay is a ready
+`runtime_market_update_replay` from `runtime-candidate-replay.yml` and every
+selected strategy runtime score matches that replay tape.
+
 Use `research_trace_plan` after durable rows exist to generate the next
 Research Manager plan from DB trace:
 

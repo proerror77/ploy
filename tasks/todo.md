@@ -62,8 +62,11 @@ trace, not dry-run promotion.
       missing, blocked, or semantically mismatched runtime inputs.
 - [x] Apply feature snapshot hard gates so sampled required-for-execution
       surfaces cannot suppress full-depth executable blockers.
+- [x] Apply side-effect replay validator so ready AutoFactor handoffs cannot
+      create dry-run issues/config PRs or satisfy the PRD gate without runtime
+      replay evidence.
 - [ ] Apply remaining high-priority data/research cleanup based on audit
-      results: multi-horizon accounting gates and side-effect replay validators.
+      results: multi-horizon accounting gates.
 
 ## Review
 
@@ -166,6 +169,11 @@ trace, not dry-run promotion.
   promotion now pass `manifest.json`; sampled `required_for_execution` surfaces
   add blocking risk flags and prevent top-bucket sampled fillability from
   suppressing global full-depth fillability blockers.
+- 2026-05-23: Added an AutoFactor handoff replay validator and wired it into
+  hosted/standalone handoff side effects plus the settlement PRD gate helper.
+  A ready handoff must now embed a ready `runtime_market_update_replay` from
+  `runtime-candidate-replay.yml` with matching selected strategy runtime score
+  before it can create dry-run follow-up state.
 
 # Candidate Replay Durable Trace (2026-05-23)
 

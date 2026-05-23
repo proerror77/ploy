@@ -52,8 +52,9 @@ reserved for `executable_replay` evidence.
 4. **AutoFactor side effects require durable trace provenance.**
 
    Promotion side effects now require the persisted trace marker plus snapshot
-   provenance and reject direct-DB/debug/self-hosted source markers before
-   handoff issue or config PR creation.
+   provenance, reject direct-DB/debug/self-hosted source markers, and validate
+   that the ready handoff embeds a runtime candidate replay tape before handoff
+   issue or config PR creation.
 
 5. **Legacy factor direct-DB branches are removed.**
 

@@ -10,6 +10,37 @@ from scripts import run_settlement_probability_prd_gate as gate
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "settlement-probability-prd-gate.yml"
 
+READY_REPORT = """=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=true stake_usd=15.00 min_entry_fill_rate=0.3000 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=100 event_complete_rows=200 replay_parity_ready=true
+gate,passed,evidence
+data_quality,true,mode=event_complete
+recorded_replay_parity,true,blocking_flags=<none>
+"""
+
+
+def ready_handoff() -> dict:
+    runtime_score = "autofactor_formula:auto_settlement_conservative_settlement_edge"
+    return {
+        "status": "ready",
+        "candidate_strategy_replay": {
+            "ready": True,
+            "basis": "runtime_market_update_replay",
+            "source_workflow": "runtime-candidate-replay.yml",
+            "workflow_run_id": "26306734877",
+            "workflow_run_url": "https://github.com/proerror77/ploy/actions/runs/26306734877",
+            "artifact_name": "runtime-candidate-replay-26306734877",
+            "candidate_replay_id": "candidate_replay:0123456789abcdef0123456789abcdef",
+            "runtime_score": runtime_score,
+            "decision_contract": {
+                "event_level": True,
+                "one_decision_per_event": True,
+                "official_settlement": True,
+                "full_depth_entry": True,
+            },
+        },
+        "strategies": [{"runtime_score": runtime_score}],
+    }
+
 
 class SettlementProbabilityPrdGateTests(unittest.TestCase):
     def run_main(self, argv, *, dispatch):
@@ -129,6 +160,48 @@ class SettlementProbabilityPrdGateTests(unittest.TestCase):
         self.assertIn("missing-required-snapshot", workflow)
         self.assertNotIn("legacy-build", workflow)
         self.assertNotIn("--allow-legacy-snapshot-build", workflow)
+
+    def test_download_gate_requires_runtime_replay_handoff(self):
+        def fake_download(args, *, dry_run=False):
+            output_dir = Path(args[args.index("--dir") + 1])
+            artifact = output_dir / "factor-walk-forward-v2"
+            artifact.mkdir(parents=True)
+            (artifact / "report.txt").write_text(READY_REPORT, encoding="utf-8")
+            handoff = ready_handoff()
+            handoff["candidate_strategy_replay"]["basis"] = "factor_walk_forward_top_bucket_aggregate"
+            (artifact / "autofactor-strategy-handoff.json").write_text(
+                json.dumps(handoff, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            return ""
+
+        with mock.patch.object(gate, "run_command", side_effect=fake_download):
+            result = gate.download_and_evaluate_promotion_gate(12345)
+
+        self.assertFalse(result.ready)
+        self.assertIn(
+            "handoff_replay_gate:candidate_strategy_replay_not_runtime_replay:"
+            "factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
+            result.blocked_gates,
+        )
+
+    def test_download_gate_accepts_runtime_replay_handoff(self):
+        def fake_download(args, *, dry_run=False):
+            output_dir = Path(args[args.index("--dir") + 1])
+            artifact = output_dir / "factor-walk-forward-v2"
+            artifact.mkdir(parents=True)
+            (artifact / "report.txt").write_text(READY_REPORT, encoding="utf-8")
+            (artifact / "autofactor-strategy-handoff.json").write_text(
+                json.dumps(ready_handoff(), indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            return ""
+
+        with mock.patch.object(gate, "run_command", side_effect=fake_download):
+            result = gate.download_and_evaluate_promotion_gate(12345)
+
+        self.assertTrue(result.ready)
+        self.assertEqual(result.blocked_gates, ())
 
 
 if __name__ == "__main__":

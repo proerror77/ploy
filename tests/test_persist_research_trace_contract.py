@@ -160,6 +160,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "--candidate-replay-json",
             "candidate-strategy-replay/candidate-strategy-replay.json",
             "--snapshot-manifest-json artifacts/research-snapshot/manifest.json",
+            "validate_autofactor_handoff_replay_gate.py",
             "factor walk-forward report is required for durable trace persistence.",
         ]
         for snippet in required_snippets:
@@ -175,6 +176,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "*/snapshot-provenance/source.txt",
             "*/snapshot-provenance/manifest.json",
             "--snapshot-manifest-json",
+            "validate_autofactor_handoff_replay_gate.py",
             "AutoFactor promotion side effects require successful durable Research OS trace persistence.",
             "AutoFactor promotion side effects reject legacy/debug/self-hosted source artifacts.",
             "direct_db_debug=true|canonical_result=no|registry=runner-local|runner=self-hosted|runner=ploy-ci-1",
