@@ -122,6 +122,23 @@ wait_for_recent_rows() {{
   exit 1
 }}
 
+wait_for_recent_log() {{
+  local unit="$1"
+  local pattern="$2"
+  local message="$3"
+  local attempts="${{4:-20}}"
+  local sleep_secs="${{5:-3}}"
+  local since="${{DEPLOY_VERIFY_SINCE:-${{DEPLOY_STARTED_AT}}}}"
+  for _ in $(seq 1 "${{attempts}}"); do
+    if journalctl -u "${{unit}}" --since "${{since}}" --no-pager | grep -E -q "${{pattern}}"; then
+      return 0
+    fi
+    sleep "${{sleep_secs}}"
+  done
+  echo "${{message}}" >&2
+  exit 1
+}}
+
 assert_no_recent_logs() {{
   local unit="$1"
   local pattern="$2"
@@ -299,9 +316,10 @@ wait_for_recent_rows \\
 wait_for_recent_rows \\
   "SELECT EXISTS (SELECT 1 FROM pm_market_metadata WHERE symbol IS NOT NULL AND end_time >= NOW())" \\
   "pm_market_metadata has no active crypto markets after deploy"
-wait_for_recent_rows \\
-  "SELECT EXISTS (SELECT 1 FROM clob_trade_ticks WHERE received_at >= NOW() - INTERVAL '5 minutes')" \\
-  "clob_trade_ticks is not receiving PM trade prints after deploy"
+wait_for_recent_log \\
+  "ploy-pm-trade-collector.service" \\
+  "Polymarket trade collector poll complete" \\
+  "pm trade collector did not complete a healthy poll after deploy"
 
 if service_exists ployd.service; then
   assert_no_recent_logs \\
@@ -319,8 +337,8 @@ assert_no_recent_logs \\
   "market discovery collector failed after deploy"
 assert_no_recent_logs \\
   "ploy-pm-trade-collector.service" \\
-  "no partition of relation \\"clob_trade_ticks\\"" \\
-  "pm trade collector still lacks active partitions"
+  "no partition of relation \\"clob_trade_ticks\\"|Polymarket trade collector poll failed|Failed to collect Polymarket trades|stale for more than|api_errors=[1-9][0-9]*|persist_errors=[1-9][0-9]*" \\
+  "pm trade collector failed after deploy"
 
 systemctl status ploy-binance-aggtrade-collector.service --no-pager
 systemctl status ploy-binance-lob-collector.service --no-pager

@@ -161,6 +161,94 @@ def _walk_forward_dispatch(
     }
 
 
+def _runtime_candidate_replay_dispatch(
+    *,
+    deployment_id: str,
+    config_path: str,
+    recording_path: str,
+    runtime_score: str,
+    strategy_profile: str,
+    issue_number: str,
+    min_trade_count: str,
+    min_fill_rate: str,
+    min_roi: str,
+    source_target: str,
+    source_horizon: str,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    if not runtime_score:
+        blockers.append("missing_runtime_score")
+    if not deployment_id:
+        blockers.append("missing_deployment_id")
+    if not config_path:
+        blockers.append("missing_config_path")
+    if not recording_path:
+        blockers.append("missing_recording_path")
+    if not strategy_profile:
+        blockers.append("missing_strategy_profile")
+
+    options = {
+        "full_depth_entry": True,
+        "skip_settlement_exits": False,
+        "source_target": source_target,
+        "source_horizon": source_horizon,
+    }
+    fields = {
+        "deployment_id": deployment_id,
+        "config_path": config_path,
+        "recording_path": recording_path,
+        "runtime_score": runtime_score,
+        "strategy_profile": strategy_profile,
+        "issue_number": issue_number,
+        "min_trade_count": min_trade_count,
+        "min_fill_rate": min_fill_rate,
+        "min_roi": min_roi,
+        "options_json": json.dumps(options, separators=(",", ":"), sort_keys=True),
+    }
+    return {
+        "workflow": "runtime-candidate-replay.yml",
+        "reason": "build runtime_market_update_replay evidence for Research Manager fix_runtime plan",
+        "ready": not blockers,
+        "blockers": blockers,
+        "fields": fields,
+    }
+
+
+def _recorded_replay_parity_dispatch(
+    *,
+    deployment_id: str,
+    config_path: str,
+    recording_path: str,
+    issue_number: str,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    if not deployment_id:
+        blockers.append("missing_deployment_id")
+    if not config_path:
+        blockers.append("missing_config_path")
+    if not recording_path:
+        blockers.append("missing_recording_path")
+
+    fields = {
+        "deployment_id": deployment_id,
+        "config_path": config_path,
+        "recording_path": recording_path,
+        "since": "auto",
+        "until": "auto",
+        "issue_number": issue_number,
+        "approval_environment": "tango-1-1-build-only",
+        "skip_settlement_exits": "false",
+        "runner_source": "deployed",
+    }
+    return {
+        "workflow": "recorded-replay-parity.yml",
+        "reason": "compare deployed runtime scorer decisions against recorded dry-run evidence",
+        "ready": not blockers,
+        "blockers": blockers,
+        "fields": fields,
+    }
+
+
 def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any]) -> dict[str, Any]:
     if plan_payload.get("schema_version") != "research_trace_plan.v1":
         raise SystemExit("research_trace_plan schema mismatch")
@@ -194,6 +282,33 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                 symbols=args.symbols,
                 stake_usd=args.stake_usd,
                 chain_remaining=args.chain_remaining,
+            )
+        )
+
+    if "compare_runtime_scorer_contract" in actions:
+        dispatches.append(
+            _runtime_candidate_replay_dispatch(
+                deployment_id=args.runtime_deployment_id,
+                config_path=args.runtime_config_path,
+                recording_path=args.runtime_recording_path,
+                runtime_score=args.runtime_score,
+                strategy_profile=args.runtime_strategy_profile,
+                issue_number=args.runtime_issue_number,
+                min_trade_count=args.runtime_min_trade_count,
+                min_fill_rate=args.runtime_min_fill_rate,
+                min_roi=args.runtime_min_roi,
+                source_target=args.runtime_source_target,
+                source_horizon=args.runtime_source_horizon,
+            )
+        )
+
+    if "run_recorded_replay_parity" in actions:
+        dispatches.append(
+            _recorded_replay_parity_dispatch(
+                deployment_id=args.runtime_deployment_id,
+                config_path=args.runtime_config_path,
+                recording_path=args.runtime_recording_path,
+                issue_number=args.runtime_issue_number,
             )
         )
 
@@ -278,6 +393,29 @@ def main() -> None:
     parser.add_argument("--stake-usd", default="15")
     parser.add_argument("--chain-remaining", type=int, default=1)
     parser.add_argument("--max-snapshot-window-days", type=int, default=2)
+    parser.add_argument(
+        "--runtime-deployment-id",
+        default="pm5d.threelayer.settlement-probability-btc-eth.dryrun",
+    )
+    parser.add_argument(
+        "--runtime-config-path",
+        default="/opt/ploy/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+    )
+    parser.add_argument(
+        "--runtime-recording-path",
+        default="/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson",
+    )
+    parser.add_argument(
+        "--runtime-score",
+        default="autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike",
+    )
+    parser.add_argument("--runtime-strategy-profile", default="settlement_probability")
+    parser.add_argument("--runtime-issue-number", default="538")
+    parser.add_argument("--runtime-min-trade-count", default="50")
+    parser.add_argument("--runtime-min-fill-rate", default="0.30")
+    parser.add_argument("--runtime-min-roi", default="0")
+    parser.add_argument("--runtime-source-target", default="full_depth_settlement_executable_pnl")
+    parser.add_argument("--runtime-source-horizon", default="5m")
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

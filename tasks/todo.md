@@ -1,5 +1,34 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Runtime Chain Data Review (2026-05-24)
+
+Evidence stage: `runtime_parity` recovery / deploy data-layer health, not
+strategy promotion.
+
+### Tasks
+
+- [x] Reconfirm PM5D semantic contract and Event ML workflow gates.
+- [x] Root-cause `clob_trade_ticks` postflight failure after deploy run
+      `26339297739`.
+- [x] Replace deploy PM trade health with collector successful-poll liveness
+      instead of requiring a fresh inserted trade row.
+- [x] Validate workflow/script syntax and targeted tests.
+- [x] Use the restored Research Manager `fix_runtime` plan to run or repair
+      runtime scorer contract / recorded replay parity.
+
+### Review
+
+- 2026-05-24: Deploy postflight was requiring
+  `clob_trade_ticks.received_at >= now()-5m`, but the PM trade collector's
+  runtime contract treats zero new trades or fully deduped trade pages as
+  healthy when market polls succeed. The postflight check is now based on a
+  recent `Polymarket trade collector poll complete` journal entry plus recent
+  error-log guards.
+- 2026-05-24: Research Manager executor now maps `fix_runtime` actions to
+  bounded follow-up evidence dispatches: `compare_runtime_scorer_contract`
+  builds a `runtime-candidate-replay.yml` plan, and
+  `run_recorded_replay_parity` builds a `recorded-replay-parity.yml` plan.
+
 ## Goal
 
 Turn the durable Research OS trace that was just persisted from hosted
