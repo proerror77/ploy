@@ -127,9 +127,29 @@ jobs:
             echo "- Legacy \`ploy-ci-1\` job: skipped"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  reject-legacy-db-default:
+    name: Reject legacy DB factor review by default
+    if: "${{ github.event.inputs.snapshot_run_id == '' && !contains(github.event.inputs.options_json, '\"allow_direct_db_debug\":true') && !contains(github.event.inputs.options_json, '\"allow_direct_db_debug\": true') }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Explain canonical research path
+        run: |
+          {
+            echo "## Factor Review V2"
+            echo ""
+            echo "The legacy \`ploy-ci-1\` direct-DB branch is disabled by default."
+            echo "Run \`research-snapshot.yml\` first, then dispatch this workflow with \`snapshot_run_id\` so it routes to \`factor-review-v2-hosted-artifact.yml\`."
+            echo ""
+            echo "For emergency debugging only, set \`options_json.allow_direct_db_debug=true\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Legacy direct-DB factor review requires snapshot_run_id or allow_direct_db_debug=true." >&2
+          exit 2
+
   review:
     name: Run factor review from DB on ploy-ci-1
-    if: ${{ github.event.inputs.snapshot_run_id == '' }}
+    if: "${{ github.event.inputs.snapshot_run_id == '' && (contains(github.event.inputs.options_json, '\"allow_direct_db_debug\":true') || contains(github.event.inputs.options_json, '\"allow_direct_db_debug\": true')) }}"
     runs-on: [self-hosted, ploy-ci-1]
     timeout-minutes: 60
     environment: ploy-ci-1

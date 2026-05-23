@@ -104,6 +104,16 @@ path = "examples/research_snapshot_compile.rs"
 required-features = ["db"]
 
 [[example]]
+name = "persist_research_trace"
+path = "examples/persist_research_trace.rs"
+required-features = ["db"]
+
+[[example]]
+name = "research_trace_plan"
+path = "examples/research_trace_plan.rs"
+required-features = ["db"]
+
+[[example]]
 name = "research_snapshot_parity"
 path = "examples/research_snapshot_parity.rs"
 

@@ -29,8 +29,8 @@ pub struct ResearchManagerPlan {
 
 pub fn validate_evidence_stage(stage: &str) -> Result<(), String> {
     match stage {
-        "diagnostic" | "factor_attribution" | "walk_forward" | "runtime_parity"
-        | "dry_run_candidate" => Ok(()),
+        "diagnostic" | "factor_attribution" | "executable_replay" | "walk_forward"
+        | "runtime_parity" | "dry_run_candidate" | "live_candidate" => Ok(()),
         _ => Err(format!("unsupported evidence_stage: {stage}")),
     }
 }
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn planner_fails_closed_on_unknown_evidence_stage() {
         let err = plan_next_research(&input(
-            "live_candidate",
+            "unknown_stage",
             serde_json::json!({}),
             serde_json::json!({}),
         ))
@@ -237,8 +237,9 @@ mod tests {
         ))
         .expect("plan");
         assert_eq!(plan.theme, "revise_prior");
-        assert!(plan
-            .actions
-            .contains(&"generate_typed_llm_prior_json".to_string()));
+        assert!(
+            plan.actions
+                .contains(&"generate_typed_llm_prior_json".to_string())
+        );
     }
 }
