@@ -71,7 +71,11 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "autofactor_runtime_contract_v1",
             '"runtime_score": mapping.runtime_score',
             '"strategy_profile": mapping.strategy_profile',
-            '"input_names": input_names',
+            '"input_names": ast_input_names',
+            '"ast_input_names": ast_input_names',
+            '"runtime_input_names": input_projection.runtime_input_names',
+            '"input_mappings": input_projection.mappings',
+            "runtime_input_projection",
             "runtime_contract_unmapped_factor",
         ]
         for snippet in required:

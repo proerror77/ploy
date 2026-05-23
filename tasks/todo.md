@@ -19063,3 +19063,60 @@ Evidence stage: `walk_forward / runtime_parity`.
   `CARGO_TARGET_DIR=/tmp/ploy-runtime-executable-objective-example /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research --features db --example factor_walk_forward_v2`,
   and `rtk git diff --check`. The cargo check completed with existing warnings
   in strategy modules, but no errors.
+
+# Runtime-Supported AutoFactor Contract Lane (2026-05-24)
+
+## Goal
+
+Restore the AutoFactor research chain by making registry preview contracts
+distinguish research AST input names from canonical runtime scorer inputs, so
+promotion and candidate replay can advance only factors the runtime can actually
+score while still fail-closing unsupported inputs.
+
+Evidence stage: `factor_attribution` with `runtime_parity` gates.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: typed AutoFactor runtime contract input canonicalization and
+    registry preview blocker semantics.
+- `scripts/autofactor_runtime_contract.py`
+  - Owner: shared promotion/candidate replay resolver for registry-preview
+    runtime input validation.
+- `tests/test_persist_research_trace_contract.py`
+  - Owner: static contract coverage for registry preview fields.
+- `tests/test_autofactor_strategy_promotion.py` and
+  `tests/test_build_autofactor_candidate_strategy_replay.py`
+  - Owner: fail-closed Python resolver behavior.
+- `tasks/todo.md`
+  - Owner: current session tracking.
+
+## Tasks
+
+- [x] Add canonical runtime input names to alpha-search registry contracts while
+      preserving AST input names for auditability.
+- [x] Keep `external_pressure`, `iv_change_1m`, Bayesian formulas, and unknown
+      research-only inputs blocked until runtime semantics are canonical.
+- [x] Make promotion and candidate replay validate `runtime_input_names` when
+      present, falling back to legacy `input_names` only for old artifacts.
+- [x] Run focused Rust/Python/static verification.
+- [ ] Commit, push, open PR, wait for CI, and merge if checks pass.
+
+## Review
+
+- 2026-05-24: Alpha-search registry preview now emits `ast_input_names`,
+  canonical `runtime_input_names`, and explicit `input_mappings`. Runtime
+  contract validation keeps unsupported research-only inputs blocked, but no
+  longer treats runtime-equivalent research helper columns such as
+  `near_strike_score`, `entry_capacity_score`, and
+  `full_depth_entry_fillable_gate` as unsupported when the contract provides
+  canonical runtime inputs.
+- 2026-05-24: Promotion and candidate replay now prefer
+  `runtime_input_names` from `autofactor_runtime_contract_v1`, with legacy
+  `input_names` fallback for older registry artifacts.
+- 2026-05-24: Focused verification passed:
+  `python3 -m unittest tests.test_autofactor_strategy_promotion tests.test_build_autofactor_candidate_strategy_replay tests.test_persist_research_trace_contract`,
+  `CARGO_TARGET_DIR=/tmp/ploy-runtime-supported-autofactor rtk cargo test --locked -p ploy-research alpha_search --lib`,
+  `python3 -m py_compile scripts/autofactor_runtime_contract.py tests/test_autofactor_strategy_promotion.py tests/test_build_autofactor_candidate_strategy_replay.py tests/test_persist_research_trace_contract.py`,
+  `rustfmt --edition 2024 --check crates/ploy-research/src/alpha_search.rs`,
+  and `rtk git diff --check`.

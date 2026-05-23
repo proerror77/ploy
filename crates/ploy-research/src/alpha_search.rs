@@ -5,8 +5,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::autofactor::{
-    autofactor_target_horizon, factor_expr_hash, AutoFactorDecision, AutoFactorOptions,
-    AutoFactorReport, FactorExpr, LlmPriorSpec,
+    AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr, LlmPriorSpec,
+    autofactor_target_horizon, factor_expr_hash,
 };
 
 const ALPHA_SEARCH_ARTIFACT_VERSION: &str = "alpha_search_artifacts_v1";
@@ -287,6 +287,20 @@ struct FactorRegistryPreviewArtifact {
     target: String,
     horizon: String,
     factors: Vec<FactorRegistryPreviewRow>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeInputMapping {
+    ast_input_name: String,
+    runtime_input_names: Vec<String>,
+    projection: &'static str,
+}
+
+#[derive(Debug)]
+struct RuntimeInputProjection {
+    runtime_input_names: Vec<String>,
+    mappings: Vec<RuntimeInputMapping>,
+    blockers: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -645,13 +659,14 @@ fn runtime_contract_for_report(
     ast_json: &serde_json::Value,
     horizon: &str,
 ) -> serde_json::Value {
-    let input_names = factor_input_names(&report.expr);
+    let ast_input_names = factor_input_names(&report.expr);
+    let input_projection = runtime_input_projection(&ast_input_names);
     let mut blockers = Vec::new();
     let mapping = inferred_runtime_mapping(&report.name);
     if mapping.runtime_score.is_empty() || mapping.strategy_profile.is_empty() {
         blockers.push("runtime_contract_unmapped_factor".to_string());
     }
-    blockers.extend(runtime_input_blockers(&input_names));
+    blockers.extend(input_projection.blockers.clone());
     blockers.extend(runtime_formula_blockers(&report.name));
     blockers.sort();
     blockers.dedup();
@@ -665,7 +680,10 @@ fn runtime_contract_for_report(
         "factor_family": normalized_factor_family(&report.name),
         "target": report.target.as_deref().unwrap_or("unknown"),
         "horizon": horizon,
-        "input_names": input_names,
+        "input_names": ast_input_names,
+        "ast_input_names": ast_input_names,
+        "runtime_input_names": input_projection.runtime_input_names,
+        "input_mappings": input_projection.mappings,
         "blockers": blockers,
     })
 }
@@ -710,31 +728,84 @@ fn inferred_runtime_mapping(name: &str) -> RuntimeMapping {
     RuntimeMapping::default()
 }
 
-fn runtime_input_blockers(input_names: &[String]) -> Vec<String> {
+fn runtime_input_projection(ast_input_names: &[String]) -> RuntimeInputProjection {
+    let mut runtime_inputs = BTreeSet::new();
+    let mut mappings = Vec::new();
     let mut blockers = Vec::new();
-    for input in input_names {
-        match input.as_str() {
-            "conservative_settlement_edge"
-            | "full_depth_settlement_edge"
-            | "model_conservative_settlement_edge"
-            | "model_full_depth_settlement_edge"
-            | "settlement_edge"
-            | "entry_price"
-            | "distance_over_sigma"
-            | "direction_sign"
-            | "drift_30s"
-            | "sigma_horizon"
-            | "entry_capacity_ratio"
-            | "side_spread"
-            | "pm_lag_secs" => {}
-            "external_pressure" => {
-                blockers.push("runtime_input_semantics_mismatch:external_pressure".to_string())
+    for input in ast_input_names {
+        match runtime_input_mapping(input) {
+            Ok((runtime_input_names, projection)) => {
+                for runtime_input in &runtime_input_names {
+                    runtime_inputs.insert(runtime_input.clone());
+                }
+                mappings.push(RuntimeInputMapping {
+                    ast_input_name: input.clone(),
+                    runtime_input_names,
+                    projection,
+                });
             }
-            "iv_change_1m" => blockers.push("runtime_input_not_supplied:iv_change_1m".to_string()),
-            other => blockers.push(format!("runtime_input_unsupported:{other}")),
+            Err(blocker) => blockers.push(blocker),
         }
     }
-    blockers
+    blockers.sort();
+    blockers.dedup();
+    RuntimeInputProjection {
+        runtime_input_names: runtime_inputs.into_iter().collect(),
+        mappings,
+        blockers,
+    }
+}
+
+fn runtime_input_mapping(input: &str) -> Result<(Vec<String>, &'static str), String> {
+    let runtime_inputs = match input {
+        "conservative_settlement_edge"
+        | "full_depth_settlement_edge"
+        | "model_conservative_settlement_edge"
+        | "model_full_depth_settlement_edge"
+        | "settlement_edge" => (
+            vec!["settlement_edge".to_string()],
+            "settlement_edge_projection",
+        ),
+        "near_strike_score" => (
+            vec![
+                "direction_sign".to_string(),
+                "distance_over_sigma".to_string(),
+            ],
+            "runtime_near_strike_score",
+        ),
+        "entry_capacity_score" => (
+            vec!["entry_capacity_ratio".to_string()],
+            "runtime_entry_capacity_score",
+        ),
+        "full_depth_entry_fillable_gate" => (
+            vec!["entry_capacity_ratio".to_string()],
+            "runtime_full_depth_entry_gate",
+        ),
+        "entry_price_quality_score" => (
+            vec!["entry_price".to_string()],
+            "runtime_entry_price_quality_score",
+        ),
+        "external_move_since_poly_update" | "cex_return_30s_side" => (
+            vec!["direction_sign".to_string(), "drift_30s".to_string()],
+            "runtime_side_drift_30s",
+        ),
+        "sigma_horizon_pos" => (vec!["sigma_horizon".to_string()], "runtime_sigma_horizon"),
+        "poly_quote_age" => (vec!["pm_lag_secs".to_string()], "runtime_quote_age"),
+        "side_spread"
+        | "entry_price"
+        | "distance_over_sigma"
+        | "direction_sign"
+        | "drift_30s"
+        | "sigma_horizon"
+        | "entry_capacity_ratio"
+        | "pm_lag_secs" => (vec![input.to_string()], "runtime_native_input"),
+        "external_pressure" => {
+            return Err("runtime_input_semantics_mismatch:external_pressure".to_string());
+        }
+        "iv_change_1m" => return Err("runtime_input_not_supplied:iv_change_1m".to_string()),
+        other => return Err(format!("runtime_input_unsupported:{other}")),
+    };
+    Ok(runtime_inputs)
 }
 
 fn runtime_formula_blockers(name: &str) -> Vec<String> {
@@ -1324,11 +1395,7 @@ fn normalized_positive(value: f64) -> f64 {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() {
-        value
-    } else {
-        0.0
-    }
+    if value.is_finite() { value } else { 0.0 }
 }
 
 fn ratio_usize(numerator: usize, denominator: usize) -> f64 {
@@ -1580,18 +1647,22 @@ mod tests {
         )
         .expect("write artifacts");
         assert_eq!(summary.candidate_count, 1);
-        assert!(tmp
-            .join("full_depth_settlement_executable_pnl/search-space.json")
-            .exists());
-        assert!(tmp
-            .join("full_depth_settlement_executable_pnl/tree-trace.json")
-            .exists());
-        assert!(tmp
-            .join("full_depth_settlement_executable_pnl/mcts-expansion-plan.json")
-            .exists());
-        assert!(tmp
-            .join("full_depth_settlement_executable_pnl/mcts-state.json")
-            .exists());
+        assert!(
+            tmp.join("full_depth_settlement_executable_pnl/search-space.json")
+                .exists()
+        );
+        assert!(
+            tmp.join("full_depth_settlement_executable_pnl/tree-trace.json")
+                .exists()
+        );
+        assert!(
+            tmp.join("full_depth_settlement_executable_pnl/mcts-expansion-plan.json")
+                .exists()
+        );
+        assert!(
+            tmp.join("full_depth_settlement_executable_pnl/mcts-state.json")
+                .exists()
+        );
         let registry_preview =
             tmp.join("full_depth_settlement_executable_pnl/factor-registry-preview.json");
         assert!(registry_preview.exists());
@@ -1621,7 +1692,60 @@ mod tests {
             rows[0]["runtime_contract"]["input_names"],
             serde_json::json!(["conservative_settlement_edge"])
         );
+        assert_eq!(
+            rows[0]["runtime_contract"]["ast_input_names"],
+            serde_json::json!(["conservative_settlement_edge"])
+        );
+        assert_eq!(
+            rows[0]["runtime_contract"]["runtime_input_names"],
+            serde_json::json!(["settlement_edge"])
+        );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn runtime_contract_canonicalizes_supported_research_inputs() {
+        let report = AutoFactorReport {
+            name: "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity"
+                .to_string(),
+            target: Some("full_depth_settlement_executable_pnl".to_string()),
+            expr: FactorExpr::Mul(
+                Box::new(FactorExpr::Mul(
+                    Box::new(FactorExpr::Input(
+                        "model_full_depth_settlement_edge".to_string(),
+                    )),
+                    Box::new(FactorExpr::Input("near_strike_score".to_string())),
+                )),
+                Box::new(FactorExpr::Input("entry_capacity_score".to_string())),
+            ),
+            ..sample_report(
+                "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity",
+            )
+        };
+        let contract =
+            runtime_contract_for_report(&report, "dsl-hash", &serde_json::json!({}), "5m");
+        assert_eq!(
+            contract["runtime_score"],
+            "autofactor_formula:auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity"
+        );
+        assert_eq!(
+            contract["ast_input_names"],
+            serde_json::json!([
+                "entry_capacity_score",
+                "model_full_depth_settlement_edge",
+                "near_strike_score"
+            ])
+        );
+        assert_eq!(
+            contract["runtime_input_names"],
+            serde_json::json!([
+                "direction_sign",
+                "distance_over_sigma",
+                "entry_capacity_ratio",
+                "settlement_edge"
+            ])
+        );
+        assert_eq!(contract["blockers"], serde_json::json!([]));
     }
 
     #[test]
@@ -1667,9 +1791,11 @@ mod tests {
             "5m",
         );
         let blockers = contract["blockers"].as_array().expect("blockers");
-        assert!(blockers
-            .iter()
-            .any(|item| item.as_str() == Some("runtime_input_not_supplied:iv_change_1m")));
+        assert!(
+            blockers
+                .iter()
+                .any(|item| item.as_str() == Some("runtime_input_not_supplied:iv_change_1m"))
+        );
     }
 
     #[test]
@@ -1679,9 +1805,11 @@ mod tests {
             runtime_contract_for_report(&unsupported, "dsl-hash", &serde_json::json!({}), "5m");
         assert_eq!(contract["runtime_score"], "");
         let blockers = contract["blockers"].as_array().expect("blockers");
-        assert!(blockers
-            .iter()
-            .any(|item| item.as_str() == Some("runtime_contract_unmapped_factor")));
+        assert!(
+            blockers
+                .iter()
+                .any(|item| item.as_str() == Some("runtime_contract_unmapped_factor"))
+        );
         assert!(blockers.iter().any(|item| {
             item.as_str() == Some("runtime_contract_unsupported_predictive_suffix")
         }));
@@ -1899,10 +2027,12 @@ mod tests {
         let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
-        assert!(!plan
-            .selected_nodes
-            .iter()
-            .any(|node| node.factor_name == "mcts_spread_adjusted_external_move_near_strike"));
+        assert!(
+            !plan
+                .selected_nodes
+                .iter()
+                .any(|node| node.factor_name == "mcts_spread_adjusted_external_move_near_strike")
+        );
         assert_eq!(
             plan.selected_nodes
                 .first()
@@ -1948,10 +2078,11 @@ mod tests {
         let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
-        assert!(plan
-            .selected_nodes
-            .iter()
-            .all(|node| !node.factor_name.contains("spread_adjusted_external_move")));
+        assert!(
+            plan.selected_nodes
+                .iter()
+                .all(|node| !node.factor_name.contains("spread_adjusted_external_move"))
+        );
         assert_eq!(
             plan.selected_nodes
                 .first()

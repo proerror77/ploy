@@ -383,6 +383,71 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         self.assertEqual(registry["entries"][0]["runtime_contract"]["input_names"][-1], "iv_change_1m")
         self.assertEqual(handoff["status"], "blocked")
 
+    def test_registry_contract_uses_canonical_runtime_inputs_for_promotion(self):
+        report = """=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=true stake_usd=15.00 min_entry_fill_rate=0.0500 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=2488 event_complete_rows=51989 replay_parity_ready=true
+gate,passed,evidence
+data_quality,true,mode=event_complete event_complete_events=2488 event_complete_rows=51989
+recorded_replay_parity,true,blocking_flags=<none>
+
+# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_unique_event_count,top_bucket_max_event_decisions,complexity
+1,auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity,full_depth_settlement_executable_pnl,candidate,passed,49831,0.110842,0.150273,43,1.064178,0.9535,6,0.8333,1.0000,9966,2.666226,0.6836,0.9000,9966,1,5
+"""
+        runtime_score = (
+            "autofactor_formula:"
+            "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity"
+        )
+        _, payload, registry, handoff, _ = self.run_script(
+            report,
+            replay_payload=replay_for_target(runtime_score),
+            registry_preview_payload={
+                "version": "alpha_search_artifacts_v1",
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+                "factors": [
+                    {
+                        "factor_name": (
+                            "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity"
+                        ),
+                        "runtime_contract": {
+                            "version": "autofactor_runtime_contract_v1",
+                            "runtime_score": runtime_score,
+                            "strategy_profile": "settlement_probability",
+                            "strategy_family": "settlement_probability",
+                            "input_names": [
+                                "entry_capacity_score",
+                                "model_full_depth_settlement_edge",
+                                "near_strike_score",
+                            ],
+                            "ast_input_names": [
+                                "entry_capacity_score",
+                                "model_full_depth_settlement_edge",
+                                "near_strike_score",
+                            ],
+                            "runtime_input_names": [
+                                "direction_sign",
+                                "distance_over_sigma",
+                                "entry_capacity_ratio",
+                                "settlement_edge",
+                            ],
+                            "blockers": [],
+                        },
+                        "blockers": [],
+                    }
+                ],
+            },
+        )
+
+        first = payload["evaluated_factors"][0]
+        self.assertTrue(first["qualified"])
+        self.assertNotIn("runtime_input_unsupported:near_strike_score", first["blockers"])
+        self.assertNotIn("runtime_input_unsupported:entry_capacity_score", first["blockers"])
+        self.assertEqual(registry["entries"][0]["runtime_contract"]["runtime_input_names"][-1], "settlement_edge")
+        self.assertEqual(handoff["status"], "ready")
+
     def test_blocks_candidate_when_runtime_profile_is_not_required_profile(self):
         _, payload, registry, handoff, handoff_md = self.run_script(
             READY_GATE + AUTOFACTOR_REPORT
