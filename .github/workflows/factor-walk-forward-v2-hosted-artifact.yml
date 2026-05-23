@@ -31,7 +31,7 @@ on:
         required: true
         default: "15"
       options_json:
-        description: "Advanced options JSON: walk windows, factor filters, event-complete gates, replay parity, promotion gate, optional issue/config handoff"
+        description: "Advanced options JSON: walk windows, factor filters, event-complete gates, replay parity, promotion gate, optional trace persistence/issue/config handoff"
         required: false
         default: '{"train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":"","observation_sample_secs":"","max_quote_age_secs":"","top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","candidate_strategy_replay_json":"","candidate_strategy_replay_run_id":"","candidate_strategy_replay_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":"","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
       sweep_json:
@@ -114,10 +114,11 @@ jobs:
               "issue_number": "",
               "create_handoff_issue": "false",
               "create_config_pr": "false",
+              "persist_research_trace": "false",
               "strategy_config": "config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
               "fail_if_blocked": "false",
           }
-          bool_keys = {"chain_next_run", "create_handoff_issue", "create_config_pr", "fail_if_blocked", "require_deribit"}
+          bool_keys = {"chain_next_run", "create_handoff_issue", "create_config_pr", "persist_research_trace", "fail_if_blocked", "require_deribit"}
           choices = {
               "report_suite": {"core", "full"},
               "data_quality_mode": {"strict_continuous", "event_complete"},
@@ -384,7 +385,8 @@ jobs:
           cargo build --profile fast --locked \
             -p ploy-research \
             --features db \
-            --example factor_walk_forward_v2
+            --example factor_walk_forward_v2 \
+            --example persist_research_trace
 
       - name: Run factor walk-forward sweep
         env:
@@ -475,6 +477,52 @@ jobs:
             args+=(--fail-if-blocked)
           fi
           python3 scripts/run_factor_walk_forward_sweep.py "${args[@]}"
+
+      - name: Persist Research OS trace
+        if: always()
+        env:
+          RESEARCH_TRACE_DB_URL: ${{ secrets.RESEARCH_OS_DATABASE_URL || secrets.PLOY_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ "${WALK_PERSIST_RESEARCH_TRACE}" != "true" ]; then
+            echo "persist_research_trace is false; skipping durable Research OS persistence."
+            exit 0
+          fi
+          if [ -z "${RESEARCH_TRACE_DB_URL}" ]; then
+            echo "persist_research_trace requested but RESEARCH_OS_DATABASE_URL/PLOY_DATABASE_URL secret is not available." >&2
+            exit 2
+          fi
+          if [ ! -f artifacts/research-snapshot/manifest.json ]; then
+            echo "research snapshot manifest is required for durable trace persistence." >&2
+            exit 2
+          fi
+
+          trace_args=(
+            --run-id "${GITHUB_RUN_ID}"
+            --snapshot-dir artifacts/research-snapshot
+            --db-url "${RESEARCH_TRACE_DB_URL}"
+          )
+          if [ -d artifacts/factor-walk-forward-v2/alpha-search ]; then
+            trace_args+=(--alpha-search-dir artifacts/factor-walk-forward-v2/alpha-search)
+          fi
+          if [ -f artifacts/factor-walk-forward-v2/autofactor-factor-registry.json ]; then
+            trace_args+=(--registry-json artifacts/factor-walk-forward-v2/autofactor-factor-registry.json)
+          fi
+          if [ -f artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.json ]; then
+            trace_args+=(--promotion-json artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.json)
+          fi
+          if [ -f artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json ]; then
+            trace_args+=(--handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json)
+          fi
+
+          ./target/fast/examples/persist_research_trace "${trace_args[@]}"
+          {
+            echo "### Durable Research OS trace"
+            echo ""
+            echo "- Persisted: \`true\`"
+            echo "- Run ID: \`${GITHUB_RUN_ID}\`"
+            echo "- Evidence stages: \`factor_attribution\`, \`walk_forward\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create config PR from ready handoff
         if: always()
@@ -603,6 +651,7 @@ jobs:
             echo "- Report suite: ${WALK_REPORT_SUITE}"
             echo "- Required strategy profile: ${WALK_REQUIRED_STRATEGY_PROFILE}"
             echo "- Allowed target: ${WALK_ALLOWED_TARGET}"
+            echo "- Durable trace persistence: ${WALK_PERSIST_RESEARCH_TRACE}"
             echo "- Factor filter: ${WALK_FACTOR_NAME_FILTER:-<none>}"
             if [ -n "${SWEEP_JSON}" ]; then
               echo "- Sweep mode: \`true\`"
