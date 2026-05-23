@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::sync::OnceLock;
 
 use chrono::Datelike;
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,44 @@ const SELECTOR_GATE_FEATURES: [&str; 4] = [
     "entry_capacity_score",
     "full_depth_entry_fillable_gate",
 ];
+const ACCOUNTING_CATALOG_JSON: &str =
+    include_str!("../../../config/autofactor_accounting_catalog.json");
+const ACCOUNTING_CATALOG_SCHEMA_VERSION: &str = "autofactor_accounting_catalog.v1";
+
+static ACCOUNTING_CATALOG: OnceLock<AutoFactorAccountingCatalog> = OnceLock::new();
+
+#[derive(Debug, Clone, Deserialize)]
+struct AutoFactorAccountingCatalog {
+    schema_version: String,
+    targets: BTreeMap<String, AutoFactorTargetContract>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutoFactorTargetContract {
+    pub horizon: String,
+    pub accounting_lane: String,
+    pub strategy_profile: String,
+    pub required_execution_contract: String,
+    pub event_level_accounting: bool,
+    pub official_settlement_required: bool,
+    pub full_depth_entry_required: bool,
+}
+
+fn autofactor_accounting_catalog() -> &'static AutoFactorAccountingCatalog {
+    ACCOUNTING_CATALOG.get_or_init(|| {
+        let catalog: AutoFactorAccountingCatalog = serde_json::from_str(ACCOUNTING_CATALOG_JSON)
+            .expect("AutoFactor accounting catalog JSON must parse");
+        assert_eq!(
+            catalog.schema_version, ACCOUNTING_CATALOG_SCHEMA_VERSION,
+            "unsupported AutoFactor accounting catalog schema"
+        );
+        catalog
+    })
+}
+
+pub fn autofactor_target_contract(target: &str) -> Option<&'static AutoFactorTargetContract> {
+    autofactor_accounting_catalog().targets.get(target)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum FactorExpr {
@@ -369,16 +408,9 @@ impl AutoFactorV2Target {
 }
 
 pub fn autofactor_target_horizon(target: &str) -> &'static str {
-    match target {
-        "reprice_pnl_5s" | "full_depth_reprice_pnl_5s" => "5s",
-        "reprice_pnl_10s" | "full_depth_reprice_pnl_10s" => "10s",
-        "reprice_pnl_30s" | "full_depth_reprice_pnl_30s" => "30s",
-        "reprice_pnl_60s" | "full_depth_reprice_pnl_60s" => "60s",
-        "settlement_executable_pnl"
-        | "full_depth_settlement_executable_pnl"
-        | "tradeable_full_depth_settlement_pnl" => "5m",
-        _ => "unknown",
-    }
+    autofactor_target_contract(target)
+        .map(|contract| contract.horizon.as_str())
+        .unwrap_or("unknown")
 }
 
 #[derive(Debug, Clone)]
@@ -3578,6 +3610,17 @@ mod tests {
         ] {
             assert_eq!(autofactor_target_horizon(target), "5m");
         }
+        let contract = autofactor_target_contract("full_depth_settlement_executable_pnl").unwrap();
+        assert_eq!(contract.accounting_lane, "settlement_probability");
+        assert_eq!(contract.strategy_profile, "settlement_probability");
+        assert_eq!(
+            contract.required_execution_contract,
+            "full_depth_settlement_entry"
+        );
+        assert!(contract.event_level_accounting);
+        assert!(contract.official_settlement_required);
+        assert!(contract.full_depth_entry_required);
         assert_eq!(autofactor_target_horizon("experimental_target"), "unknown");
+        assert!(autofactor_target_contract("experimental_target").is_none());
     }
 }

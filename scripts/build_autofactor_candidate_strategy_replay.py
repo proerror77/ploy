@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from autofactor_accounting_catalog import autofactor_target_horizon
 from autofactor_runtime_contract import RuntimeContractResolver
 from research_snapshot_contract import load_snapshot_execution_contract
 
@@ -58,20 +59,6 @@ def replay_identity(*, runtime_score: str, strategy_profile: str, evidence: str,
         "evidence": evidence,
         "source_factor": source_factor or {},
     }
-
-
-def target_horizon(target: str) -> str:
-    if "reprice_pnl_5s" in target:
-        return "5s"
-    if "reprice_pnl_10s" in target:
-        return "10s"
-    if "reprice_pnl_30s" in target:
-        return "30s"
-    if "reprice_pnl_60s" in target:
-        return "60s"
-    if "settlement" in target:
-        return "5m"
-    return "unknown"
 
 
 def parse_autofactor_rows(report_text: str) -> list[dict[str, Any]]:
@@ -219,7 +206,7 @@ def build_artifact(
     source_factor = {
         "name": row.get("name", ""),
         "target": row.get("target", ""),
-        "horizon": target_horizon(str(row.get("target", ""))),
+        "horizon": autofactor_target_horizon(str(row.get("target", ""))),
         "decision": row.get("decision", ""),
         "reason": row.get("reason", ""),
     }
@@ -267,7 +254,7 @@ def build_artifact(
             "official_settlement": True,
             "full_depth_entry": True,
             "target": row.get("target", ""),
-            "horizon": target_horizon(str(row.get("target", ""))),
+            "horizon": autofactor_target_horizon(str(row.get("target", ""))),
             "stake_usd": stake_usd,
             "entry_policy": "top_scoring_bucket",
         },

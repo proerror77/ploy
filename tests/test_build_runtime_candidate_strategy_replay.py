@@ -173,6 +173,49 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         self.assertIn("Promotion ready: `true`", markdown)
         self.assertIn("## Acceptance Criteria", markdown)
 
+    def test_resolves_source_horizon_from_shared_catalog(self):
+        payload, _ = self.run_script(
+            runtime_eval_payload(),
+            "--full-depth-entry",
+            "--min-trade-count",
+            "2",
+            "--source-target",
+            "full_depth_settlement_executable_pnl",
+        )
+
+        self.assertEqual(payload["source_factor"]["horizon"], "5m")
+        self.assertEqual(payload["decision_contract"]["horizon"], "5m")
+
+    def test_blocks_source_horizon_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            runtime_json = tmp_path / "runtime-eval.json"
+            output_json = tmp_path / "candidate-strategy-replay.json"
+            runtime_json.write_text(json.dumps(runtime_eval_payload()), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--runtime-evaluation-json",
+                    str(runtime_json),
+                    "--runtime-score",
+                    "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                    "--output-json",
+                    str(output_json),
+                    "--source-target",
+                    "full_depth_settlement_executable_pnl",
+                    "--source-horizon",
+                    "30s",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("source_horizon_mismatch:30s!=5m", result.stderr)
+
     def test_blocks_zero_intent_runtime_replay_with_diagnostics(self):
         payload, _ = self.run_script(
             {
