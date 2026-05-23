@@ -40,7 +40,13 @@ The release bundle contains:
 - `bin/ployctl`
 - `bin/ploytui`
 - `deployment/ployd.service`
+- `deployment/ploy-maintenance.service`
+- `deployment/ploy-maintenance.timer`
+- `deployment/ploy-platform-watchdog.service`
+- `deployment/ploy-platform-watchdog.timer`
 - `scripts/install-platform-service.sh`
+- `scripts/ploy_maintenance.sh`
+- `scripts/ploy_platform_watchdog.sh`
 - `data/state/deployments.json.sample`
 
 ## Host Installation Flow
@@ -48,13 +54,19 @@ The release bundle contains:
 After the bundle lands on the host, the deploy workflow:
 
 1. Installs `ployd`, `ployctl`, and `ploytui` into `/opt/ploy/bin`
-2. Installs `deployment/ployd.service` into `/opt/ploy/deployment`
-3. Installs `scripts/install-platform-service.sh` into `/opt/ploy/scripts`
+2. Installs `deployment/ployd.service` and host-support maintenance/watchdog
+   unit files into `/opt/ploy/deployment`
+3. Installs `scripts/install-platform-service.sh`,
+   `scripts/ploy_maintenance.sh`, and `scripts/ploy_platform_watchdog.sh` into
+   `/opt/ploy/scripts`
 4. Seeds `/opt/ploy/data/state/deployments.json` if missing
-5. Runs `install-platform-service.sh`
+5. Runs `install-platform-service.sh`, which installs `ployd.service` and the
+   maintenance/watchdog timers into systemd
 6. Restarts `ployd`
 7. Verifies:
    - `systemctl status ployd`
+   - `systemctl status ploy-platform-watchdog.timer`
+   - `systemctl status ploy-maintenance.timer`
    - `curl -fsS http://127.0.0.1:8081/health`
    - `/opt/ploy/bin/ployctl system status`
    - `/opt/ploy/bin/ployctl system metrics`

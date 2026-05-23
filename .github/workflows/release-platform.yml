@@ -113,7 +113,13 @@ jobs:
           install -m 755 "target/${PLATFORM_TARGET}/release/ploytui" "${bundle_root}/bin/ploytui"
           install -m 755 "target/${PLATFORM_TARGET}/release/new-ploy-runner" "${bundle_root}/bin/ploy-runner"
           install -m 644 deployment/ployd.service "${bundle_root}/deployment/ployd.service"
+          install -m 644 deployment/ploy-maintenance.service "${bundle_root}/deployment/ploy-maintenance.service"
+          install -m 644 deployment/ploy-maintenance.timer "${bundle_root}/deployment/ploy-maintenance.timer"
+          install -m 644 deployment/ploy-platform-watchdog.service "${bundle_root}/deployment/ploy-platform-watchdog.service"
+          install -m 644 deployment/ploy-platform-watchdog.timer "${bundle_root}/deployment/ploy-platform-watchdog.timer"
           install -m 755 scripts/install-platform-service.sh "${bundle_root}/scripts/install-platform-service.sh"
+          install -m 755 scripts/ploy_maintenance.sh "${bundle_root}/scripts/ploy_maintenance.sh"
+          install -m 755 scripts/ploy_platform_watchdog.sh "${bundle_root}/scripts/ploy_platform_watchdog.sh"
           install -m 755 scripts/drills/live_dry_run.sh "${bundle_root}/scripts/drills/live_dry_run.sh"
           install -m 644 config/deployments/example.live.dry-run.json "${bundle_root}/config/deployments/example.live.dry-run.json.sample"
           install -m 644 data/state/deployments.json.sample "${bundle_root}/data/state/deployments.json.sample"
@@ -191,7 +197,13 @@ jobs:
             $SUDO install -m 755 "${WORKDIR}/bin/ploytui" "${DEPLOY_ROOT}/bin/ploytui"
             $SUDO install -m 755 "${WORKDIR}/bin/ploy-runner" "${DEPLOY_ROOT}/bin/ploy-runner"
             $SUDO install -m 644 "${WORKDIR}/deployment/ployd.service" "${DEPLOY_ROOT}/deployment/ployd.service"
+            $SUDO install -m 644 "${WORKDIR}/deployment/ploy-maintenance.service" "${DEPLOY_ROOT}/deployment/ploy-maintenance.service"
+            $SUDO install -m 644 "${WORKDIR}/deployment/ploy-maintenance.timer" "${DEPLOY_ROOT}/deployment/ploy-maintenance.timer"
+            $SUDO install -m 644 "${WORKDIR}/deployment/ploy-platform-watchdog.service" "${DEPLOY_ROOT}/deployment/ploy-platform-watchdog.service"
+            $SUDO install -m 644 "${WORKDIR}/deployment/ploy-platform-watchdog.timer" "${DEPLOY_ROOT}/deployment/ploy-platform-watchdog.timer"
             $SUDO install -m 755 "${WORKDIR}/scripts/install-platform-service.sh" "${DEPLOY_ROOT}/scripts/install-platform-service.sh"
+            $SUDO install -m 755 "${WORKDIR}/scripts/ploy_maintenance.sh" "${DEPLOY_ROOT}/scripts/ploy_maintenance.sh"
+            $SUDO install -m 755 "${WORKDIR}/scripts/ploy_platform_watchdog.sh" "${DEPLOY_ROOT}/scripts/ploy_platform_watchdog.sh"
             $SUDO install -m 755 "${WORKDIR}/scripts/drills/live_dry_run.sh" "${DEPLOY_ROOT}/scripts/drills/live_dry_run.sh"
             $SUDO install -m 644 "${WORKDIR}/config/deployments/example.live.dry-run.json.sample" "${DEPLOY_ROOT}/config/deployments/example.live.dry-run.json.sample"
             if [ ! -f "${DEPLOY_ROOT}/data/state/deployments.json" ]; then
@@ -202,6 +214,8 @@ jobs:
             $SUDO systemctl restart ployd || $SUDO systemctl start ployd
             sleep 2
             $SUDO systemctl status ployd --no-pager
+            $SUDO systemctl status ploy-platform-watchdog.timer --no-pager
+            $SUDO systemctl status ploy-maintenance.timer --no-pager
             curl -fsS http://127.0.0.1:8081/health
             curl -N --max-time 2 http://127.0.0.1:8081/api/events/stream || true
             # Verify the deployed operator client path: ployctl system status

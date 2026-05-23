@@ -128,7 +128,7 @@
 Referenced files:
 
 - `scripts/archive/legacy-root-runtime/aws_ec2_deploy.sh` (historical/context-only)
-- `scripts/install-service.sh`
+- `scripts/archive/legacy-root-runtime/install-service.sh` (historical/context-only)
 - `src/coordinator/bootstrap.rs`
 
 ### accounts
