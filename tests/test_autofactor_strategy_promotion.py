@@ -174,11 +174,23 @@ candidate,bucket,count
 DEFAULT_REPLAY_PAYLOAD = {
     "schema_version": 1,
     "kind": "autofactor_candidate_strategy_replay",
+    "candidate_replay_id": "candidate_replay:0123456789abcdef0123456789abcdef",
+    "identity": {
+        "basis": "runtime_market_update_replay",
+        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge",
+        "strategy_profile": "settlement_probability",
+        "workflow_run_id": "26306734877",
+    },
     "evidence_stage": "executable_replay",
     "basis": "runtime_market_update_replay",
     "strategy_profile": "settlement_probability",
     "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge",
     "promotion_ready": True,
+    "promotion_decision": "promote_to_runtime",
+    "source_workflow": "runtime-candidate-replay.yml",
+    "workflow_run_id": "26306734877",
+    "workflow_run_url": "https://github.com/proerror77/ploy/actions/runs/26306734877",
+    "artifact_name": "runtime-candidate-replay-26306734877",
     "decision_contract": {
         "event_level": True,
         "one_decision_per_event": True,
@@ -291,6 +303,10 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "settlement_probability",
         )
         self.assertIn("Candidate strategy replay ready: `true`", handoff_md)
+        self.assertIn(
+            "Candidate strategy replay id: `candidate_replay:0123456789abcdef0123456789abcdef`",
+            handoff_md,
+        )
         self.assertIn("top bucket avg label", handoff_md)
         self.assertNotIn("top bucket pnl", handoff_md.lower())
         near_strike = next(
@@ -729,6 +745,10 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         replay = {
             **DEFAULT_REPLAY_PAYLOAD,
             "basis": "factor_walk_forward_top_bucket_aggregate",
+            "identity": {
+                **DEFAULT_REPLAY_PAYLOAD["identity"],
+                "basis": "factor_walk_forward_top_bucket_aggregate",
+            },
         }
 
         _, payload, _, handoff, _ = self.run_script(
@@ -744,6 +764,41 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             "factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
             first["blockers"],
         )
+
+    def test_blocks_legacy_runtime_replay_without_durable_provenance(self):
+        replay = {
+            key: value
+            for key, value in DEFAULT_REPLAY_PAYLOAD.items()
+            if key
+            not in {
+                "candidate_replay_id",
+                "identity",
+                "promotion_decision",
+                "source_workflow",
+                "workflow_run_id",
+                "workflow_run_url",
+                "artifact_name",
+            }
+        }
+
+        _, payload, _, handoff, handoff_md = self.run_script(
+            READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            replay_payload=replay,
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        first = payload["evaluated_factors"][0]
+        self.assertIn(
+            "candidate_strategy_replay_missing_candidate_replay_id",
+            first["blockers"],
+        )
+        self.assertIn("candidate_strategy_replay_missing_identity", first["blockers"])
+        self.assertIn("candidate_strategy_replay_missing_source_workflow", first["blockers"])
+        self.assertIn("candidate_strategy_replay_missing_workflow_run_id", first["blockers"])
+        self.assertIn("candidate_strategy_replay_missing_workflow_run_url", first["blockers"])
+        self.assertIn("candidate_strategy_replay_missing_artifact_name", first["blockers"])
+        self.assertIn("Candidate strategy replay id: ``", handoff_md)
 
     def test_blocks_replay_without_executable_strategy_contract(self):
         replay = {
