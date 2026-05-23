@@ -471,6 +471,57 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         )
         self.assertNotIn(f"missing_runtime_contract:{factor_name}", evaluated["blockers"])
 
+    def test_runtime_contract_preview_selection_fails_closed_on_target_mismatch(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = tmp / "fake_factor_walk_forward.py"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "if '--alpha-search-output-dir' in args:\n"
+                "    root = pathlib.Path(args[args.index('--alpha-search-output-dir') + 1])\n"
+                "    out = root / 'full_depth_settlement_executable_pnl'\n"
+                "    out.mkdir(parents=True, exist_ok=True)\n"
+                "    (out / 'factor-registry-preview.json').write_text(\n"
+                "        json.dumps({\n"
+                "            'version': 'alpha_search_artifacts_v1',\n"
+                "            'target': 'full_depth_settlement_executable_pnl',\n"
+                "            'horizon': '5m',\n"
+                "            'factors': [],\n"
+                "        }),\n"
+                "        encoding='utf-8',\n"
+                "    )\n"
+                f"{FAKE_TRADEABLE_HARD_GATE_BY_FILTER}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+
+            result = subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--factor-name-filter",
+                    "external_move",
+                    "--allowed-target",
+                    "tradeable_full_depth_settlement_pnl",
+                    "--alpha-search-output-dir",
+                    str(tmp / "out" / "alpha-search"),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "no factor registry preview matched allowed target(s): "
+            "tradeable_full_depth_settlement_pnl",
+            result.stderr,
+        )
+        self.assertIn("full_depth_settlement_executable_pnl", result.stderr)
+
     def test_summary_marks_predictive_formula_mutation_runtime_mappable(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

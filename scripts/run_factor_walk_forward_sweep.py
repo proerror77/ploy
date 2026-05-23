@@ -250,9 +250,6 @@ def factor_registry_preview_path(variant_dir: Path, allowed_targets: list[str]) 
             if payload.get("target") == target:
                 return preview
 
-    if len(previews) == 1:
-        return previews[0]
-
     available = ", ".join(str(path.relative_to(alpha_root).parent) for path in previews)
     requested = ", ".join(targets)
     raise SystemExit(
