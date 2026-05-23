@@ -79,6 +79,27 @@ class RuntimeMarketDataBoundaryTests(unittest.TestCase):
             "market discovery must refresh catalog before trade collector polls",
         )
 
+    def test_pm_trade_deploy_health_uses_collector_poll_not_fresh_insert(self) -> None:
+        workflow = ROOT / ".github" / "workflows" / "deploy-tango-1-1.yml"
+        cloud_assist = ROOT / "scripts" / "ci" / "deploy_tango_cloud_assist.py"
+
+        for path in (workflow, cloud_assist):
+            text = path.read_text()
+            self.assertIn("wait_for_recent_log", text)
+            self.assertIn("Polymarket trade collector poll complete", text)
+            self.assertIn("pm trade collector did not complete a healthy poll after deploy", text)
+            self.assertIn("pm trade collector failed after deploy", text)
+            self.assertNotIn(
+                "clob_trade_ticks WHERE received_at >= NOW() - INTERVAL '5 minutes'",
+                text,
+                f"{path.name} must not require a fresh PM trade insert as collector health",
+            )
+            self.assertNotIn(
+                "clob_trade_ticks is not receiving PM trade prints after deploy",
+                text,
+                f"{path.name} must not fail deploys when a healthy poll inserts no trades",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

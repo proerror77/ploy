@@ -95,6 +95,82 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
         self.assertTrue(options["chain_next_run"])
         self.assertEqual(1, options["chain_remaining"])
 
+    def test_fix_runtime_plan_maps_to_candidate_replay_and_parity(self) -> None:
+        payload = build_executor_payload(
+            Namespace(
+                mode="dry_run",
+                execute_ack="",
+                git_ref="main",
+                snapshot_run_id="",
+                symbols="BTCUSDT",
+                stake_usd="15",
+                chain_remaining=1,
+                max_snapshot_window_days=2,
+                runtime_deployment_id="pm5d.threelayer.settlement-probability-btc-eth.dryrun",
+                runtime_config_path="/opt/ploy/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+                runtime_recording_path="/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson",
+                runtime_score="autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike",
+                runtime_strategy_profile="settlement_probability",
+                runtime_issue_number="538",
+                runtime_min_trade_count="50",
+                runtime_min_fill_rate="0.30",
+                runtime_min_roi="0",
+                runtime_source_target="full_depth_settlement_executable_pnl",
+                runtime_source_horizon="5m",
+            ),
+            plan_payload(
+                "fix_runtime",
+                ["run_recorded_replay_parity", "compare_runtime_scorer_contract"],
+            ),
+        )
+
+        self.assertEqual("dry_run", payload["mode"])
+        self.assertEqual(2, payload["executable_dispatch_count"])
+        workflows = [item["workflow"] for item in payload["dispatches"]]
+        self.assertEqual(
+            ["runtime-candidate-replay.yml", "recorded-replay-parity.yml"],
+            workflows,
+        )
+        replay = payload["dispatches"][0]
+        self.assertEqual(
+            "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike",
+            replay["fields"]["runtime_score"],
+        )
+        replay_options = json.loads(replay["fields"]["options_json"])
+        self.assertTrue(replay_options["full_depth_entry"])
+        self.assertFalse(replay_options["skip_settlement_exits"])
+        self.assertEqual("full_depth_settlement_executable_pnl", replay_options["source_target"])
+        self.assertEqual("5m", replay_options["source_horizon"])
+
+    def test_fix_runtime_blocks_candidate_replay_without_runtime_score(self) -> None:
+        payload = build_executor_payload(
+            Namespace(
+                mode="dry_run",
+                execute_ack="",
+                git_ref="main",
+                snapshot_run_id="",
+                symbols="BTCUSDT",
+                stake_usd="15",
+                chain_remaining=1,
+                max_snapshot_window_days=2,
+                runtime_deployment_id="pm5d.threelayer.settlement-probability-btc-eth.dryrun",
+                runtime_config_path="/opt/ploy/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+                runtime_recording_path="/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson",
+                runtime_score="",
+                runtime_strategy_profile="settlement_probability",
+                runtime_issue_number="538",
+                runtime_min_trade_count="50",
+                runtime_min_fill_rate="0.30",
+                runtime_min_roi="0",
+                runtime_source_target="full_depth_settlement_executable_pnl",
+                runtime_source_horizon="5m",
+            ),
+            plan_payload("fix_runtime", ["compare_runtime_scorer_contract"]),
+        )
+
+        self.assertEqual(0, payload["executable_dispatch_count"])
+        self.assertIn("missing_runtime_score", payload["blocked_dispatches"][0]["blockers"])
+
     def test_cli_writes_executor_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

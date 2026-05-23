@@ -813,6 +813,46 @@ fn tango_deploy_keeps_pm5d_live_paused() {
 }
 
 #[test]
+fn tango_deploy_pm_trade_postflight_uses_collector_health_not_fresh_trade_rows() {
+    let workflow = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
+    let cloud_assist = workflow_contents("scripts/ci/deploy_tango_cloud_assist.py");
+    let mut offenders = Vec::new();
+
+    for (name, content) in [
+        ("deploy-tango-1-1.yml", workflow.as_str()),
+        ("deploy_tango_cloud_assist.py", cloud_assist.as_str()),
+    ] {
+        if content.contains(
+            "SELECT EXISTS (SELECT 1 FROM clob_trade_ticks WHERE received_at >= NOW() - INTERVAL '5 minutes')",
+        ) {
+            offenders.push(format!("{name}: still requires fresh clob_trade_ticks inserts"));
+        }
+        if content.contains("clob_trade_ticks is not receiving PM trade prints after deploy") {
+            offenders.push(format!("{name}: still emits stale PM trade freshness failure"));
+        }
+        for needle in [
+            "systemctl is-active --quiet ploy-pm-trade-collector.service",
+            "require_service_guardrails ploy-pm-trade-collector.service",
+            "wait_for_recent_log",
+            "journalctl -u",
+            "Polymarket trade collector poll complete",
+            "no partition of relation",
+            "pm trade collector failed after deploy",
+        ] {
+            if !content.contains(needle) {
+                offenders.push(format!("{name}: missing `{needle}`"));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "tango deploy PM trade postflight guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn research_issue_workflows_apply_decision_labels() {
     let helper = workflow_contents(".github/scripts/research-issue-labels.js");
     let mut offenders = Vec::new();
