@@ -365,18 +365,45 @@ fn collect_factor_preview_rows(plan: &TracePlan) -> Result<Vec<FactorPreviewRow>
     if let Some(alpha_dir) = &plan.alpha_search_dir {
         for path in find_named_files(alpha_dir, "factor-registry-preview.json")? {
             let preview: Value = read_json(&path)?;
-            let target = string_field(&preview, "target").unwrap_or_else(|| "unknown".to_string());
-            let factors = preview
-                .get("factors")
-                .and_then(Value::as_array)
+            let target = string_field(&preview, "target")
+                .or_else(|| target_from_preview_path(&path))
+                .unwrap_or_else(|| "unknown".to_string());
+            let horizon = string_field(&preview, "horizon")
+                .unwrap_or_else(|| default_horizon_for_target(&target));
+            let factors = preview_factors(&preview)
                 .with_context(|| format!("{} missing factors array", path.display()))?;
             for factor in factors {
-                rows.push(factor_preview_row(factor, &target, &path)?);
+                rows.push(factor_preview_row(factor, &target, &horizon, &path)?);
             }
         }
     }
     rows.sort_by(|left, right| left.dsl_hash.cmp(&right.dsl_hash));
     Ok(rows)
+}
+
+fn preview_factors(preview: &Value) -> Option<&Vec<Value>> {
+    if let Some(factors) = preview.get("factors").and_then(Value::as_array) {
+        return Some(factors);
+    }
+    preview.as_array()
+}
+
+fn target_from_preview_path(path: &Path) -> Option<String> {
+    path.parent()
+        .and_then(Path::file_name)
+        .and_then(|item| item.to_str())
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn default_horizon_for_target(target: &str) -> String {
+    if target.contains("10s") {
+        "10s".to_string()
+    } else if target.contains("30s") {
+        "30s".to_string()
+    } else {
+        FACTOR_HORIZON.to_string()
+    }
 }
 
 fn collect_candidate_replay_rows(
@@ -509,6 +536,7 @@ fn factor_name_from_runtime_score(value: &Value) -> Option<String> {
 fn factor_preview_row(
     factor: &Value,
     default_target: &str,
+    default_horizon: &str,
     path: &Path,
 ) -> Result<FactorPreviewRow> {
     let factor_name = string_field(factor, "factor_name")
@@ -536,6 +564,9 @@ fn factor_preview_row(
         .filter(|value| !value.is_empty())
         .unwrap_or("autofactor")
         .to_string();
+    let horizon = string_field(factor, "horizon")
+        .or_else(|| string_field(&runtime_contract, "horizon"))
+        .unwrap_or_else(|| default_horizon.to_string());
 
     Ok(FactorPreviewRow {
         factor_name,
@@ -544,7 +575,7 @@ fn factor_preview_row(
         ast_json,
         runtime_contract,
         factor_family,
-        horizon: FACTOR_HORIZON.to_string(),
+        horizon,
         registry_status: decision.registry_status,
         promotion_decision: decision.promotion_decision,
         promotion_status: decision.promotion_status,
@@ -1315,5 +1346,121 @@ mod tests {
             &json!({"blockers": ["a", "c"]}),
         );
         assert_eq!(blockers, json!(["a", "b", "c"]));
+    }
+
+    fn preview_plan(alpha_search_dir: PathBuf) -> TracePlan {
+        TracePlan {
+            run_id: "test-run".to_string(),
+            snapshot_dir: PathBuf::from("/tmp/unused-snapshot"),
+            alpha_search_dir: Some(alpha_search_dir),
+            registry_json: None,
+            promotion_json: None,
+            handoff_json: None,
+            candidate_replay_jsons: Vec::new(),
+            dry_run: true,
+        }
+    }
+
+    fn write_preview(path: &Path, value: &Value) {
+        fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+        fs::write(
+            path,
+            serde_json::to_string_pretty(value).expect("serialize preview"),
+        )
+        .expect("write preview");
+    }
+
+    #[test]
+    fn reads_versioned_factor_registry_preview_envelope() {
+        let root = std::env::temp_dir().join(format!(
+            "ploy-trace-preview-envelope-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let preview_path = root
+            .join("full_depth_settlement_executable_pnl")
+            .join("factor-registry-preview.json");
+        write_preview(
+            &preview_path,
+            &json!({
+                "version": "alpha_search_artifacts_v1",
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+                "factors": [{
+                    "factor_name": "auto_settlement_conservative_settlement_edge",
+                    "dsl_hash": "abc123",
+                    "ast_json": {"Input": "conservative_settlement_edge"},
+                    "horizon": "5m",
+                    "status": "candidate",
+                    "runtime_contract": {
+                        "strategy_family": "settlement_probability",
+                        "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                        "horizon": "5m",
+                        "blockers": []
+                    },
+                    "blockers": [],
+                    "metrics": {"reward": 1.0}
+                }]
+            }),
+        );
+
+        let rows = collect_factor_preview_rows(&preview_plan(root.clone())).expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "full_depth_settlement_executable_pnl");
+        assert_eq!(rows[0].horizon, "5m");
+        assert_eq!(rows[0].factor_family, "settlement_probability");
+        assert_eq!(rows[0].promotion_decision, "continue");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_legacy_top_level_array_preview_and_uses_parent_target() {
+        let root = std::env::temp_dir().join(format!(
+            "ploy-trace-preview-legacy-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let preview_path = root
+            .join("full_depth_reprice_pnl_10s")
+            .join("factor-registry-preview.json");
+        write_preview(
+            &preview_path,
+            &json!([{
+                "factor_name": "legacy_factor",
+                "dsl_hash": "legacy123",
+                "ast_json": {"Input": "external_move_since_poly_update"},
+                "status": "watchlist",
+                "blockers": [],
+                "metrics": {"reward": 0.2}
+            }]),
+        );
+
+        let rows = collect_factor_preview_rows(&preview_plan(root.clone())).expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "full_depth_reprice_pnl_10s");
+        assert_eq!(rows[0].horizon, "10s");
+        assert_eq!(rows[0].promotion_status, "watchlist");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn malformed_preview_without_factors_still_fails_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "ploy-trace-preview-bad-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let preview_path = root
+            .join("full_depth_settlement_executable_pnl")
+            .join("factor-registry-preview.json");
+        write_preview(
+            &preview_path,
+            &json!({"target": "full_depth_settlement_executable_pnl"}),
+        );
+
+        let error = collect_factor_preview_rows(&preview_plan(root.clone()))
+            .expect_err("bad preview should fail");
+        assert!(error.to_string().contains("missing factors array"));
+        let _ = fs::remove_dir_all(root);
     }
 }

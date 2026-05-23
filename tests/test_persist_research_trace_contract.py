@@ -49,6 +49,29 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("candidate_replay_id = $3", source)
         self.assertIn("ON CONFLICT (candidate_replay_id) DO UPDATE", source)
         self.assertIn('"promotion_registry" | "autofactor_promotion" | "strategy_handoff" => "walk_forward"', source)
+        self.assertIn("preview_factors(&preview)", source)
+        self.assertIn("target_from_preview_path(&path)", source)
+        self.assertIn("default_horizon_for_target(&target)", source)
+        self.assertIn("string_field(factor, \"horizon\")", source)
+
+    def test_alpha_search_registry_preview_is_versioned_runtime_contract(self) -> None:
+        source = (ROOT / "crates" / "ploy-research" / "src" / "alpha_search.rs").read_text(
+            encoding="utf-8"
+        )
+        required = [
+            "struct FactorRegistryPreviewArtifact",
+            "version: ALPHA_SEARCH_ARTIFACT_VERSION",
+            "target: target.to_string()",
+            "factors: factor_registry_preview_rows",
+            "runtime_contract_for_report",
+            "autofactor_runtime_contract_v1",
+            '"runtime_score": mapping.runtime_score',
+            '"strategy_profile": mapping.strategy_profile',
+            '"input_names": input_names',
+            "runtime_contract_unmapped_factor",
+        ]
+        for snippet in required:
+            self.assertIn(snippet, source)
 
     def test_promotion_mapping_is_fail_closed(self) -> None:
         source = EXAMPLE.read_text(encoding="utf-8")
