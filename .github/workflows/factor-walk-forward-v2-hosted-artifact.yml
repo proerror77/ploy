@@ -481,7 +481,7 @@ jobs:
       - name: Persist Research OS trace
         if: always()
         env:
-          RESEARCH_TRACE_DB_URL: ${{ secrets.RESEARCH_OS_DATABASE_URL || secrets.PLOY_DATABASE_URL }}
+          RESEARCH_TRACE_DB_URL: ${{ secrets.RESEARCH_OS_DATABASE_URL || secrets.PLOY_DATABASE_URL || secrets.PLOY_RESEARCH_DATABASE_URL || secrets.PLOY_DB_URL }}
         run: |
           set -euo pipefail
           if [ "${WALK_PERSIST_RESEARCH_TRACE}" != "true" ]; then
@@ -489,7 +489,8 @@ jobs:
             exit 0
           fi
           if [ -z "${RESEARCH_TRACE_DB_URL}" ]; then
-            echo "persist_research_trace requested but RESEARCH_OS_DATABASE_URL/PLOY_DATABASE_URL secret is not available." >&2
+            echo "persist_research_trace requested but no Research OS database secret is available." >&2
+            echo "Expected one of: RESEARCH_OS_DATABASE_URL, PLOY_DATABASE_URL, PLOY_RESEARCH_DATABASE_URL, PLOY_DB_URL." >&2
             exit 2
           fi
           if [ ! -f artifacts/research-snapshot/manifest.json ]; then

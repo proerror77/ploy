@@ -76,6 +76,8 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "Persist Research OS trace",
             "RESEARCH_OS_DATABASE_URL",
             "PLOY_DATABASE_URL",
+            "PLOY_RESEARCH_DATABASE_URL",
+            "PLOY_DB_URL",
             "--alpha-search-dir artifacts/factor-walk-forward-v2/alpha-search",
             "--registry-json artifacts/factor-walk-forward-v2/autofactor-factor-registry.json",
             "--promotion-json artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.json",

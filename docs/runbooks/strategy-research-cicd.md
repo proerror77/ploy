@@ -131,7 +131,8 @@ snapshot identity.
 
 Hosted walk-forward can run the writer automatically only when explicitly
 requested with `options_json.persist_research_trace=true` and a protected
-`RESEARCH_OS_DATABASE_URL` or `PLOY_DATABASE_URL` secret is available. The
+database secret is available. It checks `RESEARCH_OS_DATABASE_URL`,
+`PLOY_DATABASE_URL`, `PLOY_RESEARCH_DATABASE_URL`, then `PLOY_DB_URL`. The
 default remains false so ordinary research runs stay read-only artifact
 generation.
 
