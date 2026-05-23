@@ -48,6 +48,9 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
         self.assertEqual(1, payload["executable_dispatch_count"])
         self.assertEqual("research-snapshot.yml", payload["dispatches"][0]["workflow"])
         self.assertEqual("2026-04-21", payload["dispatches"][0]["fields"]["start_date"])
+        options = json.loads(payload["dispatches"][0]["fields"]["options_json"])
+        self.assertTrue(options["upload_sampled_snapshot"])
+        self.assertNotIn("upload_full_snapshot", options)
 
     def test_execute_mode_requires_ack(self) -> None:
         payload = build_executor_payload(

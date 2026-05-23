@@ -157,6 +157,8 @@ class SettlementProbabilityPrdGateTests(unittest.TestCase):
         self.assertEqual(options["pm_book_sample_secs"], 30)
         self.assertEqual(options["observation_sample_secs"], 30)
         self.assertEqual(options["max_quote_age_secs"], 30)
+        self.assertTrue(options["upload_sampled_snapshot"])
+        self.assertNotIn("upload_full_snapshot", options)
 
     def test_workflow_requires_snapshot_and_does_not_expose_legacy_build(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")

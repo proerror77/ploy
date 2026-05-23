@@ -68,7 +68,10 @@ trace, not dry-run promotion.
 - [x] Apply multi-horizon accounting gate so runtime replay target/horizon must
       match the promoted AutoFactor row before handoff.
 - [ ] Apply remaining high-priority cleanup: generated shared label/accounting
-      catalog and legacy terminology/API cleanup.
+      catalog.
+- [x] Rename active sampled snapshot API/provenance away from legacy
+      `full_snapshot` terminology while preserving workflow dispatch alias
+      compatibility.
 
 ## Review
 
@@ -181,6 +184,11 @@ trace, not dry-run promotion.
   target/horizon in `source_factor` / `decision_contract`, and promotion blocks
   replay tapes whose target or horizon differs from the factor row being
   promoted.
+- 2026-05-23: Active research snapshot dispatch now uses
+  `upload_sampled_snapshot`, and provenance now writes
+  `sampled_snapshot_embedded`. The `research-snapshot.yml` parser keeps a
+  backward-compatible alias for old dispatch payloads, but downstream active
+  metadata no longer describes sampled retained artifacts as full snapshots.
 
 # Candidate Replay Durable Trace (2026-05-23)
 

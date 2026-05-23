@@ -412,7 +412,7 @@ def main() -> int:
             "audit_lookback_hours": int(args.audit_lookback_hours),
             "data_gate": snapshot_data_gate,
             "snapshot_registry_dir": "",
-            "upload_full_snapshot": True,
+            "upload_sampled_snapshot": True,
         }
         snapshot_fields = {
             "git_ref": git_ref,

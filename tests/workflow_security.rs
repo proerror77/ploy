@@ -127,6 +127,42 @@ fn research_snapshot_preserves_empty_timestamp_args_over_ssh() {
 }
 
 #[test]
+fn research_snapshot_uses_sampled_snapshot_canonical_names_with_legacy_alias() {
+    let workflow = workflow_contents(".github/workflows/research-snapshot.yml");
+    let mut offenders = Vec::new();
+
+    for needle in [
+        "\"upload_sampled_snapshot\":true",
+        "\"upload_\" + \"full_snapshot\": \"upload_sampled_snapshot\"",
+        "options_json cannot include both {legacy_key} and {canonical_key}",
+        "handle.write(f\"upload_sampled_snapshot={values['upload_sampled_snapshot']}\\n\")",
+        "echo \"sampled_snapshot_embedded=${SNAPSHOT_UPLOAD_SAMPLED_SNAPSHOT}\"",
+        "steps.snapshot_options.outputs.upload_sampled_snapshot == 'true'",
+    ] {
+        if !workflow.contains(needle) {
+            offenders.push(format!("research-snapshot.yml: missing `{needle}`"));
+        }
+    }
+
+    for forbidden in [
+        "full_snapshot_embedded=${SNAPSHOT_UPLOAD_",
+        "steps.snapshot_options.outputs.upload_full_snapshot == 'true'",
+    ] {
+        if workflow.contains(forbidden) {
+            offenders.push(format!(
+                "research-snapshot.yml: still contains forbidden `{forbidden}`"
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "research snapshot sampled naming guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn factor_evolve_daily_search_passes_snapshot_quote_age() {
     let workflow = workflow_contents(".github/workflows/factor-evolve-daily-research.yml");
     let mut offenders = Vec::new();

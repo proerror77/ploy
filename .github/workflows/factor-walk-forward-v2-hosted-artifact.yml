@@ -837,7 +837,7 @@ jobs:
           {
             echo "source_snapshot_run_id=${{ github.event.inputs.snapshot_run_id }}"
             echo "producer_run_id=${GITHUB_RUN_ID}"
-            echo "full_snapshot_embedded=false"
+            echo "sampled_snapshot_embedded=false"
             echo "runner=ubuntu-latest"
             echo "source=snapshot_artifact"
           } > artifacts/factor-walk-forward-v2-upload/snapshot-provenance/source.txt
