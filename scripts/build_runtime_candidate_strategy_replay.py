@@ -17,6 +17,11 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from autofactor_accounting_catalog import (
+    autofactor_target_horizon,
+    validate_autofactor_source_contract,
+)
+
 
 RUNTIME_REPLAY_BASIS = "runtime_market_update_replay"
 COUNTERFACTUAL_THRESHOLDS = (
@@ -124,6 +129,24 @@ def normalize_counterfactual_threshold(raw: str) -> str:
             return label
     allowed = ", ".join(label for label, _suffix in COUNTERFACTUAL_THRESHOLDS)
     raise SystemExit(f"--configured-entry-threshold must be one of: {allowed}")
+
+
+def resolve_source_horizon(source_target: str, source_horizon: str) -> str:
+    if not source_target and not source_horizon:
+        return ""
+    if source_horizon:
+        blockers = validate_autofactor_source_contract(
+            target=source_target,
+            horizon=source_horizon,
+        )
+        if blockers:
+            raise SystemExit("; ".join(blockers))
+        return source_horizon
+    resolved = autofactor_target_horizon(source_target)
+    if resolved == "unknown":
+        blockers = validate_autofactor_source_contract(target=source_target, horizon="")
+        raise SystemExit("; ".join(blockers))
+    return resolved
 
 
 def score_counterfactual(
@@ -519,7 +542,7 @@ def main() -> int:
         source_factor_name=args.source_factor_name,
         source_dsl_hash=args.source_dsl_hash,
         source_target=args.source_target,
-        source_horizon=args.source_horizon,
+        source_horizon=resolve_source_horizon(args.source_target, args.source_horizon),
         stake_usd=decimal_arg(args.stake_usd, "--stake-usd"),
         full_depth_entry=args.full_depth_entry,
         min_trade_count=args.min_trade_count,

@@ -67,7 +67,7 @@ trace, not dry-run promotion.
       replay evidence.
 - [x] Apply multi-horizon accounting gate so runtime replay target/horizon must
       match the promoted AutoFactor row before handoff.
-- [ ] Apply remaining high-priority cleanup: generated shared label/accounting
+- [x] Apply remaining high-priority cleanup: generated shared label/accounting
       catalog.
 - [x] Rename active sampled snapshot API/provenance away from legacy
       `full_snapshot` terminology while preserving workflow dispatch alias
@@ -189,6 +189,12 @@ trace, not dry-run promotion.
   `sampled_snapshot_embedded`. The `research-snapshot.yml` parser keeps a
   backward-compatible alias for old dispatch payloads, but downstream active
   metadata no longer describes sampled retained artifacts as full snapshots.
+- 2026-05-23: Added shared `autofactor_accounting_catalog.v1` for AutoFactor
+  target -> horizon -> accounting lane -> required execution contract. Rust
+  alpha-search/persist consumers and Python promotion/replay builders now use
+  the shared catalog instead of hand-rolled target/horizon mappings; runtime
+  candidate replay rejects source horizon mismatches before producing a replay
+  artifact.
 
 # Candidate Replay Durable Trace (2026-05-23)
 

@@ -34,6 +34,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from autofactor_accounting_catalog import autofactor_target_horizon
 from autofactor_runtime_contract import RuntimeContractResolver
 from research_snapshot_contract import (
     load_snapshot_execution_contract,
@@ -155,20 +156,6 @@ def parse_int(raw: str) -> int:
 
 def finite_or_none(value: float) -> float | None:
     return value if value == value else None
-
-
-def target_horizon(target: str) -> str:
-    if "reprice_pnl_5s" in target:
-        return "5s"
-    if "reprice_pnl_10s" in target:
-        return "10s"
-    if "reprice_pnl_30s" in target:
-        return "30s"
-    if "reprice_pnl_60s" in target:
-        return "60s"
-    if "settlement" in target:
-        return "5m"
-    return "unknown"
 
 
 def parse_promotion_gate(report_text: str) -> PromotionGate:
@@ -664,7 +651,7 @@ def evaluate(
                 candidate_strategy_replay,
                 mapping=mapping,
                 expected_target=row.target,
-                expected_horizon=target_horizon(row.target),
+                expected_horizon=autofactor_target_horizon(row.target),
                 required_strategy_profile=required_strategy_profile,
                 min_replay_trade_count=min_replay_trade_count,
                 min_replay_fill_rate=min_replay_fill_rate,
