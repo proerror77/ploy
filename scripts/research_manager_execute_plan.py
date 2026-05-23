@@ -445,7 +445,11 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
             )
         )
 
-    if plan.get("theme") == "revise_prior" or "generate_typed_llm_prior_json" in actions:
+    if (
+        plan.get("theme") == "revise_prior"
+        or "generate_typed_llm_prior_json" in actions
+        or blocker_actions
+    ):
         typed_prior = {
             "schema_version": "research_manager_typed_prior.v1",
             "source": "research_trace_plan",
