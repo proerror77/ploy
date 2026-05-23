@@ -211,6 +211,10 @@ async fn latest_snapshot_health(pool: &PgPool) -> Result<Value> {
     Ok(match row {
         Some(row) => {
             let surface_blockers = source_surface_blockers(&row.3);
+            let data_repair_blockers = blockers_by_type(&surface_blockers, "data_repair");
+            let promotion_blockers = blockers_by_type(&surface_blockers, "promotion");
+            let has_surface_blockers = !surface_blockers.is_empty();
+            let has_data_repair_blockers = !data_repair_blockers.is_empty();
             json!({
                 "source": "research_dataset_snapshots",
                 "data_snapshot_id": row.0,
@@ -219,8 +223,10 @@ async fn latest_snapshot_health(pool: &PgPool) -> Result<Value> {
                 "source_surfaces": row.3,
                 "row_counts": row.4,
                 "surface_blockers": surface_blockers,
-                "missing_blocks_promotion": !surface_blockers.is_empty(),
-                "critical_missing": !surface_blockers.is_empty(),
+                "data_repair_blockers": data_repair_blockers,
+                "promotion_blockers": promotion_blockers,
+                "missing_blocks_promotion": has_surface_blockers,
+                "critical_missing": has_data_repair_blockers,
             })
         }
         None => json!({
@@ -229,6 +235,19 @@ async fn latest_snapshot_health(pool: &PgPool) -> Result<Value> {
             "reason": "no_research_dataset_snapshots",
         }),
     })
+}
+
+fn blockers_by_type(blockers: &[Value], blocker_type: &str) -> Vec<Value> {
+    blockers
+        .iter()
+        .filter(|blocker| {
+            blocker
+                .get("blocker_type")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == blocker_type)
+        })
+        .cloned()
+        .collect()
 }
 
 fn source_surface_blockers(source_surfaces: &Value) -> Vec<Value> {
@@ -257,23 +276,27 @@ fn source_surface_blockers(source_surfaces: &Value) -> Vec<Value> {
                 .unwrap_or(false);
             let requires_execution = gate_category == "required_for_execution";
 
-            let reason = if gate_category == "missing_blocks_promotion" {
-                Some("surface_declared_missing_blocks_promotion")
+            let blocker = if gate_category == "missing_blocks_promotion" {
+                Some(("surface_declared_missing_blocks_promotion", "promotion"))
             } else if requires_execution && row_count == Some(0) {
-                Some("required_execution_surface_empty")
+                Some(("required_execution_surface_empty", "data_repair"))
             } else if requires_execution && row_count.is_none() {
-                Some("required_execution_surface_not_materialized")
+                Some(("required_execution_surface_not_materialized", "promotion"))
             } else if requires_execution && snapshot_sampled {
-                Some("required_execution_surface_is_sampled_snapshot")
+                Some((
+                    "required_execution_surface_is_sampled_snapshot",
+                    "promotion",
+                ))
             } else {
                 None
             };
 
-            reason.map(|reason| {
+            blocker.map(|(reason, blocker_type)| {
                 json!({
                     "surface": name,
                     "gate_category": gate_category,
                     "reason": reason,
+                    "blocker_type": blocker_type,
                 })
             })
         })

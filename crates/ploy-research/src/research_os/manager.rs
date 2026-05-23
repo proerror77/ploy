@@ -62,16 +62,8 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
 
     if has_any_key_value(
         &input.market_data_health,
-        &[
-            "missing",
-            "stale",
-            "critical_missing",
-            "missing_blocks_promotion",
-        ],
+        &["missing", "stale", "critical_missing"],
         &[true.into(), "true".into(), "critical".into()],
-    ) || contains_string(
-        &input.market_data_health,
-        &["missing_blocks_promotion", "stale", "critical_missing"],
     ) {
         return Ok(plan(
             "fix_data",
@@ -88,7 +80,15 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
 
     if contains_string(
         &input.latest_runs,
-        &["replay_parity_missing", "runtime_parity_missing"],
+        &[
+            "replay_parity_missing",
+            "runtime_parity_missing",
+            "candidate_strategy_replay_not_runtime_replay",
+            "candidate_strategy_replay_missing",
+            "missing_runtime_contract",
+            "runtime_contract_unmapped_factor",
+            "missing_runtime_strategy_mapping",
+        ],
     ) || has_any_key_value(
         &input.latest_runs,
         &["replay_parity_ready", "runtime_parity_ready"],
@@ -232,11 +232,40 @@ mod tests {
         let plan = plan_next_research(&input(
             "walk_forward",
             serde_json::json!({}),
-            serde_json::json!({"surfaces": [{"name": "clob", "missing_blocks_promotion": true}]}),
+            serde_json::json!({"critical_missing": true, "surface_blockers": [{"name": "clob", "blocker_type": "data_repair"}]}),
         ))
         .expect("plan");
         assert_eq!(plan.theme, "fix_data");
         assert_eq!(plan.candidate_count, 0);
+    }
+
+    #[test]
+    fn planner_does_not_rerun_snapshot_for_promotion_only_blockers() {
+        let plan = plan_next_research(&input(
+            "factor_attribution",
+            serde_json::json!({}),
+            serde_json::json!({
+                "missing_blocks_promotion": true,
+                "critical_missing": false,
+                "promotion_blockers": [
+                    {"surface": "clob_orderbook_snapshots", "reason": "required_execution_surface_is_sampled_snapshot"}
+                ]
+            }),
+        ))
+        .expect("plan");
+        assert_ne!(plan.theme, "fix_data");
+        assert!(plan.candidate_count > 0);
+    }
+
+    #[test]
+    fn planner_routes_runtime_contract_blockers_to_runtime_repair() {
+        let plan = plan_next_research(&input(
+            "factor_attribution",
+            serde_json::json!({"blockers": ["missing_runtime_contract:auto_settlement_edge"]}),
+            serde_json::json!({"missing_blocks_promotion": true, "critical_missing": false}),
+        ))
+        .expect("plan");
+        assert_eq!(plan.theme, "fix_runtime");
     }
 
     #[test]

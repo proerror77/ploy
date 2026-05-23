@@ -82,6 +82,8 @@ trace, not dry-run promotion.
       instead of a moving `now()-lookback` window.
 - [x] Fix Research Manager snapshot dispatch so exact timestamp windows and
       short bounded compile windows are part of the machine contract.
+- [x] Split Research Manager data-repair blockers from promotion/runtime
+      blockers so successful snapshots do not loop back into `fix_data`.
 
 ## Review
 
@@ -272,6 +274,14 @@ trace, not dry-run promotion.
   `python3 -m py_compile scripts/research_manager_execute_plan.py tests/test_research_manager_execute_plan.py`,
   `rtk git diff --check`, and a dry-run against trace-plan run `26336127621`
   produced `2026-05-16T00:00:00Z -> 2026-05-18T00:00:00Z` dispatch options.
+- 2026-05-23: After PR #628 merged, executor run `26338513688` dispatched
+  bounded snapshot `26338516159`, which completed successfully from
+  `2026-05-16T00:00:00Z` to `2026-05-18T00:00:00Z`; hosted walk-forward
+  `26338723709` completed and persisted durable trace with
+  `evidence_stages=factor_attribution,walk_forward`. Trace-plan run
+  `26338820517` still returned `fix_data`, but the blocker was now planner
+  classification: sampled execution surfaces and missing runtime replay are
+  promotion/runtime blockers, not reasons to rerun the same snapshot audit.
 
 # Candidate Replay Durable Trace (2026-05-23)
 
