@@ -312,6 +312,35 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             prior["constraints"],
         )
 
+    def test_fix_data_plan_with_blocker_actions_generates_typed_prior(self) -> None:
+        plan = plan_payload("fix_data", ["collect_full_depth_execution_surface"])
+        plan["plan"]["blocker_actions"] = [
+            {
+                "blocker_family": "promotion_data_execution_surface",
+                "action": "collect_full_depth_execution_surface",
+                "reason": "Research snapshot data health reports sampled execution surface.",
+            },
+            {
+                "blocker_family": "promotion_data_settlement",
+                "action": "repair_official_settlement_coverage",
+                "reason": "Official settlement labels are required for promotion.",
+            },
+        ]
+        payload = build_executor_payload(base_args(), plan)
+
+        prior = payload["typed_prior"]
+        self.assertIsNotNone(prior)
+        self.assertEqual("fix_data", prior["theme"])
+        self.assertEqual(plan["plan"]["blocker_actions"], prior["blocker_actions"])
+        self.assertIn(
+            "block promotion until full-depth execution-surface evidence replaces sampled snapshots",
+            prior["constraints"],
+        )
+        self.assertIn(
+            "block promotion until official settlement coverage exists for all replay-traded events",
+            prior["constraints"],
+        )
+
     def test_cli_records_dispatch_failures_without_dropping_executor_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
