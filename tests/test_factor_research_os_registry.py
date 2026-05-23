@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_042 = ROOT / "migrations" / "042_factor_research_os_registry.sql"
 MIGRATION_043 = ROOT / "migrations" / "043_research_os_trace_constraints.sql"
 MIGRATION_044 = ROOT / "migrations" / "044_candidate_replay_tapes.sql"
+MIGRATION_046 = ROOT / "migrations" / "046_factor_registry_blockers.sql"
 
 
 def research_os_sql() -> str:
@@ -14,6 +15,7 @@ def research_os_sql() -> str:
             MIGRATION_042.read_text(encoding="utf-8"),
             MIGRATION_043.read_text(encoding="utf-8"),
             MIGRATION_044.read_text(encoding="utf-8"),
+            MIGRATION_046.read_text(encoding="utf-8"),
         ]
     )
 
@@ -41,6 +43,7 @@ class FactorResearchOsRegistryMigrationTest(unittest.TestCase):
         self.assertIn("ON factor_registry(dsl_hash, target, horizon)", sql)
         self.assertIn("ast_json JSONB NOT NULL", sql)
         self.assertIn("runtime_contract JSONB NOT NULL DEFAULT '{}'::jsonb", sql)
+        self.assertIn("chk_factor_registry_blockers_array", sql)
         self.assertIn("source_surfaces_json JSONB NOT NULL DEFAULT '[]'::jsonb", sql)
         self.assertIn("input_artifacts_json JSONB NOT NULL DEFAULT '[]'::jsonb", sql)
         self.assertIn("dataset_start_ts TIMESTAMPTZ", sql)
@@ -115,6 +118,7 @@ class FactorResearchOsRegistryMigrationTest(unittest.TestCase):
         self.assertIn("042_factor_research_os_registry.sql", workflow)
         self.assertIn("043_research_os_trace_constraints.sql", workflow)
         self.assertIn("044_candidate_replay_tapes.sql", workflow)
+        self.assertIn("046_factor_registry_blockers.sql", workflow)
 
 
 if __name__ == "__main__":

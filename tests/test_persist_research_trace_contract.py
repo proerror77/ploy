@@ -77,6 +77,12 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         for snippet in required:
             self.assertIn(snippet, source)
 
+    def test_persist_research_trace_writes_factor_registry_blockers(self) -> None:
+        source = EXAMPLE.read_text(encoding="utf-8")
+        self.assertIn("blockers_json", source)
+        self.assertIn("blockers_json = EXCLUDED.blockers_json", source)
+        self.assertIn("row.blockers.to_string()", source)
+
     def test_promotion_mapping_is_fail_closed(self) -> None:
         source = EXAMPLE.read_text(encoding="utf-8")
         self.assertIn('promotion_decision: "continue"', source)
