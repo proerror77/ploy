@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ DEFAULT_ALLOWED_TARGETS = {
     "full_depth_settlement_executable_pnl",
     "tradeable_full_depth_settlement_pnl",
 }
+
+AGGREGATE_BASIS = "factor_walk_forward_top_bucket_aggregate"
 
 FORMULA_RUNTIME_MAPPED_NAMES = {
     "amplitude_weighted_momentum_30s_sigma",
@@ -56,6 +59,21 @@ def parse_int(raw: str, default: int = 0) -> int:
         return int(raw)
     except (TypeError, ValueError):
         return default
+
+
+def canonical_sha256(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def replay_identity(*, runtime_score: str, strategy_profile: str, evidence: str, source_factor: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "basis": AGGREGATE_BASIS,
+        "runtime_score": runtime_score,
+        "strategy_profile": strategy_profile,
+        "evidence": evidence,
+        "source_factor": source_factor or {},
+    }
 
 
 def normalize_formula_name(name: str) -> str:
@@ -235,14 +253,23 @@ def build_artifact(
     min_roi: float,
 ) -> dict[str, Any]:
     if row is None:
+        identity = replay_identity(
+            runtime_score="",
+            strategy_profile=required_strategy_profile,
+            evidence=evidence,
+            source_factor=None,
+        )
         return {
             "schema_version": 1,
             "kind": "autofactor_candidate_strategy_replay",
-            "evidence_stage": "executable_replay",
-            "basis": "factor_walk_forward_top_bucket_aggregate",
+            "candidate_replay_id": f"candidate_replay:{canonical_sha256(identity)[:32]}",
+            "identity": identity,
+            "evidence_stage": "diagnostic",
+            "basis": AGGREGATE_BASIS,
             "strategy_profile": required_strategy_profile,
             "runtime_score": "",
             "promotion_ready": False,
+            "promotion_decision": "blocked",
             "evidence": evidence,
             "decision_contract": {
                 "event_level": True,
@@ -264,6 +291,18 @@ def build_artifact(
     notional = stake_usd * top_bucket_n
     roi = total_pnl / notional if notional > 0 and total_pnl == total_pnl else float("nan")
     runtime_score = row["runtime_mapping"]["runtime_score"]
+    source_factor = {
+        "name": row.get("name", ""),
+        "target": row.get("target", ""),
+        "decision": row.get("decision", ""),
+        "reason": row.get("reason", ""),
+    }
+    identity = replay_identity(
+        runtime_score=runtime_score,
+        strategy_profile=row["runtime_mapping"]["strategy_profile"],
+        evidence=evidence,
+        source_factor=source_factor,
+    )
 
     artifact_blockers = list(blockers)
     artifact_blockers.append("requires_runtime_replay_not_top_bucket_aggregate")
@@ -283,18 +322,16 @@ def build_artifact(
     return {
         "schema_version": 1,
         "kind": "autofactor_candidate_strategy_replay",
-        "evidence_stage": "executable_replay",
-        "basis": "factor_walk_forward_top_bucket_aggregate",
+        "candidate_replay_id": f"candidate_replay:{canonical_sha256(identity)[:32]}",
+        "identity": identity,
+        "evidence_stage": "diagnostic",
+        "basis": AGGREGATE_BASIS,
         "strategy_profile": row["runtime_mapping"]["strategy_profile"],
         "runtime_score": runtime_score,
         "promotion_ready": False,
+        "promotion_decision": "blocked",
         "evidence": evidence,
-        "source_factor": {
-            "name": row.get("name", ""),
-            "target": row.get("target", ""),
-            "decision": row.get("decision", ""),
-            "reason": row.get("reason", ""),
-        },
+        "source_factor": source_factor,
         "decision_contract": {
             "event_level": True,
             "one_decision_per_event": True,

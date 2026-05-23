@@ -32,6 +32,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "factor_registry",
             "factor_evaluations",
             "experiment_trace",
+            "candidate_replay_tapes",
         ]:
             self.assertIn(table, source)
         self.assertIn("ON CONFLICT (data_snapshot_id) DO UPDATE", source)
@@ -40,6 +41,11 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn('const EVALUATION_KIND: &str = "alpha_search_preview"', source)
         self.assertIn("SELECT eval_id::text", source)
         self.assertIn("trace_hash(", source)
+        self.assertIn("--candidate-replay-json", source)
+        self.assertIn("candidate_replay_tape", source)
+        self.assertIn("evaluation_kind = 'candidate_replay'", source)
+        self.assertIn("candidate_replay_id = $3", source)
+        self.assertIn("ON CONFLICT (candidate_replay_id) DO UPDATE", source)
         self.assertIn('"promotion_registry" | "autofactor_promotion" | "strategy_handoff" => "walk_forward"', source)
 
     def test_promotion_mapping_is_fail_closed(self) -> None:
@@ -117,6 +123,8 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "--registry-json artifacts/factor-walk-forward-v2/autofactor-factor-registry.json",
             "--promotion-json artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.json",
             "--handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json",
+            "--candidate-replay-json",
+            "candidate-strategy-replay/candidate-strategy-replay.json",
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, workflow)
@@ -147,6 +155,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             self.assertIn("research-trace-plan", source)
         self.assertIn("--example persist_research_trace", workflow)
         self.assertIn("--example research_trace_plan", workflow)
+        self.assertIn("044_candidate_replay_tapes.sql", workflow)
 
     def test_research_trace_plan_reads_durable_tables(self) -> None:
         source = TRACE_PLAN.read_text(encoding="utf-8")

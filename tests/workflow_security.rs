@@ -568,6 +568,8 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
         "--require candidate-strategy-replay.json",
         "artifacts/candidate-strategy-replay/candidate-strategy-replay.json",
         "--candidate-strategy-replay-json",
+        "--candidate-replay-json",
+        "candidate-strategy-replay/candidate-strategy-replay.json",
     ] {
         if !hosted.contains(needle) {
             offenders.push(format!(
@@ -698,6 +700,21 @@ fn runtime_candidate_replay_allows_empty_entry_score_override() {
         workflow.contains("min_entry_score_override=\"${7:-}\""),
         "runtime-candidate-replay.yml must tolerate an omitted three_layer_min_entry_score override"
     );
+    for needle in [
+        "--deployment-id",
+        "--workflow-run-id",
+        "--workflow-run-url",
+        "--artifact-name",
+        "--recording-path",
+        "--config-path",
+        "--runner-source",
+        "--runner-git-sha",
+    ] {
+        assert!(
+            workflow.contains(needle),
+            "runtime-candidate-replay.yml must pass replay provenance arg `{needle}`"
+        );
+    }
 }
 
 #[test]

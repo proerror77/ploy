@@ -10,6 +10,7 @@ runtime scorer's actual intent/order/fill behavior on the replay stream.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from collections import Counter
 from decimal import Decimal, InvalidOperation
@@ -43,6 +44,53 @@ def decimal_arg(raw: Any, name: str) -> Decimal:
     if not value.is_finite():
         raise SystemExit(f"{name} must be finite: {raw!r}")
     return value
+
+
+def sha256_file_if_present(raw_path: str) -> str:
+    if not raw_path:
+        return ""
+    path = Path(raw_path)
+    if not path.exists() or not path.is_file():
+        return ""
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def canonical_sha256(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_identity(
+    *,
+    basis: str,
+    runtime_score: str,
+    strategy_profile: str,
+    deployment_id: str,
+    workflow_run_id: str,
+    recording_path: str,
+    recording_sha256: str,
+    config_path: str,
+    config_sha256: str,
+    runner_git_sha: str,
+    runtime_evaluation_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "basis": basis,
+        "runtime_score": runtime_score,
+        "strategy_profile": strategy_profile,
+        "deployment_id": deployment_id,
+        "workflow_run_id": workflow_run_id,
+        "recording_path": recording_path,
+        "recording_sha256": recording_sha256,
+        "config_path": config_path,
+        "config_sha256": config_sha256,
+        "runner_git_sha": runner_git_sha,
+        "runtime_evaluation_sha256": runtime_evaluation_sha256,
+    }
 
 
 def is_closed_settlement(raw: Any) -> bool:
@@ -169,6 +217,22 @@ def build_artifact(
     *,
     runtime_score: str,
     strategy_profile: str,
+    deployment_id: str,
+    source_workflow: str,
+    workflow_run_id: str,
+    workflow_run_url: str,
+    artifact_name: str,
+    recording_path: str,
+    recording_sha256: str,
+    config_path: str,
+    config_sha256: str,
+    runner_source: str,
+    runner_git_sha: str,
+    runtime_evaluation_sha256: str,
+    source_factor_name: str,
+    source_dsl_hash: str,
+    source_target: str,
+    source_horizon: str,
     stake_usd: Decimal,
     full_depth_entry: bool,
     min_trade_count: int,
@@ -259,16 +323,51 @@ def build_artifact(
 
     diagnostics = runtime_eval.get("strategy_diagnostics") or result.get("strategy_diagnostics") or {}
     counterfactual = score_counterfactual(diagnostics, configured_entry_threshold)
+    identity = build_identity(
+        basis=RUNTIME_REPLAY_BASIS,
+        runtime_score=runtime_score,
+        strategy_profile=strategy_profile,
+        deployment_id=deployment_id,
+        workflow_run_id=workflow_run_id,
+        recording_path=recording_path,
+        recording_sha256=recording_sha256,
+        config_path=config_path,
+        config_sha256=config_sha256,
+        runner_git_sha=runner_git_sha,
+        runtime_evaluation_sha256=runtime_evaluation_sha256,
+    )
+    source_factor = {
+        "name": source_factor_name,
+        "dsl_hash": source_dsl_hash,
+        "target": source_target,
+        "horizon": source_horizon,
+    }
 
     artifact = {
         "schema_version": 1,
         "kind": "autofactor_candidate_strategy_replay",
+        "candidate_replay_id": f"candidate_replay:{canonical_sha256(identity)[:32]}",
+        "identity": identity,
         "evidence_stage": "executable_replay",
         "basis": RUNTIME_REPLAY_BASIS,
         "strategy_profile": strategy_profile,
         "runtime_score": runtime_score,
         "promotion_ready": not blocking_flags,
+        "promotion_decision": "promote_to_runtime" if not blocking_flags else "blocked",
+        "source_workflow": source_workflow,
+        "workflow_run_id": workflow_run_id,
+        "workflow_run_url": workflow_run_url,
+        "artifact_name": artifact_name,
+        "deployment_id": deployment_id,
+        "recording_path": recording_path,
+        "recording_sha256": recording_sha256,
+        "config_path": config_path,
+        "config_sha256": config_sha256,
+        "runner_source": runner_source,
+        "runner_git_sha": runner_git_sha,
+        "runtime_evaluation_sha256": runtime_evaluation_sha256,
         "evidence": evidence,
+        "source_factor": source_factor,
         "decision_contract": {
             "event_level": trade_count > 0 and unique_event_count == trade_count,
             "one_decision_per_event": trade_count > 0 and max_event_decisions == 1,
@@ -365,6 +464,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runtime-evaluation-json", required=True)
     parser.add_argument("--runtime-score", required=True)
     parser.add_argument("--strategy-profile", default="settlement_probability")
+    parser.add_argument("--deployment-id", default="")
+    parser.add_argument("--source-workflow", default="runtime-candidate-replay.yml")
+    parser.add_argument("--workflow-run-id", default="")
+    parser.add_argument("--workflow-run-url", default="")
+    parser.add_argument("--artifact-name", default="")
+    parser.add_argument("--recording-path", default="")
+    parser.add_argument("--recording-sha256", default="")
+    parser.add_argument("--config-path", default="")
+    parser.add_argument("--config-sha256", default="")
+    parser.add_argument("--runner-source", default="")
+    parser.add_argument("--runner-git-sha", default="")
+    parser.add_argument("--source-factor-name", default="")
+    parser.add_argument("--source-dsl-hash", default="")
+    parser.add_argument("--source-target", default="")
+    parser.add_argument("--source-horizon", default="")
     parser.add_argument("--stake-usd", default="15")
     parser.add_argument("--full-depth-entry", action="store_true")
     parser.add_argument("--min-trade-count", type=int, default=50)
@@ -381,10 +495,29 @@ def main() -> int:
     args = parse_args()
     runtime_path = Path(args.runtime_evaluation_json)
     runtime_eval = json.loads(runtime_path.read_text(encoding="utf-8"))
+    runtime_evaluation_sha256 = sha256_file_if_present(str(runtime_path))
+    recording_sha256 = args.recording_sha256 or sha256_file_if_present(args.recording_path)
+    config_sha256 = args.config_sha256 or sha256_file_if_present(args.config_path)
     artifact = build_artifact(
         runtime_eval,
         runtime_score=args.runtime_score,
         strategy_profile=args.strategy_profile,
+        deployment_id=args.deployment_id,
+        source_workflow=args.source_workflow,
+        workflow_run_id=args.workflow_run_id,
+        workflow_run_url=args.workflow_run_url,
+        artifact_name=args.artifact_name,
+        recording_path=args.recording_path,
+        recording_sha256=recording_sha256,
+        config_path=args.config_path,
+        config_sha256=config_sha256,
+        runner_source=args.runner_source,
+        runner_git_sha=args.runner_git_sha,
+        runtime_evaluation_sha256=runtime_evaluation_sha256,
+        source_factor_name=args.source_factor_name,
+        source_dsl_hash=args.source_dsl_hash,
+        source_target=args.source_target,
+        source_horizon=args.source_horizon,
         stake_usd=decimal_arg(args.stake_usd, "--stake-usd"),
         full_depth_entry=args.full_depth_entry,
         min_trade_count=args.min_trade_count,

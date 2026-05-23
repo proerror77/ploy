@@ -32,6 +32,7 @@ struct TracePlan {
     registry_json: Option<PathBuf>,
     promotion_json: Option<PathBuf>,
     handoff_json: Option<PathBuf>,
+    candidate_replay_jsons: Vec<PathBuf>,
     dry_run: bool,
 }
 
@@ -78,6 +79,41 @@ struct FactorPreviewRow {
 }
 
 #[derive(Debug, Clone)]
+struct CandidateReplayTapeRow {
+    candidate_replay_id: String,
+    run_id: String,
+    source_workflow: String,
+    workflow_run_id: Option<String>,
+    workflow_run_url: Option<String>,
+    artifact_name: Option<String>,
+    artifact_sha256: String,
+    artifact_json: Value,
+    basis: String,
+    evidence_stage: String,
+    deployment_id: Option<String>,
+    strategy_profile: String,
+    runtime_score: String,
+    data_snapshot_id: String,
+    dsl_hash: Option<String>,
+    factor_name: Option<String>,
+    target: Option<String>,
+    horizon: Option<String>,
+    recording_path: Option<String>,
+    recording_sha256: Option<String>,
+    config_path: Option<String>,
+    config_sha256: Option<String>,
+    runner_source: Option<String>,
+    runner_git_sha: Option<String>,
+    decision_contract_json: Value,
+    acceptance_criteria_json: Value,
+    metrics_json: Value,
+    blocking_risk_flags_json: Value,
+    promotion_ready: bool,
+    promotion_decision: String,
+    artifact_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 struct ArtifactTrace {
     event_type: String,
     artifact_path: PathBuf,
@@ -111,12 +147,19 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
         .map(|window| window[1].clone())
 }
 
+fn flag_values(args: &[String], flag: &str) -> Vec<String> {
+    args.windows(2)
+        .filter(|window| window[0] == flag)
+        .map(|window| window[1].clone())
+        .collect()
+}
+
 fn flag_present(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
 }
 
 fn usage() -> &'static str {
-    "usage: persist_research_trace --run-id <id> --snapshot-dir <dir> [--db-url <url>|DATABASE_URL] [--alpha-search-dir <dir>] [--registry-json <path>] [--promotion-json <path>] [--handoff-json <path>] [--dry-run]"
+    "usage: persist_research_trace --run-id <id> --snapshot-dir <dir> [--db-url <url>|DATABASE_URL] [--alpha-search-dir <dir>] [--registry-json <path>] [--promotion-json <path>] [--handoff-json <path>] [--candidate-replay-json <path>...] [--dry-run]"
 }
 
 fn parse_args(args: &[String]) -> Result<TracePlan> {
@@ -130,6 +173,10 @@ fn parse_args(args: &[String]) -> Result<TracePlan> {
         registry_json: flag_value(args, "--registry-json").map(PathBuf::from),
         promotion_json: flag_value(args, "--promotion-json").map(PathBuf::from),
         handoff_json: flag_value(args, "--handoff-json").map(PathBuf::from),
+        candidate_replay_jsons: flag_values(args, "--candidate-replay-json")
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
         dry_run: flag_present(args, "--dry-run"),
     })
 }
@@ -142,13 +189,15 @@ async fn main() -> Result<()> {
     let dataset = dataset_row_from_manifest(&plan.run_id, &manifest)?;
     let traces = collect_artifact_traces(&plan)?;
     let factor_rows = collect_factor_preview_rows(&plan)?;
+    let candidate_replay_rows = collect_candidate_replay_rows(&plan, &dataset)?;
 
     eprintln!(
-        "persist_research_trace: run_id={} snapshot={} factors={} traces={} dry_run={}",
+        "persist_research_trace: run_id={} snapshot={} factors={} candidate_replays={} traces={} dry_run={}",
         plan.run_id,
         dataset.data_snapshot_id,
         factor_rows.len(),
-        traces.len() + 1,
+        candidate_replay_rows.len(),
+        traces.len() + candidate_replay_rows.len() + 1,
         plan.dry_run
     );
 
@@ -170,11 +219,16 @@ async fn main() -> Result<()> {
         let factor_id = upsert_factor_registry(&pool, factor).await?;
         upsert_factor_evaluation(&pool, &factor_id, &plan.run_id, &dataset, factor).await?;
     }
+    for replay in &candidate_replay_rows {
+        upsert_candidate_replay_tape(&pool, replay).await?;
+        upsert_candidate_replay_evaluation(&pool, replay).await?;
+    }
 
     append_experiment_trace(
         &pool,
         &plan.run_id,
         Some(&dataset.data_snapshot_id),
+        None,
         None,
         "research_snapshot_manifest",
         "research_snapshot_manifest",
@@ -190,12 +244,29 @@ async fn main() -> Result<()> {
             &plan.run_id,
             Some(&dataset.data_snapshot_id),
             None,
+            None,
             &trace.event_type,
             &trace.event_type,
             trace.evidence_stage(),
             trace.promotion_decision(),
             &trace.artifact_path,
             &trace.output_json,
+        )
+        .await?;
+    }
+    for replay in &candidate_replay_rows {
+        append_experiment_trace(
+            &pool,
+            &plan.run_id,
+            Some(&dataset.data_snapshot_id),
+            replay.dsl_hash.as_deref(),
+            Some(&replay.candidate_replay_id),
+            "candidate_replay_tape",
+            "candidate_replay_tape",
+            &replay.evidence_stage,
+            Some(&replay.promotion_decision),
+            &replay.artifact_path,
+            &replay.artifact_json,
         )
         .await?;
     }
@@ -306,6 +377,133 @@ fn collect_factor_preview_rows(plan: &TracePlan) -> Result<Vec<FactorPreviewRow>
     }
     rows.sort_by(|left, right| left.dsl_hash.cmp(&right.dsl_hash));
     Ok(rows)
+}
+
+fn collect_candidate_replay_rows(
+    plan: &TracePlan,
+    dataset: &DatasetSnapshotRow,
+) -> Result<Vec<CandidateReplayTapeRow>> {
+    let mut rows = Vec::new();
+    for path in &plan.candidate_replay_jsons {
+        rows.push(candidate_replay_row(plan, dataset, path)?);
+    }
+    rows.sort_by(|left, right| left.candidate_replay_id.cmp(&right.candidate_replay_id));
+    Ok(rows)
+}
+
+fn candidate_replay_row(
+    plan: &TracePlan,
+    dataset: &DatasetSnapshotRow,
+    path: &Path,
+) -> Result<CandidateReplayTapeRow> {
+    let artifact_json: Value = read_json(path)?;
+    let artifact_sha256 = file_sha256(path)?;
+    let basis = string_field(&artifact_json, "basis")
+        .with_context(|| format!("{} missing basis", path.display()))?;
+    let evidence_stage = string_field(&artifact_json, "evidence_stage").unwrap_or_else(|| {
+        if basis == "factor_walk_forward_top_bucket_aggregate" {
+            "diagnostic".to_string()
+        } else {
+            "executable_replay".to_string()
+        }
+    });
+    let candidate_replay_id = string_field(&artifact_json, "candidate_replay_id")
+        .unwrap_or_else(|| format!("candidate_replay:{}", &artifact_sha256[..32]));
+    let source_factor = artifact_json
+        .get("source_factor")
+        .and_then(Value::as_object);
+    let dsl_hash = source_factor
+        .and_then(|item| item.get("dsl_hash"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let factor_name = source_factor
+        .and_then(|item| item.get("name"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| factor_name_from_runtime_score(&artifact_json));
+    let target = source_factor
+        .and_then(|item| item.get("target"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let horizon = source_factor
+        .and_then(|item| item.get("horizon"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| Some(FACTOR_HORIZON.to_string()));
+    let promotion_ready = artifact_json
+        .get("promotion_ready")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let promotion_decision =
+        string_field(&artifact_json, "promotion_decision").unwrap_or_else(|| {
+            if promotion_ready {
+                "promote_to_runtime".to_string()
+            } else {
+                "blocked".to_string()
+            }
+        });
+
+    Ok(CandidateReplayTapeRow {
+        candidate_replay_id,
+        run_id: plan.run_id.clone(),
+        source_workflow: string_field(&artifact_json, "source_workflow")
+            .unwrap_or_else(|| "unknown".to_string()),
+        workflow_run_id: string_field(&artifact_json, "workflow_run_id"),
+        workflow_run_url: string_field(&artifact_json, "workflow_run_url"),
+        artifact_name: string_field(&artifact_json, "artifact_name"),
+        artifact_sha256,
+        artifact_json: artifact_json.clone(),
+        basis,
+        evidence_stage,
+        deployment_id: string_field(&artifact_json, "deployment_id"),
+        strategy_profile: string_field(&artifact_json, "strategy_profile")
+            .unwrap_or_else(|| "unknown".to_string()),
+        runtime_score: string_field(&artifact_json, "runtime_score").unwrap_or_default(),
+        data_snapshot_id: dataset.data_snapshot_id.clone(),
+        dsl_hash,
+        factor_name,
+        target,
+        horizon,
+        recording_path: string_field(&artifact_json, "recording_path"),
+        recording_sha256: string_field(&artifact_json, "recording_sha256"),
+        config_path: string_field(&artifact_json, "config_path"),
+        config_sha256: string_field(&artifact_json, "config_sha256"),
+        runner_source: string_field(&artifact_json, "runner_source"),
+        runner_git_sha: string_field(&artifact_json, "runner_git_sha"),
+        decision_contract_json: artifact_json
+            .get("decision_contract")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        acceptance_criteria_json: artifact_json
+            .get("acceptance_criteria")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        metrics_json: artifact_json
+            .get("metrics")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        blocking_risk_flags_json: artifact_json
+            .get("blocking_risk_flags")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+        promotion_ready,
+        promotion_decision,
+        artifact_path: path.to_path_buf(),
+    })
+}
+
+fn factor_name_from_runtime_score(value: &Value) -> Option<String> {
+    string_field(value, "runtime_score")
+        .and_then(|score| {
+            score
+                .strip_prefix("autofactor_formula:")
+                .map(ToOwned::to_owned)
+        })
+        .filter(|name| !name.is_empty())
 }
 
 fn factor_preview_row(
@@ -690,11 +888,307 @@ async fn upsert_factor_evaluation(
     Ok(())
 }
 
+async fn upsert_candidate_replay_tape(pool: &PgPool, row: &CandidateReplayTapeRow) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO candidate_replay_tapes (
+            candidate_replay_id,
+            run_id,
+            source_workflow,
+            workflow_run_id,
+            workflow_run_url,
+            artifact_name,
+            artifact_sha256,
+            artifact_json,
+            basis,
+            evidence_stage,
+            deployment_id,
+            strategy_profile,
+            runtime_score,
+            data_snapshot_id,
+            dsl_hash,
+            target,
+            horizon,
+            recording_path,
+            recording_sha256,
+            config_path,
+            config_sha256,
+            runner_source,
+            runner_git_sha,
+            decision_contract_json,
+            acceptance_criteria_json,
+            metrics_json,
+            blocking_risk_flags_json,
+            promotion_ready,
+            promotion_decision
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14,
+            $15, $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb, $25::jsonb,
+            $26::jsonb, $27::jsonb, $28, $29
+        )
+        ON CONFLICT (candidate_replay_id) DO UPDATE SET
+            run_id = EXCLUDED.run_id,
+            source_workflow = EXCLUDED.source_workflow,
+            workflow_run_id = EXCLUDED.workflow_run_id,
+            workflow_run_url = EXCLUDED.workflow_run_url,
+            artifact_name = EXCLUDED.artifact_name,
+            artifact_sha256 = EXCLUDED.artifact_sha256,
+            artifact_json = EXCLUDED.artifact_json,
+            basis = EXCLUDED.basis,
+            evidence_stage = EXCLUDED.evidence_stage,
+            deployment_id = EXCLUDED.deployment_id,
+            strategy_profile = EXCLUDED.strategy_profile,
+            runtime_score = EXCLUDED.runtime_score,
+            data_snapshot_id = EXCLUDED.data_snapshot_id,
+            dsl_hash = EXCLUDED.dsl_hash,
+            target = EXCLUDED.target,
+            horizon = EXCLUDED.horizon,
+            recording_path = EXCLUDED.recording_path,
+            recording_sha256 = EXCLUDED.recording_sha256,
+            config_path = EXCLUDED.config_path,
+            config_sha256 = EXCLUDED.config_sha256,
+            runner_source = EXCLUDED.runner_source,
+            runner_git_sha = EXCLUDED.runner_git_sha,
+            decision_contract_json = EXCLUDED.decision_contract_json,
+            acceptance_criteria_json = EXCLUDED.acceptance_criteria_json,
+            metrics_json = EXCLUDED.metrics_json,
+            blocking_risk_flags_json = EXCLUDED.blocking_risk_flags_json,
+            promotion_ready = EXCLUDED.promotion_ready,
+            promotion_decision = EXCLUDED.promotion_decision
+        "#,
+    )
+    .bind(&row.candidate_replay_id)
+    .bind(&row.run_id)
+    .bind(&row.source_workflow)
+    .bind(&row.workflow_run_id)
+    .bind(&row.workflow_run_url)
+    .bind(&row.artifact_name)
+    .bind(&row.artifact_sha256)
+    .bind(row.artifact_json.to_string())
+    .bind(&row.basis)
+    .bind(&row.evidence_stage)
+    .bind(&row.deployment_id)
+    .bind(&row.strategy_profile)
+    .bind(&row.runtime_score)
+    .bind(&row.data_snapshot_id)
+    .bind(&row.dsl_hash)
+    .bind(&row.target)
+    .bind(&row.horizon)
+    .bind(&row.recording_path)
+    .bind(&row.recording_sha256)
+    .bind(&row.config_path)
+    .bind(&row.config_sha256)
+    .bind(&row.runner_source)
+    .bind(&row.runner_git_sha)
+    .bind(row.decision_contract_json.to_string())
+    .bind(row.acceptance_criteria_json.to_string())
+    .bind(row.metrics_json.to_string())
+    .bind(row.blocking_risk_flags_json.to_string())
+    .bind(row.promotion_ready)
+    .bind(&row.promotion_decision)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn upsert_candidate_replay_evaluation(
+    pool: &PgPool,
+    row: &CandidateReplayTapeRow,
+) -> Result<()> {
+    let factor_id = find_candidate_replay_factor_id(pool, row).await?;
+    let Some(factor_id) = factor_id else {
+        return Ok(());
+    };
+    let rejection_reason = row
+        .blocking_risk_flags_json
+        .as_array()
+        .filter(|items| !items.is_empty())
+        .map(|_| "blocked by candidate replay contract".to_string());
+    let metrics_json = json!({
+        "source": "candidate_replay_tape",
+        "basis": row.basis,
+        "metrics": row.metrics_json,
+        "acceptance_criteria": row.acceptance_criteria_json,
+    });
+    let existing_eval_id: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT eval_id::text
+        FROM factor_evaluations
+        WHERE factor_id = $1::uuid
+          AND run_id = $2
+          AND data_snapshot_id = $3
+          AND evidence_stage = $4
+          AND evaluation_kind = 'candidate_replay'
+          AND candidate_replay_id = $5
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(&factor_id)
+    .bind(&row.run_id)
+    .bind(&row.data_snapshot_id)
+    .bind(&row.evidence_stage)
+    .bind(&row.candidate_replay_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(eval_id) = existing_eval_id {
+        sqlx::query(
+            r#"
+            UPDATE factor_evaluations SET
+                evidence_stage = $2,
+                evaluation_kind = 'candidate_replay',
+                candidate_replay_id = $3,
+                evaluator_version = $4,
+                runtime_contract = $5::jsonb,
+                passed_gate = $6,
+                promotion_decision = $7,
+                promotion_status = $8,
+                blockers_json = $9::jsonb,
+                rejection_reason = $10,
+                metrics_json = $11::jsonb
+            WHERE eval_id = $1::uuid
+            "#,
+        )
+        .bind(eval_id)
+        .bind(&row.evidence_stage)
+        .bind(&row.candidate_replay_id)
+        .bind(EVALUATOR_VERSION)
+        .bind(row.artifact_json.to_string())
+        .bind(row.promotion_ready)
+        .bind(&row.promotion_decision)
+        .bind(candidate_replay_promotion_status(row))
+        .bind(row.blocking_risk_flags_json.to_string())
+        .bind(rejection_reason)
+        .bind(metrics_json.to_string())
+        .execute(pool)
+        .await?;
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO factor_evaluations (
+            eval_id,
+            factor_id,
+            run_id,
+            data_snapshot_id,
+            dataset_start_ts,
+            dataset_end_ts,
+            evidence_stage,
+            evaluation_kind,
+            candidate_replay_id,
+            evaluator_version,
+            runtime_contract,
+            passed_gate,
+            promotion_decision,
+            promotion_status,
+            blockers_json,
+            rejection_reason,
+            metrics_json
+        )
+        SELECT
+            $1::uuid,
+            $2::uuid,
+            $3,
+            $4,
+            s.dataset_start_ts,
+            s.dataset_end_ts,
+            $5,
+            'candidate_replay',
+            $6,
+            $7,
+            $8::jsonb,
+            $9,
+            $10,
+            $11,
+            $12::jsonb,
+            $13,
+            $14::jsonb
+        FROM research_dataset_snapshots s
+        WHERE s.data_snapshot_id = $4
+        "#,
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&factor_id)
+    .bind(&row.run_id)
+    .bind(&row.data_snapshot_id)
+    .bind(&row.evidence_stage)
+    .bind(&row.candidate_replay_id)
+    .bind(EVALUATOR_VERSION)
+    .bind(row.artifact_json.to_string())
+    .bind(row.promotion_ready)
+    .bind(&row.promotion_decision)
+    .bind(candidate_replay_promotion_status(row))
+    .bind(row.blocking_risk_flags_json.to_string())
+    .bind(rejection_reason)
+    .bind(metrics_json.to_string())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn find_candidate_replay_factor_id(
+    pool: &PgPool,
+    row: &CandidateReplayTapeRow,
+) -> Result<Option<String>> {
+    if let Some(dsl_hash) = &row.dsl_hash {
+        let factor_id = sqlx::query_scalar(
+            r#"
+            SELECT factor_id::text
+            FROM factor_registry
+            WHERE dsl_hash = $1
+              AND ($2::text IS NULL OR target = $2)
+              AND ($3::text IS NULL OR horizon = $3)
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(dsl_hash)
+        .bind(&row.target)
+        .bind(&row.horizon)
+        .fetch_optional(pool)
+        .await?;
+        if factor_id.is_some() {
+            return Ok(factor_id);
+        }
+    }
+    if let Some(factor_name) = &row.factor_name {
+        return Ok(sqlx::query_scalar(
+            r#"
+            SELECT factor_id::text
+            FROM factor_registry
+            WHERE factor_name = $1
+              AND ($2::text IS NULL OR target = $2)
+              AND ($3::text IS NULL OR horizon = $3)
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(factor_name)
+        .bind(&row.target)
+        .bind(&row.horizon)
+        .fetch_optional(pool)
+        .await?);
+    }
+    Ok(None)
+}
+
+fn candidate_replay_promotion_status(row: &CandidateReplayTapeRow) -> &'static str {
+    if row.promotion_ready {
+        "ready"
+    } else {
+        "blocked"
+    }
+}
+
 async fn append_experiment_trace(
     pool: &PgPool,
     run_id: &str,
     data_snapshot_id: Option<&str>,
     dsl_hash: Option<&str>,
+    candidate_replay_id: Option<&str>,
     event_type: &str,
     artifact_kind: &str,
     evidence_stage: &str,
@@ -738,6 +1232,7 @@ async fn append_experiment_trace(
             event_type,
             data_snapshot_id,
             dsl_hash,
+            candidate_replay_id,
             artifact_kind,
             evidence_stage,
             promotion_decision,
@@ -747,7 +1242,7 @@ async fn append_experiment_trace(
             hash_prev,
             hash_current
         )
-        VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13, $14)
+        VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15)
         "#,
     )
     .bind(Uuid::new_v4().to_string())
@@ -756,6 +1251,7 @@ async fn append_experiment_trace(
     .bind(event_type)
     .bind(data_snapshot_id)
     .bind(dsl_hash)
+    .bind(candidate_replay_id)
     .bind(artifact_kind)
     .bind(evidence_stage)
     .bind(promotion_decision)
