@@ -65,6 +65,7 @@ when the mismatch is understood and tracked as a follow-up issue.
 | Dry-run config sync | `.github/workflows/sync-dryrun-strategy-config-tango-1-1.yml` | Protected config-only sync for a reviewed dry-run strategy TOML; restarts only the target dry-run worker and avoids collector restarts during clean-window waits |
 | Event ML rolling evidence | `.github/workflows/event-ml-rolling-evidence.yml` | Produce rolling ML evidence from a retained event-root dataset artifact; `source_dataset_run_id` is required |
 | Research Manager plan | `.github/workflows/research-trace-plan.yml` | Read durable Research OS trace on `tango-1-1` with the deployed `research-trace-plan` binary and emit next-step JSON/Markdown artifacts |
+| Research Manager executor | `.github/workflows/research-manager-execute-plan.yml` | Convert a trace-plan artifact into dry-run or explicitly ACKed bounded follow-up research dispatches |
 | Market data audit | `.github/workflows/market-data-gap-audit.yml` | Scheduled/manual Tango data freshness and gap gate |
 | Image build | `.github/workflows/build-push-acr.yml` | Build ACK images; push only immutable checked-out SHA tags |
 | ACK deploy | `.github/workflows/deploy-ack.yml` | Deploy immutable SHA image tags through the protected `ack` environment |
@@ -129,6 +130,14 @@ until executable replay, runtime scorer parity, and dry-run evidence are
 attached through the later gates. Candidate replay tapes must use their own
 `candidate_replay_id` instead of being collapsed into the sampled research
 snapshot identity.
+
+As of current mainline evidence, this chain has been proven through a durable
+trace-backed plan, but not through automatic strategy discovery. Hosted
+walk-forward run `26336054813` persisted
+`evidence_stages=factor_attribution,walk_forward`; Research Trace Plan run
+`26336127621` read the trace and produced `theme=fix_data` with
+`candidate_count=0`. Treat that as restored plumbing plus a data/candidate
+quality blocker, not as a dry-run-ready strategy.
 
 AutoFactor promotion and aggregate candidate-replay builders must prefer the
 typed `factor-registry-preview.json` runtime contract when it is available.

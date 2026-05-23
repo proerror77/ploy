@@ -72,6 +72,10 @@ trace, not dry-run promotion.
 - [x] Rename active sampled snapshot API/provenance away from legacy
       `full_snapshot` terminology while preserving workflow dispatch alias
       compatibility.
+- [x] Refresh architecture/runbook inventory after PR #624/#625 and current
+      `main` trace-plan evidence.
+- [x] Record that the restored chain currently returns `fix_data` with zero
+      qualified candidates, not dry-run-ready strategy discovery.
 
 ## Review
 
@@ -145,11 +149,12 @@ trace, not dry-run promotion.
   scripts, crates, and tests do not reintroduce that language. Validation
   passed: YAML parse for touched workflows, `python3 -m unittest
   tests.test_persist_research_trace_contract`, and `rtk git diff --check`.
-- 2026-05-23: PR #615 is merged to `main` as
-  `c2e4fde4c74b44d7e03a49d99142cbb702560122`; deploy run `26330884546` is still
-  waiting on the protected `tango-1-1` environment. Mainline research
-  restoration remains unproven until that deploy succeeds and a fresh hosted
-  walk-forward persists trace from the current `main` SHA.
+- 2026-05-23: PR #615 merged to `main` as
+  `c2e4fde4c74b44d7e03a49d99142cbb702560122`. At the time of that note, deploy
+  run `26330884546` was still waiting on the protected `tango-1-1`
+  environment, so mainline research restoration was not yet proven. Later
+  entries supersede this with fresh current-`main` walk-forward and trace-plan
+  evidence.
 - 2026-05-23: `factor-review-v2.yml` and `factor-walk-forward-v2.yml` no longer
   contain the emergency self-hosted direct-DB jobs. They route snapshot-backed
   requests to hosted artifact workflows and reject missing `snapshot_run_id`.
@@ -195,6 +200,35 @@ trace, not dry-run promotion.
   the shared catalog instead of hand-rolled target/horizon mappings; runtime
   candidate replay rejects source horizon mismatches before producing a replay
   artifact.
+- 2026-05-23: PR #624 merged as
+  `40e0c6f40268575da45c4f9ddfa3f9d9a214bbe0`. Active research snapshot
+  contracts use `upload_sampled_snapshot` and `sampled_snapshot_embedded`;
+  `research-snapshot.yml` retains a backward-compatible dispatch alias only.
+- 2026-05-23: PR #625 merged as
+  `a5234cbfdf3cb93c22aa013888e418b83d308399`. AutoFactor target/horizon
+  accounting now uses `config/autofactor_accounting_catalog.json` across Rust
+  alpha-search/persistence and Python promotion/replay builders.
+- 2026-05-23: Hosted walk-forward run `26336054813` from current `main`
+  succeeded and persisted durable trace. Artifact evidence included
+  `research-trace/persisted.env` with `persisted=true`,
+  `run_id=26336054813`, and
+  `evidence_stages=factor_attribution,walk_forward`.
+- 2026-05-23: The same run remains blocked for strategy discovery:
+  `sweep-summary.json` reported `decision=blocked`,
+  `qualified_count=0`, and no runtime-mappable candidate. Its diagnostic
+  candidate replay was based on `factor_walk_forward_top_bucket_aggregate` and
+  carried blockers including `no_runtime_mappable_candidate` plus the sampled
+  execution-surface blocker for `clob_orderbook_snapshots`.
+- 2026-05-23: Research Trace Plan run `26336127621` succeeded from current
+  `main` after protected environment approval. The plan artifact had
+  `schema_version=research_trace_plan.v1`, `theme=fix_data`,
+  `priority=high`, `candidate_count=0`, and actions
+  `repair_or_exclude_missing_data_surface` / `rerun_snapshot_data_audit`.
+- 2026-05-23: Documentation review refreshed the architecture verdict: the
+  chain is restored through snapshot-backed walk-forward, durable trace, and
+  Research Manager planning, but automatic research/backtest/strategy discovery
+  is not proven until `research-manager-execute-plan.yml` drives the next
+  bounded run and attaches evidence without manual artifact interpretation.
 
 # Candidate Replay Durable Trace (2026-05-23)
 

@@ -23,8 +23,8 @@ reserved for `executable_replay` evidence.
 | Research snapshot | `research_snapshot_compile` emits immutable complete sampled artifacts with source-surface metadata and canonical `gate_category` values | Canonical factor-search input; not full-resolution execution replay evidence |
 | Alpha-search | Hosted artifact walk-forward emits registry previews, typed runtime contracts, MCTS tree, search feedback, promotion/handoff artifacts | Usable for factor discovery and attribution |
 | Candidate replay | `candidate_replay_tapes` exists and `persist_research_trace` can link replay artifacts to factor evaluations | Durable replay identity now exists; true runtime replay evidence must still be supplied per candidate |
-| Durable trace | Hosted walk-forward defaults to trace persistence and writes Research OS rows when DB secrets and deployed binaries are available | Queryable foundation exists; current post-PR #615 deploy/run verification is pending |
-| Research Manager | `research_trace_plan` can read durable DB trace and emit next-plan JSON | Planning surface exists; not yet wired to automatic issue creation or workflow dispatch |
+| Durable trace | Hosted walk-forward defaults to trace persistence and writes Research OS rows when DB secrets and deployed binaries are available | Current `main` run `26336054813` persisted trace and uploaded `research-trace/persisted.env` |
+| Research Manager | `research_trace_plan` can read durable DB trace and emit next-plan JSON | Current `main` run `26336127621` produced a `fix_data` plan; executor exists but automatic closed-loop execution is still unproven |
 | Legacy research paths | Factor routers and Event ML rolling evidence are artifact-backed only | Former direct `ploy-ci-1` DB execution/export branches have been removed from the active research chain |
 | Diagnostic backtest | `backtest.yml` now emits `evidence-stage` artifacts with `promotion_ready=false` | Useful diagnostic replay/backtest surface; not promotion evidence |
 
@@ -70,29 +70,51 @@ reserved for `executable_replay` evidence.
    event-root dataset artifact via `source_dataset_run_id` and fails closed when
    that artifact provenance is missing.
 
+7. **Shared AutoFactor accounting is now generated from one active catalog.**
+
+   `config/autofactor_accounting_catalog.json` is consumed by Rust
+   alpha-search/persistence code and Python promotion/replay builders. Runtime
+   candidate replay now rejects target/horizon mismatches against the selected
+   factor row before emitting replay evidence.
+
+8. **Active sampled snapshot naming has been cut away from legacy `full`
+   terminology.**
+
+   Active dispatch/provenance fields now use `upload_sampled_snapshot` and
+   `sampled_snapshot_embedded`. `research-snapshot.yml` keeps a backward
+   compatible input alias for older dispatch payloads, but downstream artifacts
+   no longer describe retained sampled products as unsampled source data.
+
+## Current Verified Runs
+
+| Run | Git ref / source | Result | Meaning |
+| --- | --- | --- | --- |
+| `26336054813` | `main` at `a5234cbfdf3cb93c22aa013888e418b83d308399` | Hosted walk-forward succeeded; `persisted=true`; stages `factor_attribution,walk_forward` | Snapshot -> walk-forward -> durable trace path is working from current main |
+| `26336127621` | `main` Research Trace Plan | Succeeded; `schema_version=research_trace_plan.v1`; `theme=fix_data`; `candidate_count=0` | Research Manager can read trace and produce a typed next plan |
+
+The current walk-forward evidence is deliberately blocked:
+
+- `sweep-summary.json` reports `decision=blocked` and `qualified_count=0`.
+- Candidate replay remains a diagnostic aggregate
+  (`basis=factor_walk_forward_top_bucket_aggregate`) and is blocked by
+  `no_runtime_mappable_candidate`.
+- Snapshot contract blockers include
+  `sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots`,
+  so the run cannot make full-depth executable handoff claims.
+- The snapshot backing this run contains `BTCUSDT`, `ETHUSDT`, and `SOLUSDT`;
+  earlier six-symbol dispatch was invalid for that snapshot scope.
+
 ## Remaining Problems
 
-1. **The post-PR #615 deploy has not completed yet.**
+1. **Research Manager is not proven closed-loop automation.**
 
-   The required Tango deploy run is still waiting on the protected environment.
-   Until it succeeds, migration `044_candidate_replay_tapes.sql` and the
-   deployed `persist-research-trace` / `research-trace-plan` binaries are not
-   verified for the current `main` SHA.
+   `research_trace_plan` produces a typed plan from DB trace, and
+   `research-manager-execute-plan.yml` can dry-run bounded follow-up actions.
+   The missing proof is an executed loop that reads the plan, dispatches the
+   next research workflow, attaches evidence, and updates the next issue/run
+   without manual artifact interpretation.
 
-2. **Trace-backed research has not been rerun from current `main`.**
-
-   Earlier trace persistence was observed, but after the latest evidence-stage
-   and replay provenance changes, the chain still needs a fresh hosted
-   walk-forward run from `main` and a fresh Research Manager plan over the
-   resulting DB trace.
-
-3. **Research Manager is not closed-loop automation.**
-
-   `research_trace_plan` produces a typed plan from DB trace, but it does not
-   yet create GitHub issues, dispatch the next hosted run, or write typed priors
-   back into the alpha-search chain.
-
-4. **Feature snapshots are still sampled research products, not full execution
+2. **Feature snapshots are still sampled research products, not full execution
    tapes.**
 
    Snapshot manifests carry source surfaces, cadence, `raw_full_fidelity`,
@@ -103,7 +125,7 @@ reserved for `executable_replay` evidence.
    positive replacement: durable full-depth lake/runtime replay evidence must
    become the normal executable handoff source.
 
-5. **Runtime input canonicalization is now gated for AutoFactor promotion/replay,
+3. **Runtime input canonicalization is now gated for AutoFactor promotion/replay,
    but not yet a shared cross-language source of truth.**
 
    Factor registry contracts now carry typed runtime metadata, and Python
@@ -113,17 +135,19 @@ reserved for `executable_replay` evidence.
    need one generated/shared source for feature names, horizons, LOB surfaces,
    blocker semantics, and strategy profile/family mapping.
 
-6. **Multi-horizon label/accounting now has a promotion handoff gate, but the
-   label engine still needs a shared generated catalog.**
+4. **Multi-horizon label/accounting has a shared AutoFactor catalog, but the
+   broader label engine still needs generated contracts.**
 
    AutoFactor promotion now checks that the candidate runtime replay tape's
-   `source_factor.target/horizon` matches the factor row being promoted, and
-   runtime/aggregate replay artifacts write the same target/horizon into their
-   decision contract. The remaining architecture gap is consolidating 30s /
-   60s / 5m / 15m label definitions into one generated catalog shared by Rust
-   research, runtime replay builders, and persistence.
+   `source_factor.target/horizon` matches the factor row being promoted.
+   Runtime/aggregate replay artifacts write the same target/horizon into their
+   decision contract, and AutoFactor target/horizon/accounting metadata now
+   comes from `config/autofactor_accounting_catalog.json`. The remaining
+   architecture gap is consolidating 30s / 60s / 5m / 15m label definitions
+   beyond AutoFactor into one generated catalog shared by Rust research, runtime
+   replay builders, and persistence.
 
-7. **DuckDB should remain a query accelerator, not durable state.**
+5. **DuckDB should remain a query accelerator, not durable state.**
 
    Durable research registry, promotion decisions, replay tape identity, and
    experiment trace belong in PostgreSQL plus immutable artifacts/lake files.
@@ -134,14 +158,12 @@ reserved for `executable_replay` evidence.
 
 | Priority | Work | Done when |
 | --- | --- | --- |
-| P0 | Approve/complete `deploy-tango-1-1.yml` run `26330884546` from `main` | Workflow succeeds for SHA `c2e4fde4c74b44d7e03a49d99142cbb702560122` |
-| P0 | Verify current Tango research deployment | Migration `044_candidate_replay_tapes.sql` is applied and `/opt/ploy/bin/persist-research-trace` / `/opt/ploy/bin/research-trace-plan` are executable |
-| P0 | Run one hosted walk-forward from current `main` with default trace persistence | DB contains current-run rows across Research OS trace tables |
-| P0 | Run `research-trace-plan.yml` against the fresh trace | Plan JSON references latest trace rows and returns `continue_search`, `revise_prior`, `fix_data`, `fix_runtime`, or `fix_workflow` |
-| P1 | Add Research Manager action executor | Plan output can open/link issues and dispatch bounded hosted research reruns without manual artifact reading |
-| P1 | Promote runtime input canonicalization to a shared generated contract | Rust runtime scoring, Rust alpha-search, and Python promotion/replay use one source of truth instead of mirrored catalogs |
+| P0 | Execute the Research Manager `fix_data` plan in dry-run and then bounded execute mode | Executor artifact dispatches the next snapshot/data-audit or hosted walk-forward run and records issue/run linkage |
+| P0 | Repair or replace sampled execution-surface evidence | Full-depth CLOB lake or runtime replay evidence replaces sampled `clob_orderbook_snapshots` for executable handoff |
+| P0 | Explain why latest trace plan had empty factor registry/latest run arrays | Query path either links run `26336054813` rows or records why no runtime-mappable factor rows were persisted |
+| P1 | Promote runtime input canonicalization to a generated shared contract | Rust runtime scoring, Rust alpha-search, and Python promotion/replay use one source of truth instead of mirrored catalogs |
 | P1 | Complete full-depth executable evidence layer | Runtime replay or full-depth lake evidence replaces sampled snapshot rows for executable handoff |
-| P1 | Generate shared label/accounting catalog | Runtime, research, replay, and trace persistence derive target/horizon/accounting metadata from one source |
+| P1 | Generate shared non-AutoFactor label contracts | Runtime, research, replay, and trace persistence derive 30s / 60s / 5m / 15m label definitions from one source |
 
 ## Verdict
 
@@ -150,18 +172,27 @@ factor attribution, durable trace, candidate replay, and diagnostic backtest
 have separate evidence stages and the old direct-DB factor execution branch has
 been cut out of the active workflows.
 
-The research chain is not fully restored until the current deploy completes and
-one fresh `main` run proves this sequence:
+The research chain has been restored through durable trace planning, but not
+through strategy discovery or dry-run handoff. The proven sequence is:
 
 ```text
 research-snapshot.yml
   -> factor-walk-forward-v2-hosted-artifact.yml
   -> persist Research OS trace
   -> research-trace-plan.yml
-  -> next bounded research issue/run
 ```
 
-Only after that observed loop should the system be described as automatic
-research/backtest/strategy discovery. Today it is a mostly separated research
-architecture with the final deploy, rerun, and closed-loop automation still
-pending.
+The missing sequence is:
+
+```text
+research-trace-plan.yml
+  -> research-manager-execute-plan.yml
+  -> next bounded snapshot/data-audit or hosted walk-forward run
+  -> issue/evidence update
+  -> revised candidate or explicit rejection
+```
+
+Only after that loop runs without manual artifact interpretation should the
+system be described as automatic research/backtest/strategy discovery. Today it
+is a separated, trace-backed research architecture whose current result is
+`fix_data` with zero qualified candidates, not a tradable strategy.

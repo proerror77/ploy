@@ -127,7 +127,7 @@
 
 Referenced files:
 
-- `scripts/archive/legacy-root-runtime/aws_ec2_deploy.sh`
+- `scripts/archive/legacy-root-runtime/aws_ec2_deploy.sh` (historical/context-only)
 - `scripts/install-service.sh`
 - `src/coordinator/bootstrap.rs`
 
@@ -136,7 +136,7 @@ Referenced files:
 Referenced files:
 
 - `migrations/014_multi_account_and_collector_targets.sql`
-- `scripts/archive/legacy-root-runtime/ploy_accountctl.sh`
+- `scripts/archive/legacy-root-runtime/ploy_accountctl.sh` (historical/context-only)
 - `src/api/handlers/system.rs`
 - `src/api/routes.rs`
 - `src/api/types.rs`

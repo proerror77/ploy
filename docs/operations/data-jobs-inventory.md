@@ -53,8 +53,8 @@ collection behavior.
 | `scripts/check_polymarket_api_usage.sh` | diagnostic | ops | Keep; no Rust replacement needed. |
 | `scripts/report_drawdown.py` | report helper | research | Keep until research reporting is consolidated. |
 | `scripts/refresh_research_valid_windows.sh` | research maintenance | research | Keep; tied to factor research materialized view. |
-| `scripts/run_factor_research.sh` | manual direct-DB debug runner | research | Break-glass only; requires `PLOY_ALLOW_DIRECT_FACTOR_RESEARCH=manual-direct-factor-research`. Prefer retained artifacts and hosted workflows. |
-| `scripts/run_factor_research_matrix.sh` | manual direct-DB debug batch runner | research | Calls `run_factor_research.sh` and inherits the same explicit ACK requirement. |
+| `scripts/run_factor_research.sh` | manual direct-DB debug runner | research | Break-glass only; requires `PLOY_ALLOW_DIRECT_FACTOR_RESEARCH=manual-direct-factor-research`. It is not the canonical research chain and must not be used for promotion evidence; prefer retained snapshots, hosted artifact workflows, durable trace, and Research Manager plans. |
+| `scripts/run_factor_research_matrix.sh` | manual direct-DB debug batch runner | research | Calls `run_factor_research.sh` and inherits the same explicit ACK requirement and non-canonical status. |
 
 ## Archive Candidates
 
@@ -85,3 +85,7 @@ collection behavior.
 - Prefer current Rust control-plane/runtime surfaces for new operational docs.
 - Mark Python scripts as compatibility or one-shot unless they are the canonical source for a live data stream.
 - Before retirement, verify runbook references with `rg` and confirm replacement freshness or parity evidence.
+- Treat direct-DB factor research scripts as operator break-glass tools only.
+  Artifact-backed research starts with `research-snapshot.yml`, routes through
+  hosted factor review/walk-forward workflows, persists Research OS trace, and
+  lets `research-trace-plan.yml` produce the next bounded research action.
