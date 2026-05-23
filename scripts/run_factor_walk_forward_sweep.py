@@ -184,6 +184,10 @@ def promotion_args(args: argparse.Namespace, report: Path, variant_dir: Path) ->
         variant_dir / "candidate-strategy-replay.json"
     )
     command.extend(["--candidate-strategy-replay-json", replay_json])
+    registry_preview = factor_registry_preview_path(variant_dir)
+    if registry_preview:
+        command.extend(["--factor-registry-preview-json", str(registry_preview)])
+        command.append("--require-runtime-contract")
     for target in args.allowed_target:
         command.extend(["--allowed-target", target])
     return command
@@ -210,9 +214,21 @@ def candidate_replay_args(
         "--evidence",
         str(report),
     ]
+    registry_preview = factor_registry_preview_path(variant_dir)
+    if registry_preview:
+        command.extend(["--factor-registry-preview-json", str(registry_preview)])
+        command.append("--require-runtime-contract")
     for target in args.allowed_target:
         command.extend(["--allowed-target", target])
     return command
+
+
+def factor_registry_preview_path(variant_dir: Path) -> Path | None:
+    alpha_root = variant_dir / "alpha-search"
+    if not alpha_root.exists():
+        return None
+    previews = sorted(alpha_root.rglob("factor-registry-preview.json"))
+    return previews[0] if previews else None
 
 
 def ranked_factor_rows(promotion: dict[str, Any], allowed_targets: set[str]) -> list[dict[str, Any]]:
@@ -249,12 +265,22 @@ def ranked_factor_rows(promotion: dict[str, Any], allowed_targets: set[str]) -> 
                 "qualified": bool(item.get("qualified")),
                 "runtime_mapping": mapping,
                 "runtime_mappable": bool(mapping)
-                and not any(str(blocker).startswith("runtime_profile_mismatch:") for blocker in blockers)
+                and not any(is_runtime_contract_blocker(str(blocker)) for blocker in blockers)
                 and "empty_runtime_strategy_profile" not in blockers,
                 "blockers": blockers,
             }
         )
     return rows
+
+
+def is_runtime_contract_blocker(blocker: str) -> bool:
+    return (
+        blocker.startswith("runtime_profile_mismatch:")
+        or blocker.startswith("runtime_contract_")
+        or blocker.startswith("runtime_input_")
+        or blocker.startswith("missing_runtime_")
+        or blocker.startswith("incomplete_runtime_contract_")
+    )
 
 
 def _factor_score(item: dict[str, Any]) -> tuple[float, float, float, float, float, float]:

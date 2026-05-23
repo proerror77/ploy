@@ -57,9 +57,11 @@ trace, not dry-run promotion.
       `evidence_stage` cannot contradict each other.
 - [x] Add a default-dry-run Research Manager executor workflow that turns
       trace-plan actions into auditable bounded follow-up research dispatches.
+- [x] Add an AutoFactor runtime input canonicalization gate so promotion and
+      candidate replay prefer typed registry contracts and fail closed on
+      missing, blocked, or semantically mismatched runtime inputs.
 - [ ] Apply remaining high-priority data/research cleanup based on audit
-      results: runtime input canonicalization, feature snapshot hard gates, and
-      multi-horizon accounting gates.
+      results: feature snapshot hard gates and multi-horizon accounting gates.
 
 ## Review
 
@@ -149,6 +151,14 @@ trace, not dry-run promotion.
   `scripts/run_factor_research_matrix.sh` now require
   `PLOY_ALLOW_DIRECT_FACTOR_RESEARCH=manual-direct-factor-research`, so manual
   DB research cannot be confused with the artifact-backed mainline path.
+- 2026-05-23: Added a shared AutoFactor runtime contract loader for Python
+  promotion/replay consumers and wired hosted sweep / standalone promotion to
+  pass `factor-registry-preview.json` when present. Registry-backed paths now
+  require typed runtime contracts and block missing contracts, contract
+  blockers, unsupported inputs, `external_pressure` semantic mismatch, and
+  placeholder `iv_change_1m` instead of falling back to factor-name inference.
+  Rust alpha-search registry previews now emit the same blockers and no longer
+  mark unsupported predictive suffixes as runtime-mappable.
 
 # Candidate Replay Durable Trace (2026-05-23)
 

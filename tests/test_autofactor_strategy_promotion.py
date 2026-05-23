@@ -211,10 +211,18 @@ DEFAULT_REPLAY_PAYLOAD = {
 
 
 class AutoFactorStrategyPromotionTests(unittest.TestCase):
-    def run_script(self, report, *extra_args, check=True, replay_payload=DEFAULT_REPLAY_PAYLOAD):
+    def run_script(
+        self,
+        report,
+        *extra_args,
+        check=True,
+        replay_payload=DEFAULT_REPLAY_PAYLOAD,
+        registry_preview_payload=None,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             report_path = Path(tmp) / "report.txt"
             replay_path = Path(tmp) / "candidate-strategy-replay.json"
+            registry_path = Path(tmp) / "factor-registry-preview.json"
             output_json = Path(tmp) / "promotion.json"
             output_registry = Path(tmp) / "registry.json"
             output_handoff = Path(tmp) / "handoff.json"
@@ -227,6 +235,17 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 replay_args = ["--candidate-strategy-replay-json", str(replay_path)]
+            registry_args = []
+            if registry_preview_payload is not None:
+                registry_path.write_text(
+                    json.dumps(registry_preview_payload, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                registry_args = [
+                    "--factor-registry-preview-json",
+                    str(registry_path),
+                    "--require-runtime-contract",
+                ]
             result = subprocess.run(
                 [
                     sys.executable,
@@ -242,6 +261,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                     "--output-handoff-md",
                     str(output_handoff_md),
                     *replay_args,
+                    *registry_args,
                     *extra_args,
                 ],
                 cwd=ROOT,
@@ -254,6 +274,70 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             handoff = json.loads(output_handoff.read_text(encoding="utf-8"))
             handoff_md = output_handoff_md.read_text(encoding="utf-8")
             return result, payload, registry, handoff, handoff_md
+
+    def test_registry_contract_blocks_promotion_name_inference_when_missing(self):
+        _, payload, registry, handoff, _ = self.run_script(
+            READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            registry_preview_payload={
+                "version": "alpha_search_artifacts_v1",
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+                "factors": [],
+            },
+        )
+
+        first = payload["evaluated_factors"][0]
+        self.assertFalse(first["qualified"])
+        self.assertIn(
+            "missing_runtime_contract:auto_settlement_conservative_settlement_edge",
+            first["blockers"],
+        )
+        self.assertEqual(registry["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+
+    def test_registry_contract_blocker_prevents_promotion(self):
+        report = (READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT).replace(
+            "auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl",
+            "auto_settlement_conservative_settlement_edge_x_iv_change,full_depth_settlement_executable_pnl",
+        )
+        replay = dict(DEFAULT_REPLAY_PAYLOAD)
+        replay["runtime_score"] = (
+            "autofactor_formula:auto_settlement_conservative_settlement_edge_x_iv_change"
+        )
+        replay["identity"] = dict(DEFAULT_REPLAY_PAYLOAD["identity"])
+        replay["identity"]["runtime_score"] = replay["runtime_score"]
+        _, payload, registry, handoff, _ = self.run_script(
+            report,
+            replay_payload=replay,
+            registry_preview_payload={
+                "version": "alpha_search_artifacts_v1",
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+                "factors": [
+                    {
+                        "factor_name": "auto_settlement_conservative_settlement_edge_x_iv_change",
+                        "runtime_contract": {
+                            "version": "autofactor_runtime_contract_v1",
+                            "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_iv_change",
+                            "strategy_profile": "settlement_probability",
+                            "strategy_family": "settlement_probability",
+                            "input_names": [
+                                "conservative_settlement_edge",
+                                "iv_change_1m",
+                            ],
+                            "blockers": ["runtime_input_not_supplied:iv_change_1m"],
+                        },
+                        "blockers": [],
+                    }
+                ],
+            },
+        )
+
+        first = payload["evaluated_factors"][0]
+        self.assertFalse(first["qualified"])
+        self.assertIn("runtime_input_not_supplied:iv_change_1m", first["blockers"])
+        self.assertEqual(registry["entries"][0]["runtime_contract"]["input_names"][-1], "iv_change_1m")
+        self.assertEqual(handoff["status"], "blocked")
 
     def test_blocks_candidate_when_runtime_profile_is_not_required_profile(self):
         _, payload, registry, handoff, handoff_md = self.run_script(

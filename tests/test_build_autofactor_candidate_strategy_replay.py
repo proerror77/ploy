@@ -17,13 +17,30 @@ SCRIPT = ROOT / "scripts" / "build_autofactor_candidate_strategy_replay.py"
 
 
 class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
-    def run_script(self, report: str, *extra_args: str) -> tuple[dict, str]:
+    def run_script(
+        self,
+        report: str,
+        *extra_args: str,
+        registry_preview_payload: dict | None = None,
+    ) -> tuple[dict, str]:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             report_path = tmp_path / "report.txt"
             output_json = tmp_path / "candidate-strategy-replay.json"
             output_md = tmp_path / "candidate-strategy-replay.md"
             report_path.write_text(report, encoding="utf-8")
+            registry_args = []
+            if registry_preview_payload is not None:
+                registry_path = tmp_path / "factor-registry-preview.json"
+                registry_path.write_text(
+                    json.dumps(registry_preview_payload, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                registry_args = [
+                    "--factor-registry-preview-json",
+                    str(registry_path),
+                    "--require-runtime-contract",
+                ]
             subprocess.run(
                 [
                     sys.executable,
@@ -34,6 +51,7 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
                     str(output_json),
                     "--output-md",
                     str(output_md),
+                    *registry_args,
                     *extra_args,
                 ],
                 cwd=ROOT,
@@ -45,6 +63,90 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
                 json.loads(output_json.read_text(encoding="utf-8")),
                 output_md.read_text(encoding="utf-8"),
             )
+
+    def test_registry_contract_blocks_name_inference_when_missing(self):
+        payload, _ = self.run_script(
+            AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            registry_preview_payload={
+                "version": "alpha_search_artifacts_v1",
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+                "factors": [],
+            },
+        )
+
+        self.assertFalse(payload["promotion_ready"])
+        self.assertEqual(payload["runtime_score"], "")
+        self.assertIn(
+            "missing_runtime_contract:auto_settlement_conservative_settlement_edge",
+            payload["blocking_risk_flags"],
+        )
+
+    def test_registry_contract_blocks_unsupported_contract_version(self):
+        payload, _ = self.run_script(
+            AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            registry_preview_payload={
+                "version": "alpha_search_artifacts_v1",
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+                "factors": [
+                    {
+                        "factor_name": "auto_settlement_conservative_settlement_edge",
+                        "runtime_contract": {
+                            "version": "legacy_runtime_contract",
+                            "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                            "strategy_profile": "settlement_probability",
+                            "strategy_family": "settlement_probability",
+                            "input_names": ["conservative_settlement_edge"],
+                            "blockers": [],
+                        },
+                        "blockers": [],
+                    }
+                ],
+            },
+        )
+
+        self.assertFalse(payload["promotion_ready"])
+        self.assertEqual(payload["runtime_score"], "")
+        self.assertIn("unsupported_runtime_contract_version", payload["blocking_risk_flags"])
+
+    def test_registry_contract_blocks_noncanonical_runtime_input(self):
+        report = AUTOFACTOR_SETTLEMENT_AUTO_REPORT.replace(
+            "auto_settlement_conservative_settlement_edge,full_depth_settlement_executable_pnl",
+            "auto_settlement_conservative_settlement_edge_x_iv_change,full_depth_settlement_executable_pnl",
+        )
+        payload, _ = self.run_script(
+            report,
+            registry_preview_payload={
+                "version": "alpha_search_artifacts_v1",
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+                "factors": [
+                    {
+                        "factor_name": "auto_settlement_conservative_settlement_edge_x_iv_change",
+                        "runtime_contract": {
+                            "version": "autofactor_runtime_contract_v1",
+                            "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge_x_iv_change",
+                            "strategy_profile": "settlement_probability",
+                            "strategy_family": "settlement_probability",
+                            "input_names": [
+                                "conservative_settlement_edge",
+                                "iv_change_1m",
+                            ],
+                            "blockers": ["runtime_input_not_supplied:iv_change_1m"],
+                        },
+                        "blockers": [],
+                    }
+                ],
+            },
+        )
+
+        self.assertFalse(payload["promotion_ready"])
+        self.assertEqual(payload["runtime_score"], "")
+        self.assertIn(
+            "runtime_input_not_supplied:iv_change_1m",
+            payload["blocking_risk_flags"],
+        )
 
     def test_builds_blocked_aggregate_for_runtime_mappable_settlement_candidate(self):
         payload, markdown = self.run_script(AUTOFACTOR_SETTLEMENT_AUTO_REPORT)

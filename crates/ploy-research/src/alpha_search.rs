@@ -5,8 +5,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::autofactor::{
-    AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr, LlmPriorSpec,
-    autofactor_target_horizon, factor_expr_hash,
+    autofactor_target_horizon, factor_expr_hash, AutoFactorDecision, AutoFactorOptions,
+    AutoFactorReport, FactorExpr, LlmPriorSpec,
 };
 
 const ALPHA_SEARCH_ARTIFACT_VERSION: &str = "alpha_search_artifacts_v1";
@@ -618,7 +618,10 @@ fn registry_blockers(
     if report.decision != AutoFactorDecision::Candidate {
         blockers.push(report.reason.clone());
     }
-    if let Some(items) = runtime_contract.get("blockers").and_then(serde_json::Value::as_array) {
+    if let Some(items) = runtime_contract
+        .get("blockers")
+        .and_then(serde_json::Value::as_array)
+    {
         blockers.extend(
             items
                 .iter()
@@ -648,6 +651,10 @@ fn runtime_contract_for_report(
     if mapping.runtime_score.is_empty() || mapping.strategy_profile.is_empty() {
         blockers.push("runtime_contract_unmapped_factor".to_string());
     }
+    blockers.extend(runtime_input_blockers(&input_names));
+    blockers.extend(runtime_formula_blockers(&report.name));
+    blockers.sort();
+    blockers.dedup();
     serde_json::json!({
         "version": "autofactor_runtime_contract_v1",
         "dsl_hash": dsl_hash,
@@ -693,14 +700,7 @@ fn inferred_runtime_mapping(name: &str) -> RuntimeMapping {
             runtime_score: format!("autofactor_formula:{name}"),
         };
     }
-    if [
-        "amplitude_weighted_momentum_30s_sigma",
-        "poly_lag_pressure",
-        "spread_adjusted_external_move",
-    ]
-    .iter()
-    .any(|base| normalized.starts_with(base))
-    {
+    if is_predictive_settlement_formula(&normalized) {
         return RuntimeMapping {
             strategy_profile: "settlement_probability".to_string(),
             strategy_family: "predictive_settlement_probability".to_string(),
@@ -708,6 +708,158 @@ fn inferred_runtime_mapping(name: &str) -> RuntimeMapping {
         };
     }
     RuntimeMapping::default()
+}
+
+fn runtime_input_blockers(input_names: &[String]) -> Vec<String> {
+    let mut blockers = Vec::new();
+    for input in input_names {
+        match input.as_str() {
+            "conservative_settlement_edge"
+            | "full_depth_settlement_edge"
+            | "model_conservative_settlement_edge"
+            | "model_full_depth_settlement_edge"
+            | "settlement_edge"
+            | "entry_price"
+            | "distance_over_sigma"
+            | "direction_sign"
+            | "drift_30s"
+            | "sigma_horizon"
+            | "entry_capacity_ratio"
+            | "side_spread"
+            | "pm_lag_secs" => {}
+            "external_pressure" => {
+                blockers.push("runtime_input_semantics_mismatch:external_pressure".to_string())
+            }
+            "iv_change_1m" => blockers.push("runtime_input_not_supplied:iv_change_1m".to_string()),
+            other => blockers.push(format!("runtime_input_unsupported:{other}")),
+        }
+    }
+    blockers
+}
+
+fn runtime_formula_blockers(name: &str) -> Vec<String> {
+    let normalized = normalized_factor_key(name);
+    let mut blockers = Vec::new();
+    if normalized.starts_with("auto_settlement_bayes_") {
+        blockers.push("runtime_contract_unmapped_bayes_formula".to_string());
+    }
+    if normalized.starts_with("poly_lag_pressure") {
+        blockers.push("runtime_input_semantics_mismatch:external_pressure".to_string());
+    }
+    if normalized.contains("external_pressure") {
+        blockers.push("runtime_input_semantics_mismatch:external_pressure".to_string());
+    }
+    if normalized.contains("iv_change") {
+        blockers.push("runtime_input_not_supplied:iv_change_1m".to_string());
+    }
+    if is_predictive_formula_base(&normalized) && !is_predictive_settlement_formula(&normalized) {
+        blockers.push("runtime_contract_unsupported_predictive_suffix".to_string());
+    }
+    blockers
+}
+
+fn is_predictive_formula_base(normalized: &str) -> bool {
+    [
+        "amplitude_weighted_momentum_30s_sigma",
+        "poly_lag_pressure",
+        "spread_adjusted_external_move",
+    ]
+    .iter()
+    .any(|base| normalized.starts_with(base))
+}
+
+fn is_predictive_settlement_formula(normalized: &str) -> bool {
+    let Some(base) = [
+        "amplitude_weighted_momentum_30s_sigma",
+        "poly_lag_pressure",
+        "spread_adjusted_external_move",
+    ]
+    .iter()
+    .find(|base| normalized.starts_with(**base)) else {
+        return false;
+    };
+    let suffix = normalized.strip_prefix(base).unwrap_or("");
+    predictive_formula_suffix_supported(suffix)
+}
+
+fn predictive_formula_suffix_supported(suffix: &str) -> bool {
+    let suffix = suffix
+        .replace(
+            "_runtime_pass_through_add_spread_penalty",
+            "_spread_adjusted",
+        )
+        .replace(
+            "_runtime_pass_through_add_capacity_gate",
+            "_full_depth_entry_gate",
+        )
+        .replace("_add_capacity_gate", "_full_depth_entry_gate");
+    let Some(suffix) = strip_predictive_selector_gates(&suffix) else {
+        return false;
+    };
+    if suffix.is_empty() {
+        return true;
+    }
+    for token in suffix.trim_start_matches('_').split('_') {
+        if !matches!(
+            token,
+            "squashed"
+                | "near"
+                | "strike"
+                | "capacity"
+                | "full"
+                | "depth"
+                | "entry"
+                | "gate"
+                | "price"
+                | "quality"
+                | "spread"
+                | "adjusted"
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+fn strip_predictive_selector_gates(suffix: &str) -> Option<String> {
+    let mut remaining_suffix = suffix.to_string();
+    while let Some((remaining, selector)) = remaining_suffix.split_once("_select_") {
+        let (_feature, raw_threshold, trailing_suffix) = parse_predictive_selector_gate(selector)?;
+        if parse_predictive_selector_threshold(raw_threshold).is_none() {
+            return None;
+        }
+        remaining_suffix = format!("{remaining}{trailing_suffix}");
+    }
+    Some(remaining_suffix)
+}
+
+fn parse_predictive_selector_gate(selector: &str) -> Option<(&'static str, &str, String)> {
+    for feature in [
+        "entry_price_quality",
+        "full_depth_entry",
+        "entry_capacity",
+        "near_strike",
+    ] {
+        let prefix = format!("{feature}_ge_");
+        let Some(raw) = selector.strip_prefix(&prefix) else {
+            continue;
+        };
+        let (threshold, trailing_suffix) = match raw.split_once('_') {
+            Some((threshold, trailing)) => (threshold, format!("_{trailing}")),
+            None => (raw, String::new()),
+        };
+        return Some((feature, threshold, trailing_suffix));
+    }
+    None
+}
+
+fn parse_predictive_selector_threshold(raw: &str) -> Option<f64> {
+    let threshold = if raw.contains('.') {
+        raw.parse().ok()?
+    } else {
+        raw.parse::<f64>().ok()? / 100.0
+    };
+    (threshold.is_finite() && (0.0..=1.0).contains(&threshold)).then_some(threshold)
 }
 
 fn is_settlement_formula(normalized: &str) -> bool {
@@ -1172,7 +1324,11 @@ fn normalized_positive(value: f64) -> f64 {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 fn ratio_usize(numerator: usize, denominator: usize) -> f64 {
@@ -1325,7 +1481,8 @@ fn normalized_factor_key(raw: &str) -> String {
         .to_string();
     loop {
         let next = value
-            .strip_prefix("llm_")
+            .strip_prefix("mut2_")
+            .or_else(|| value.strip_prefix("llm_"))
             .or_else(|| value.strip_prefix("mcts_"))
             .or_else(|| value.strip_prefix("mut_"));
         let Some(stripped) = next else {
@@ -1423,22 +1580,18 @@ mod tests {
         )
         .expect("write artifacts");
         assert_eq!(summary.candidate_count, 1);
-        assert!(
-            tmp.join("full_depth_settlement_executable_pnl/search-space.json")
-                .exists()
-        );
-        assert!(
-            tmp.join("full_depth_settlement_executable_pnl/tree-trace.json")
-                .exists()
-        );
-        assert!(
-            tmp.join("full_depth_settlement_executable_pnl/mcts-expansion-plan.json")
-                .exists()
-        );
-        assert!(
-            tmp.join("full_depth_settlement_executable_pnl/mcts-state.json")
-                .exists()
-        );
+        assert!(tmp
+            .join("full_depth_settlement_executable_pnl/search-space.json")
+            .exists());
+        assert!(tmp
+            .join("full_depth_settlement_executable_pnl/tree-trace.json")
+            .exists());
+        assert!(tmp
+            .join("full_depth_settlement_executable_pnl/mcts-expansion-plan.json")
+            .exists());
+        assert!(tmp
+            .join("full_depth_settlement_executable_pnl/mcts-state.json")
+            .exists());
         let registry_preview =
             tmp.join("full_depth_settlement_executable_pnl/factor-registry-preview.json");
         assert!(registry_preview.exists());
@@ -1446,10 +1599,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(registry_preview).expect("read preview"))
                 .expect("preview json");
         assert_eq!(preview["version"], ALPHA_SEARCH_ARTIFACT_VERSION);
-        assert_eq!(
-            preview["target"],
-            "full_depth_settlement_executable_pnl"
-        );
+        assert_eq!(preview["target"], "full_depth_settlement_executable_pnl");
         assert_eq!(preview["horizon"], "5m");
         let rows = preview["factors"].as_array().expect("factors array");
         assert_eq!(
@@ -1472,6 +1622,69 @@ mod tests {
             serde_json::json!(["conservative_settlement_edge"])
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn runtime_contract_blocks_noncanonical_runtime_inputs() {
+        let external_pressure_report = AutoFactorReport {
+            name: "auto_settlement_model_full_depth_settlement_edge_x_external_pressure"
+                .to_string(),
+            target: Some("full_depth_settlement_executable_pnl".to_string()),
+            expr: FactorExpr::Mul(
+                Box::new(FactorExpr::Input(
+                    "model_full_depth_settlement_edge".to_string(),
+                )),
+                Box::new(FactorExpr::Input("external_pressure".to_string())),
+            ),
+            ..sample_report("auto_settlement_model_full_depth_settlement_edge_x_external_pressure")
+        };
+        let contract = runtime_contract_for_report(
+            &external_pressure_report,
+            "dsl-hash",
+            &serde_json::json!({}),
+            "5m",
+        );
+        let blockers = contract["blockers"].as_array().expect("blockers");
+        assert!(blockers.iter().any(|item| {
+            item.as_str() == Some("runtime_input_semantics_mismatch:external_pressure")
+        }));
+
+        let iv_change_report = AutoFactorReport {
+            name: "auto_settlement_conservative_settlement_edge_x_iv_change".to_string(),
+            target: Some("full_depth_settlement_executable_pnl".to_string()),
+            expr: FactorExpr::Mul(
+                Box::new(FactorExpr::Input(
+                    "conservative_settlement_edge".to_string(),
+                )),
+                Box::new(FactorExpr::Input("iv_change_1m".to_string())),
+            ),
+            ..sample_report("auto_settlement_conservative_settlement_edge_x_iv_change")
+        };
+        let contract = runtime_contract_for_report(
+            &iv_change_report,
+            "dsl-hash",
+            &serde_json::json!({}),
+            "5m",
+        );
+        let blockers = contract["blockers"].as_array().expect("blockers");
+        assert!(blockers
+            .iter()
+            .any(|item| item.as_str() == Some("runtime_input_not_supplied:iv_change_1m")));
+    }
+
+    #[test]
+    fn runtime_contract_blocks_unsupported_predictive_suffixes() {
+        let unsupported = sample_report("llm_amplitude_weighted_momentum_30s_sigma_feature_gate");
+        let contract =
+            runtime_contract_for_report(&unsupported, "dsl-hash", &serde_json::json!({}), "5m");
+        assert_eq!(contract["runtime_score"], "");
+        let blockers = contract["blockers"].as_array().expect("blockers");
+        assert!(blockers
+            .iter()
+            .any(|item| item.as_str() == Some("runtime_contract_unmapped_factor")));
+        assert!(blockers.iter().any(|item| {
+            item.as_str() == Some("runtime_contract_unsupported_predictive_suffix")
+        }));
     }
 
     #[test]
@@ -1686,12 +1899,10 @@ mod tests {
         let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
-        assert!(
-            !plan
-                .selected_nodes
-                .iter()
-                .any(|node| node.factor_name == "mcts_spread_adjusted_external_move_near_strike")
-        );
+        assert!(!plan
+            .selected_nodes
+            .iter()
+            .any(|node| node.factor_name == "mcts_spread_adjusted_external_move_near_strike"));
         assert_eq!(
             plan.selected_nodes
                 .first()
@@ -1737,11 +1948,10 @@ mod tests {
         let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
-        assert!(
-            plan.selected_nodes
-                .iter()
-                .all(|node| !node.factor_name.contains("spread_adjusted_external_move"))
-        );
+        assert!(plan
+            .selected_nodes
+            .iter()
+            .all(|node| !node.factor_name.contains("spread_adjusted_external_move")));
         assert_eq!(
             plan.selected_nodes
                 .first()
