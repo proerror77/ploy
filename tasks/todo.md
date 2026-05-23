@@ -1,5 +1,35 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Legacy Crypto Trainer Cleanup (2026-05-24)
+
+Evidence stage: architecture/data-plane cleanup; no strategy promotion and no
+live data mutation.
+
+### Tasks
+
+- [x] Start a fresh cleanup branch from current `origin/main`.
+- [x] Reconfirm project semantics and Event ML / AutoFactor workflow gates.
+- [x] Audit active references for the remaining root `train_crypto_*_onnx_from_db.py`
+      scripts.
+- [x] Archive legacy trainer prototypes that have no active workflow, runbook,
+      checklist, or test callers.
+- [x] Keep the documented LOB TCN training entrypoint active.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+### Review
+
+- 2026-05-24: `scripts/train_crypto_lob_tcn_onnx_from_db.py` remains active
+  because the LOB ML architecture note and deploy checklist still name it as the
+  training entrypoint. The Binance-threshold and CLOB/trade-tick settlement
+  trainers have only schema-map/inventory references, so they are being retained
+  under `scripts/archive/research-debug/` as research provenance instead of
+  executable-looking root scripts.
+- 2026-05-24: Focused validation passed: root active-reference check for the
+  archived trainer names, Python compile for the two archived trainers plus the
+  retained LOB TCN trainer, `python3 -m unittest
+  tests.test_persist_research_trace_contract`, and `rtk git diff --check`.
+
 ## Current Session - Quote Backfill Legacy Cleanup (2026-05-24)
 
 Evidence stage: architecture/data-plane cleanup; no strategy promotion and no
@@ -15,7 +45,7 @@ live data mutation.
 - [x] Keep active orderbook archive, break-glass factor research, and LOB TCN
       training entrypoints unchanged.
 - [x] Run focused validation.
-- [ ] Commit, push, open PR, wait for CI, and merge.
+- [x] Commit, push, open PR, wait for CI, and merge.
 
 ### Review
 
@@ -28,6 +58,8 @@ live data mutation.
   `bash -n` for archived shell scripts, `python3 -m py_compile` for archived
   Python, `python3 -m unittest tests.test_persist_research_trace_contract`, and
   `rtk git diff --check`.
+- 2026-05-24: PR #647 merged to `main` at
+  `f113ad47e09569ae9c9ab8f26a465c34650bf1ac`.
 
 ## Current Session - Research/Data Architecture Current Review (2026-05-24)
 

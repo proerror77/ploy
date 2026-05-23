@@ -216,7 +216,7 @@ Referenced files:
 
 - `migrations/018_training_data_tables.sql`
 - `scripts/ploy_maintenance.sh`
-- `scripts/train_crypto_binance_threshold_tcn_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_binance_threshold_tcn_onnx_from_db.py`
 - `src/coordinator/bootstrap.rs`
 - `src/platform/persistence_pipeline.rs`
 
@@ -226,8 +226,8 @@ Referenced files:
 
 - `migrations/018_training_data_tables.sql`
 - `scripts/ploy_maintenance.sh`
-- `scripts/train_crypto_binance_threshold_tcn_onnx_from_db.py`
-- `scripts/train_crypto_lob_tick_settlement_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_binance_threshold_tcn_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_lob_tick_settlement_onnx_from_db.py`
 - `src/agents/crypto_lob_ml.rs`
 - `src/coordinator/bootstrap.rs`
 - `src/platform/persistence_pipeline.rs`
@@ -255,8 +255,8 @@ Referenced files:
 
 - `migrations/018_training_data_tables.sql`
 - `scripts/ploy_maintenance.sh`
-- `scripts/train_crypto_binance_threshold_tcn_onnx_from_db.py`
-- `scripts/train_crypto_lob_tick_settlement_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_binance_threshold_tcn_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_lob_tick_settlement_onnx_from_db.py`
 - `src/agents/crypto_lob_ml.rs`
 - `src/agents/sports.rs`
 - `src/analysis/updown_backtest.rs`
@@ -295,7 +295,7 @@ Referenced files:
 - `scripts/ploy_maintenance.sh`
 - `scripts/pm_bursts_watch.sh`
 - `scripts/pm_trades_watch.sh`
-- `scripts/train_crypto_lob_tick_settlement_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_lob_tick_settlement_onnx_from_db.py`
 - `src/agents/crypto_lob_ml.rs`
 - `src/coordinator/bootstrap.rs`
 
@@ -306,7 +306,7 @@ Referenced files:
 - `deployment/bin/ploy-orderbook-history-collector.sh`
 - `deployment/env.crypto-dryrun.example`
 - `migrations/014_multi_account_and_collector_targets.sql`
-- `scripts/train_crypto_binance_threshold_tcn_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_binance_threshold_tcn_onnx_from_db.py`
 - `src/agents/sports.rs`
 - `src/collector/polymarket_orderbook_history.rs`
 - `src/collector/token_targets.rs`
@@ -586,10 +586,10 @@ Referenced files:
 - `deployment/env.crypto-dryrun.example`
 - `migrations/015_pm_token_settlements.sql`
 - `migrations/018_training_data_tables.sql`
-- `scripts/train_crypto_binance_threshold_tcn_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_binance_threshold_tcn_onnx_from_db.py`
 - `scripts/archive/research-debug/train_crypto_lob_mlp_onnx_from_db.py`
 - `scripts/train_crypto_lob_tcn_onnx_from_db.py`
-- `scripts/train_crypto_lob_tick_settlement_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_lob_tick_settlement_onnx_from_db.py`
 - `src/cli/strategy.rs`
 - `src/coordinator/bootstrap.rs`
 - `src/strategy/backtest_feed.rs`
@@ -796,8 +796,8 @@ Referenced files:
 - `scripts/pm_bursts_watch.sh`
 - `scripts/pm_trades_watch.sh`
 - `scripts/archive/research-debug/reverse_engineered_strategy_dry_run.py`
-- `scripts/train_crypto_binance_threshold_tcn_onnx_from_db.py`
-- `scripts/train_crypto_lob_tick_settlement_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_binance_threshold_tcn_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_lob_tick_settlement_onnx_from_db.py`
 - `src/adapters/postgres.rs`
 - `src/agents/crypto_lob_ml.rs`
 - `src/agents/openclaw/config.rs`
