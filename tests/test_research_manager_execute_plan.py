@@ -31,6 +31,32 @@ def plan_payload(theme: str, actions: list[str], factor_registry_summary: dict |
     }
 
 
+def base_args(**overrides):
+    values = {
+        "mode": "dry_run",
+        "execute_ack": "",
+        "git_ref": "main",
+        "snapshot_run_id": "",
+        "symbols": "BTCUSDT",
+        "stake_usd": "15",
+        "chain_remaining": 1,
+        "max_snapshot_window_days": 2,
+        "runtime_deployment_id": "pm5d.threelayer.settlement-probability-btc-eth.dryrun",
+        "runtime_config_path": "/opt/ploy/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+        "runtime_recording_path": "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson",
+        "runtime_score": "",
+        "runtime_strategy_profile": "settlement_probability",
+        "runtime_issue_number": "538",
+        "runtime_min_trade_count": "50",
+        "runtime_min_fill_rate": "0.30",
+        "runtime_min_roi": "0",
+        "runtime_source_target": "full_depth_settlement_executable_pnl",
+        "runtime_source_horizon": "5m",
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
 class ResearchManagerExecutePlanTest(unittest.TestCase):
     def test_fix_data_plan_creates_snapshot_dispatch_in_dry_run(self) -> None:
         payload = build_executor_payload(
@@ -257,6 +283,34 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             self.assertTrue((out / "research-manager-executor.json").exists())
             self.assertTrue((out / "research-manager-executor.md").exists())
             self.assertTrue((out / "next-llm-prior.json").exists())
+
+    def test_typed_prior_carries_machine_readable_blocker_actions(self) -> None:
+        plan = plan_payload("revise_prior", ["generate_typed_llm_prior_json"])
+        plan["plan"]["blocker_actions"] = [
+            {
+                "blocker_family": "search_power",
+                "action": "increase_distinct_event_coverage_or_reduce_selectivity",
+                "reason": "Runtime replay did not produce enough distinct event trades.",
+            },
+            {
+                "blocker_family": "execution_fillability",
+                "action": "prefer_high_fillability_depth_filters",
+                "reason": "Candidate selected low-fillability entries.",
+            },
+        ]
+        payload = build_executor_payload(base_args(), plan)
+
+        prior = payload["typed_prior"]
+        self.assertIsNotNone(prior)
+        self.assertEqual(plan["plan"]["blocker_actions"], prior["blocker_actions"])
+        self.assertIn(
+            "prefer candidates with broader distinct-event coverage and avoid ultra-narrow buckets",
+            prior["constraints"],
+        )
+        self.assertIn(
+            "prefer candidates with stronger full-depth fillability and capacity filters",
+            prior["constraints"],
+        )
 
     def test_cli_records_dispatch_failures_without_dropping_executor_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

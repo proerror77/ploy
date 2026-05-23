@@ -332,11 +332,54 @@ def _runtime_replay_args(args: argparse.Namespace, plan_payload: dict[str, Any])
     }
 
 
+def _blocker_actions(plan: dict[str, Any]) -> list[dict[str, str]]:
+    raw = plan.get("blocker_actions")
+    if not isinstance(raw, list):
+        return []
+    actions: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        blocker_family = str(item.get("blocker_family") or "")
+        action = str(item.get("action") or "")
+        reason = str(item.get("reason") or "")
+        if blocker_family and action:
+            actions.append(
+                {
+                    "blocker_family": blocker_family,
+                    "action": action,
+                    "reason": reason,
+                }
+            )
+    return actions
+
+
+def _typed_prior_constraints(blocker_actions: list[dict[str, str]]) -> list[str]:
+    constraints = [
+        "reuse only runtime-contract-mappable inputs",
+        "do not promote without runtime_market_update_replay evidence",
+        "preserve one-event-one-decision accounting",
+    ]
+    action_names = {item["action"] for item in blocker_actions}
+    if "increase_distinct_event_coverage_or_reduce_selectivity" in action_names:
+        constraints.append("prefer candidates with broader distinct-event coverage and avoid ultra-narrow buckets")
+    if "prefer_high_fillability_depth_filters" in action_names:
+        constraints.append("prefer candidates with stronger full-depth fillability and capacity filters")
+    if "collect_full_depth_execution_surface" in action_names:
+        constraints.append("block promotion until full-depth execution-surface evidence replaces sampled snapshots")
+    if "repair_official_settlement_coverage" in action_names:
+        constraints.append("block promotion until official settlement coverage exists for all replay-traded events")
+    if "repair_runtime_contract_mapping" in action_names:
+        constraints.append("only select factors with typed unblocked runtime contracts")
+    return constraints
+
+
 def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any]) -> dict[str, Any]:
     if plan_payload.get("schema_version") != "research_trace_plan.v1":
         raise SystemExit("research_trace_plan schema mismatch")
     plan = plan_payload.get("plan") or {}
     actions = [str(action) for action in plan.get("actions") or []]
+    blocker_actions = _blocker_actions(plan)
     dispatches: list[dict[str, Any]] = []
     typed_prior: dict[str, Any] | None = None
 
@@ -409,11 +452,8 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
             "evidence_stage": plan.get("evidence_stage", ""),
             "theme": plan.get("theme", ""),
             "actions": actions,
-            "constraints": [
-                "reuse only runtime-contract-mappable inputs",
-                "do not promote without runtime_market_update_replay evidence",
-                "preserve one-event-one-decision accounting",
-            ],
+            "blocker_actions": blocker_actions,
+            "constraints": _typed_prior_constraints(blocker_actions),
         }
 
     executable_dispatches = [item for item in dispatches if item["ready"]]
@@ -439,6 +479,7 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
             "priority": plan.get("priority", ""),
             "evidence_stage": plan.get("evidence_stage", ""),
             "actions": actions,
+            "blocker_actions": blocker_actions,
         },
         "dispatches": dispatches,
         "executable_dispatch_count": len(executable_dispatches),
@@ -471,6 +512,11 @@ def render_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- `{item['workflow']}`: `{status}`; blockers: `{blockers}`{suffix}")
     if payload.get("typed_prior"):
         lines.extend(["", "## Typed Prior", "", "- `research_manager_typed_prior.v1` generated"])
+        blocker_actions = payload["typed_prior"].get("blocker_actions") or []
+        if blocker_actions:
+            lines.extend(["", "### Blocker Actions", ""])
+            for item in blocker_actions:
+                lines.append(f"- `{item['blocker_family']}` -> `{item['action']}`")
     if payload.get("dispatch_attempts"):
         lines.extend(["", "## Dispatch Attempts", ""])
         for item in payload["dispatch_attempts"]:
