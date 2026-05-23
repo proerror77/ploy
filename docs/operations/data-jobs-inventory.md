@@ -34,8 +34,6 @@ collection behavior.
 | Surface | Status | Owner | Notes |
 | --- | --- | --- | --- |
 | `scripts/backfill_pm_midpoints.py` | one-shot backfill | data repair | Keep with migration/runbook context. |
-| `scripts/backfill_quotes.py` | one-shot backfill | data repair | Candidate for archive after quote history repair is complete. |
-| `scripts/backfill_quotes*.sh` | one-shot backfill variants | data repair | Consolidate or archive duplicates. |
 | `scripts/backfill_settlements.py` | one-shot backfill | data repair | Keep until settlement repair path is Rust-owned. |
 | `scripts/backfill_price_to_beat.sql` | one-shot SQL repair | DB repair | Keep as migration/reference until encoded in migration. |
 | `scripts/fix_binance_lob_partitions.sql` | one-shot/operational repair | DB repair | Still deployed by `deploy-tango-1-1.yml`. |
@@ -81,6 +79,11 @@ collection behavior.
 | `scripts/discover_new_markets.py` | `scripts/archive/legacy-research-tools/discover_new_markets.py` | Local DB market discovery prototype; canonical discovery is Rust market-data / deployed collector flow. |
 | `scripts/discover_pm_updown_markets.py` | `scripts/archive/legacy-research-tools/discover_pm_updown_markets.py` | CLI-based discovery prototype; canonical discovery is Rust market-data / deployed collector flow. |
 | `scripts/install-service.sh` | `scripts/archive/legacy-root-runtime/install-service.sh` | Legacy host-support installer; maintenance/watchdog unit ownership moved to `install-platform-service.sh` and `release-platform.yml`. |
+| `scripts/backfill_quotes.py` | `scripts/archive/data-repair/backfill_quotes.py` | Historical synthetic quote repair for March 2026 gaps; no active workflow/test/runbook caller. |
+| `scripts/backfill_quotes.sh` | `scripts/archive/data-repair/backfill_quotes.sh` | Historical SQL quote repair variant; superseded by live collectors and retained as provenance only. |
+| `scripts/backfill_quotes_fixed.sh` | `scripts/archive/data-repair/backfill_quotes_fixed.sh` | Historical SQL quote repair variant; superseded by live collectors and retained as provenance only. |
+| `scripts/backfill_quotes_improved.sh` | `scripts/archive/data-repair/backfill_quotes_improved.sh` | Historical SQL quote repair variant; superseded by live collectors and retained as provenance only. |
+| `scripts/backfill_quotes_final.sh` | `scripts/archive/data-repair/backfill_quotes_final.sh` | Historical SQL quote repair variant; superseded by live collectors and retained as provenance only. |
 | `scripts/deploy_7_symbols.sh` | `scripts/archive/legacy-root-runtime/deploy_7_symbols.sh` | Manual host binary copy/restart script; deployment must use CI-built artifacts and workflows. |
 | `scripts/deploy-ploy-runner.sh` | `scripts/archive/legacy-root-runtime/deploy-ploy-runner.sh` | Manual host binary/config/systemd mutation script; deployment must use CI-built artifacts and workflows. |
 

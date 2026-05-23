@@ -1,5 +1,34 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Quote Backfill Legacy Cleanup (2026-05-24)
+
+Evidence stage: architecture/data-plane cleanup; no strategy promotion and no
+live data mutation.
+
+### Tasks
+
+- [x] Start a fresh cleanup branch from current `origin/main`.
+- [x] Confirm quote backfill variants have no active workflow/test/runbook
+      callers.
+- [x] Archive historical quote backfill variants under
+      `scripts/archive/data-repair/`.
+- [x] Keep active orderbook archive, break-glass factor research, and LOB TCN
+      training entrypoints unchanged.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+### Review
+
+- 2026-05-24: The archived quote backfill scripts are historical synthetic
+  quote repair variants for March 2026 gaps. They hard-code local DB defaults
+  and old repair windows, and no active workflow, test, runbook, or README calls
+  them. They are retained under `scripts/archive/data-repair/` for repair
+  provenance instead of remaining executable-looking root scripts.
+- 2026-05-24: Focused validation passed: active root-reference check,
+  `bash -n` for archived shell scripts, `python3 -m py_compile` for archived
+  Python, `python3 -m unittest tests.test_persist_research_trace_contract`, and
+  `rtk git diff --check`.
+
 ## Current Session - Research/Data Architecture Current Review (2026-05-24)
 
 Evidence stage: architecture/data-plane cleanup and research workflow review
