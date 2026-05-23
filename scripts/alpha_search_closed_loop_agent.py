@@ -16,6 +16,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+try:
+    from autofactor_accounting_catalog import autofactor_target_horizon
+except ModuleNotFoundError:
+    from scripts.autofactor_accounting_catalog import autofactor_target_horizon
+
 
 DEFAULT_TARGET = "full_depth_settlement_executable_pnl"
 RUN_ID_RE = re.compile(r"(\d{8,})")
@@ -210,6 +215,15 @@ def classify_blockers(blockers: list[str]) -> str | None:
     text = " ".join(blockers).lower()
     if not text:
         return None
+    if any(
+        token in text
+        for token in [
+            "candidate_strategy_replay_not_runtime_replay",
+            "requires_runtime_replay_not_top_bucket_aggregate",
+            "candidate_strategy_replay_identity_basis_mismatch",
+        ]
+    ):
+        return "fix_runtime"
     if any(
         token in text
         for token in [
@@ -634,14 +648,23 @@ def runtime_replay_request(run: dict[str, Any]) -> dict[str, Any] | None:
                 "min_trade_count": "50",
                 "min_fill_rate": "0.30",
                 "min_roi": "0",
-                "options_json": json.dumps(
-                    {"full_depth_entry": True, "skip_settlement_exits": False},
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
+                "options_json": runtime_replay_options_json(str(run.get("target") or DEFAULT_TARGET)),
             },
         }
     return None
+
+
+def runtime_replay_options_json(target: str) -> str:
+    return json.dumps(
+        {
+            "full_depth_entry": True,
+            "skip_settlement_exits": False,
+            "source_target": target,
+            "source_horizon": autofactor_target_horizon(target),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def runtime_replay_candidate(run: dict[str, Any]) -> dict[str, Any] | None:
@@ -720,11 +743,7 @@ def runtime_replay_candidate(run: dict[str, Any]) -> dict[str, Any] | None:
             "min_trade_count": "50",
             "min_fill_rate": "0.30",
             "min_roi": "0",
-            "options_json": json.dumps(
-                {"full_depth_entry": True, "skip_settlement_exits": False},
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
+            "options_json": runtime_replay_options_json(target),
         },
     }
 
