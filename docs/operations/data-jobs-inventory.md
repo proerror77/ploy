@@ -56,7 +56,7 @@ collection behavior.
 
 | Surface | Status | Reason |
 | --- | --- | --- |
-| `scripts/train_crypto_*_onnx_from_db.py` | research prototype | Keep only while ML lane is active; otherwise archive under research prototypes. `scripts/train_crypto_lob_mlp_onnx_from_db.py` has been archived in favor of `scripts/train_crypto_lob_tcn_onnx_from_db.py`. |
+| `scripts/train_crypto_lob_tcn_onnx_from_db.py` | active research prototype | Keep while the LOB ML lane remains documented; `docs/notes/crypto_lob_ml_architecture_boundary.md` and `docs/CRYPTO_LOB_ML_DEPLOY_CHECKLIST.md` still use it as the explicit training entrypoint. |
 
 ## Platform Release / Host Install
 
@@ -70,6 +70,8 @@ collection behavior.
 | --- | --- | --- |
 | `scripts/simulate_backtest.py` | `scripts/archive/research-debug/simulate_backtest.py` | Legacy standalone simulator; canonical evidence is produced by Rust/backtest and hosted snapshot-backed workflows. |
 | `scripts/train_crypto_lob_mlp_onnx_from_db.py` | `scripts/archive/research-debug/train_crypto_lob_mlp_onnx_from_db.py` | Self-deprecated MLP trainer; active LOB ML docs point to the TCN training entry. |
+| `scripts/train_crypto_binance_threshold_tcn_onnx_from_db.py` | `scripts/archive/research-debug/train_crypto_binance_threshold_tcn_onnx_from_db.py` | Binance-first threshold trainer prototype; no active workflow, runbook, checklist, or test calls it. |
+| `scripts/train_crypto_lob_tick_settlement_onnx_from_db.py` | `scripts/archive/research-debug/train_crypto_lob_tick_settlement_onnx_from_db.py` | Legacy CLOB/trade-tick settlement trainer prototype; no active workflow, runbook, checklist, or test calls it. |
 | `scripts/copycat_dry_run.py` | `scripts/archive/research-debug/copycat_dry_run.py` | Public-profile copy-trading prototype; future copy-trading work should use canonical `MarketUpdate`/runtime path and runtime evidence. |
 | `scripts/reverse_engineered_strategy_dry_run.py` | `scripts/archive/research-debug/reverse_engineered_strategy_dry_run.py` | Public-profile reverse-engineering prototype; not a canonical research, replay, or dry-run handoff path. |
 | `scripts/check_db.rs` | `scripts/archive/legacy-research-tools/check_db.rs` | Duplicate DB diagnostic; canonical ops path is `/opt/ploy/bin/ploy-runner check-db`. |
