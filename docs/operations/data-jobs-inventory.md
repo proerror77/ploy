@@ -62,7 +62,6 @@ collection behavior.
 | --- | --- | --- |
 | `scripts/collect_data.py` | archive candidate | Generic historical kline collector overlaps with current DB/export paths. |
 | `scripts/collect_klines.sh` | archive candidate | Same overlap as `collect_data.py`. |
-| `scripts/simulate_backtest.py` | archive candidate | Legacy Python simulation should not be primary backtest path. |
 | `scripts/reverse_engineered_strategy_dry_run.py` | archive candidate | Research prototype, not canonical runtime. |
 | `scripts/copycat_dry_run.py` | archive candidate | Research prototype; future copy-trading work should use canonical `MarketUpdate`/runtime path. |
 | `scripts/discover_new_markets.py` | archive candidate | Discovery belongs in Rust market-data/scanner once parity is proven. |
@@ -70,7 +69,14 @@ collection behavior.
 | `scripts/deploy_7_symbols.sh` | archive candidate | Deployment should use manifests/workflows. |
 | `scripts/deploy-ploy-runner.sh` | archive candidate | Prefer CI-built artifacts and deploy workflows. |
 | `scripts/install-service.sh` / `scripts/install-platform-service.sh` | archive candidate | Keep only if runbooks still reference them; otherwise workflow/systemd install owns service deployment. |
-| `scripts/train_crypto_*_onnx_from_db.py` | research prototype | Keep only while ML lane is active; otherwise archive under research prototypes. |
+| `scripts/train_crypto_*_onnx_from_db.py` | research prototype | Keep only while ML lane is active; otherwise archive under research prototypes. `scripts/train_crypto_lob_mlp_onnx_from_db.py` has been archived in favor of `scripts/train_crypto_lob_tcn_onnx_from_db.py`. |
+
+## Archived Legacy Research Scripts
+
+| Surface | Archived Path | Reason |
+| --- | --- | --- |
+| `scripts/simulate_backtest.py` | `scripts/archive/research-debug/simulate_backtest.py` | Legacy standalone simulator; canonical evidence is produced by Rust/backtest and hosted snapshot-backed workflows. |
+| `scripts/train_crypto_lob_mlp_onnx_from_db.py` | `scripts/archive/research-debug/train_crypto_lob_mlp_onnx_from_db.py` | Self-deprecated MLP trainer; active LOB ML docs point to the TCN training entry. |
 
 ## Guardrails
 

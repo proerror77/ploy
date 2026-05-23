@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DEPRECATED: prefer `scripts/train_crypto_lob_tcn_onnx_from_db.py`.
+ARCHIVED/DEPRECATED: prefer `scripts/train_crypto_lob_tcn_onnx_from_db.py`.
 
 Train a small MLP (DL) to predict y_up (Polymarket official settlement) from
 Binance LOB-derived features, and export the model to ONNX.

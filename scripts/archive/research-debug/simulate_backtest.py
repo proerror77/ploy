@@ -6,7 +6,7 @@ Uses historical K-line data to simulate Polymarket 15-minute crypto markets
 and tests the volatility arbitrage strategy.
 
 Usage:
-    python scripts/simulate_backtest.py --klines ./data/klines.csv --output ./results/
+    python scripts/archive/research-debug/simulate_backtest.py --klines ./data/klines.csv --output ./results/
 """
 
 import argparse

@@ -153,7 +153,7 @@ Referenced files:
 - `migrations/014_multi_account_and_collector_targets.sql`
 - `scripts/ploy_maintenance.sh`
 - `scripts/report_drawdown.py`
-- `scripts/train_crypto_lob_mlp_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_lob_mlp_onnx_from_db.py`
 - `scripts/train_crypto_lob_tcn_onnx_from_db.py`
 - `src/cli/strategy.rs`
 - `src/coordinator/bootstrap.rs`
@@ -587,7 +587,7 @@ Referenced files:
 - `migrations/015_pm_token_settlements.sql`
 - `migrations/018_training_data_tables.sql`
 - `scripts/train_crypto_binance_threshold_tcn_onnx_from_db.py`
-- `scripts/train_crypto_lob_mlp_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_lob_mlp_onnx_from_db.py`
 - `scripts/train_crypto_lob_tcn_onnx_from_db.py`
 - `scripts/train_crypto_lob_tick_settlement_onnx_from_db.py`
 - `src/cli/strategy.rs`
@@ -760,7 +760,7 @@ Referenced files:
 Referenced files:
 
 - `migrations/018_training_data_tables.sql`
-- `scripts/train_crypto_lob_mlp_onnx_from_db.py`
+- `scripts/archive/research-debug/train_crypto_lob_mlp_onnx_from_db.py`
 - `scripts/train_crypto_lob_tcn_onnx_from_db.py`
 - `src/collector/sync_collector.rs`
 - `src/coordinator/bootstrap.rs`
