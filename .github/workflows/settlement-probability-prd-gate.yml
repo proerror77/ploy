@@ -22,8 +22,8 @@ on:
         required: true
         default: "15"
       snapshot_run_id:
-        description: "Existing run id with a complete sampled research-snapshot artifact; skips legacy ploy-ci-1 snapshot build"
-        required: false
+        description: "Required run id with a complete sampled research-snapshot artifact"
+        required: true
         default: ""
       issue_number:
         description: "Issue number for posting gate evidence; leave empty to skip comments"
@@ -120,7 +120,7 @@ jobs:
             echo "- Window: \`${{ github.event.inputs.start_date }}..${{ github.event.inputs.end_date }}\`"
             echo "- Symbols: \`${{ github.event.inputs.symbols }}\`"
             echo "- Stake: \`${{ github.event.inputs.stake_usd }}u\`"
-            echo "- Snapshot source run: \`${{ github.event.inputs.snapshot_run_id || 'legacy-build' }}\`"
+            echo "- Snapshot source run: \`${{ github.event.inputs.snapshot_run_id || 'missing-required-snapshot' }}\`"
             echo "- Walk-forward runner: \`ubuntu-latest\` via \`factor-walk-forward-v2-hosted-artifact.yml\`"
             audit_lookback_hours="${{ github.event.inputs.audit_lookback_hours }}"
             data_quality_mode="strict-continuous"

@@ -1,9 +1,14 @@
 import json
 import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from scripts import run_settlement_probability_prd_gate as gate
+
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github" / "workflows" / "settlement-probability-prd-gate.yml"
 
 
 class SettlementProbabilityPrdGateTests(unittest.TestCase):
@@ -62,7 +67,7 @@ class SettlementProbabilityPrdGateTests(unittest.TestCase):
             "recorded-replay-parity-26301157711",
         )
 
-    def test_legacy_snapshot_build_keeps_default_sampling_values(self):
+    def test_blocks_missing_snapshot_by_default(self):
         dispatches = []
 
         def capture_dispatch(workflow, fields, *, workflow_ref, dry_run):
@@ -82,6 +87,30 @@ class SettlementProbabilityPrdGateTests(unittest.TestCase):
             dispatch=capture_dispatch,
         )
 
+        self.assertEqual(status, 2)
+        self.assertEqual(dispatches, [])
+
+    def test_explicit_legacy_snapshot_build_keeps_default_sampling_values(self):
+        dispatches = []
+
+        def capture_dispatch(workflow, fields, *, workflow_ref, dry_run):
+            dispatches.append((workflow, fields, workflow_ref, dry_run))
+            return None
+
+        status = self.run_main(
+            [
+                "--git-ref",
+                "main",
+                "--start-date",
+                "2026-05-16",
+                "--end-date",
+                "2026-05-20",
+                "--allow-legacy-snapshot-build",
+                "--dry-run",
+            ],
+            dispatch=capture_dispatch,
+        )
+
         self.assertEqual(status, 0)
         self.assertEqual(len(dispatches), 1)
         workflow, fields, _, _ = dispatches[0]
@@ -91,6 +120,15 @@ class SettlementProbabilityPrdGateTests(unittest.TestCase):
         self.assertEqual(options["pm_book_sample_secs"], 30)
         self.assertEqual(options["observation_sample_secs"], 30)
         self.assertEqual(options["max_quote_age_secs"], 30)
+
+    def test_workflow_requires_snapshot_and_does_not_expose_legacy_build(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("Required run id with a complete sampled research-snapshot artifact", workflow)
+        self.assertIn("required: true", workflow)
+        self.assertIn("missing-required-snapshot", workflow)
+        self.assertNotIn("legacy-build", workflow)
+        self.assertNotIn("--allow-legacy-snapshot-build", workflow)
 
 
 if __name__ == "__main__":
