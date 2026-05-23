@@ -50,7 +50,12 @@ Expected: PASS
 **Files:**
 - Create: `deployment/ploy-platform-watchdog.service`
 - Create: `deployment/ploy-platform-watchdog.timer`
-- Modify: `scripts/install-service.sh`
+- Historical modify target: `scripts/install-service.sh`
+
+Note: `scripts/install-service.sh` has since moved to
+`scripts/archive/legacy-root-runtime/install-service.sh`. The active
+maintenance/watchdog install path is now `scripts/install-platform-service.sh`
+through `.github/workflows/release-platform.yml`.
 
 **Step 1: Add systemd units**
 
@@ -58,7 +63,8 @@ Create a oneshot service that runs the watchdog script from `/opt/ploy/scripts`,
 
 **Step 2: Wire install path**
 
-Install the two new unit files when present and enable the timer during `install-service.sh`.
+Install the two new unit files when present and enable the timer during the
+active platform installer.
 
 **Step 3: Run targeted test / lint**
 
@@ -78,7 +84,7 @@ Add a short progress note linking the host outage root cause to the new watchdog
 
 Run:
 - `bash scripts/tests/test_ploy_platform_watchdog.sh`
-- `rtk git diff -- deployment/ploy-platform-watchdog.service deployment/ploy-platform-watchdog.timer scripts/ploy_platform_watchdog.sh scripts/install-service.sh tasks/todo.md`
+- `rtk git diff -- deployment/ploy-platform-watchdog.service deployment/ploy-platform-watchdog.timer scripts/ploy_platform_watchdog.sh scripts/install-platform-service.sh tasks/todo.md`
 
 **Step 3: Commit**
 
@@ -88,7 +94,7 @@ git add docs/plans/2026-03-11-ploy-platform-watchdog-design.md \
   deployment/ploy-platform-watchdog.timer \
   scripts/ploy_platform_watchdog.sh \
   scripts/tests/test_ploy_platform_watchdog.sh \
-  scripts/install-service.sh \
+  scripts/install-platform-service.sh \
   tasks/todo.md
 git commit -m "ops: add ploy platform watchdog"
 ```

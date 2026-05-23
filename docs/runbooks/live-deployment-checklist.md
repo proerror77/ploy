@@ -16,11 +16,16 @@ This checklist is the operator-facing go/no-go gate. It assumes:
   - `.github/workflows/release-platform.yml`
   - `deployment/ployd.service`
   - `scripts/install-platform-service.sh`
+  - `deployment/ploy-maintenance.timer`
+  - `deployment/ploy-platform-watchdog.timer`
 - Confirm the host has:
   - `/opt/ploy/bin/ployd`
   - `/opt/ploy/bin/ployctl`
   - `/opt/ploy/.env`
 - Confirm `ployd` is the only long-running platform process.
+- Confirm host-support timers are installed:
+  - `ploy-platform-watchdog.timer`
+  - `ploy-maintenance.timer`
 
 ## Required Host Inputs
 

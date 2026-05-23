@@ -58,14 +58,13 @@ collection behavior.
 
 | Surface | Status | Reason |
 | --- | --- | --- |
-| `scripts/install-service.sh` | legacy host-support installer / archive candidate | Not referenced by active workflows, tests, or runbooks; archive only after confirming maintenance/watchdog unit ownership. |
 | `scripts/train_crypto_*_onnx_from_db.py` | research prototype | Keep only while ML lane is active; otherwise archive under research prototypes. `scripts/train_crypto_lob_mlp_onnx_from_db.py` has been archived in favor of `scripts/train_crypto_lob_tcn_onnx_from_db.py`. |
 
 ## Platform Release / Host Install
 
 | Surface | Status | Owner | Notes |
 | --- | --- | --- | --- |
-| `scripts/install-platform-service.sh` | canonical platform release installer | release-platform | Active `release-platform.yml` bundle/install/execute path; guarded by `tests/platform_release_workflow.rs`; do not archive. |
+| `scripts/install-platform-service.sh` | canonical platform release installer | release-platform | Active `release-platform.yml` bundle/install/execute path; now also owns host-support maintenance/watchdog unit installation; guarded by `tests/platform_release_workflow.rs`; do not archive. |
 
 ## Archived Legacy Research Scripts
 
@@ -81,6 +80,7 @@ collection behavior.
 | `scripts/collect_klines.sh` | `scripts/archive/legacy-research-tools/collect_klines.sh` | Generic Binance kline CSV collector; research now starts from retained snapshot artifacts. |
 | `scripts/discover_new_markets.py` | `scripts/archive/legacy-research-tools/discover_new_markets.py` | Local DB market discovery prototype; canonical discovery is Rust market-data / deployed collector flow. |
 | `scripts/discover_pm_updown_markets.py` | `scripts/archive/legacy-research-tools/discover_pm_updown_markets.py` | CLI-based discovery prototype; canonical discovery is Rust market-data / deployed collector flow. |
+| `scripts/install-service.sh` | `scripts/archive/legacy-root-runtime/install-service.sh` | Legacy host-support installer; maintenance/watchdog unit ownership moved to `install-platform-service.sh` and `release-platform.yml`. |
 | `scripts/deploy_7_symbols.sh` | `scripts/archive/legacy-root-runtime/deploy_7_symbols.sh` | Manual host binary copy/restart script; deployment must use CI-built artifacts and workflows. |
 | `scripts/deploy-ploy-runner.sh` | `scripts/archive/legacy-root-runtime/deploy-ploy-runner.sh` | Manual host binary/config/systemd mutation script; deployment must use CI-built artifacts and workflows. |
 

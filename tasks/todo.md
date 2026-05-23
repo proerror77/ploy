@@ -1,5 +1,36 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Legacy Host Installer Cleanup (2026-05-24)
+
+Evidence stage: architecture/data-plane cleanup after restored
+`walk_forward -> runtime_parity` automation; no strategy promotion.
+
+### Tasks
+
+- [x] Start a fresh cleanup branch from current `origin/main`.
+- [x] Confirm `install-service.sh` is not referenced by active workflows,
+      tests, or runbooks.
+- [x] Move maintenance/watchdog unit ownership into
+      `release-platform.yml` and `install-platform-service.sh`.
+- [x] Archive the legacy `install-service.sh` entrypoint.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+### Review
+
+- 2026-05-24: `install-service.sh` was not an active release path, but it was
+  still the only script that installed `ploy-maintenance.timer` and
+  `ploy-platform-watchdog.timer`. This slice migrates those host-support units
+  into the canonical platform release bundle and installer before archiving the
+  legacy script.
+- 2026-05-24: Focused validation passed: `bash -n` for the active and archived
+  installers plus support scripts, YAML parse for `release-platform.yml`,
+  `bash scripts/tests/test_ploy_platform_watchdog.sh`,
+  `python3 -m unittest tests.test_ploy_maintenance_defaults`,
+  `rtk cargo test --locked --test platform_release_workflow
+  release_platform_workflow_builds_new_workspace_binaries -- --exact`, active
+  legacy installer reference check, and `rtk git diff --check`.
+
 ## Current Session - Archived Dry-Run Prototype Cleanup (2026-05-24)
 
 Evidence stage: architecture/data-plane cleanup after restored
@@ -13,7 +44,7 @@ Evidence stage: architecture/data-plane cleanup after restored
 - [x] Archive public-profile copycat and reverse-engineered dry-run prototypes
       from active `scripts/`.
 - [x] Keep `install-platform-service.sh` marked as active release installer and
-      leave `install-service.sh` as the only host-support archive candidate.
+      leave `install-service.sh` as the next host-support archive candidate.
 - [x] Run focused validation.
 - [ ] Commit, push, open PR, wait for CI, and merge.
 
@@ -29,8 +60,8 @@ Evidence stage: architecture/data-plane cleanup after restored
   retaining their unit tests as archived-prototype compatibility checks.
 - 2026-05-24: Agent Team review confirmed `scripts/install-platform-service.sh`
   remains the active `release-platform.yml` host installer and must not be
-  archived. `scripts/install-service.sh` is still only a legacy host-support
-  archive candidate pending maintenance/watchdog ownership cleanup.
+  archived. `scripts/install-service.sh` was left for the follow-up
+  maintenance/watchdog ownership cleanup.
 - 2026-05-24: Focused validation passed:
   `python3 -B -m unittest tests.test_copycat_dry_run
   tests.test_reverse_engineered_strategy`,
