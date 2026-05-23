@@ -1,6 +1,6 @@
 # Data Jobs Inventory
 
-Date: 2026-04-22
+Date: 2026-05-24
 
 This inventory classifies repo-local data scripts, jobs, and workflow surfaces so
 Phase 6 cleanup can retire duplicates without guessing. It does not change live
@@ -11,8 +11,8 @@ collection behavior.
 | Surface | Status | Owner | Notes |
 | --- | --- | --- | --- |
 | `crates/ploy-market-data` | canonical | Rust data plane | Owns live feed/scanner/discovery code used by runner/runtime surfaces. |
-| `new-ploy-runner collect-quotes` / `ploy-runner-host::ops` | canonical ops surface | runner ops | Full/ops build only; lean replay/backtest binaries intentionally do not expose it. |
-| `new-ploy-runner collect-pm-trades` / `ploy-runner-host::ops` | canonical ops surface | runner ops | Polls Polymarket Data API trade prints into `clob_trade_ticks`; full/ops build only. |
+| `/opt/ploy/bin/ploy-runner collect-quotes` / `ploy-runner-host::ops` | canonical ops surface | runner ops | Full/ops build only; lean replay/backtest binaries intentionally do not expose it. |
+| `/opt/ploy/bin/ploy-runner collect-pm-trades` / `ploy-runner-host::ops` | canonical ops surface | runner ops | Polls Polymarket Data API trade prints into `clob_trade_ticks`; full/ops build only. |
 | `ploy-feed-loaders` | canonical historical DB loader | research/backtest adapters | Owns SQLx historical `MarketUpdate` loading outside strategy-bundles. |
 | `scripts/export_parquet.sh` | canonical export helper | data/export host | Keep as the explicit Parquet export entrypoint until replaced by Rust datactl. |
 | `.github/workflows/backtest.yml` | canonical CI backtest lane | CI/backtest host | Should remain separated from trade-host deploy assumptions. |
@@ -47,8 +47,6 @@ collection behavior.
 
 | Surface | Status | Owner | Notes |
 | --- | --- | --- | --- |
-| `scripts/check_db.rs` | compatibility diagnostic | ops | Prefer runner `check-db`; archive after parity. |
-| `scripts/check_db_data.rs` | compatibility diagnostic | ops | Prefer runner `check-db`; archive after parity. |
 | `scripts/check_db.sql` | diagnostic SQL | ops | Keep as SQL snippet/reference. |
 | `scripts/check_polymarket_api_usage.sh` | diagnostic | ops | Keep; no Rust replacement needed. |
 | `scripts/report_drawdown.py` | report helper | research | Keep until research reporting is consolidated. |
@@ -60,14 +58,8 @@ collection behavior.
 
 | Surface | Status | Reason |
 | --- | --- | --- |
-| `scripts/collect_data.py` | archive candidate | Generic historical kline collector overlaps with current DB/export paths. |
-| `scripts/collect_klines.sh` | archive candidate | Same overlap as `collect_data.py`. |
 | `scripts/reverse_engineered_strategy_dry_run.py` | archive candidate | Research prototype, not canonical runtime. |
 | `scripts/copycat_dry_run.py` | archive candidate | Research prototype; future copy-trading work should use canonical `MarketUpdate`/runtime path. |
-| `scripts/discover_new_markets.py` | archive candidate | Discovery belongs in Rust market-data/scanner once parity is proven. |
-| `scripts/discover_pm_updown_markets.py` | archive candidate | Same as above. |
-| `scripts/deploy_7_symbols.sh` | archive candidate | Deployment should use manifests/workflows. |
-| `scripts/deploy-ploy-runner.sh` | archive candidate | Prefer CI-built artifacts and deploy workflows. |
 | `scripts/install-service.sh` / `scripts/install-platform-service.sh` | archive candidate | Keep only if runbooks still reference them; otherwise workflow/systemd install owns service deployment. |
 | `scripts/train_crypto_*_onnx_from_db.py` | research prototype | Keep only while ML lane is active; otherwise archive under research prototypes. `scripts/train_crypto_lob_mlp_onnx_from_db.py` has been archived in favor of `scripts/train_crypto_lob_tcn_onnx_from_db.py`. |
 
@@ -77,6 +69,14 @@ collection behavior.
 | --- | --- | --- |
 | `scripts/simulate_backtest.py` | `scripts/archive/research-debug/simulate_backtest.py` | Legacy standalone simulator; canonical evidence is produced by Rust/backtest and hosted snapshot-backed workflows. |
 | `scripts/train_crypto_lob_mlp_onnx_from_db.py` | `scripts/archive/research-debug/train_crypto_lob_mlp_onnx_from_db.py` | Self-deprecated MLP trainer; active LOB ML docs point to the TCN training entry. |
+| `scripts/check_db.rs` | `scripts/archive/legacy-research-tools/check_db.rs` | Duplicate DB diagnostic; canonical ops path is `/opt/ploy/bin/ploy-runner check-db`. |
+| `scripts/check_db_data.rs` | `scripts/archive/legacy-research-tools/check_db_data.rs` | Duplicate DB diagnostic; canonical ops path is `/opt/ploy/bin/ploy-runner check-db`. |
+| `scripts/collect_data.py` | `scripts/archive/legacy-research-tools/collect_data.py` | Generic Binance kline CSV collector; research now starts from retained snapshot artifacts. |
+| `scripts/collect_klines.sh` | `scripts/archive/legacy-research-tools/collect_klines.sh` | Generic Binance kline CSV collector; research now starts from retained snapshot artifacts. |
+| `scripts/discover_new_markets.py` | `scripts/archive/legacy-research-tools/discover_new_markets.py` | Local DB market discovery prototype; canonical discovery is Rust market-data / deployed collector flow. |
+| `scripts/discover_pm_updown_markets.py` | `scripts/archive/legacy-research-tools/discover_pm_updown_markets.py` | CLI-based discovery prototype; canonical discovery is Rust market-data / deployed collector flow. |
+| `scripts/deploy_7_symbols.sh` | `scripts/archive/legacy-root-runtime/deploy_7_symbols.sh` | Manual host binary copy/restart script; deployment must use CI-built artifacts and workflows. |
+| `scripts/deploy-ploy-runner.sh` | `scripts/archive/legacy-root-runtime/deploy-ploy-runner.sh` | Manual host binary/config/systemd mutation script; deployment must use CI-built artifacts and workflows. |
 
 ## Guardrails
 

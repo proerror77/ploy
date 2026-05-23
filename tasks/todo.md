@@ -1,5 +1,33 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Legacy Research Tool Cleanup (2026-05-24)
+
+Evidence stage: architecture/data-plane cleanup after restored
+`walk_forward -> runtime_parity` automation; no strategy promotion.
+
+### Tasks
+
+- [x] Start a fresh cleanup branch from current `origin/main`.
+- [x] Archive low-risk legacy root runtime deploy scripts.
+- [x] Archive duplicate CSV kline collectors, market discovery prototypes, and
+      Rust DB diagnostic snippets from active `scripts/`.
+- [x] Update active collector/research docs away from legacy `ploy collect` and
+      `ploy strategy backfill-*` guidance.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+### Review
+
+- 2026-05-24: The active research chain is now artifact-backed:
+  `research-snapshot.yml` -> hosted factor review/walk-forward -> durable
+  trace -> runtime replay. Legacy local CSV and manual deploy helpers were
+  moved under `scripts/archive/` so active `scripts/` no longer advertises them
+  as runnable operational paths.
+- 2026-05-24: Focused validation passed: Python compile for archived Python
+  scripts, `bash -n` for archived shell scripts, `python3 -m unittest
+  tests.test_persist_research_trace_contract`, root-script absence check for
+  the archived files, and `rtk git diff --check`.
+
 ## Current Session - Batch Runtime Replay Request Dispatch (2026-05-24)
 
 Evidence stage: `walk_forward` -> `runtime_parity` / `executable_replay`

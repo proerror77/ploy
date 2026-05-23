@@ -1,226 +1,161 @@
-# Collector And Backfill Runbook
+# Collector And Research Data Runbook
 
-This page answers one practical question:
-
-`live`, `backfill`, and `research` each use different commands. Run the right one for the job.
+This page routes data work through the current workspace surfaces. The old
+single-binary commands such as `ploy collect`, `ploy orderbook-history`, and
+`ploy strategy backfill-*` are archived compatibility references; do not use
+them for new research or promotion evidence.
 
 ## Quick Routing
 
-| Goal | Command family | Use when | Do not use when |
+| Goal | Current surface | Use when | Do not use when |
 | --- | --- | --- | --- |
-| Continuous live/raw capture | `ploy collect` | You want fresh Binance + Polymarket-aligned data flowing into Postgres | You need historical replay or large backfills |
-| Historical Polymarket L2 backfill | `ploy orderbook-history` | You need historical CLOB snapshots for specific token IDs | You want the main live sync collector |
-| Historical Deribit IV baseline | `ploy deribit-iv-backfill` | You need `deribit_iv_ticks` for IV-aware research/backtests | You only need live PM/Binance data |
-| Backtest/research dataset prep | `ploy strategy backfill-*` | You are preparing tables for replay, settlement, or kline-based analysis | You want a 24/7 collector process |
+| Deploy or restart collectors | `.github/workflows/deploy-tango-1-1.yml` | You need the production-like data plane on `tango-1-1` refreshed from CI-built artifacts | You want an ad hoc local DB command |
+| Foreground collector diagnostic | `/opt/ploy/bin/ploy-runner collect-*` | You are on the data host and need to inspect one collector path with explicit DB credentials | You are producing research/promotion evidence |
+| Research snapshot | `.github/workflows/research-snapshot.yml` | You need a retained sampled research artifact from remote data | You need full-depth executable replay evidence |
+| Factor review / walk-forward | hosted artifact workflows | You already have a snapshot artifact and want factor attribution / walk-forward evidence | You need live trading or dry-run promotion |
+| Runtime replay | `.github/workflows/runtime-candidate-replay.yml` | A runtime score needs executable `MarketUpdate` replay evidence | You only have aggregate top-bucket diagnostics |
+| Data quality / gap audit | deploy postflight, `check-db`, or `scripts/audit_market_data_gaps.py` | You need freshness, coverage, or blocker evidence | You are trying to bypass a failed promotion gate |
 
-## 1. Live Collection: `ploy collect`
+## 1. Live Data Plane
 
-Use this when you want the main synchronized collector.
+The live data plane is owned by CI deploys and systemd units on `tango-1-1`.
+Do not build Rust on the trading host and do not install one-off binaries by
+hand.
 
-It is the right command for:
+The deploy workflow installs `/opt/ploy/bin/ploy-runner` plus the current
+systemd units:
 
-- live lag-analysis capture
-- ongoing Binance + Polymarket raw data ingestion
-- building a fresh `sync_records` stream for later research
+- `ploy-market-discovery.service`
+- `ploy-quote-collector.service`
+- `ploy-pm-trade-collector.service`
+- `ploy-binance-price-collector.service`
+- `ploy-binance-aggtrade-collector.service`
+- `ploy-binance-lob-collector.service`
+- `ploy-deribit-iv-collector.service`
+- `ploy-deribit-greeks-collector.service`
 
-Example:
-
-```bash
-ploy collect \
-  --symbols BTCUSDT,ETHUSDT,SOLUSDT \
-  --markets bitcoin-up-or-down-march-7-12pm,ethereum-up-or-down-march-7-12pm \
-  --duration 0
-```
-
-Notes:
-
-- `--duration 0` means run until stopped.
-- This path writes to database tables; the main collector path is not the CSV sink.
-- This mode auto-discovers crypto-series Polymarket tokens and bridges live PM prices into the collector.
-
-Use `ploy collect` when the question is:
-
-- "What should keep running in the background to accumulate fresh raw data?"
-
-Do not use it when the question is:
-
-- "I need the last 7 days of PM L2 snapshots."
-- "I need Deribit IV history."
-- "I need replay tables for an offline backtest."
-
-## 2. Historical PM L2 Backfill: `ploy orderbook-history`
-
-Use this when you need historical Polymarket CLOB orderbook snapshots for one or more token IDs.
-
-Example:
+Trigger deploys from `main`:
 
 ```bash
-ploy orderbook-history \
-  --asset-ids 12345,67890 \
-  --lookback-secs 3600 \
-  --levels 20 \
-  --sample-ms 1000 \
-  --resume-from-db
+gh workflow run deploy-tango-1-1.yml -f git_ref=main
 ```
 
-Typical use cases:
+After deploy, use the workflow postflight and service logs as evidence. The
+workflow checks service activity, guardrails, and collector liveness.
 
-- rebuild missing L2 history for specific assets
-- backfill PM orderbook snapshots for research
-- resume from the DB high-water mark without restarting from scratch
+## 2. Foreground Collector Diagnostics
 
-Key flags:
+Use foreground collector commands only as operator diagnostics on the data host.
+They are not the canonical research chain and should not feed promotion
+artifacts directly.
 
-- `--asset-ids`: required token IDs
-- `--resume-from-db`: continue from stored high-water mark
-- `--lookback-secs`: rolling window if `--start-ms` is omitted
-- `--sample-ms 0`: persist every returned snapshot
-
-Use `ploy orderbook-history` when the question is:
-
-- "I know the PM token IDs and want historical depth."
-
-## 3. Deribit IV Baseline: `ploy deribit-iv-backfill`
-
-Use this when you want historical Deribit volatility-index bars in Postgres.
-
-Example:
+Examples:
 
 ```bash
-ploy deribit-iv-backfill \
-  --currencies BTC,ETH \
-  --lookback-days 30 \
-  --resolution-secs 60
+/opt/ploy/bin/ploy-runner check-db --db-url "$PLOY_DATABASE__URL"
+/opt/ploy/bin/ploy-runner collect-markets --symbols BTCUSDT,ETHUSDT,SOLUSDT --db-url "$PLOY_DATABASE__URL"
+/opt/ploy/bin/ploy-runner collect-quotes --symbols BTCUSDT,ETHUSDT,SOLUSDT --timeframe 5m --db-url "$PLOY_DATABASE__URL"
+/opt/ploy/bin/ploy-runner collect-pm-trades --symbols BTCUSDT,ETHUSDT,SOLUSDT --db-url "$PLOY_DATABASE__URL"
+/opt/ploy/bin/ploy-runner collect-binance-lob --symbols BTCUSDT,ETHUSDT,SOLUSDT --depth 20 --db-url "$PLOY_DATABASE__URL"
+/opt/ploy/bin/ploy-runner collect-binance-price --symbols BTCUSDT,ETHUSDT,SOLUSDT --db-url "$PLOY_DATABASE__URL"
+/opt/ploy/bin/ploy-runner collect-binance-aggtrade --symbols BTCUSDT,ETHUSDT,SOLUSDT --db-url "$PLOY_DATABASE__URL"
+/opt/ploy/bin/ploy-runner collect-deribit-iv --currencies BTC,ETH,SOL --db-url "$PLOY_DATABASE__URL"
+/opt/ploy/bin/ploy-runner collect-deribit-greeks --currencies BTC,ETH,SOL --db-url "$PLOY_DATABASE__URL"
 ```
 
-Dry-run example:
+If a diagnostic requires remote secrets or production data, prefer a GitHub
+Actions workflow with environment-scoped secrets over a local command.
+
+## 3. Research Snapshot Path
+
+Research starts from retained artifacts, not ad hoc local CSV files.
 
 ```bash
-ploy deribit-iv-backfill \
-  --currencies BTC \
-  --start 2026-02-01T00:00:00Z \
-  --end 2026-02-07T00:00:00Z \
-  --dry-run
+gh workflow run research-snapshot.yml \
+  -f git_ref=main \
+  -f start_date=2026-05-16 \
+  -f end_date=2026-05-18 \
+  -f symbols=BTCUSDT,ETHUSDT,SOLUSDT \
+  -f data_profile=pm5d-execution
 ```
 
-This is the right path for:
+The output is a complete sampled research snapshot artifact with manifest,
+quality report, and data-gap audit. It is a factor-search input, not a claim
+that every execution surface is full-fidelity.
 
-- IV-aware research
-- volatility baseline tables
-- filling `deribit_iv_ticks`
+## 4. Factor Review And Walk-Forward
 
-Use `ploy deribit-iv-backfill` when the question is:
-
-- "I need Deribit IV bars in the database."
-
-## 4. Research And Backtest Prep: `ploy strategy backfill-*`
-
-These commands are for offline prep, not live collection.
-
-### 4.1 Binance Klines
+Use hosted artifact workflows after a snapshot exists:
 
 ```bash
-ploy strategy backfill-klines \
-  --symbols BTCUSDT,ETHUSDT,SOLUSDT \
-  --from 2026-02-20T00:00:00Z \
-  --to 2026-02-28T00:00:00Z \
-  --interval 1m
+gh workflow run factor-review-v2.yml \
+  -f git_ref=main \
+  -f snapshot_run_id=<snapshot-run-id>
+
+gh workflow run factor-walk-forward-v2.yml \
+  -f git_ref=main \
+  -f snapshot_run_id=<snapshot-run-id>
 ```
 
-Use this when you need historical Binance bars for backtests.
+Snapshot-backed requests route to GitHub-hosted artifact workflows. Requests
+without `snapshot_run_id` fail closed instead of running direct DB research.
 
-### 4.2 PM Replay Tables
+For AutoFactor / PM5D work, evidence stages must stay separated:
+
+- `factor_attribution`: factor direction, stability, bucket behavior.
+- `walk_forward`: train/test separation and promotion gate diagnostics.
+- `runtime_parity` / `executable_replay`: runtime scorer and MarketUpdate tape
+  evidence.
+- `dry_run_candidate`: only after the required replay, settlement, fillability,
+  risk, and trace gates pass.
+
+## 5. Runtime Candidate Replay
+
+Use runtime replay when a specific runtime score needs executable evidence:
 
 ```bash
-ploy strategy backfill-pm-replay-tables \
-  --from 2026-02-20T00:00:00Z \
-  --to 2026-02-28T00:00:00Z \
-  --symbols BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT
+gh workflow run runtime-candidate-replay.yml \
+  -f deployment_id=pm5d.threelayer.settlement-probability-btc-eth.dryrun \
+  -f config_path=/opt/ploy/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml \
+  -f recording_path=/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson \
+  -f runtime_score=autofactor_formula:<candidate> \
+  -f strategy_profile=settlement_probability \
+  -f min_trade_count=50 \
+  -f min_fill_rate=0.30 \
+  -f min_roi=0
 ```
 
-Use this when you want to materialize replay-friendly PM tables from `sync_records`.
+Runtime replay artifacts must report `basis=runtime_market_update_replay`.
+Aggregate top-bucket candidate replay is diagnostic only and must not satisfy a
+dry-run handoff.
 
-### 4.3 PM Token Settlements
+## 6. Data Quality Checks
+
+For quick operator checks, use:
 
 ```bash
-ploy strategy backfill-pm-token-settlements \
-  --from 2026-02-20T00:00:00Z \
-  --to 2026-02-28T00:00:00Z \
-  --symbols BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT
+/opt/ploy/bin/ploy-runner check-db --db-url "$PLOY_DATABASE__URL"
 ```
 
-Use this when you want official Polymarket settlement state in `pm_token_settlements`.
+For research snapshot gaps, use the `data-gap-audit.json` and `quality.md`
+uploaded by `research-snapshot.yml`. For a focused gap investigation, use
+`scripts/audit_market_data_gaps.py` with an explicit remote/CI context.
 
-## 5. Recommended Workflows
+Do not treat sampled snapshot rows as full-depth execution evidence. If a
+promotion depends on full-depth CLOB, official settlement, or runtime replay,
+missing or sampled surfaces remain blockers.
 
-### Live Capture Workflow
+## 7. Archived Compatibility Paths
 
-1. Run `ploy collect` continuously.
-2. Periodically inspect downstream freshness/lag.
-3. Use the collected raw tables later for research transforms.
+These old paths have been removed from active guidance:
 
-### PM L2 Research Workflow
+- `ploy collect`
+- `ploy collect --check-only`
+- `ploy orderbook-history`
+- `ploy deribit-iv-backfill`
+- `ploy strategy backfill-*`
+- `scripts/collect_data.py`
+- `scripts/collect_klines.sh`
+- manual deploy scripts that copy binaries onto hosts
 
-1. Identify token IDs to study.
-2. Run `ploy orderbook-history --resume-from-db`.
-3. Join those snapshots with settlement or replay tables later.
-
-### Offline Backtest Prep Workflow
-
-1. Backfill Binance klines with `ploy strategy backfill-klines`.
-2. Backfill PM replay tables with `ploy strategy backfill-pm-replay-tables`.
-3. Backfill settlements with `ploy strategy backfill-pm-token-settlements`.
-4. Optionally backfill Deribit IV with `ploy deribit-iv-backfill`.
-
-## 6. Lightweight Data-Quality Check
-
-Use this when you want a quick health read on collector tables without starting a collector:
-
-```bash
-ploy collect --check-only
-```
-
-Tune the window and stale threshold if needed:
-
-```bash
-ploy collect --check-only \
-  --lookback-minutes 30 \
-  --freshness-warn-secs 90
-```
-
-The report prints, for each core collector relation:
-
-- latest timestamp
-- age in seconds
-- recent row count
-- duplicate row count
-- duplicate ratio over the selected lookback window
-
-Current coverage includes:
-
-- `clob_quote_ticks`
-- `binance_lob_ticks`
-- `clob_orderbook_snapshots`
-- `sync_records_derived`
-
-Use it when the question is:
-
-- "Is the collector fresh?"
-- "Am I writing lots of duplicate snapshots?"
-- "Did the raw pipeline stop moving?"
-
-## 7. Sanity Checks
-
-After dataset prep, useful follow-up commands are:
-
-```bash
-ploy strategy accuracy --lookback-hours 168 --limit 50
-ploy strategy backtest-list --limit 20
-```
-
-If you are unsure which path to use, use this rule:
-
-- Need fresh raw streaming data: `ploy collect`
-- Need historical PM L2 for known assets: `ploy orderbook-history`
-- Need Deribit IV history: `ploy deribit-iv-backfill`
-- Need offline backtest tables: `ploy strategy backfill-*`
+Use archived files only for historical context when reading old evidence.
