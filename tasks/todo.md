@@ -22,6 +22,32 @@ Evidence stage: `factor_attribution` / `walk_forward` recovery with
   reported `missing_runtime_contract:*`. Root cause was the sweep wrapper
   selecting the first `alpha-search/**/factor-registry-preview.json` by sorted
   path instead of the preview matching `--allowed-target`.
+- 2026-05-24: PR #639 merged and hosted walk-forward run `26343497815`
+  succeeded from `main`. The allowed target no longer has
+  `missing_runtime_contract:*`; the next blocker is correctly runtime replay,
+  not registry routing.
+
+## Current Session - Closed Loop Runtime Replay Request Fix (2026-05-24)
+
+Evidence stage: `walk_forward` -> `runtime_parity` planning, not strategy
+promotion.
+
+### Tasks
+
+- [x] Re-run closed-loop classification against run `26343497815` artifacts.
+- [x] Reclassify aggregate candidate replay blockers as `fix_runtime` even when
+      the aggregate artifact lacks runtime replay provenance fields.
+- [x] Include source target/horizon in generated runtime replay requests.
+- [x] Dispatch `runtime-candidate-replay.yml` for the selected runtime score.
+- [ ] Commit, push, merge, and feed runtime replay evidence back into promotion.
+
+### Review
+
+- 2026-05-24: Run `26343497815` selected runtime score
+  `autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_spread_adjusted_capacity`
+  for the next runtime replay request with `source_target=tradeable_full_depth_settlement_pnl`
+  and `source_horizon=5m`. Runtime candidate replay run `26343673505` was
+  dispatched from `main`.
 
 ## Current Session - Runtime Chain Data Review (2026-05-24)
 

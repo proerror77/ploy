@@ -19,6 +19,7 @@ def write_json(path: Path, payload: dict) -> None:
 def artifact(
     root: Path,
     *,
+    target: str = "full_depth_settlement_executable_pnl",
     handoff_status: str = "blocked",
     chain_reason: str = "chain_next_run_false",
     should_dispatch: bool = False,
@@ -28,7 +29,6 @@ def artifact(
     candidate_strategy_replay: dict | None = None,
     write_feedback: bool = True,
 ) -> Path:
-    target = "full_depth_settlement_executable_pnl"
     factor_root = root / "factor-walk-forward-v2"
     alpha_root = factor_root / "alpha-search" / target
     if write_feedback:
@@ -575,8 +575,71 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             self.assertEqual(request["inputs"]["strategy_profile"], "settlement_probability")
             self.assertEqual(
                 json.loads(request["inputs"]["options_json"]),
-                {"full_depth_entry": True, "skip_settlement_exits": False},
+                {
+                    "full_depth_entry": True,
+                    "skip_settlement_exits": False,
+                    "source_horizon": "5m",
+                    "source_target": agent.DEFAULT_TARGET,
+                },
             )
+
+    def test_aggregate_replay_missing_artifact_fields_still_routes_to_fix_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_score = "autofactor_formula:mut_spread_adjusted_external_move_select_entry_price_quality_ge_050"
+            path = artifact(
+                Path(tmp),
+                target="tradeable_full_depth_settlement_pnl",
+                promotion={
+                    "decision": "blocked",
+                    "required_strategy_profile": "settlement_probability",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "requires_runtime_replay_not_top_bucket_aggregate",
+                                "candidate_strategy_replay_not_runtime_replay:factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
+                                "candidate_strategy_replay_missing_source_workflow",
+                                "candidate_strategy_replay_missing_workflow_run_id",
+                                "candidate_strategy_replay_missing_workflow_run_url",
+                                "candidate_strategy_replay_missing_artifact_name",
+                            ],
+                            "factor": {
+                                "name": "mut_spread_adjusted_external_move_select_entry_price_quality_ge_050",
+                                "target": "tradeable_full_depth_settlement_pnl",
+                                "decision": "candidate",
+                                "reason": "passed",
+                                "top_bucket_avg_label": 3.54,
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": runtime_score,
+                                "strategy_profile": "settlement_probability",
+                            },
+                        }
+                    ],
+                    "candidate_strategy_replay": {
+                        "basis": "factor_walk_forward_top_bucket_aggregate",
+                        "runtime_score": runtime_score,
+                        "strategy_profile": "settlement_probability",
+                    },
+                },
+            )
+
+            decision = agent.closed_loop_decision(
+                [agent.load_artifact(path, "tradeable_full_depth_settlement_pnl")]
+            )
+            request = decision["runtime_replay_request"]
+
+        self.assertEqual(decision["decision"], "fix_runtime")
+        self.assertEqual(request["workflow"], "runtime-candidate-replay.yml")
+        self.assertEqual(request["inputs"]["runtime_score"], runtime_score)
+        self.assertEqual(
+            json.loads(request["inputs"]["options_json"]),
+            {
+                "full_depth_entry": True,
+                "skip_settlement_exits": False,
+                "source_horizon": "5m",
+                "source_target": "tradeable_full_depth_settlement_pnl",
+            },
+        )
 
     def test_fix_runtime_request_uses_best_current_runtime_mappable_factor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
