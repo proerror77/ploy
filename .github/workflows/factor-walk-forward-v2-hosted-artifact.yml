@@ -487,7 +487,6 @@ jobs:
           python3 scripts/run_factor_walk_forward_sweep.py "${args[@]}"
 
       - name: Persist Research OS trace
-        if: always()
         env:
           RESEARCH_TRACE_DB_URL: ${{ secrets.RESEARCH_OS_DATABASE_URL || secrets.PLOY_DATABASE_URL || secrets.PLOY_RESEARCH_DATABASE_URL || secrets.PLOY_DB_URL }}
           TANGO_1_1_SSH_KEY: ${{ secrets.TANGO_1_1_SSH_KEY }}
@@ -507,6 +506,10 @@ jobs:
           fi
           if [ ! -f artifacts/research-snapshot/manifest.json ]; then
             echo "research snapshot manifest is required for durable trace persistence." >&2
+            exit 2
+          fi
+          if [ ! -f artifacts/factor-walk-forward-v2/report.txt ]; then
+            echo "factor walk-forward report is required for durable trace persistence." >&2
             exit 2
           fi
 

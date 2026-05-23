@@ -103,6 +103,10 @@ class PersistResearchTraceContractTest(unittest.TestCase):
 
     def test_hosted_walk_forward_persists_trace_by_default(self) -> None:
         workflow = HOSTED_WALK.read_text(encoding="utf-8")
+        persist_step = workflow.split("- name: Persist Research OS trace", 1)[1].split(
+            "- name: Create config PR from ready handoff",
+            1,
+        )[0]
         required_snippets = [
             '"persist_research_trace":true',
             '"persist_research_trace": "true"',
@@ -128,9 +132,11 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "--handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json",
             "--candidate-replay-json",
             "candidate-strategy-replay/candidate-strategy-replay.json",
+            "factor walk-forward report is required for durable trace persistence.",
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, workflow)
+        self.assertNotIn("if: always()", persist_step)
 
     def test_standalone_autofactor_promotion_side_effects_require_trace(self) -> None:
         workflow = AUTOFACTOR_PROMOTION.read_text(encoding="utf-8")
