@@ -3,9 +3,9 @@
 
 The default gate is intentionally strict:
 
-1. Reuse a retained complete sampled research snapshot artifact when --snapshot-run-id is
-   supplied, or build a portable pm5d-vol research snapshot as a legacy
-   fallback.
+1. Reuse a retained complete sampled research snapshot artifact supplied with
+   --snapshot-run-id. The legacy pm5d-vol snapshot build path is an explicit
+   manual exception, not the default PRD gate.
 2. Feed that snapshot artifact into the GitHub-hosted Factor Walk-Forward V2
    artifact workflow.
 3. Optionally attach a replay/dry-run parity artifact to the promotion gate.
@@ -284,8 +284,16 @@ def parse_args() -> argparse.Namespace:
         default="",
         help=(
             "Existing workflow run id that owns a complete sampled research-snapshot artifact. "
-            "When supplied, skip the legacy ploy-ci-1 snapshot workflow and run "
-            "the hosted artifact-only walk-forward path."
+            "Required for the default gate so walk-forward consumes a retained "
+            "snapshot contract."
+        ),
+    )
+    parser.add_argument(
+        "--allow-legacy-snapshot-build",
+        action="store_true",
+        help=(
+            "Manual exception only: build a legacy pm5d-vol snapshot when no "
+            "--snapshot-run-id is supplied."
         ),
     )
     parser.add_argument(
@@ -357,6 +365,19 @@ def main() -> int:
             flush=True,
         )
     else:
+        if not args.allow_legacy_snapshot_build:
+            message = "\n".join(
+                [
+                    "Settlement probability PRD gate blocked before dispatch:",
+                    "",
+                    "- Missing required `--snapshot-run-id` for a retained complete sampled research snapshot.",
+                    "- The legacy pm5d-vol snapshot build path is disabled by default.",
+                    "- Decision: dispatch or select a research-snapshot artifact first, then rerun the PRD gate.",
+                ]
+            )
+            print(message, flush=True)
+            issue_comment(args.issue_number, message, dry_run=args.dry_run)
+            return 2
         snapshot_options = {
             "lob_sample_secs": int(args.lob_sample_secs or "30"),
             "pm_book_sample_secs": int(args.pm_book_sample_secs or "30"),

@@ -371,11 +371,12 @@ gh workflow run settlement-probability-prd-gate.yml \
   -f replay_parity_run_id=<optional-replay-parity-run-id>
 ```
 
-With `snapshot_run_id` set, the gate skips the legacy `ploy-ci-1` snapshot
-build and dispatches `factor-walk-forward-v2-hosted-artifact.yml` on
-`ubuntu-latest`. If `snapshot_run_id` is omitted, the orchestrator still falls
-back to `research-snapshot.yml`; that path remains a legacy DB-adjacent path
-until snapshot export is moved to a hosted-safe data source.
+The gate requires `snapshot_run_id` by default and dispatches
+`factor-walk-forward-v2-hosted-artifact.yml` on `ubuntu-latest`. If
+`snapshot_run_id` is omitted, the orchestrator fails before dispatch instead of
+falling back to the legacy DB-adjacent `research-snapshot.yml` path. Direct CLI
+callers can still use `--allow-legacy-snapshot-build` as a manual exception
+while snapshot export is moved to a hosted-safe data source.
 When replay parity evidence uses a non-default artifact name, encode the input
 as `replay_parity_run_id=<run-id>:<artifact-name>` so the workflow stays within
 GitHub's 10-input dispatch limit.
