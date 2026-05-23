@@ -31,7 +31,7 @@ on:
       options_json:
         description: "Advanced options JSON: walk windows, factor filters, snapshot/data/audit settings, local snapshot registry, optional replay parity artifact"
         required: false
-        default: '{"train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":30,"pm_book_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","compile_snapshot":true,"allow_direct_db_debug":false,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","data_quality_mode":"strict_continuous","min_event_complete_events":20,"min_event_complete_rows":40,"issue_number":"","snapshot_registry_dir":"","replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":""}'
+        default: '{"train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":30,"pm_book_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","compile_snapshot":true,"allow_direct_db_debug":false,"legacy_db_debug_ack":"","optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","data_quality_mode":"strict_continuous","min_event_complete_events":20,"min_event_complete_rows":40,"issue_number":"","snapshot_registry_dir":"","replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":""}'
 
 concurrency:
   group: factor-walk-forward-v2-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}
@@ -144,7 +144,7 @@ jobs:
 
   reject-legacy-db-default:
     name: Reject legacy DB walk-forward by default
-    if: "${{ github.event.inputs.snapshot_run_id == '' && !contains(github.event.inputs.options_json, '\"allow_direct_db_debug\":true') && !contains(github.event.inputs.options_json, '\"allow_direct_db_debug\": true') }}"
+    if: "${{ github.event.inputs.snapshot_run_id == '' && ((!contains(github.event.inputs.options_json, '\"allow_direct_db_debug\":true') && !contains(github.event.inputs.options_json, '\"allow_direct_db_debug\": true')) || (!contains(github.event.inputs.options_json, '\"legacy_db_debug_ack\":\"manual-legacy-db-debug\"') && !contains(github.event.inputs.options_json, '\"legacy_db_debug_ack\": \"manual-legacy-db-debug\"'))) }}"
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -157,14 +157,14 @@ jobs:
             echo "The legacy \`ploy-ci-1\` direct-DB branch is disabled by default."
             echo "Run \`research-snapshot.yml\` first, then dispatch this workflow with \`snapshot_run_id\` so it routes to \`factor-walk-forward-v2-hosted-artifact.yml\`."
             echo ""
-            echo "For emergency debugging only, set \`options_json.allow_direct_db_debug=true\`."
+            echo "For emergency debugging only, set \`options_json.allow_direct_db_debug=true\` and \`options_json.legacy_db_debug_ack=manual-legacy-db-debug\`."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "Legacy direct-DB walk-forward requires snapshot_run_id or allow_direct_db_debug=true." >&2
+          echo "Legacy direct-DB walk-forward requires snapshot_run_id or the explicit legacy DB debug ack." >&2
           exit 2
 
   walk-forward:
-    name: Run factor walk-forward from DB on ploy-ci-1
-    if: "${{ github.event.inputs.snapshot_run_id == '' && (contains(github.event.inputs.options_json, '\"allow_direct_db_debug\":true') || contains(github.event.inputs.options_json, '\"allow_direct_db_debug\": true')) }}"
+    name: Emergency legacy walk-forward from DB on ploy-ci-1
+    if: "${{ github.event.inputs.snapshot_run_id == '' && (contains(github.event.inputs.options_json, '\"allow_direct_db_debug\":true') || contains(github.event.inputs.options_json, '\"allow_direct_db_debug\": true')) && (contains(github.event.inputs.options_json, '\"legacy_db_debug_ack\":\"manual-legacy-db-debug\"') || contains(github.event.inputs.options_json, '\"legacy_db_debug_ack\": \"manual-legacy-db-debug\"')) }}"
     runs-on: [self-hosted, ploy-ci-1]
     timeout-minutes: 60
     environment: ploy-ci-1
@@ -219,6 +219,7 @@ jobs:
               "report_suite": "full",
               "compile_snapshot": "true",
               "allow_direct_db_debug": "false",
+              "legacy_db_debug_ack": "",
               "optimizer_data_dir": "/tmp/ploy-parquet",
               "data_profile": "pm5d-execution",
               "custom_required_sources": "",
@@ -584,7 +585,7 @@ jobs:
             source_args=(--db-url "${PLOY_DB_URL:?PLOY_DB_URL secret is required}" --allow-direct-db-debug)
             echo "canonical_result=no direct_db_debug=true" | tee artifacts/factor-walk-forward-v2/source.txt
           else
-            echo "ERROR: no research snapshot is present; set compile_snapshot=true, pass snapshot_run_id, or explicitly set allow_direct_db_debug=true" >&2
+            echo "ERROR: no research snapshot is present; pass snapshot_run_id, or explicitly set allow_direct_db_debug=true plus legacy_db_debug_ack=manual-legacy-db-debug" >&2
             exit 2
           fi
           args=(
