@@ -124,16 +124,27 @@ def gap_query(
     bucket_minutes: int,
     recent_minutes: int,
     statement_timeout_seconds: int,
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
 ) -> str:
     table = ident(target.table_name)
     ts_col = ident(target.timestamp_column)
     predicate = target_predicate(target)
+    if start_ts and end_ts:
+        start_expr = f"date_trunc('minute', {sql_literal(start_ts)}::timestamptz)"
+        end_expr = (
+            f"date_trunc('minute', {sql_literal(end_ts)}::timestamptz "
+            f"- interval '{bucket_minutes} minutes')"
+        )
+    else:
+        start_expr = f"date_trunc('minute', now() - interval '{lookback_hours} hours')"
+        end_expr = f"date_trunc('minute', now() - interval '{bucket_minutes} minutes')"
     return f"""
 SET statement_timeout TO '{statement_timeout_seconds}s';
 WITH params AS (
   SELECT
-    date_trunc('minute', now() - interval '{lookback_hours} hours') AS start_at,
-    date_trunc('minute', now() - interval '{bucket_minutes} minutes') AS end_at,
+    {start_expr} AS start_at,
+    {end_expr} AS end_at,
     interval '{bucket_minutes} minutes' AS bucket_width
 ),
 buckets AS (
@@ -283,11 +294,19 @@ def classify_coverage(row: dict[str, Any], target: GapTarget) -> tuple[str, list
 
 
 def classify_gap_for_gate(
-    row: dict[str, Any], target: GapTarget, gate_mode: str
+    row: dict[str, Any], target: GapTarget, gate_mode: str, historical_window: bool = False
 ) -> tuple[str, list[str], str, list[str], str, list[str]]:
     freshness_status, freshness_reasons = classify_freshness(row, target)
     coverage_status, coverage_reasons = classify_coverage(row, target)
-    if gate_mode == "freshness":
+    if historical_window:
+        status = coverage_status
+        reasons = list(coverage_reasons)
+        if freshness_status != "ok":
+            reasons.extend(
+                f"freshness not enforced for historical window: {reason}"
+                for reason in freshness_reasons
+            )
+    elif gate_mode == "freshness":
         status = freshness_status
         reasons = list(freshness_reasons)
         if coverage_status != "ok":
@@ -321,8 +340,11 @@ def audit_gap_target(
     statement_timeout_seconds: int,
     psql_timeout_seconds: int,
     gate_mode: str,
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
+    historical_window = bool(start_ts and end_ts)
     try:
         row = run_json(
             gap_query(
@@ -331,6 +353,8 @@ def audit_gap_target(
                 bucket_minutes=bucket_minutes,
                 recent_minutes=recent_minutes,
                 statement_timeout_seconds=statement_timeout_seconds,
+                start_ts=start_ts,
+                end_ts=end_ts,
             ),
             psql_timeout_seconds,
         )
@@ -341,7 +365,7 @@ def audit_gap_target(
             freshness_reasons,
             coverage_status,
             coverage_reasons,
-        ) = classify_gap_for_gate(row, target, gate_mode)
+        ) = classify_gap_for_gate(row, target, gate_mode, historical_window)
         row["status"] = status
         row["reasons"] = reasons
         row["freshness_status"] = freshness_status
@@ -364,6 +388,9 @@ def audit_gap_target(
             "coverage_status": "unknown",
             "coverage_reasons": [str(exc)],
         }
+    if historical_window:
+        row["audit_window_start_ts"] = start_ts
+        row["audit_window_end_ts"] = end_ts
     row["query_ms"] = round((time.monotonic() - started) * 1000)
     return row
 
@@ -651,6 +678,17 @@ def parse_source_requirements(raw: str) -> list[str]:
     return out
 
 
+def parse_audit_timestamp(raw: str, *, label: str) -> str:
+    value = raw.strip()
+    if not value:
+        raise ValueError(f"{label} must not be empty")
+    normalized = value.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def source_aliases(target: GapTarget | dict[str, Any]) -> set[str]:
     if isinstance(target, GapTarget):
         source_id = target.source_id
@@ -737,6 +775,16 @@ def print_text(payload: dict[str, Any]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lookback-hours", type=int, default=168)
+    parser.add_argument(
+        "--start-ts",
+        default="",
+        help="optional explicit audit window start timestamp; makes coverage historical",
+    )
+    parser.add_argument(
+        "--end-ts",
+        default="",
+        help="optional explicit audit window end timestamp; makes coverage historical",
+    )
     parser.add_argument("--bucket-minutes", type=int, default=5)
     parser.add_argument("--recent-minutes", type=int, default=15)
     parser.add_argument("--statement-timeout-seconds", type=int, default=20)
@@ -778,6 +826,20 @@ def main() -> int:
         parser.error("--bucket-minutes must be positive")
     if args.recent_minutes <= 0:
         parser.error("--recent-minutes must be positive")
+    start_ts = args.start_ts.strip()
+    end_ts = args.end_ts.strip()
+    if bool(start_ts) != bool(end_ts):
+        parser.error("--start-ts and --end-ts must be provided together")
+    if start_ts and end_ts:
+        try:
+            start_ts = parse_audit_timestamp(start_ts, label="--start-ts")
+            end_ts = parse_audit_timestamp(end_ts, label="--end-ts")
+        except ValueError as exc:
+            parser.error(str(exc))
+        if datetime.fromisoformat(start_ts.replace("Z", "+00:00")) >= datetime.fromisoformat(
+            end_ts.replace("Z", "+00:00")
+        ):
+            parser.error("--start-ts must be before --end-ts")
 
     symbols = parse_symbols(args.symbols)
     source_requirements = parse_source_requirements(args.required_sources)
@@ -793,6 +855,8 @@ def main() -> int:
             statement_timeout_seconds=args.statement_timeout_seconds,
             psql_timeout_seconds=args.psql_timeout_seconds,
             gate_mode=args.gate_mode,
+            start_ts=start_ts or None,
+            end_ts=end_ts or None,
         )
         for target in selected_gap_targets
     ]
@@ -822,6 +886,8 @@ def main() -> int:
         if os.environ.get("PLOY_DATABASE__URL")
         else ("DATABASE_URL" if os.environ.get("DATABASE_URL") else "default-local"),
         "lookback_hours": args.lookback_hours,
+        "audit_window_start_ts": start_ts or None,
+        "audit_window_end_ts": end_ts or None,
         "bucket_minutes": args.bucket_minutes,
         "recent_minutes": args.recent_minutes,
         "gate_mode": args.gate_mode,
