@@ -52,6 +52,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("preview_factors(&preview)", source)
         self.assertIn("target_from_preview_path(&path)", source)
         self.assertIn("default_horizon_for_target(&target)", source)
+        self.assertIn("autofactor_target_horizon(target)", source)
         self.assertIn("string_field(factor, \"horizon\")", source)
 
     def test_alpha_search_registry_preview_is_versioned_runtime_contract(self) -> None:
@@ -60,6 +61,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         )
         required = [
             "struct FactorRegistryPreviewArtifact",
+            "autofactor_target_horizon(target)",
             "version: ALPHA_SEARCH_ARTIFACT_VERSION",
             "target: target.to_string()",
             "factors: factor_registry_preview_rows",

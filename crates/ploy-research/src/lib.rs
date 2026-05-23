@@ -92,12 +92,12 @@ pub use alpha_search::{
 };
 pub use attribution::{factor_pnl, regime_pnl, AttributionReport, RegimePnl};
 pub use autofactor::{
-    autofactor_labels_from_v2, autofactor_matrix_from_v2, autofactor_windows_from_v2,
-    domain_seed_candidates, evaluate_named_factor, format_autofactor_reports, mine_autofactors,
-    mine_domain_autofactors_from_v2, mine_domain_autofactors_from_v2_with_guidance,
-    mine_domain_autofactors_from_v2_with_mcts_plan, AutoFactorDecision, AutoFactorError,
-    AutoFactorMatrix, AutoFactorOptions, AutoFactorReport, AutoFactorV2Target, FactorExpr,
-    LlmMutationSpec, LlmPriorSpec, NamedFactorExpr,
+    autofactor_labels_from_v2, autofactor_matrix_from_v2, autofactor_target_horizon,
+    autofactor_windows_from_v2, domain_seed_candidates, evaluate_named_factor,
+    format_autofactor_reports, mine_autofactors, mine_domain_autofactors_from_v2,
+    mine_domain_autofactors_from_v2_with_guidance, mine_domain_autofactors_from_v2_with_mcts_plan,
+    AutoFactorDecision, AutoFactorError, AutoFactorMatrix, AutoFactorOptions, AutoFactorReport,
+    AutoFactorV2Target, FactorExpr, LlmMutationSpec, LlmPriorSpec, NamedFactorExpr,
 };
 pub use backtest::{run_binary_backtest, BacktestMetrics, SimulatedFill};
 pub use factors_new::{

@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use ploy_research::ResearchSnapshotManifest;
+use ploy_research::autofactor_target_horizon;
 use ploy_research::research_os::trace::trace_hash;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -397,13 +398,7 @@ fn target_from_preview_path(path: &Path) -> Option<String> {
 }
 
 fn default_horizon_for_target(target: &str) -> String {
-    if target.contains("10s") {
-        "10s".to_string()
-    } else if target.contains("30s") {
-        "30s".to_string()
-    } else {
-        FACTOR_HORIZON.to_string()
-    }
+    autofactor_target_horizon(target).to_string()
 }
 
 fn collect_candidate_replay_rows(
@@ -1462,5 +1457,17 @@ mod tests {
             .expect_err("bad preview should fail");
         assert!(error.to_string().contains("missing factors array"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn default_horizon_uses_shared_autofactor_target_catalog() {
+        assert_eq!(default_horizon_for_target("full_depth_reprice_pnl_5s"), "5s");
+        assert_eq!(default_horizon_for_target("full_depth_reprice_pnl_30s"), "30s");
+        assert_eq!(default_horizon_for_target("full_depth_reprice_pnl_60s"), "60s");
+        assert_eq!(
+            default_horizon_for_target("tradeable_full_depth_settlement_pnl"),
+            "5m"
+        );
+        assert_eq!(default_horizon_for_target("unknown_target"), "unknown");
     }
 }

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::autofactor::{
     AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr, LlmPriorSpec,
-    factor_expr_hash,
+    autofactor_target_horizon, factor_expr_hash,
 };
 
 const ALPHA_SEARCH_ARTIFACT_VERSION: &str = "alpha_search_artifacts_v1";
@@ -633,13 +633,7 @@ fn registry_blockers(
 }
 
 fn factor_horizon(target: &str) -> String {
-    if target.contains("10s") {
-        "10s".to_string()
-    } else if target.contains("30s") {
-        "30s".to_string()
-    } else {
-        "5m".to_string()
-    }
+    autofactor_target_horizon(target).to_string()
 }
 
 fn runtime_contract_for_report(
