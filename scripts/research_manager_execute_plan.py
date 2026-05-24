@@ -235,6 +235,11 @@ def _walk_forward_dispatch(
     symbols: str,
     stake_usd: str,
     chain_remaining: int,
+    alpha_search_llm_prior: dict[str, Any] | None = None,
+    candidate_strategy_replay_run_id: str = "",
+    candidate_strategy_replay_artifact_name: str = "",
+    full_depth_execution_surface_run_id: str = "",
+    full_depth_execution_surface_artifact_name: str = "",
 ) -> dict[str, Any]:
     blockers: list[str] = []
     if not snapshot_run_id:
@@ -249,6 +254,20 @@ def _walk_forward_dispatch(
         "fail_if_blocked": False,
         "persist_research_trace": True,
     }
+    if alpha_search_llm_prior:
+        options["alpha_search_llm_prior_json"] = json.dumps(
+            alpha_search_llm_prior,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    if candidate_strategy_replay_run_id:
+        options["candidate_strategy_replay_run_id"] = candidate_strategy_replay_run_id
+    if candidate_strategy_replay_artifact_name:
+        options["candidate_strategy_replay_artifact_name"] = candidate_strategy_replay_artifact_name
+    if full_depth_execution_surface_run_id:
+        options["full_depth_execution_surface_run_id"] = full_depth_execution_surface_run_id
+    if full_depth_execution_surface_artifact_name:
+        options["full_depth_execution_surface_artifact_name"] = full_depth_execution_surface_artifact_name
     fields = {
         "git_ref": git_ref,
         "snapshot_run_id": snapshot_run_id,
@@ -485,6 +504,21 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
     action_names = {item["action"] for item in blocker_actions}
     snapshot_actions = {"rerun_snapshot_data_audit", "repair_or_exclude_missing_data_surface"}
 
+    if (
+        plan.get("theme") == "revise_prior"
+        or "generate_typed_llm_prior_json" in actions
+        or blocker_actions
+    ):
+        typed_prior = {
+            "schema_version": "research_manager_typed_prior.v1",
+            "source": "research_trace_plan",
+            "evidence_stage": plan.get("evidence_stage", ""),
+            "theme": plan.get("theme", ""),
+            "actions": actions,
+            "blocker_actions": blocker_actions,
+            "constraints": _typed_prior_constraints(blocker_actions),
+        }
+
     if any(action in snapshot_actions for action in actions) or (
         plan.get("theme") == "fix_data" and not actions
     ):
@@ -532,6 +566,27 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                 symbols=args.symbols,
                 stake_usd=args.stake_usd,
                 chain_remaining=args.chain_remaining,
+                alpha_search_llm_prior=typed_prior,
+                candidate_strategy_replay_run_id=getattr(
+                    args,
+                    "candidate_strategy_replay_run_id",
+                    "",
+                ),
+                candidate_strategy_replay_artifact_name=getattr(
+                    args,
+                    "candidate_strategy_replay_artifact_name",
+                    "",
+                ),
+                full_depth_execution_surface_run_id=getattr(
+                    args,
+                    "full_depth_execution_surface_run_id",
+                    "",
+                ),
+                full_depth_execution_surface_artifact_name=getattr(
+                    args,
+                    "full_depth_execution_surface_artifact_name",
+                    "",
+                ),
             )
         )
 
@@ -568,21 +623,6 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                 issue_number=args.runtime_issue_number,
             )
         )
-
-    if (
-        plan.get("theme") == "revise_prior"
-        or "generate_typed_llm_prior_json" in actions
-        or blocker_actions
-    ):
-        typed_prior = {
-            "schema_version": "research_manager_typed_prior.v1",
-            "source": "research_trace_plan",
-            "evidence_stage": plan.get("evidence_stage", ""),
-            "theme": plan.get("theme", ""),
-            "actions": actions,
-            "blocker_actions": blocker_actions,
-            "constraints": _typed_prior_constraints(blocker_actions),
-        }
 
     executable_dispatches = [item for item in dispatches if item["ready"]]
     blocked_dispatches = [item for item in dispatches if not item["ready"]]
@@ -664,6 +704,10 @@ def main() -> None:
     parser.add_argument("--symbols", default="")
     parser.add_argument("--stake-usd", default="15")
     parser.add_argument("--chain-remaining", type=int, default=1)
+    parser.add_argument("--candidate-strategy-replay-run-id", default="")
+    parser.add_argument("--candidate-strategy-replay-artifact-name", default="")
+    parser.add_argument("--full-depth-execution-surface-run-id", default="")
+    parser.add_argument("--full-depth-execution-surface-artifact-name", default="")
     parser.add_argument("--max-snapshot-window-days", type=int, default=2)
     parser.add_argument("--max-full-depth-surface-hours", type=int, default=12)
     parser.add_argument(

@@ -517,7 +517,33 @@ jobs:
             args+=(--alpha-search-state-json "${alpha_search_state_json}")
           fi
           if [ -n "${WALK_ALPHA_SEARCH_LLM_PRIOR_JSON}" ]; then
-            args+=(--alpha-search-llm-prior-json "${WALK_ALPHA_SEARCH_LLM_PRIOR_JSON}")
+            alpha_search_llm_prior_json="${WALK_ALPHA_SEARCH_LLM_PRIOR_JSON}"
+            if python3 - <<'PY'
+          import json
+          import os
+
+          raw = os.environ["WALK_ALPHA_SEARCH_LLM_PRIOR_JSON"].strip()
+          if not raw.startswith(("{", "[")):
+              raise SystemExit(1)
+          json.loads(raw)
+          PY
+            then
+              mkdir -p artifacts/alpha-search-plan
+              python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw = os.environ["WALK_ALPHA_SEARCH_LLM_PRIOR_JSON"]
+          prior = json.loads(raw)
+          Path("artifacts/alpha-search-plan/next-llm-prior.json").write_text(
+              json.dumps(prior, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+              alpha_search_llm_prior_json="artifacts/alpha-search-plan/next-llm-prior.json"
+            fi
+            args+=(--alpha-search-llm-prior-json "${alpha_search_llm_prior_json}")
           elif [ -f artifacts/alpha-search-plan/next-llm-prior.json ]; then
             args+=(--alpha-search-llm-prior-json artifacts/alpha-search-plan/next-llm-prior.json)
           fi
