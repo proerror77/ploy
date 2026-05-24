@@ -11,6 +11,7 @@ from tests.test_autofactor_strategy_promotion import (
     AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
     SAMPLED_EXECUTION_SNAPSHOT_MANIFEST,
     VALID_FULL_DEPTH_EXECUTION_SURFACE,
+    ZERO_COVERAGE_DATA_AUDIT,
 )
 
 
@@ -25,6 +26,7 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
         *extra_args: str,
         registry_preview_payload: dict | None = None,
         snapshot_manifest_payload: dict | None = None,
+        snapshot_data_audit_payload: dict | None = None,
         full_depth_execution_surface_payload: dict | None = None,
     ) -> tuple[dict, str]:
         with tempfile.TemporaryDirectory() as tmp:
@@ -53,6 +55,14 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 snapshot_args = ["--snapshot-manifest-json", str(snapshot_manifest_path)]
+            data_audit_args = []
+            if snapshot_data_audit_payload is not None:
+                data_audit_path = tmp_path / "data-gap-audit.json"
+                data_audit_path.write_text(
+                    json.dumps(snapshot_data_audit_payload, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                data_audit_args = ["--snapshot-data-audit-json", str(data_audit_path)]
             execution_surface_args = []
             if full_depth_execution_surface_payload is not None:
                 execution_surface_path = tmp_path / "full-depth-execution-surface.json"
@@ -78,6 +88,7 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
                     str(output_md),
                     *registry_args,
                     *snapshot_args,
+                    *data_audit_args,
                     *execution_surface_args,
                     *extra_args,
                 ],
@@ -298,6 +309,19 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
             "requires_runtime_replay_not_top_bucket_aggregate",
             payload["blocking_risk_flags"],
         )
+
+    def test_zero_coverage_data_audit_blocks_candidate_replay_contract(self):
+        payload, _ = self.run_script(
+            AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            snapshot_manifest_payload=SAMPLED_EXECUTION_SNAPSHOT_MANIFEST,
+            snapshot_data_audit_payload=ZERO_COVERAGE_DATA_AUDIT,
+            full_depth_execution_surface_payload=VALID_FULL_DEPTH_EXECUTION_SURFACE,
+        )
+
+        expected = "data_audit_zero_coverage:polymarket_orderbooks:0<288"
+        self.assertFalse(payload["promotion_ready"])
+        self.assertIn(expected, payload["source_snapshot_contract"]["blocking_risk_flags"])
+        self.assertIn(expected, payload["blocking_risk_flags"])
 
     def test_invalid_full_depth_execution_surface_proof_remains_blocked(self):
         proof = dict(VALID_FULL_DEPTH_EXECUTION_SURFACE)

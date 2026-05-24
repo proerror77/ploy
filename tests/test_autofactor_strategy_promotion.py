@@ -258,6 +258,24 @@ VALID_FULL_DEPTH_EXECUTION_SURFACE = {
     "incomplete": False,
 }
 
+ZERO_COVERAGE_DATA_AUDIT = {
+    "overall_status": "ok",
+    "audit_window_start_ts": "2026-05-17T00:00:00Z",
+    "audit_window_end_ts": "2026-05-18T00:00:00Z",
+    "required_sources": ["polymarket_orderbooks"],
+    "gap_audits": [
+        {
+            "source_id": "polymarket_orderbooks",
+            "status": "ok",
+            "coverage_status": "ok",
+            "expected_buckets": 288,
+            "present_buckets": 0,
+            "missing_buckets": 288,
+            "coverage_pct": 0.0,
+        }
+    ],
+}
+
 
 class AutoFactorStrategyPromotionTests(unittest.TestCase):
     def run_script(
@@ -268,6 +286,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         replay_payload=DEFAULT_REPLAY_PAYLOAD,
         registry_preview_payload=None,
         snapshot_manifest_payload=None,
+        snapshot_data_audit_payload=None,
         full_depth_execution_surface_payload=None,
     ):
         with tempfile.TemporaryDirectory() as tmp:
@@ -275,6 +294,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
             replay_path = Path(tmp) / "candidate-strategy-replay.json"
             registry_path = Path(tmp) / "factor-registry-preview.json"
             snapshot_manifest_path = Path(tmp) / "manifest.json"
+            data_audit_path = Path(tmp) / "data-gap-audit.json"
             execution_surface_path = Path(tmp) / "full-depth-execution-surface.json"
             output_json = Path(tmp) / "promotion.json"
             output_registry = Path(tmp) / "registry.json"
@@ -306,6 +326,13 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 snapshot_args = ["--snapshot-manifest-json", str(snapshot_manifest_path)]
+            data_audit_args = []
+            if snapshot_data_audit_payload is not None:
+                data_audit_path.write_text(
+                    json.dumps(snapshot_data_audit_payload, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                data_audit_args = ["--snapshot-data-audit-json", str(data_audit_path)]
             execution_surface_args = []
             if full_depth_execution_surface_payload is not None:
                 execution_surface_path.write_text(
@@ -335,6 +362,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                     *replay_args,
                     *registry_args,
                     *snapshot_args,
+                    *data_audit_args,
                     *execution_surface_args,
                     *extra_args,
                 ],
@@ -683,6 +711,29 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
             payload["source_snapshot_contract"]["full_depth_execution_surface_proofs"][0][
                 "valid"
             ]
+        )
+
+    def test_zero_coverage_data_audit_blocks_even_with_full_depth_proof(self):
+        _, payload, _, handoff, _ = self.run_script(
+            LOW_SLIPPAGE_HEALTH
+            + GLOBAL_FILLABILITY_BLOCKED_GATE
+            + AUTOFACTOR_TOP_BUCKET_EXECUTION_REPORT,
+            replay_payload=replay_for_target(
+                "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                "tradeable_full_depth_settlement_pnl",
+            ),
+            snapshot_manifest_payload=SAMPLED_EXECUTION_SNAPSHOT_MANIFEST,
+            snapshot_data_audit_payload=ZERO_COVERAGE_DATA_AUDIT,
+            full_depth_execution_surface_payload=VALID_FULL_DEPTH_EXECUTION_SURFACE,
+        )
+
+        expected = "data_audit_zero_coverage:polymarket_orderbooks:0<288"
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        self.assertIn(expected, payload["source_snapshot_contract"]["blocking_risk_flags"])
+        self.assertIn(
+            f"snapshot_contract_blocks_execution_claim:{expected}",
+            payload["evaluated_factors"][0]["blockers"],
         )
 
     def test_invalid_full_depth_execution_surface_proof_fails_closed(self):

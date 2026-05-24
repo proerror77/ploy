@@ -323,6 +323,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--factor-registry-preview-json", default="")
     parser.add_argument("--require-runtime-contract", action="store_true")
     parser.add_argument("--snapshot-manifest-json", default="")
+    parser.add_argument("--snapshot-data-audit-json", default="")
     parser.add_argument("--full-depth-execution-surface-json", default="")
     return parser.parse_args()
 
@@ -353,6 +354,7 @@ def main() -> int:
         snapshot_contract=load_snapshot_execution_contract(
             args.snapshot_manifest_json or None,
             full_depth_execution_surface_json=args.full_depth_execution_surface_json or None,
+            data_audit_report_json=args.snapshot_data_audit_json or None,
         ),
     )
     output_json = Path(args.output_json)
