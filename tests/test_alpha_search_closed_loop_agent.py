@@ -740,6 +740,81 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             )
             self.assertEqual(request["inputs"]["runtime_score"], better_runtime_score)
 
+    def test_runtime_replay_request_takes_priority_over_high_reject_ratio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stale_runtime_score = (
+                "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_spread_adjusted_capacity"
+            )
+            better_runtime_score = (
+                "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted"
+            )
+            path = artifact(
+                Path(tmp),
+                target="tradeable_full_depth_settlement_pnl",
+                feedback={
+                    "target": "tradeable_full_depth_settlement_pnl",
+                    "candidate_count": 1079,
+                    "rejected_count": 958,
+                    "passed_count": 31,
+                    "best_candidate": "mut_auto_settlement_model_conservative_settlement_edge_spread_adjusted_spread_adjusted",
+                    "best_reward": 5.7282,
+                },
+                promotion={
+                    "decision": "blocked",
+                    "required_strategy_profile": "settlement_probability",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "roi_too_low:-0.079091<0.000000",
+                                "candidate_strategy_replay_not_ready",
+                                f"candidate_strategy_replay_runtime_score_mismatch:{stale_runtime_score}!={better_runtime_score}",
+                                "candidate_strategy_replay_roi_too_low:-0.079091<0.000000",
+                            ],
+                            "factor": {
+                                "name": "mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted",
+                                "target": "tradeable_full_depth_settlement_pnl",
+                                "decision": "candidate",
+                                "reason": "passed",
+                                "top_bucket_n": 216,
+                                "top_bucket_avg_label": 16.533648,
+                                "top_bucket_full_depth_entry_fill_rate": 1.0,
+                                "positive_window_ratio": 0.8333,
+                                "symbol_positive_ratio": 1.0,
+                                "spearman_ic": 0.125437,
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": better_runtime_score,
+                                "strategy_profile": "settlement_probability",
+                            },
+                        }
+                    ],
+                    "candidate_strategy_replay": {
+                        "runtime_score": stale_runtime_score,
+                        "strategy_profile": "settlement_probability",
+                    },
+                },
+            )
+
+            decision = agent.closed_loop_decision(
+                [agent.load_artifact(path, "tradeable_full_depth_settlement_pnl")]
+            )
+
+        request = decision["runtime_replay_request"]
+        self.assertEqual("fix_runtime", decision["decision"])
+        self.assertEqual(
+            "runtime_mappable_candidate_needs_runtime_replay",
+            decision["reason"],
+        )
+        self.assertEqual(
+            "mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted",
+            request["source_factor"],
+        )
+        self.assertEqual(request["inputs"]["runtime_score"], better_runtime_score)
+        self.assertEqual(
+            json.loads(request["inputs"]["options_json"])["source_target"],
+            "tradeable_full_depth_settlement_pnl",
+        )
+
     def test_fix_runtime_includes_batch_runtime_replay_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             scores = [
