@@ -31,6 +31,39 @@ This is not a dry-run or live promotion decision.
   scripts/alpha_search_closed_loop_agent.py
   tests/test_alpha_search_closed_loop_agent.py`, and `rtk git diff --check`.
 
+## Current Session - Positive Replay Data Blocker Classification (2026-05-24)
+
+Evidence stage: `walk_forward` / `executable_replay` planning repair. This is
+not a dry-run or live promotion decision.
+
+### Tasks
+
+- [x] Feed replay `26364996955` back into hosted walk-forward `26365232589`
+      with full-depth proof and durable trace persistence.
+- [x] Run Research Trace Plan `26365434827` and identify stale
+      `strategy_economics -> mutate_or_reject_negative_runtime_edge`
+      contamination despite positive runtime replay ROI.
+- [x] Fix Research Manager blocker extraction so positive
+      `runtime_market_update_replay` ROI with current data blockers does not
+      inherit stale negative-edge prior text.
+- [x] Add Rust regression coverage for positive replay plus
+      `trade_count_too_small` / `official_settlement_missing` blockers.
+- [x] Run focused Rust/static validation.
+- [ ] Commit, push, open PR, wait for CI, merge, deploy updated
+      `research-trace-plan`, then rerun Research Trace Plan.
+
+### Review
+
+- 2026-05-24: Hosted walk-forward `26365232589` confirmed the current best
+  runtime-mappable factor has replay `26364996955` with `entry_fill_rate=1.0`,
+  `ROI=0.118107`, `total_pnl=79.722312`, `45` trades, and blockers
+  `trade_count_too_small:45<50` plus `official_settlement_missing:42<45`.
+- 2026-05-24: Focused validation passed:
+  `rtk cargo test --locked -p ploy-research research_os::manager --lib` (`13`
+  passed), `rustfmt --edition 2024 --check
+  crates/ploy-research/src/research_os/manager.rs`, and
+  `rtk git diff --check`.
+
 ## Current Session - Negative Runtime Economics Prior Repair (2026-05-24)
 
 Evidence stage: `walk_forward` / `executable_replay` closed-loop search repair.
