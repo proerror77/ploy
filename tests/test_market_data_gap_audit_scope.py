@@ -141,6 +141,8 @@ class MarketDataGapAuditScopeTests(unittest.TestCase):
         self.assertIn('audit_end_ts="${SNAPSHOT_END_TS:-${{ github.event.inputs.end_date }}}"', workflow)
         self.assertIn('--start-ts "${audit_start_ts}"', workflow)
         self.assertIn('--end-ts "${audit_end_ts}"', workflow)
+        self.assertIn("Gate mode: `{payload.get('gate_mode', 'unknown')}`", workflow)
+        self.assertIn("Audit window: `{payload.get('audit_window_start_ts') or '<lookback-start>'}", workflow)
 
 
 if __name__ == "__main__":

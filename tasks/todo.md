@@ -1,5 +1,31 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - PM5D Research Chain Recovery (2026-05-24)
+
+Evidence stage: `factor_attribution` / `walk_forward` recovery. This is not a
+dry-run or live promotion decision.
+
+### Tasks
+
+- [x] Inspect failed `research-snapshot.yml` run `26349101142` provenance.
+- [x] Identify the exact data blocker instead of guessing from the workflow
+      failure.
+- [ ] Run a later 24h high-density PM5D execution snapshot that avoids the
+      known Binance LOB gap.
+- [ ] Run hosted factor walk-forward from the successful full snapshot.
+- [ ] Record promotion/replay blockers from the new artifacts and update the
+      architecture review.
+- [ ] Commit and push any code/docs fixes needed to keep this chain
+      reproducible.
+
+### Review
+
+- 2026-05-24: `research-snapshot-provenance-26349101142` failed before compile
+  because exact-window data audit was `critical` for `binance_lob` on
+  BTC/ETH/SOL. The max gap was `960m`, from `2026-05-16T00:00:00Z` to
+  `2026-05-16T16:00:00Z`. Polymarket quotes/orderbooks and Binance
+  price/agg-trades were not the blocking surfaces in that artifact.
+
 ## Current Session - Market Data Promotion Blocker Actions (2026-05-24)
 
 Evidence stage: architecture/data-plane cleanup and research workflow planning;
