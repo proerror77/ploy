@@ -352,6 +352,11 @@ def replay_identity_mismatch_blockers(promotion: dict[str, Any]) -> list[str]:
     if not selected_items:
         return []
 
+    for item in selected_items:
+        blockers = [str(blocker) for blocker in item.get("blockers") or []]
+        if not any(blocker.startswith(prefixes) for blocker in blockers):
+            return []
+
     def rank(item: dict[str, Any]) -> float:
         factor = item.get("factor") if isinstance(item.get("factor"), dict) else {}
         try:
@@ -609,6 +614,10 @@ def run_variant(
         promotion = json.loads(
             (variant_dir / "autofactor-strategy-promotion.json").read_text(encoding="utf-8")
         )
+    elif args.candidate_strategy_replay_json:
+        source_replay = Path(args.candidate_strategy_replay_json)
+        if source_replay.exists():
+            shutil.copy2(source_replay, variant_dir / "candidate-strategy-replay.json")
     item["decision"] = promotion.get("decision")
     item["qualified_count"] = len(promotion.get("qualified_strategies") or [])
     item["promotion_gate_ready"] = bool((promotion.get("promotion_gate") or {}).get("ready"))

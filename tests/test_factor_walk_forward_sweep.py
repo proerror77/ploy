@@ -44,6 +44,23 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
 """)
 '''
 
+FAKE_TWO_RUNTIME_MAPPABLE_REPORT = r'''
+print("""=== Settlement Probability PRD Promotion Gate ===
+ready_for_dry_run_handoff=true stake_usd=15.00 min_entry_fill_rate=0.0500 max_ece=0.0500 min_positive_window_ratio=0.60 require_deribit=false include_deribit=false data_quality_mode=event_complete event_complete_events=2488 event_complete_rows=51989 replay_parity_ready=true
+gate,passed,evidence
+data_quality,true,mode=event_complete event_complete_events=2488 event_complete_rows=51989
+deribit_vol_surface,true,require_deribit=false include_deribit=false
+recorded_replay_parity,true,blocking_flags=<none>
+
+# AutoFactor target=full_depth_settlement_executable_pnl
+=== AutoFactor Seed Candidate Report ===
+target labels are side-aligned executable settlement PnL; reports are candidate discovery gates, not deploy decisions.
+rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,positive_window_ratio,symbol_count,symbol_positive_ratio,monotonicity,top_bucket_n,top_bucket_avg_label,top_bucket_positive_label_rate,top_bucket_full_depth_entry_fill_rate,top_bucket_unique_event_count,top_bucket_max_event_decisions,complexity
+1,mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted,full_depth_settlement_executable_pnl,candidate,passed,1079,0.125437,0.346161,12,1.334432,0.8333,3,1.0000,1.0000,216,16.533648,0.4722,1.0000,216,1,7
+2,mut_auto_settlement_model_full_depth_settlement_edge_spread_adjusted_capacity,full_depth_settlement_executable_pnl,candidate,passed,1079,0.125437,0.346161,12,1.334432,0.8333,3,1.0000,1.0000,216,16.533648,0.4722,1.0000,216,1,7
+""")
+'''
+
 FAKE_TRADEABLE_HARD_GATE_BY_FILTER = r'''
 import sys
 filter_value = ""
@@ -337,6 +354,50 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
                 for blocker in blockers
             )
         )
+
+    def test_external_replay_matching_lower_rank_candidate_is_kept(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = self.fake_binary_with_report(tmp, FAKE_TWO_RUNTIME_MAPPABLE_REPORT)
+            replay_path = self.replay_file(
+                tmp,
+                "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_spread_adjusted_capacity",
+            )
+            subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--candidate-strategy-replay-json",
+                    str(replay_path),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            summary = json.loads((tmp / "out" / "sweep-summary.json").read_text(encoding="utf-8"))
+            replay = json.loads(
+                (tmp / "out" / "candidate-strategy-replay.json").read_text(encoding="utf-8")
+            )
+            promotion = json.loads(
+                (tmp / "out" / "autofactor-strategy-promotion.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        variant = summary["variants"][0]
+        self.assertNotIn("ignored_candidate_strategy_replay_json", variant)
+        self.assertEqual(replay["basis"], "runtime_market_update_replay")
+        self.assertEqual(
+            replay["runtime_score"],
+            "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_spread_adjusted_capacity",
+        )
+        self.assertEqual(
+            promotion["candidate_strategy_replay"]["basis"],
+            "runtime_market_update_replay",
+        )
+        self.assertEqual(variant["qualified_count"], 1)
 
     def test_builds_blocked_aggregate_candidate_replay_when_missing(self):
         with tempfile.TemporaryDirectory() as raw_tmp:

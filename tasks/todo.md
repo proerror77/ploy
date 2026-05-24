@@ -1,5 +1,56 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Runtime Replay Selector Repair (2026-05-24)
+
+Evidence stage: `walk_forward` / `executable_replay` promotion-chain repair.
+This is not a dry-run or live promotion decision.
+
+### Tasks
+
+- [x] Parse the five runtime candidate replay artifacts dispatched by hosted
+      walk-forward run `26354684867`.
+- [x] Feed runtime replay `26355035577` back into hosted walk-forward with
+      snapshot `26354463118` and full-depth execution surface `26351573860`.
+- [x] Diagnose why replay-fed run `26355312065` still chose `fix_runtime`.
+- [x] Fix sweep replay selection so an external runtime replay is kept when it
+      matches any current runtime-mappable candidate, not only the top-ranked
+      candidate.
+- [x] Add regression coverage for lower-ranked matching runtime replay
+      artifacts.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, merge, and rerun hosted
+      walk-forward from `main`.
+
+### Review
+
+- 2026-05-24: Runtime replay runs `26355035577`, `26355036231`,
+  `26355036901`, `26355037488`, and `26355038147` all completed as
+  `runtime_market_update_replay` evidence with `53` trades, `53` unique
+  events, one-decision event accounting, and `entry_fill_rate=1.0`. None are
+  promotion-ready: each has `roi=-0.07909107855471195`, total PnL
+  `-62.877407450996`, and blocker `roi_too_low:-0.079091<0.000000`.
+- 2026-05-24: Replay-fed hosted walk-forward run `26355312065` succeeded from
+  `main@bf55299770ab8ec0bb08d9464fabdda91e622f8c`, but the sweep runner
+  incorrectly ignored the downloaded runtime replay because it matched the
+  search-feedback best candidate
+  `mut_auto_settlement_model_full_depth_settlement_edge_spread_adjusted_capacity`
+  while another runtime-mappable factor ranked one row higher. Promotion then
+  consumed a regenerated `factor_walk_forward_top_bucket_aggregate` artifact
+  and incorrectly stayed in `fix_runtime`.
+- 2026-05-24: Local replay of the same artifacts through the promotion
+  evaluator with the downloaded runtime replay produces the expected blocker
+  shape: `basis=runtime_market_update_replay`, no data-audit blockers, full
+  depth execution proof satisfied, and economic blockers
+  `roi_too_low:-0.079091<0.000000` /
+  `candidate_strategy_replay_roi_too_low:-0.079091<0.000000`. Running the
+  closed-loop classifier on that corrected artifact selects `revise_prior`
+  instead of `fix_runtime`.
+- 2026-05-24: Focused validation passed: `python3 -m unittest
+  tests.test_factor_walk_forward_sweep tests.test_alpha_search_closed_loop_agent
+  tests.test_autofactor_strategy_promotion` (`82` tests),
+  `python3 -m py_compile` for the touched scripts/tests, and
+  `rtk git diff --check`.
+
 ## Current Session - PM5D Research Chain Recovery (2026-05-24)
 
 Evidence stage: `factor_attribution` / `walk_forward` recovery. This is not a
