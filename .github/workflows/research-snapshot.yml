@@ -226,13 +226,25 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/research-snapshot
           remote_audit="${REMOTE_DIR}/research-snapshot/data-gap-audit.json"
+          remote_audit_script="${REMOTE_DIR}/workflow-scripts/audit_market_data_gaps.py"
           audit_start_ts="${SNAPSHOT_START_TS:-${{ github.event.inputs.start_date }}}"
           audit_end_ts="${SNAPSHOT_END_TS:-${{ github.event.inputs.end_date }}}"
+
+          ssh tango-1-1 /bin/bash -s -- "${REMOTE_DIR}/workflow-scripts" <<'EOF'
+          set -euo pipefail
+          mkdir -p "$1"
+          EOF
+          scp scripts/audit_market_data_gaps.py "tango-1-1:${remote_audit_script}"
+          ssh tango-1-1 /bin/bash -s -- "${remote_audit_script}" <<'EOF'
+          set -euo pipefail
+          chmod 0755 "$1"
+          EOF
 
           for attempt in 1 2 3; do
             if ssh tango-1-1 /bin/bash -s -- \
               "${DEPLOY_ROOT}" \
               "${REMOTE_DIR}" \
+              "${remote_audit_script}" \
               "${remote_audit}" \
               "${SNAPSHOT_AUDIT_LOOKBACK_HOURS}" \
               "${audit_start_ts}" \
@@ -243,22 +255,23 @@ jobs:
           set -euo pipefail
           deploy_root="$1"
           remote_dir="$2"
-          remote_audit="$3"
-          audit_lookback_hours="$4"
-          audit_start_ts="$5"
-          audit_end_ts="$6"
-          symbols="$7"
-          required_sources="$8"
-          orderbook_archive_root="$9"
+          audit_script="$3"
+          remote_audit="$4"
+          audit_lookback_hours="$5"
+          audit_start_ts="$6"
+          audit_end_ts="$7"
+          symbols="$8"
+          required_sources="$9"
+          orderbook_archive_root="${10}"
 
           set -a
           . "${deploy_root}/.env"
           set +a
           : "${PLOY_DATABASE__URL:?PLOY_DATABASE__URL missing in ${deploy_root}/.env}"
           mkdir -p "${remote_dir}/research-snapshot"
-          test -x "${deploy_root}/scripts/audit_market_data_gaps.py"
+          test -x "${audit_script}"
           PLOY_DATABASE__URL="${PLOY_DATABASE__URL}" \
-            "${deploy_root}/scripts/audit_market_data_gaps.py" \
+            "${audit_script}" \
               --lookback-hours "${audit_lookback_hours}" \
               --start-ts "${audit_start_ts}" \
               --end-ts "${audit_end_ts}" \

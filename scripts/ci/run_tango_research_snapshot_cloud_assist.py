@@ -49,6 +49,9 @@ def remote_script() -> str:
     bucket = require_env("ALIYUN_OSS_BUCKET")
     region = require_env("DEPLOY_OSS_REGION")
     object_prefix = f"research-snapshot/{run_id}/{attempt}"
+    audit_script_b64 = base64.b64encode(
+        Path("scripts/audit_market_data_gaps.py").read_bytes()
+    ).decode("ascii")
 
     return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -99,18 +102,28 @@ PY
 
 workdir={q(f"{deploy_root}/tmp/research-snapshot-cloud-assist-{run_id}-{attempt}")}
 rm -rf "${{workdir}}"
-mkdir -p "${{workdir}}/research-snapshot"
+mkdir -p "${{workdir}}/research-snapshot" "${{workdir}}/workflow-scripts"
 cd "${{workdir}}"
 ensure_ossutil
+
+python3 - <<'PY'
+import base64
+from pathlib import Path
+
+payload = {audit_script_b64!r}
+path = Path("workflow-scripts/audit_market_data_gaps.py")
+path.write_bytes(base64.b64decode(payload.encode("ascii")))
+path.chmod(0o755)
+PY
 
 set -a
 . {q(deploy_root)}/.env
 set +a
 : "${{PLOY_DATABASE__URL:?PLOY_DATABASE__URL missing in {deploy_root}/.env}}"
 
-test -x {q(deploy_root)}/scripts/audit_market_data_gaps.py
+test -x workflow-scripts/audit_market_data_gaps.py
 PLOY_DATABASE__URL="${{PLOY_DATABASE__URL}}" \\
-  {q(deploy_root)}/scripts/audit_market_data_gaps.py \\
+  ./workflow-scripts/audit_market_data_gaps.py \\
     --lookback-hours {q(env("SNAPSHOT_AUDIT_LOOKBACK_HOURS", "168"))} \\
     --start-ts {q(require_env("SNAPSHOT_START_TS"))} \\
     --end-ts {q(require_env("SNAPSHOT_END_TS"))} \\

@@ -145,6 +145,10 @@ class MarketDataGapAuditScopeTests(unittest.TestCase):
         self.assertIn('--start-ts "${audit_start_ts}"', workflow)
         self.assertIn('--end-ts "${audit_end_ts}"', workflow)
         self.assertIn('"orderbook_archive_root": "/opt/ploy/data/lake"', workflow)
+        self.assertIn("remote_audit_script=", workflow)
+        self.assertIn('scp scripts/audit_market_data_gaps.py "tango-1-1:${remote_audit_script}"', workflow)
+        self.assertIn('"${audit_script}"', workflow)
+        self.assertNotIn('"${deploy_root}/scripts/audit_market_data_gaps.py" \\', workflow)
         self.assertIn('--orderbook-archive-root "${orderbook_archive_root}"', workflow)
         self.assertIn('--pm-book-archive-dir "${orderbook_archive_root}/orderbook_snapshots"', workflow)
         self.assertIn("Gate mode: `{payload.get('gate_mode', 'unknown')}`", workflow)
@@ -157,6 +161,9 @@ class MarketDataGapAuditScopeTests(unittest.TestCase):
         cloud_assist = RESEARCH_SNAPSHOT_CLOUD_ASSIST_SCRIPT.read_text()
         self.assertIn("--orderbook-archive-root", cloud_assist)
         self.assertIn("--pm-book-archive-dir", cloud_assist)
+        self.assertIn('Path("scripts/audit_market_data_gaps.py").read_bytes()', cloud_assist)
+        self.assertIn("./workflow-scripts/audit_market_data_gaps.py", cloud_assist)
+        self.assertNotIn('/scripts/audit_market_data_gaps.py \\\\', cloud_assist)
         self.assertIn('SNAPSHOT_ORDERBOOK_ARCHIVE_ROOT", "/opt/ploy/data/lake"', cloud_assist)
 
 
