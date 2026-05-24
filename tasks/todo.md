@@ -33,6 +33,12 @@ does not claim strategy profitability or dry-run readiness.
   and `rtk git diff --check`. Whole-file `rustfmt --check` on
   `crates/ploy-research/src/autofactor.rs` still reports pre-existing formatting
   drift outside this patch, so it was not used as a completion gate.
+- 2026-05-25: PR CI exposed a separate mainline test drift after the dry-run
+  config was promoted to
+  `autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted`.
+  Updated `tests/test_strategy_config_contracts.py` to assert the current
+  reviewed runtime score. Full legacy Python validation passed:
+  `python3 -m unittest discover -s tests -p 'test_*.py'` (`284` tests).
 
 ## Current Session - Ready Handoff Executor Dispatch (2026-05-24)
 
