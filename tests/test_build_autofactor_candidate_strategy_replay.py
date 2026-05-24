@@ -10,6 +10,7 @@ from tests.test_autofactor_strategy_promotion import (
     AUTOFACTOR_LLM_RUNTIME_PASS_THROUGH_MUTATION_REPORT,
     AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
     SAMPLED_EXECUTION_SNAPSHOT_MANIFEST,
+    VALID_FULL_DEPTH_EXECUTION_SURFACE,
 )
 
 
@@ -24,6 +25,7 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
         *extra_args: str,
         registry_preview_payload: dict | None = None,
         snapshot_manifest_payload: dict | None = None,
+        full_depth_execution_surface_payload: dict | None = None,
     ) -> tuple[dict, str]:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -51,6 +53,19 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 snapshot_args = ["--snapshot-manifest-json", str(snapshot_manifest_path)]
+            execution_surface_args = []
+            if full_depth_execution_surface_payload is not None:
+                execution_surface_path = tmp_path / "full-depth-execution-surface.json"
+                execution_surface_path.write_text(
+                    json.dumps(
+                        full_depth_execution_surface_payload, indent=2, sort_keys=True
+                    ),
+                    encoding="utf-8",
+                )
+                execution_surface_args = [
+                    "--full-depth-execution-surface-json",
+                    str(execution_surface_path),
+                ]
             subprocess.run(
                 [
                     sys.executable,
@@ -63,6 +78,7 @@ class BuildAutoFactorCandidateStrategyReplayTests(unittest.TestCase):
                     str(output_md),
                     *registry_args,
                     *snapshot_args,
+                    *execution_surface_args,
                     *extra_args,
                 ],
                 cwd=ROOT,
@@ -262,6 +278,42 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
         )
         self.assertIn(
             "sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots",
+            payload["blocking_risk_flags"],
+        )
+
+    def test_full_depth_execution_surface_proof_removes_sampled_snapshot_flag(self):
+        payload, _ = self.run_script(
+            AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            snapshot_manifest_payload=SAMPLED_EXECUTION_SNAPSHOT_MANIFEST,
+            full_depth_execution_surface_payload=VALID_FULL_DEPTH_EXECUTION_SURFACE,
+        )
+
+        self.assertFalse(payload["promotion_ready"])
+        self.assertEqual(payload["source_snapshot_contract"]["blocking_risk_flags"], [])
+        self.assertNotIn(
+            "sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots",
+            payload["blocking_risk_flags"],
+        )
+        self.assertIn(
+            "requires_runtime_replay_not_top_bucket_aggregate",
+            payload["blocking_risk_flags"],
+        )
+
+    def test_invalid_full_depth_execution_surface_proof_remains_blocked(self):
+        proof = dict(VALID_FULL_DEPTH_EXECUTION_SURFACE)
+        proof["row_count"] = 0
+        payload, _ = self.run_script(
+            AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            snapshot_manifest_payload=SAMPLED_EXECUTION_SNAPSHOT_MANIFEST,
+            full_depth_execution_surface_payload=proof,
+        )
+
+        self.assertIn(
+            "sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots",
+            payload["blocking_risk_flags"],
+        )
+        self.assertIn(
+            "full_depth_execution_surface_invalid:clob_orderbook_snapshots:row_count_empty",
             payload["blocking_risk_flags"],
         )
 

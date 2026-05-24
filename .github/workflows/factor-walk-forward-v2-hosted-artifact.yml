@@ -34,7 +34,7 @@ on:
       options_json:
         description: "Advanced options JSON: walk windows, factor filters, event-complete gates, replay parity, promotion gate, durable trace persistence, optional issue/config handoff"
         required: false
-        default: '{"train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":"","pm_book_sample_secs":"","observation_sample_secs":"","max_quote_age_secs":"","top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","candidate_strategy_replay_json":"","candidate_strategy_replay_run_id":"","candidate_strategy_replay_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":"","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"persist_research_trace":true,"dispatch_runtime_replay_requests":true,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
+        default: '{"train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":"","pm_book_sample_secs":"","observation_sample_secs":"","max_quote_age_secs":"","top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","candidate_strategy_replay_json":"","candidate_strategy_replay_run_id":"","candidate_strategy_replay_artifact_name":"","full_depth_execution_surface_json":"","full_depth_execution_surface_run_id":"","full_depth_execution_surface_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":"","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"persist_research_trace":true,"dispatch_runtime_replay_requests":true,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
       sweep_json:
         description: "Optional JSON array of walk-forward option overrides to run in one job after one download/build"
         required: false
@@ -104,6 +104,9 @@ jobs:
               "candidate_strategy_replay_json": "",
               "candidate_strategy_replay_run_id": "",
               "candidate_strategy_replay_artifact_name": "",
+              "full_depth_execution_surface_json": "",
+              "full_depth_execution_surface_run_id": "",
+              "full_depth_execution_surface_artifact_name": "",
               "alpha_search_plan_json": "",
               "alpha_search_plan_run_id": "",
               "alpha_search_plan_artifact_name": "",
@@ -164,6 +167,13 @@ jobs:
                   raise SystemExit("candidate_strategy_replay_run_id must be <run-id>:<artifact-name>")
               values["candidate_strategy_replay_run_id"] = run_id
               values["candidate_strategy_replay_artifact_name"] = artifact_name
+
+          if ":" in values["full_depth_execution_surface_run_id"] and not values["full_depth_execution_surface_artifact_name"]:
+              run_id, artifact_name = values["full_depth_execution_surface_run_id"].split(":", 1)
+              if not run_id or not artifact_name:
+                  raise SystemExit("full_depth_execution_surface_run_id must be <run-id>:<artifact-name>")
+              values["full_depth_execution_surface_run_id"] = run_id
+              values["full_depth_execution_surface_artifact_name"] = artifact_name
 
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
               for key, value in values.items():
@@ -380,6 +390,26 @@ jobs:
             --output-dir artifacts/candidate-strategy-replay \
             --require candidate-strategy-replay.json
 
+      - name: Download full-depth execution surface artifact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${WALK_FULL_DEPTH_EXECUTION_SURFACE_JSON}" ] || [ -z "${WALK_FULL_DEPTH_EXECUTION_SURFACE_RUN_ID}" ]; then
+            echo "No full-depth execution surface artifact download requested."
+            exit 0
+          fi
+          rm -rf artifacts/full-depth-execution-surface
+          artifact_name="${WALK_FULL_DEPTH_EXECUTION_SURFACE_ARTIFACT_NAME}"
+          if [ -z "${artifact_name}" ]; then
+            artifact_name="full-depth-execution-surface-${WALK_FULL_DEPTH_EXECUTION_SURFACE_RUN_ID}"
+          fi
+          python3 scripts/download_github_artifact.py \
+            --run-id "${WALK_FULL_DEPTH_EXECUTION_SURFACE_RUN_ID}" \
+            --name "${artifact_name}" \
+            --output-dir artifacts/full-depth-execution-surface \
+            --require full-depth-execution-surface.json
+
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -419,6 +449,10 @@ jobs:
                 fi
               fi
             done
+          fi
+          full_depth_execution_surface_json="${WALK_FULL_DEPTH_EXECUTION_SURFACE_JSON}"
+          if [ -z "${full_depth_execution_surface_json}" ] && [ -f artifacts/full-depth-execution-surface/full-depth-execution-surface.json ]; then
+            full_depth_execution_surface_json="artifacts/full-depth-execution-surface/full-depth-execution-surface.json"
           fi
           args=(
             --binary ./target/fast/examples/factor_walk_forward_v2
@@ -460,6 +494,9 @@ jobs:
           fi
           if [ -n "${candidate_strategy_replay_json}" ]; then
             args+=(--candidate-strategy-replay-json "${candidate_strategy_replay_json}")
+          fi
+          if [ -n "${full_depth_execution_surface_json}" ]; then
+            args+=(--full-depth-execution-surface-json "${full_depth_execution_surface_json}")
           fi
           if [ "${WALK_REQUIRE_DERIBIT}" = "true" ]; then
             args+=(--require-deribit)
@@ -818,6 +855,10 @@ jobs:
               echo ""
               cat artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.md
             fi
+            if [ -f artifacts/full-depth-execution-surface/full-depth-execution-surface.md ]; then
+              echo ""
+              cat artifacts/full-depth-execution-surface/full-depth-execution-surface.md
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Stage report artifact
@@ -856,6 +897,11 @@ jobs:
             mkdir -p artifacts/factor-walk-forward-v2-upload/candidate-strategy-replay
             cp "${candidate_strategy_replay_json}" \
               artifacts/factor-walk-forward-v2-upload/candidate-strategy-replay/candidate-strategy-replay.json
+          fi
+          if [ -d artifacts/full-depth-execution-surface ]; then
+            mkdir -p artifacts/factor-walk-forward-v2-upload/full-depth-execution-surface
+            cp -R artifacts/full-depth-execution-surface/. \
+              artifacts/factor-walk-forward-v2-upload/full-depth-execution-surface/
           fi
           if [ -d artifacts/alpha-search-plan ]; then
             mkdir -p artifacts/factor-walk-forward-v2-upload/alpha-search-chain/input-alpha-search-plan
