@@ -85,7 +85,7 @@ live-promotion evidence.
       fields instead of full JSON text matching.
 - [x] Add regression coverage for healthy materialized settlement-surface
       metadata.
-- [ ] Land through PR and rerun Research Trace Plan to confirm only the real
+- [x] Land through PR and rerun Research Trace Plan to confirm only the real
       runtime blocker remains.
 
 ### Review
@@ -99,6 +99,13 @@ live-promotion evidence.
   (`15` tests) and `CARGO_TARGET_DIR=/tmp/ploy-research-manager-target
   /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research
   --example research_trace_plan --features db` (`2` tests).
+- 2026-05-25: PR `#695` landed as `main@d09f77be`; deploy `26376119023`
+  refreshed `/opt/ploy/bin/research-trace-plan` on tango. Trace Plan
+  `26376275175` confirmed the false settlement blocker is gone:
+  `surface_blockers=[]`, `promotion_blockers=[]`,
+  `settlement_surfaces.source=official_settlement_coverage_checks`,
+  `settlement_token_count=2194`, `valid=true`, and the only remaining
+  blocker action is `runtime_contract -> repair_runtime_contract_mapping`.
 
 ## Current Session - Legacy Factor Research Binary Removal (2026-05-25)
 
