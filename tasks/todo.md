@@ -90,6 +90,37 @@ live-promotion evidence.
   300 rtk cargo test --locked --test workflow_security`, and
   `rtk git diff --check`.
 
+## Current Session - Research Data Architecture Audit (2026-05-25)
+
+Evidence stage: `diagnostic` / architecture review. This records current
+research/data readiness and blockers; it is not dry-run, live, or strategy
+promotion evidence.
+
+### Tasks
+
+- [x] Review current project semantics, research runbooks, data inventory, and
+      Research OS migrations.
+- [x] Verify current `origin/main` after PRs `#685` and `#686`.
+- [x] Inspect current dry-run candidate gate evidence and classify it as a
+      blocker rather than strategy approval.
+- [x] Write a current architecture review covering raw data, sampled snapshots,
+      full-depth CLOB archive, runtime replay tapes, durable trace, DuckDB, and
+      remaining blockers.
+- [x] Mark the April research-backtest rearchitecture doc as superseded by the
+      current review/runbooks.
+
+### Review
+
+- 2026-05-25: Added
+  `docs/reviews/research-data-architecture-review-2026-05-25.md`. Main Test run
+  `26369836289` for merge commit `82361657` passed. Dry-run candidate gate run
+  `26369050956` was inspected and remains correctly blocked in
+  `clean-baseline` mode because residual runtime evidence was present:
+  `buy_orders=82`, `closed_trades=80`, `open_positions=2`. The dry-run report
+  summary at that time showed `266` total trades, `264` closed trades,
+  `win_rate_pct=39.8`, and `realized_pnl=-714.35`, so the next action is
+  evidence reset / clean-baseline rerun before candidate-quality evaluation.
+
 ## Current Session - Ready Handoff Executor Dispatch (2026-05-24)
 
 Evidence stage: `dry_run_candidate` handoff execution planning. This creates

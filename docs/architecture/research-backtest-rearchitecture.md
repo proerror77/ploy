@@ -2,7 +2,19 @@
 
 Date: 2026-04-28
 
-Status: proposed
+Status: superseded
+
+Superseded by:
+
+- `docs/reviews/research-data-architecture-review-2026-05-25.md`
+- `docs/runbooks/strategy-research-cicd.md`
+- `docs/runbooks/event-ml-automl-workflow.md`
+
+This document is preserved as the April rearchitecture proposal. It still
+captures useful design intent, but it should not be used as the current
+operator workflow contract. Current factor research consumes retained snapshot
+artifacts through hosted workflows, persists Research OS trace, and treats
+DuckDB as a Parquet query accelerator rather than durable research state.
 
 ## Problem
 
