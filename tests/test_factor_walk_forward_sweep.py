@@ -110,6 +110,8 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
                     "candidate_replay_id": "candidate_replay:fedcba98765432100123456789abcdef",
                     "identity": {
                         "basis": "runtime_market_update_replay",
+                        "recording_path": "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.20260524T155939.ndjson",
+                        "recording_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                         "runtime_score": runtime_score,
                         "strategy_profile": "settlement_probability",
                         "workflow_run_id": "26306734877",
@@ -120,6 +122,8 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
                     "runtime_score": runtime_score,
                     "promotion_ready": True,
                     "promotion_decision": "promote_to_runtime",
+                    "recording_path": "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.20260524T155939.ndjson",
+                    "recording_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                     "source_workflow": "runtime-candidate-replay.yml",
                     "workflow_run_id": "26306734877",
                     "workflow_run_url": "https://github.com/proerror77/ploy/actions/runs/26306734877",

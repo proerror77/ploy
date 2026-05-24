@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ DEFAULT_ALLOWED_TARGETS = (
     "full_depth_settlement_executable_pnl",
     "tradeable_full_depth_settlement_pnl",
 )
+ARCHIVED_RECORDING_SUFFIX_RE = re.compile(r"\.\d{8}T\d{6}Z?$")
 
 
 @dataclass
@@ -308,6 +310,15 @@ def candidate_strategy_replay_blockers(
             "candidate_strategy_replay_identity_basis_mismatch:"
             f"{replay.identity.get('basis') or '<missing>'}!=runtime_market_update_replay"
         )
+    if replay.identity:
+        recording_path = str(replay.identity.get("recording_path") or "")
+        recording_sha256 = str(replay.identity.get("recording_sha256") or "")
+        if not recording_path:
+            blockers.append("candidate_strategy_replay_missing_recording_path")
+        if not recording_sha256:
+            blockers.append("candidate_strategy_replay_missing_recording_sha256")
+            if looks_like_mutable_recording_path(recording_path):
+                blockers.append("candidate_strategy_replay_mutable_recording_without_sha256")
     provenance_fields = {
         "source_workflow": replay.source_workflow,
         "workflow_run_id": replay.workflow_run_id,
@@ -490,6 +501,15 @@ def is_autofactor_formula(mapping: dict[str, str] | None) -> bool:
     if not mapping:
         return False
     return mapping.get("runtime_score", "").startswith("autofactor_formula:")
+
+
+def looks_like_mutable_recording_path(raw_path: str) -> bool:
+    if not raw_path:
+        return False
+    name = Path(raw_path).name
+    if not name.endswith(".ndjson"):
+        return False
+    return ARCHIVED_RECORDING_SUFFIX_RE.search(name.removesuffix(".ndjson")) is None
 
 
 def global_gate_blockers(

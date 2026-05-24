@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +15,16 @@ from typing import Any
 
 EXECUTE_ACK = "execute-research-manager-plan"
 SCHEMA_VERSION = "research_manager_executor.v1"
+ARCHIVED_RECORDING_SUFFIX_RE = re.compile(r"\.\d{8}T\d{6}Z?$")
+
+
+def _looks_like_mutable_recording_path(raw_path: str) -> bool:
+    if not raw_path:
+        return False
+    name = Path(raw_path).name
+    if not name.endswith(".ndjson"):
+        return False
+    return ARCHIVED_RECORDING_SUFFIX_RE.search(name.removesuffix(".ndjson")) is None
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -464,6 +475,15 @@ def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str,
         contract = replay.get("decision_contract")
         if not isinstance(contract, dict):
             contract = {}
+        identity = replay.get("identity")
+        if not isinstance(identity, dict):
+            identity = {}
+        recording_path = str(replay.get("recording_path") or identity.get("recording_path") or "")
+        recording_sha256 = str(
+            replay.get("recording_sha256") or identity.get("recording_sha256") or ""
+        )
+        if _looks_like_mutable_recording_path(recording_path) and not recording_sha256:
+            continue
         source_factor = replay.get("source_factor")
         if not isinstance(source_factor, dict):
             source_factor = {}
@@ -480,6 +500,8 @@ def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str,
             "strategy_profile": str(replay.get("strategy_profile") or ""),
             "workflow_run_id": str(replay.get("workflow_run_id") or ""),
             "source_workflow": str(replay.get("source_workflow") or ""),
+            "recording_path": recording_path,
+            "recording_sha256": recording_sha256,
             "source_factor_name": str(
                 source_factor.get("name") or source_factor.get("factor_name") or ""
             ),

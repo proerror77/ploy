@@ -295,6 +295,51 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
         )
         self.assertEqual("tradeable_full_depth_settlement_pnl", options["allowed_target"])
 
+    def test_revise_prior_ignores_mutable_replay_without_recording_hash(self) -> None:
+        plan = plan_payload(
+            "revise_prior",
+            ["generate_typed_llm_prior_json", "rerun_alpha_search_with_bounded_mutations"],
+        )
+        plan["input"]["latest_runs"] = {
+            "runs": [
+                {
+                    "run_id": "26362501135",
+                    "artifacts": [
+                        {
+                            "output_json": {
+                                "candidate_strategy_replay": {
+                                    "basis": "runtime_market_update_replay",
+                                    "runtime_score": "autofactor_formula:stale_candidate",
+                                    "source_workflow": "runtime-candidate-replay.yml",
+                                    "workflow_run_id": "26355035577",
+                                    "strategy_profile": "settlement_probability",
+                                    "recording_path": "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson",
+                                    "recording_sha256": "",
+                                    "decision_contract": {
+                                        "target": "tradeable_full_depth_settlement_pnl",
+                                        "horizon": "5m",
+                                    },
+                                }
+                            }
+                        }
+                    ],
+                }
+            ]
+        }
+
+        payload = build_executor_payload(
+            base_args(
+                mode="execute",
+                execute_ack=EXECUTE_ACK,
+                snapshot_run_id="26354463118",
+            ),
+            plan,
+        )
+
+        options = json.loads(payload["dispatches"][0]["fields"]["options_json"])
+        self.assertNotIn("candidate_strategy_replay_run_id", options)
+        self.assertNotIn("candidate_strategy_replay_artifact_name", options)
+
     def test_fix_runtime_plan_maps_to_candidate_replay_and_parity(self) -> None:
         payload = build_executor_payload(
             Namespace(
