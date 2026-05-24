@@ -292,6 +292,7 @@ fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAc
         &["official_settlement", "official_settlement_ready"],
         &[true.into(), "true".into()],
     );
+    let frontier_runtime_replay_roi = runtime_market_update_replay_roi(&latest_value);
 
     if contains_any_text(
         &runtime_or_promotion_blockers,
@@ -348,16 +349,26 @@ fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAc
             "Candidate selection must avoid thin depth or low-fillability entry surfaces.",
         ));
     }
-    if contains_any_text(
-        &runtime_or_promotion_blockers,
+    let has_data_action = actions
+        .iter()
+        .any(|item| item.blocker_family.starts_with("data_"));
+    let positive_runtime_replay = frontier_runtime_replay_roi
+        .map(|roi| roi > 0.0)
+        .unwrap_or(false);
+    let economics_tokens = if positive_runtime_replay {
+        &["walk_forward_oos"][..]
+    } else {
         &[
             "roi_too_low",
             "candidate_strategy_replay_roi_too_low",
             "total_pnl_nonpositive",
             "walk_forward_oos",
             "negative_runtime_edge",
-        ],
-    ) {
+        ][..]
+    };
+    if contains_any_text(&runtime_or_promotion_blockers, economics_tokens)
+        && !(positive_runtime_replay && has_data_action)
+    {
         actions.push(blocker_action(
             "strategy_economics",
             "mutate_or_reject_negative_runtime_edge",
@@ -508,6 +519,29 @@ fn has_any_key_value(
             .iter()
             .any(|item| has_any_key_value(item, keys, expected_values)),
         _ => false,
+    }
+}
+
+fn runtime_market_update_replay_roi(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Object(map) => {
+            let basis = map
+                .get("basis")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if basis == "runtime_market_update_replay" {
+                if let Some(roi) = map
+                    .get("metrics")
+                    .and_then(|metrics| metrics.get("roi"))
+                    .and_then(serde_json::Value::as_f64)
+                {
+                    return Some(roi);
+                }
+            }
+            map.values().find_map(runtime_market_update_replay_roi)
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(runtime_market_update_replay_roi),
+        _ => None,
     }
 }
 
@@ -889,6 +923,67 @@ mod tests {
         assert!(plan.blocker_actions.iter().any(|item| {
             item.blocker_family == "data_execution_surface"
                 && item.action == "collect_full_depth_execution_surface"
+        }));
+    }
+
+    #[test]
+    fn planner_does_not_treat_positive_runtime_replay_with_data_blockers_as_negative_edge() {
+        let plan = plan_next_research(&input(
+            "walk_forward",
+            serde_json::json!({
+                "source": "experiment_trace",
+                "runs": [{
+                    "run_id": "26365232589",
+                    "artifacts": [{
+                        "event_type": "autofactor_promotion",
+                        "output_json": {
+                            "candidate_strategy_replay": {
+                                "basis": "runtime_market_update_replay",
+                                "blocking_risk_flags": [
+                                    "trade_count_too_small:45<50",
+                                    "official_settlement_missing:42<45"
+                                ],
+                                "decision_contract": {
+                                    "official_settlement": false,
+                                    "full_depth_entry": true,
+                                    "one_decision_per_event": true
+                                },
+                                "metrics": {
+                                    "roi": 0.11810712860376293,
+                                    "total_pnl": 79.72231180753998,
+                                    "trade_count": 45,
+                                    "unique_event_count": 45
+                                },
+                                "runtime_score": "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted"
+                            },
+                            "promotion_gate": {
+                                "blocked_gates": ["walk_forward_oos"]
+                            },
+                            "input_prior": {
+                                "runtime_avoid_factors": [{
+                                    "reason": "negative_runtime_edge"
+                                }]
+                            }
+                        }
+                    }]
+                }]
+            }),
+            serde_json::json!({}),
+        ))
+        .expect("plan");
+
+        assert_eq!(plan.theme, "fix_data");
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "data_settlement"
+                && item.action == "repair_official_settlement_coverage"
+        }));
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "search_power"
+                && item.action == "increase_distinct_event_coverage_or_reduce_selectivity"
+        }));
+        assert!(!plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "strategy_economics"
+                || item.action == "mutate_or_reject_negative_runtime_edge"
         }));
     }
 
