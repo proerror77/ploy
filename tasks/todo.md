@@ -204,6 +204,46 @@ This is not a dry-run or live promotion decision.
   hosted walk-forward YAML parse, `rtk cargo test --locked --test
   workflow_security`, and `rtk git diff --check`.
 
+## Current Session - Archive-Aware Snapshot Data Audit (2026-05-24)
+
+Evidence stage: `walk_forward` / `executable_replay` data-contract repair.
+This is not a dry-run or live promotion decision.
+
+### Tasks
+
+- [x] Reconfirm PM5D project semantics and Event ML / AutoFactor workflow gates.
+- [x] Identify the data-layer contradiction: historical data audit reads the
+      hot `clob_orderbook_snapshots` table, while full-depth execution proof
+      reads the archived `orderbook_snapshots` surface.
+- [x] Add an archive-aware `polymarket_orderbooks` audit contract for explicit
+      historical windows.
+- [x] Wire `research-snapshot.yml` and Cloud Assistant fallback to pass the
+      orderbook archive root.
+- [x] Add focused Python/static workflow validation.
+- [ ] Commit, push, open PR, wait for CI, merge, and rerun the snapshot-backed
+      walk-forward.
+
+### Review
+
+- 2026-05-24: Real runs show the raw archive can be healthy
+  (`full_depth_execution_surface.v1`, `24/24` hours, `2214371` rows) while a
+  retained snapshot data audit reports `polymarket_orderbooks` as `0/288`.
+  The old audit treats the hot table as the only historical source even after
+  orderbook retention has moved full-fidelity rows into the data lake.
+- 2026-05-24: Implemented archive-aware historical coverage for
+  `polymarket_orderbooks`: when `/opt/ploy/data/lake/orderbook_snapshots`
+  contains complete full-fidelity hourly manifests, the audit reports
+  `coverage_source=orderbook_snapshot_archive` while preserving
+  `hot_table_*` diagnostics. Missing, invalid, zero-row, or non-full-fidelity
+  archive hours remain critical. `research-snapshot.yml` and its Cloud
+  Assistant fallback now pass the same `orderbook_archive_root` to both the
+  audit script and `research-snapshot-compile --pm-book-archive-dir`.
+- 2026-05-24: Validation passed: `python3 -m unittest discover -s tests -p
+  'test_*.py'` (`274` tests), `python3 -m py_compile scripts/*.py
+  scripts/ci/*.py`, active workflow YAML parse for all workflows,
+  `rtk cargo test --locked --test workflow_security`, focused audit/workflow
+  tests (`20` tests), and `rtk git diff --check`.
+
 ## Current Session - Market Data Promotion Blocker Actions (2026-05-24)
 
 Evidence stage: architecture/data-plane cleanup and research workflow planning;

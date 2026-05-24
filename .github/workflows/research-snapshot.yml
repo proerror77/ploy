@@ -24,9 +24,9 @@ on:
         required: true
         default: "15"
       options_json:
-        description: "Advanced options JSON: optional start_ts/end_ts, sampling, optimizer_data_dir, data_profile, audit gate, and optional complete sampled snapshot upload"
+        description: "Advanced options JSON: optional start_ts/end_ts, sampling, optimizer_data_dir, data_profile, audit gate, orderbook_archive_root, and optional complete sampled snapshot upload"
         required: false
-        default: '{"start_ts":"","end_ts":"","lob_sample_secs":30,"pm_book_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","snapshot_registry_dir":"","upload_sampled_snapshot":true}'
+        default: '{"start_ts":"","end_ts":"","lob_sample_secs":30,"pm_book_sample_secs":30,"observation_sample_secs":30,"max_quote_age_secs":30,"optimizer_data_dir":"/tmp/ploy-parquet","data_profile":"pm5d-execution","custom_required_sources":"","audit_lookback_hours":168,"data_gate":"never","orderbook_archive_root":"/opt/ploy/data/lake","snapshot_registry_dir":"","upload_sampled_snapshot":true}'
 
 concurrency:
   group: research-snapshot-${{ github.event.inputs.git_ref }}-${{ github.event.inputs.start_date }}-${{ github.event.inputs.end_date }}-${{ github.event.inputs.symbols }}
@@ -79,6 +79,7 @@ jobs:
               "custom_required_sources": "",
               "audit_lookback_hours": "168",
               "data_gate": "never",
+              "orderbook_archive_root": "/opt/ploy/data/lake",
               "snapshot_registry_dir": "",
               "upload_sampled_snapshot": "true",
           }
@@ -237,7 +238,8 @@ jobs:
               "${audit_start_ts}" \
               "${audit_end_ts}" \
               "${{ github.event.inputs.symbols }}" \
-              "${REQUIRED_SOURCES}" <<'EOF'
+              "${REQUIRED_SOURCES}" \
+              "${SNAPSHOT_ORDERBOOK_ARCHIVE_ROOT}" <<'EOF'
           set -euo pipefail
           deploy_root="$1"
           remote_dir="$2"
@@ -247,6 +249,7 @@ jobs:
           audit_end_ts="$6"
           symbols="$7"
           required_sources="$8"
+          orderbook_archive_root="$9"
 
           set -a
           . "${deploy_root}/.env"
@@ -262,6 +265,7 @@ jobs:
               --bucket-minutes 5 \
               --symbols "${symbols}" \
               --required-sources "${required_sources}" \
+              --orderbook-archive-root "${orderbook_archive_root}" \
               --statement-timeout-seconds 20 \
               --psql-timeout-seconds 30 \
               --format json \
@@ -358,7 +362,8 @@ jobs:
               "${SNAPSHOT_OPTIMIZER_DATA_DIR}" \
               "${REQUIRED_SOURCES}" \
               "${DATA_AUDIT_STATUS}" \
-              "${INCLUDE_DERIBIT}" <<'EOF'
+              "${INCLUDE_DERIBIT}" \
+              "${SNAPSHOT_ORDERBOOK_ARCHIVE_ROOT}" <<'EOF'
           set -euo pipefail
           deploy_root="$1"
           remote_dir="$2"
@@ -376,6 +381,7 @@ jobs:
           required_sources="${14}"
           data_audit_status="${15}"
           include_deribit="${16}"
+          orderbook_archive_root="${17}"
           if [ "${start_ts}" = "__ploy_empty__" ]; then
             start_ts=""
           fi
@@ -413,6 +419,7 @@ jobs:
             --stake-usd "${stake_usd}" \
             --lob-sample-secs "${lob_sample_secs}" \
             --pm-book-sample-secs "${pm_book_sample_secs}" \
+            --pm-book-archive-dir "${orderbook_archive_root}/orderbook_snapshots" \
             --observation-sample-secs "${observation_sample_secs}" \
             --max-quote-age-secs "${max_quote_age_secs}" \
             --output-dir "${remote_dir}/research-snapshot" \
