@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,15 @@ DEFAULT_SYMBOLS = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT"
 
 def parse_symbols(raw: str) -> list[str]:
     return [item.strip().upper() for item in raw.split(",") if item.strip()]
+
+
+def parse_utc_ts(raw: str) -> datetime | None:
+    if not raw:
+        return None
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -35,8 +45,8 @@ def parser() -> argparse.ArgumentParser:
 async def load_candidate_markets(
     conn: asyncpg.Connection,
     *,
-    start_ts: str,
-    end_ts: str,
+    start_ts: datetime,
+    end_ts: datetime | None,
     symbols: list[str],
 ) -> list[asyncpg.Record]:
     return await conn.fetch(
@@ -61,7 +71,7 @@ async def load_candidate_markets(
         ORDER BY et.market_slug
         """,
         start_ts,
-        end_ts or None,
+        end_ts,
         symbols,
     )
 
@@ -135,13 +145,17 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     symbols = parse_symbols(args.symbols)
     if not symbols:
         raise SystemExit("--symbols must include at least one symbol")
+    start_ts = parse_utc_ts(args.start_ts)
+    if start_ts is None:
+        raise SystemExit("--start-ts is required")
+    end_ts = parse_utc_ts(args.end_ts)
 
     conn = await asyncpg.connect(db_url)
     try:
         rows = await load_candidate_markets(
             conn,
-            start_ts=args.start_ts,
-            end_ts=args.end_ts,
+            start_ts=start_ts,
+            end_ts=end_ts,
             symbols=symbols,
         )
 
