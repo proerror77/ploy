@@ -84,7 +84,7 @@ dry-run or live promotion decision.
       `26363701280` evidence.
 - [x] Finish Agent Team legacy/data review pass and remove or document any
       remaining low-risk stale references.
-- [ ] Run focused docs/search validation, commit, push, open PR, and merge if
+- [x] Run focused docs/search validation, commit, push, open PR, and merge if
       CI passes.
 
 ### Review
@@ -109,6 +109,12 @@ dry-run or live promotion decision.
   `docs/data_collection_fix_plan.md` so they no longer direct new work toward
   the archived single-binary runtime, old dashboard/server commands, or retired
   `apps/ploy-runner` ownership path.
+- 2026-05-24: PR `#674` merged as
+  `6413c6a90226a6adfc38dd2e6cb92c278a658057` after CI passed: commit hygiene,
+  workflow lint, dependency audit, frontend/sidecar, legacy Python
+  compatibility, Rust control-plane/core, integration regressions,
+  market-data ops, research heavy features, runner lean replay/backtest, runner
+  live/default, PR auto review, and CodeRabbit.
 
 ## Current Session - Research Manager Latest Blockers (2026-05-24)
 
