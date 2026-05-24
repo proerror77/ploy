@@ -39,7 +39,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   DEPLOY_HOST: ${{ vars.TANGO_1_1_HOST || vars.ALIYUN_ECS_HOST || secrets.TANGO_1_1_HOST || secrets.ALIYUN_ECS_HOST }}
+  TANGO_1_1_INSTANCE_ID: ${{ vars.TANGO_1_1_INSTANCE_ID || 'i-6we8940uojnsory3ihfw' }}
   DEPLOY_ROOT: ${{ vars.PLOY_DEPLOY_ROOT || '/opt/ploy' }}
+  DEPLOY_OSS_REGION: ${{ vars.ALIYUN_REGION || 'ap-northeast-1' }}
   REMOTE_DIR: /opt/ploy/tmp/research-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
@@ -216,6 +218,7 @@ jobs:
 
       - name: Audit required market data on tango-1-1
         id: data_audit
+        continue-on-error: true
         env:
           REQUIRED_SOURCES: ${{ steps.data_scope.outputs.required_sources }}
         run: |
@@ -327,6 +330,9 @@ jobs:
           PY
 
       - name: Compile snapshot on tango-1-1
+        id: compile_snapshot
+        if: ${{ steps.data_audit.outcome == 'success' }}
+        continue-on-error: true
         env:
           INCLUDE_DERIBIT: ${{ steps.data_scope.outputs.include_deribit }}
           REQUIRED_SOURCES: ${{ steps.data_scope.outputs.required_sources }}
@@ -452,6 +458,52 @@ jobs:
           fi
           test -s artifacts/research-snapshot/manifest.json
           test -s artifacts/research-snapshot/quality.md
+
+      - name: Install Aliyun CLI for research snapshot fallback
+        if: ${{ steps.data_audit.outcome != 'success' || steps.compile_snapshot.outcome != 'success' }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-amd64.tgz -o aliyun-cli.tgz
+          tar -xzf aliyun-cli.tgz
+          sudo install -m 0755 aliyun /usr/local/bin/aliyun
+          aliyun version
+
+      - name: Install ossutil for research snapshot fallback
+        if: ${{ steps.data_audit.outcome != 'success' || steps.compile_snapshot.outcome != 'success' }}
+        run: |
+          set -euo pipefail
+          if ! command -v ossutil >/dev/null 2>&1; then
+            curl -fsSL https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
+          fi
+          command -v ossutil >/dev/null 2>&1
+
+      - name: Configure Aliyun CLI for research snapshot fallback
+        if: ${{ steps.data_audit.outcome != 'success' || steps.compile_snapshot.outcome != 'success' }}
+        env:
+          ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ECS_ACCESS_KEY_ID || secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ECS_ACCESS_KEY_SECRET || secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "${ALIYUN_ACCESS_KEY_ID}"
+          test -n "${ALIYUN_ACCESS_KEY_SECRET}"
+          aliyun configure set \
+            --profile default \
+            --mode AK \
+            --region "${DEPLOY_OSS_REGION}" \
+            --access-key-id "${ALIYUN_ACCESS_KEY_ID}" \
+            --access-key-secret "${ALIYUN_ACCESS_KEY_SECRET}"
+
+      - name: Compile snapshot via Cloud Assistant fallback
+        if: ${{ steps.data_audit.outcome != 'success' || steps.compile_snapshot.outcome != 'success' }}
+        env:
+          INCLUDE_DERIBIT: ${{ steps.data_scope.outputs.include_deribit }}
+          REQUIRED_SOURCES: ${{ steps.data_scope.outputs.required_sources }}
+          SNAPSHOT_SYMBOLS: ${{ github.event.inputs.symbols }}
+          SNAPSHOT_STAKE_USD: ${{ github.event.inputs.stake_usd }}
+          ALIYUN_OSS_ACCESS_KEY_ID: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}
+          ALIYUN_OSS_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
+          ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
+        run: python3 scripts/ci/run_tango_research_snapshot_cloud_assist.py
 
       - name: Cleanup remote snapshot workspace
         if: always()
