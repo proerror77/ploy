@@ -40,6 +40,10 @@ def base_args(**overrides):
         "symbols": "BTCUSDT",
         "stake_usd": "15",
         "chain_remaining": 1,
+        "candidate_strategy_replay_run_id": "",
+        "candidate_strategy_replay_artifact_name": "",
+        "full_depth_execution_surface_run_id": "",
+        "full_depth_execution_surface_artifact_name": "",
         "max_snapshot_window_days": 2,
         "max_full_depth_surface_hours": 12,
         "runtime_deployment_id": "pm5d.threelayer.settlement-probability-btc-eth.dryrun",
@@ -123,6 +127,48 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
         options = json.loads(dispatch["fields"]["options_json"])
         self.assertTrue(options["chain_next_run"])
         self.assertEqual(1, options["chain_remaining"])
+
+    def test_revise_prior_walk_forward_carries_typed_prior_and_evidence_artifacts(self) -> None:
+        plan = plan_payload(
+            "revise_prior",
+            ["generate_typed_llm_prior_json", "rerun_alpha_search_with_bounded_mutations"],
+        )
+        plan["plan"]["blocker_actions"] = [
+            {
+                "blocker_family": "strategy_economics",
+                "action": "mutate_or_reject_negative_runtime_edge",
+                "reason": "Latest replay or walk-forward evidence failed economic/OOS gates.",
+            }
+        ]
+        payload = build_executor_payload(
+            base_args(
+                mode="execute",
+                execute_ack=EXECUTE_ACK,
+                snapshot_run_id="26354463118",
+                full_depth_execution_surface_run_id="26351573860",
+                full_depth_execution_surface_artifact_name="full-depth-execution-surface-26351573860",
+                candidate_strategy_replay_run_id="26355035577",
+                candidate_strategy_replay_artifact_name="runtime-candidate-replay-26355035577",
+            ),
+            plan,
+        )
+
+        dispatch = payload["dispatches"][0]
+        self.assertEqual("factor-walk-forward-v2-hosted-artifact.yml", dispatch["workflow"])
+        options = json.loads(dispatch["fields"]["options_json"])
+        self.assertEqual(
+            "26351573860",
+            options["full_depth_execution_surface_run_id"],
+        )
+        self.assertEqual(
+            "full-depth-execution-surface-26351573860",
+            options["full_depth_execution_surface_artifact_name"],
+        )
+        self.assertEqual("26355035577", options["candidate_strategy_replay_run_id"])
+        prior = json.loads(options["alpha_search_llm_prior_json"])
+        self.assertEqual("research_manager_typed_prior.v1", prior["schema_version"])
+        self.assertEqual("revise_prior", prior["theme"])
+        self.assertEqual(plan["plan"]["blocker_actions"], prior["blocker_actions"])
 
     def test_fix_runtime_plan_maps_to_candidate_replay_and_parity(self) -> None:
         payload = build_executor_payload(

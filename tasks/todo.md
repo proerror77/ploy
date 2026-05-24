@@ -24,6 +24,12 @@ decision.
       factor registry entries do not drive the current plan.
 - [ ] Commit, push, open PR, wait for CI, merge, then redeploy/refresh the
       deployed `research-trace-plan` binary before rerunning the workflow.
+- [x] Run Research Manager executor in dry-run mode from corrected trace-plan
+      artifact.
+- [x] Run Research Manager executor in execute mode to dispatch a bounded
+      follow-up hosted walk-forward.
+- [x] Identify executor dispatch evidence propagation gap from the follow-up
+      walk-forward artifact.
 
 ### Review
 
@@ -64,6 +70,35 @@ decision.
   of run `26357108585` input through `factor_evolve_daily_plan`, which now
   returns `theme=revise_prior`, `candidate_count=8`, and only
   `strategy_economics -> mutate_or_reject_negative_runtime_edge`.
+- 2026-05-24: Corrected Research Trace Plan run `26361552258` from deployed
+  `main@d919a83c` now returns `theme=revise_prior`,
+  `candidate_count=8`, actions `generate_typed_llm_prior_json` and
+  `rerun_alpha_search_with_bounded_mutations`, and only blocker action
+  `strategy_economics -> mutate_or_reject_negative_runtime_edge`.
+  Research Manager executor dry-run `26361588811` emitted
+  `research_manager_typed_prior.v1` and one ready bounded
+  `factor-walk-forward-v2-hosted-artifact.yml` dispatch. Execute run
+  `26361615208` dispatched follow-up walk-forward `26361617883`.
+- 2026-05-24: Follow-up walk-forward `26361617883` succeeded and persisted
+  trace, but its artifact proved the executor dispatch did not yet pass the
+  typed prior or full-depth/runtime replay evidence into the child workflow.
+  The child run selected a positive aggregate candidate
+  `mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted`
+  (`trade_count=216`, `entry_fill_rate=1.0`, aggregate ROI `1.1022432`) but
+  remained blocked because the replay basis was
+  `factor_walk_forward_top_bucket_aggregate` and the full-depth proof was not
+  carried into the dispatch.
+- 2026-05-24: Added executor/workflow wiring so bounded walk-forward dispatches
+  carry inline `research_manager_typed_prior.v1` as
+  `alpha_search_llm_prior_json`, and optional
+  `candidate_strategy_replay_*` / `full_depth_execution_surface_*` artifact
+  ids. Hosted walk-forward now materializes inline prior JSON to
+  `artifacts/alpha-search-plan/next-llm-prior.json` before invoking the sweep.
+  Validation passed: `python3 -m unittest
+  tests.test_research_manager_execute_plan` (`15` tests), `rtk cargo test
+  --locked --test workflow_security factor_walk_forward` (`5` tests), YAML
+  parse for the two touched workflows, a local dry-run executor replay of
+  trace-plan `26361552258`, and `rtk git diff --check`.
 
 ## Current Session - Runtime Replay Selector Repair (2026-05-24)
 
