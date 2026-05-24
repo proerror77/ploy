@@ -220,6 +220,9 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "direct_db_debug=true|canonical_result=no|registry=runner-local|runner=self-hosted|runner=ploy-ci-1",
             "create_handoff_issue requires successful durable Research OS trace persistence.",
             "create_config_pr requires successful durable Research OS trace persistence.",
+            "Config branch was pushed, but automatic PR creation failed",
+            "Manual PR URL:",
+            "The workflow result remains successful because the research artifact and reviewable branch were produced.",
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, workflow)
