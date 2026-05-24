@@ -316,13 +316,10 @@ artifact only has provenance files and is missing the complete sampled payload
 required by `load_research_snapshot`: observations, Deribit rows, and
 Polymarket full-book rows.
 
-The `factor-walk-forward-v2.yml` entrypoint now follows the same rule: when
-`snapshot_run_id` is supplied it dispatches
-`factor-walk-forward-v2-hosted-artifact.yml` from `ubuntu-latest`. Requests
-without `snapshot_run_id` fail closed instead of falling back to direct DB
-execution.
-`factor-review-v2.yml` has the same routing behavior for snapshot-backed factor
-diagnostics.
+Dispatch `factor-walk-forward-v2-hosted-artifact.yml` directly with
+`snapshot_run_id`. The former `factor-walk-forward-v2.yml` and
+`factor-review-v2.yml` router workflows have been removed, so requests without
+a retained snapshot artifact no longer have a workflow entrypoint.
 
 Advanced promotion and issue-handoff controls live in `options_json` to stay
 within the GitHub Actions 10-input limit. Defaults are

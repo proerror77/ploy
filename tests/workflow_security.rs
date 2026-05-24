@@ -518,7 +518,6 @@ fn hosted_factor_walk_forward_uploads_alpha_chain_summary() {
 #[test]
 fn factor_walk_forward_wires_alpha_prior_and_state_inputs() {
     let hosted = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
-    let router = workflow_contents(".github/workflows/factor-walk-forward-v2.yml");
     let mut offenders = Vec::new();
 
     for needle in [
@@ -538,29 +537,6 @@ fn factor_walk_forward_wires_alpha_prior_and_state_inputs() {
         if !hosted.contains(needle) {
             offenders.push(format!(
                 "factor-walk-forward-v2-hosted-artifact.yml: missing `{needle}`"
-            ));
-        }
-    }
-
-    let route_allowlist = router
-        .split("allowed = {")
-        .nth(1)
-        .and_then(|tail| tail.split("raw = os.environ").next())
-        .unwrap_or("");
-    for needle in [
-        "alpha_search_plan_run_id",
-        "alpha_search_plan_artifact_name",
-        "alpha_search_llm_prior_json",
-        "alpha_search_state_json",
-        "require_deribit",
-        "pm_book_sample_secs",
-        "train_window_hours",
-        "test_window_hours",
-        "step_hours",
-    ] {
-        if !route_allowlist.contains(needle) {
-            offenders.push(format!(
-                "factor-walk-forward-v2.yml: hosted route allowlist missing `{needle}`"
             ));
         }
     }
@@ -601,7 +577,6 @@ fn hosted_factor_walk_forward_splits_replay_parity_artifact_suffix() {
 #[test]
 fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
     let hosted = workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
-    let router = workflow_contents(".github/workflows/factor-walk-forward-v2.yml");
     let mut offenders = Vec::new();
 
     for needle in [
@@ -654,26 +629,6 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
         );
     }
 
-    let route_allowlist = router
-        .split("allowed = {")
-        .nth(1)
-        .and_then(|tail| tail.split("raw = os.environ").next())
-        .unwrap_or("");
-    for needle in [
-        "candidate_strategy_replay_json",
-        "candidate_strategy_replay_run_id",
-        "candidate_strategy_replay_artifact_name",
-        "full_depth_execution_surface_json",
-        "full_depth_execution_surface_run_id",
-        "full_depth_execution_surface_artifact_name",
-    ] {
-        if !route_allowlist.contains(needle) {
-            offenders.push(format!(
-                "factor-walk-forward-v2.yml: hosted route allowlist missing `{needle}`"
-            ));
-        }
-    }
-
     assert!(
         offenders.is_empty(),
         "hosted factor walk-forward candidate replay feedback guard failed:\n{}",
@@ -685,9 +640,7 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
 fn factor_research_workflows_thread_pm_book_sample_cadence() {
     let hosted_walk =
         workflow_contents(".github/workflows/factor-walk-forward-v2-hosted-artifact.yml");
-    let walk_router = workflow_contents(".github/workflows/factor-walk-forward-v2.yml");
     let hosted_review = workflow_contents(".github/workflows/factor-review-v2-hosted-artifact.yml");
-    let review_router = workflow_contents(".github/workflows/factor-review-v2.yml");
     let sweep = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/run_factor_walk_forward_sweep.py"),
     )
@@ -699,18 +652,12 @@ fn factor_research_workflows_thread_pm_book_sample_cadence() {
             "factor-walk-forward-v2-hosted-artifact.yml",
             hosted_walk.as_str(),
         ),
-        ("factor-walk-forward-v2.yml", walk_router.as_str()),
         (
             "factor-review-v2-hosted-artifact.yml",
             hosted_review.as_str(),
         ),
-        ("factor-review-v2.yml", review_router.as_str()),
     ] {
-        let needles: &[&str] = if name.ends_with("-hosted-artifact.yml") {
-            &["pm_book_sample_secs", "--pm-book-sample-secs"]
-        } else {
-            &["pm_book_sample_secs"]
-        };
+        let needles: &[&str] = &["pm_book_sample_secs", "--pm-book-sample-secs"];
         for needle in needles {
             if !content.contains(needle) {
                 offenders.push(format!("{name}: missing `{needle}`"));
@@ -1017,7 +964,6 @@ fn research_issue_workflows_apply_decision_labels() {
 #[test]
 fn factor_review_comments_are_factor_attribution_not_deployable_candidates() {
     let hosted = workflow_contents(".github/workflows/factor-review-v2-hosted-artifact.yml");
-    let router = workflow_contents(".github/workflows/factor-review-v2.yml");
     let mut offenders = Vec::new();
 
     for needle in [
@@ -1033,26 +979,14 @@ fn factor_review_comments_are_factor_attribution_not_deployable_candidates() {
             ));
         }
     }
-    if !router.contains("snapshot-backed router only")
-        || !router.contains("factor-review-v2-hosted-artifact.yml")
-    {
-        offenders.push(
-            "factor-review-v2.yml: router no longer points only at hosted evidence".to_string(),
-        );
-    }
-    for (name, content) in [
-        ("factor-review-v2-hosted-artifact.yml", hosted.as_str()),
-        ("factor-review-v2.yml", router.as_str()),
+    for forbidden in [
+        "candidate-for-oos-replay-gate",
+        "no-deploy-factor-review-only",
     ] {
-        for forbidden in [
-            "candidate-for-oos-replay-gate",
-            "no-deploy-factor-review-only",
-        ] {
-            if content.contains(forbidden) {
-                offenders.push(format!(
-                    "{name}: still contains legacy decision `{forbidden}`"
-                ));
-            }
+        if hosted.contains(forbidden) {
+            offenders.push(format!(
+                "factor-review-v2-hosted-artifact.yml: still contains legacy decision `{forbidden}`"
+            ));
         }
     }
     for needle in [

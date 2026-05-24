@@ -68,11 +68,11 @@ strategy approval.
    correct place for `dsl_hash`, `ast_json`, runtime contract, run id, dataset
    window, blockers, replay identity, and promotion decision.
 
-4. **Router workflows no longer execute direct DB research.**
+4. **Legacy router workflows are removed.**
 
-   `factor-review-v2.yml` and `factor-walk-forward-v2.yml` are compatibility
-   routers. They require `snapshot_run_id` and forward to hosted artifact
-   workflows; missing snapshots fail closed.
+   `factor-review-v2.yml` and `factor-walk-forward-v2.yml` have been removed.
+   Factor review and walk-forward now dispatch directly through the hosted
+   artifact workflows, which require `snapshot_run_id`.
 
 5. **Full-depth CLOB is no longer confused with sampled snapshots.**
 

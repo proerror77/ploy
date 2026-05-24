@@ -314,24 +314,20 @@ Steps:
 Concurrency should be per `(git_ref, symbols, start, end, sample_secs)`, with
 `cancel-in-progress: true` for snapshot compiles.
 
-### `factor-review-v2.yml`
+### Historical `factor-review-v2.yml`
 
-Modes:
+This router workflow has been removed. Current factor review dispatches
+`.github/workflows/factor-review-v2-hosted-artifact.yml` directly with
+`snapshot_run_id`.
 
-- `snapshot_run_id`: consume existing snapshot artifact;
-- `compile_snapshot=true`: compile first, then review.
+### Historical `factor-walk-forward-v2.yml`
 
-Default should be consume existing snapshot when available.
+This router workflow has been removed. Current factor walk-forward dispatches
+`.github/workflows/factor-walk-forward-v2-hosted-artifact.yml` directly with
+`snapshot_run_id`.
 
-### `factor-walk-forward-v2.yml`
-
-Modes:
-
-- `snapshot_run_id`: consume existing snapshot artifact;
-- `compile_snapshot=true`: compile first, then walk-forward.
-
-Default for multi-day runs should be snapshot-first. Direct DB mode remains only
-for small debugging windows and should print `canonical_result=no`.
+Missing snapshot artifacts now fail closed instead of falling back to direct DB
+or compile-in-place workflow modes.
 
 ## Performance Budget
 
