@@ -616,6 +616,9 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertIn("--train-window-hours \"${WALK_TRAIN_WINDOW_HOURS}\"", workflow)
         self.assertIn("--candidate-strategy-replay-json", workflow)
         self.assertIn("--snapshot-manifest-json artifacts/research-snapshot/manifest.json", workflow)
+        self.assertIn("full_depth_execution_surface_run_id", workflow)
+        self.assertIn("Download full-depth execution surface artifact", workflow)
+        self.assertIn("--full-depth-execution-surface-json", workflow)
 
     def test_snapshot_manifest_passes_to_candidate_replay_and_promotion(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -670,6 +673,83 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertEqual(replay["source_snapshot_contract"]["blocking_risk_flags"], expected_flags)
         self.assertEqual(
             promotion["source_snapshot_contract"]["blocking_risk_flags"], expected_flags
+        )
+
+    def test_full_depth_execution_surface_passes_to_candidate_replay_and_promotion(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            snapshot_dir = tmp / "snapshot"
+            snapshot_dir.mkdir()
+            manifest = snapshot_dir / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "research_snapshot_manifest_v1",
+                        "snapshot_hash": "snapshot:sampled-execution",
+                        "source_kind": "complete_sampled_research_snapshot",
+                        "start": "2026-04-24T00:00:00Z",
+                        "end": "2026-05-01T00:00:00Z",
+                        "source_surfaces": [
+                            {
+                                "name": "clob_orderbook_snapshots",
+                                "gate_category": "required_for_execution",
+                                "raw_full_fidelity": True,
+                                "snapshot_sampled": True,
+                            }
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            proof = tmp / "full-depth-execution-surface.json"
+            proof.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "full_depth_execution_surface.v1",
+                        "surface": "clob_orderbook_snapshots",
+                        "source": "orderbook_snapshot_archive",
+                        "start_ts": "2026-04-24T00:00:00Z",
+                        "end_ts": "2026-05-01T00:00:00Z",
+                        "checked_hours": 168,
+                        "existing_hours": 168,
+                        "row_count": 1000,
+                        "full_fidelity": True,
+                        "incomplete": False,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            binary = self.fake_binary(tmp)
+            subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--snapshot-manifest-json",
+                    str(manifest),
+                    "--full-depth-execution-surface-json",
+                    str(proof),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            replay = json.loads(
+                (tmp / "out" / "candidate-strategy-replay.json").read_text(encoding="utf-8")
+            )
+            promotion = json.loads(
+                (tmp / "out" / "autofactor-strategy-promotion.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(replay["source_snapshot_contract"]["blocking_risk_flags"], [])
+        self.assertEqual(
+            promotion["source_snapshot_contract"]["satisfied_execution_surfaces"],
+            ["clob_orderbook_snapshots"],
         )
 
     def test_alpha_search_prior_and_state_args_pass_through_to_factor_binary(self):

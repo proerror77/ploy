@@ -233,6 +233,8 @@ SAMPLED_EXECUTION_SNAPSHOT_MANIFEST = {
     "schema_version": "research_snapshot_manifest_v1",
     "snapshot_hash": "snapshot:sampled-execution",
     "source_kind": "complete_sampled_research_snapshot",
+    "start": "2026-05-17T00:00:00Z",
+    "end": "2026-05-18T00:00:00Z",
     "source_surfaces": [
         {
             "name": "clob_orderbook_snapshots",
@@ -241,6 +243,19 @@ SAMPLED_EXECUTION_SNAPSHOT_MANIFEST = {
             "snapshot_sampled": True,
         }
     ],
+}
+
+VALID_FULL_DEPTH_EXECUTION_SURFACE = {
+    "schema_version": "full_depth_execution_surface.v1",
+    "surface": "clob_orderbook_snapshots",
+    "source": "orderbook_snapshot_archive",
+    "start_ts": "2026-05-17T00:00:00Z",
+    "end_ts": "2026-05-18T00:00:00Z",
+    "checked_hours": 24,
+    "existing_hours": 24,
+    "row_count": 2_214_371,
+    "full_fidelity": True,
+    "incomplete": False,
 }
 
 
@@ -253,12 +268,14 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
         replay_payload=DEFAULT_REPLAY_PAYLOAD,
         registry_preview_payload=None,
         snapshot_manifest_payload=None,
+        full_depth_execution_surface_payload=None,
     ):
         with tempfile.TemporaryDirectory() as tmp:
             report_path = Path(tmp) / "report.txt"
             replay_path = Path(tmp) / "candidate-strategy-replay.json"
             registry_path = Path(tmp) / "factor-registry-preview.json"
             snapshot_manifest_path = Path(tmp) / "manifest.json"
+            execution_surface_path = Path(tmp) / "full-depth-execution-surface.json"
             output_json = Path(tmp) / "promotion.json"
             output_registry = Path(tmp) / "registry.json"
             output_handoff = Path(tmp) / "handoff.json"
@@ -289,6 +306,18 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 snapshot_args = ["--snapshot-manifest-json", str(snapshot_manifest_path)]
+            execution_surface_args = []
+            if full_depth_execution_surface_payload is not None:
+                execution_surface_path.write_text(
+                    json.dumps(
+                        full_depth_execution_surface_payload, indent=2, sort_keys=True
+                    ),
+                    encoding="utf-8",
+                )
+                execution_surface_args = [
+                    "--full-depth-execution-surface-json",
+                    str(execution_surface_path),
+                ]
             result = subprocess.run(
                 [
                     sys.executable,
@@ -306,6 +335,7 @@ class AutoFactorStrategyPromotionTests(unittest.TestCase):
                     *replay_args,
                     *registry_args,
                     *snapshot_args,
+                    *execution_surface_args,
                     *extra_args,
                 ],
                 cwd=ROOT,
@@ -627,6 +657,59 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
             "global_full_depth_entry_fillability: "
             "global_full_depth_entry_fill_rate=0.1311 min_required=0.3000",
             blockers,
+        )
+
+    def test_full_depth_execution_surface_proof_unlocks_sampled_snapshot_blocker(self):
+        _, payload, _, handoff, _ = self.run_script(
+            LOW_SLIPPAGE_HEALTH
+            + GLOBAL_FILLABILITY_BLOCKED_GATE
+            + AUTOFACTOR_TOP_BUCKET_EXECUTION_REPORT,
+            replay_payload=replay_for_target(
+                "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                "tradeable_full_depth_settlement_pnl",
+            ),
+            snapshot_manifest_payload=SAMPLED_EXECUTION_SNAPSHOT_MANIFEST,
+            full_depth_execution_surface_payload=VALID_FULL_DEPTH_EXECUTION_SURFACE,
+        )
+
+        self.assertEqual(payload["decision"], "qualified")
+        self.assertEqual(handoff["status"], "ready")
+        self.assertEqual(payload["source_snapshot_contract"]["blocking_risk_flags"], [])
+        self.assertEqual(
+            payload["source_snapshot_contract"]["satisfied_execution_surfaces"],
+            ["clob_orderbook_snapshots"],
+        )
+        self.assertTrue(
+            payload["source_snapshot_contract"]["full_depth_execution_surface_proofs"][0][
+                "valid"
+            ]
+        )
+
+    def test_invalid_full_depth_execution_surface_proof_fails_closed(self):
+        proof = dict(VALID_FULL_DEPTH_EXECUTION_SURFACE)
+        proof["full_fidelity"] = False
+
+        _, payload, _, handoff, _ = self.run_script(
+            LOW_SLIPPAGE_HEALTH
+            + GLOBAL_FILLABILITY_BLOCKED_GATE
+            + AUTOFACTOR_TOP_BUCKET_EXECUTION_REPORT,
+            replay_payload=replay_for_target(
+                "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                "tradeable_full_depth_settlement_pnl",
+            ),
+            snapshot_manifest_payload=SAMPLED_EXECUTION_SNAPSHOT_MANIFEST,
+            full_depth_execution_surface_payload=proof,
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        self.assertIn(
+            "sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots",
+            payload["source_snapshot_contract"]["blocking_risk_flags"],
+        )
+        self.assertIn(
+            "full_depth_execution_surface_invalid:clob_orderbook_snapshots:not_full_fidelity",
+            payload["source_snapshot_contract"]["blocking_risk_flags"],
         )
 
     def test_qualifies_predictive_external_formula_when_gate_is_ready(self):

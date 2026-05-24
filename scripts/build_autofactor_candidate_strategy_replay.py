@@ -323,6 +323,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--factor-registry-preview-json", default="")
     parser.add_argument("--require-runtime-contract", action="store_true")
     parser.add_argument("--snapshot-manifest-json", default="")
+    parser.add_argument("--full-depth-execution-surface-json", default="")
     return parser.parse_args()
 
 
@@ -349,7 +350,10 @@ def main() -> int:
         min_trade_count=args.min_trade_count,
         min_fill_rate=args.min_fill_rate,
         min_roi=args.min_roi,
-        snapshot_contract=load_snapshot_execution_contract(args.snapshot_manifest_json or None),
+        snapshot_contract=load_snapshot_execution_contract(
+            args.snapshot_manifest_json or None,
+            full_depth_execution_surface_json=args.full_depth_execution_surface_json or None,
+        ),
     )
     output_json = Path(args.output_json)
     output_json.parent.mkdir(parents=True, exist_ok=True)

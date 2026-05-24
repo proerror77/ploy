@@ -608,12 +608,21 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
         "candidate_strategy_replay_json",
         "candidate_strategy_replay_run_id",
         "candidate_strategy_replay_artifact_name",
+        "full_depth_execution_surface_json",
+        "full_depth_execution_surface_run_id",
+        "full_depth_execution_surface_artifact_name",
         "candidate_strategy_replay_run_id must be <run-id>:<artifact-name>",
+        "full_depth_execution_surface_run_id must be <run-id>:<artifact-name>",
         "Download candidate strategy replay artifact",
+        "Download full-depth execution surface artifact",
         "runtime-candidate-replay-${WALK_CANDIDATE_STRATEGY_REPLAY_RUN_ID}",
+        "full-depth-execution-surface-${WALK_FULL_DEPTH_EXECUTION_SURFACE_RUN_ID}",
         "--require candidate-strategy-replay.json",
+        "--require full-depth-execution-surface.json",
         "artifacts/candidate-strategy-replay/candidate-strategy-replay.json",
+        "artifacts/full-depth-execution-surface/full-depth-execution-surface.json",
         "--candidate-strategy-replay-json",
+        "--full-depth-execution-surface-json",
         "--candidate-replay-json",
         "candidate-strategy-replay/candidate-strategy-replay.json",
     ] {
@@ -654,6 +663,9 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
         "candidate_strategy_replay_json",
         "candidate_strategy_replay_run_id",
         "candidate_strategy_replay_artifact_name",
+        "full_depth_execution_surface_json",
+        "full_depth_execution_surface_run_id",
+        "full_depth_execution_surface_artifact_name",
     ] {
         if !route_allowlist.contains(needle) {
             offenders.push(format!(

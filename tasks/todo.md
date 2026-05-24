@@ -69,6 +69,59 @@ dry-run or live promotion decision.
   `clob_orderbook_snapshots`, `official_settlement_missing:48<51`, and
   `roi_too_low:-0.125651<0.000000`.
 
+## Current Session - Full-Depth Execution Surface Handoff (2026-05-24)
+
+Evidence stage: `executable_replay` / `runtime_parity` gate repair. This is
+not a dry-run or live promotion decision.
+
+### Tasks
+
+- [x] Reconfirm the project semantic contract and AutoFactor promotion gates.
+- [x] Verify the collected full-depth execution-surface artifact represents the
+      same 24h research window.
+- [x] Wire full-depth execution-surface proof into snapshot/promotion contract
+      evaluation.
+- [x] Wire hosted walk-forward options to download and pass the full-depth
+      execution-surface artifact.
+- [x] Add focused fail-closed tests for valid, invalid, and missing
+      execution-surface proof.
+- [x] Run focused validation and record the result.
+
+### Review
+
+- 2026-05-24: Full-depth execution-surface run `26351573860` produced
+  `schema_version=full_depth_execution_surface.v1`,
+  `surface=clob_orderbook_snapshots`, `full_fidelity=true`,
+  `incomplete=false`, `checked_hours=24`, `existing_hours=24`, and
+  `row_count=2214371` for `2026-05-17T00:00:00Z ->
+  2026-05-18T00:00:00Z`. The raw archive is healthy; the current blocker is
+  handoff wiring that still treats sampled snapshot CLOB rows as the execution
+  surface proof.
+- 2026-05-24: Official settlement repair dry-run `26351573853` succeeded with
+  `candidate_market_count=1097`, `would_settle_count=2194`,
+  `settled_count=0`, and `error_count=0`. This is dry-run evidence only; an
+  execute run would mutate the remote DB and still needs explicit ACK.
+- 2026-05-24: Implemented full-depth execution-surface proof consumption for
+  AutoFactor promotion and aggregate candidate replay. Hosted
+  `factor-walk-forward-v2-hosted-artifact.yml` can now download
+  `full-depth-execution-surface-*` through `options_json`, pass the proof into
+  the sweep runner, and embed the proof into the downstream artifact.
+  Standalone `autofactor-strategy-promotion.yml` consumes the embedded proof
+  when present without adding more dispatch inputs.
+- 2026-05-24: Focused validation passed: `python3 -m unittest
+  tests.test_autofactor_strategy_promotion
+  tests.test_build_autofactor_candidate_strategy_replay
+  tests.test_factor_walk_forward_sweep
+  tests.test_research_manager_execute_plan
+  tests.test_persist_research_trace_contract` (`96` tests), workflow YAML parse
+  for the three touched workflows, `rtk cargo test --locked --test
+  workflow_security`, Python compile for the touched scripts, and `rtk git
+  diff --check`. A real-artifact smoke using walk-forward run `26351351355`,
+  runtime replay `26351022434`, and full-depth surface run `26351573860`
+  removed all `sampled_snapshot_required_for_execution_surface` /
+  `snapshot_contract_blocks_execution_claim` blockers while correctly keeping
+  official-settlement and ROI blockers.
+
 ## Current Session - Market Data Promotion Blocker Actions (2026-05-24)
 
 Evidence stage: architecture/data-plane cleanup and research workflow planning;

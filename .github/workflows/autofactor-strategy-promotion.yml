@@ -83,6 +83,7 @@ jobs:
           snapshot_provenance_path="$(find artifacts/source -path '*/snapshot-provenance/source.txt' -print -quit)"
           snapshot_manifest_path="$(find artifacts/source -path '*/snapshot-provenance/manifest.json' -print -quit)"
           registry_preview_path="$(find artifacts/source -path '*/factor-registry-preview.json' -print -quit)"
+          execution_surface_path="$(find artifacts/source -path '*/full-depth-execution-surface.json' -print -quit)"
           side_effect_requested="false"
           if [ "${{ github.event.inputs.create_handoff_issue }}" = "true" ] || [ "${{ github.event.inputs.create_config_pr }}" = "true" ]; then
             side_effect_requested="true"
@@ -112,6 +113,7 @@ jobs:
             echo "SOURCE_SNAPSHOT_PROVENANCE_PATH=${snapshot_provenance_path}"
             echo "SOURCE_SNAPSHOT_MANIFEST_PATH=${snapshot_manifest_path}"
             echo "SOURCE_FACTOR_REGISTRY_PREVIEW_PATH=${registry_preview_path}"
+            echo "SOURCE_FULL_DEPTH_EXECUTION_SURFACE_PATH=${execution_surface_path}"
           } >> "$GITHUB_ENV"
 
       - name: Evaluate AutoFactor strategy promotion
@@ -136,6 +138,9 @@ jobs:
           fi
           if [ -n "${SOURCE_SNAPSHOT_MANIFEST_PATH:-}" ]; then
             args+=(--snapshot-manifest-json "${SOURCE_SNAPSHOT_MANIFEST_PATH}")
+          fi
+          if [ -n "${SOURCE_FULL_DEPTH_EXECUTION_SURFACE_PATH:-}" ]; then
+            args+=(--full-depth-execution-surface-json "${SOURCE_FULL_DEPTH_EXECUTION_SURFACE_PATH}")
           fi
           if [ "${{ github.event.inputs.fail_if_blocked }}" = "true" ]; then
             args+=(--fail-if-blocked)
