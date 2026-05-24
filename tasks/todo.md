@@ -65,8 +65,7 @@ no strategy promotion and no live trading.
 - [x] Add a bounded full-depth execution-surface workflow over the existing
       CLOB archive exporter.
 - [x] Map Research Manager full-depth blocker actions to the new workflow.
-- [x] Keep official-settlement repair explicit as blocked until it has a
-      bounded ACK-safe workflow.
+- [x] Add bounded dry-run/execute official-settlement repair workflow.
 - [ ] Commit, push, open PR, wait for CI, and merge.
 
 ### Review
@@ -79,7 +78,8 @@ no strategy promotion and no live trading.
   full-depth execution-surface collection. `rerun_snapshot_data_audit` still
   dispatches `research-snapshot.yml`; `collect_full_depth_execution_surface`
   dispatches `collect-full-depth-execution-surface.yml`; official settlement
-  repair remains a blocked follow-up until a bounded mutation workflow exists.
+  repair now dispatches `repair-official-settlement-coverage.yml` in dry-run
+  mode unless the executor itself is run with the required execute ACK.
 
 ## Current Session - Research Manager Blocker Actions (2026-05-24)
 

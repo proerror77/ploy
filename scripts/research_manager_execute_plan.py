@@ -191,18 +191,40 @@ def _full_depth_execution_surface_dispatch(
     }
 
 
-def _blocked_followup_dispatch(
+def _official_settlement_repair_dispatch(
     *,
-    workflow: str,
-    reason: str,
-    blocker: str,
+    plan: dict[str, Any],
+    git_ref: str,
+    symbols: str,
+    execute: bool,
 ) -> dict[str, Any]:
+    market_data = ((plan.get("input") or {}).get("market_data_health") or {})
+    window = _bounded_snapshot_window(market_data, max_window_days=2)
+    options = {
+        "start_ts": window["start_ts"],
+        "end_ts": window["end_ts"],
+        "mode": "execute" if execute else "dry_run",
+    }
+    blockers: list[str] = []
+    if not window["start_ts"] or not window["end_ts"]:
+        blockers.append("missing_dataset_window")
+    if not _parse_symbols(symbols):
+        blockers.append("missing_symbols")
+    fields = {
+        "git_ref": git_ref,
+        "start_date": window["start_date"],
+        "end_date": window["end_date"],
+        "symbols": symbols,
+        "options_json": json.dumps(options, separators=(",", ":"), sort_keys=True),
+        "execute_ack": "repair-official-settlement-coverage" if execute else "",
+    }
     return {
-        "workflow": workflow,
-        "reason": reason,
-        "ready": False,
-        "blockers": [blocker],
-        "fields": {},
+        "workflow": "repair-official-settlement-coverage.yml",
+        "reason": "repair bounded official Polymarket settlement coverage for replay-traded events",
+        "ready": not blockers,
+        "blockers": blockers,
+        "fields": fields,
+        "bounded_window": window,
     }
 
 
@@ -458,6 +480,7 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
     blocker_actions = _blocker_actions(plan)
     dispatches: list[dict[str, Any]] = []
     typed_prior: dict[str, Any] | None = None
+    side_effect_mode = args.mode == "execute" and args.execute_ack == EXECUTE_ACK
 
     action_names = {item["action"] for item in blocker_actions}
     snapshot_actions = {"rerun_snapshot_data_audit", "repair_or_exclude_missing_data_surface"}
@@ -490,13 +513,11 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
         "repair_official_settlement_coverage" in action_names
     ):
         dispatches.append(
-            _blocked_followup_dispatch(
-                workflow="repair-official-settlement-coverage.yml",
-                reason=(
-                    "official settlement repair is required, but no bounded ACK-safe "
-                    "Research Manager settlement repair workflow exists yet"
-                ),
-                blocker="missing_bounded_settlement_repair_workflow",
+            _official_settlement_repair_dispatch(
+                plan=plan_payload,
+                git_ref=args.git_ref,
+                symbols=args.symbols,
+                execute=side_effect_mode,
             )
         )
 
@@ -565,7 +586,7 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
 
     executable_dispatches = [item for item in dispatches if item["ready"]]
     blocked_dispatches = [item for item in dispatches if not item["ready"]]
-    mode = "execute" if args.mode == "execute" and args.execute_ack == EXECUTE_ACK else "dry_run"
+    mode = "execute" if side_effect_mode else "dry_run"
     if args.mode == "execute" and args.execute_ack != EXECUTE_ACK:
         blocked_dispatches.append(
             {

@@ -220,9 +220,11 @@ Full-depth execution-surface collection is a separate lane from sampled research
 snapshot refresh: `collect_full_depth_execution_surface` dispatches
 `.github/workflows/collect-full-depth-execution-surface.yml`, which uses the
 deployed CLOB archive exporter on `tango-1-1` and emits
-`full_depth_execution_surface.v1`. Official-settlement repair remains blocked
-in the executor until there is a bounded, ACK-safe repair workflow; do not treat
-a sampled snapshot rerun as settlement repair.
+`full_depth_execution_surface.v1`. `repair_official_settlement_coverage`
+dispatches `.github/workflows/repair-official-settlement-coverage.yml`, which
+defaults to `mode=dry_run` and only mutates `pm_token_settlements` when the
+Research Manager executor itself is run with execute mode plus the required ACK.
+Do not treat a sampled snapshot rerun as settlement repair.
 
 `recorded-replay-parity.yml` defaults `since=auto` and `until=auto`. In auto
 mode it scans the target recording on `tango-1-1`, intersects that recording
