@@ -127,15 +127,12 @@ class SettlementProbabilityPrdGateTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertEqual(dispatches, [])
 
-    def test_explicit_legacy_snapshot_build_keeps_default_sampling_values(self):
-        dispatches = []
-
-        def capture_dispatch(workflow, fields, *, workflow_ref, dry_run):
-            dispatches.append((workflow, fields, workflow_ref, dry_run))
-            return None
-
-        status = self.run_main(
+    def test_legacy_snapshot_build_flag_is_removed(self):
+        with mock.patch.object(
+            sys,
+            "argv",
             [
+                "run_settlement_probability_prd_gate.py",
                 "--git-ref",
                 "main",
                 "--start-date",
@@ -145,20 +142,9 @@ class SettlementProbabilityPrdGateTests(unittest.TestCase):
                 "--allow-legacy-snapshot-build",
                 "--dry-run",
             ],
-            dispatch=capture_dispatch,
-        )
-
-        self.assertEqual(status, 0)
-        self.assertEqual(len(dispatches), 1)
-        workflow, fields, _, _ = dispatches[0]
-        self.assertEqual(workflow, gate.RESEARCH_SNAPSHOT_WORKFLOW)
-        options = json.loads(fields["options_json"])
-        self.assertEqual(options["lob_sample_secs"], 30)
-        self.assertEqual(options["pm_book_sample_secs"], 30)
-        self.assertEqual(options["observation_sample_secs"], 30)
-        self.assertEqual(options["max_quote_age_secs"], 30)
-        self.assertTrue(options["upload_sampled_snapshot"])
-        self.assertNotIn("upload_full_snapshot", options)
+        ):
+            with self.assertRaises(SystemExit):
+                gate.parse_args()
 
     def test_workflow_requires_snapshot_and_does_not_expose_legacy_build(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")

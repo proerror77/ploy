@@ -17,7 +17,7 @@ does not claim strategy profitability or dry-run readiness.
 - [x] Document the catalog as the source of truth for runtime input
       canonicalization.
 - [x] Run focused Python/Rust validation.
-- [ ] Land through PR.
+- [x] Land through PR.
 
 ### Review
 
@@ -39,6 +39,56 @@ does not claim strategy profitability or dry-run readiness.
   Updated `tests/test_strategy_config_contracts.py` to assert the current
   reviewed runtime score. Full legacy Python validation passed:
   `python3 -m unittest discover -s tests -p 'test_*.py'` (`284` tests).
+- 2026-05-25: PR #685 merged to `main` as
+  `d2ed71b9 Share AutoFactor runtime contract catalog (#685)`. Main Test run
+  `26369527506` passed.
+
+## Current Session - Legacy Research Cleanup (2026-05-25)
+
+Evidence stage: `diagnostic` / architecture cleanup. This removes legacy
+control-plane fallback paths; it is not strategy profitability, dry-run, or
+live-promotion evidence.
+
+### Scope
+
+- `scripts/run_settlement_probability_prd_gate.py`
+  - Owner: settlement-probability PRD gate orchestration.
+- `tests/test_settlement_probability_prd_gate.py`
+  - Owner: fail-closed regression coverage for retained snapshot requirement.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`,
+  `docs/runbooks/event-ml-automl-workflow.md`,
+  `docs/operations/data-jobs-inventory.md`
+  - Owner: remove stale legacy snapshot-build guidance.
+- `tasks/todo.md`
+  - Owner: session tracking and review evidence.
+
+### Tasks
+
+- [x] Confirm project semantics and Event ML / AutoFactor gate ordering.
+- [x] Re-scan current `main` for legacy research cleanup candidates.
+- [x] Remove the settlement-probability PRD gate's legacy snapshot-build
+      exception.
+- [x] Update docs so retained snapshot artifacts are the only PRD gate input
+      path.
+- [x] Run focused regression validation.
+
+### Review
+
+- 2026-05-25: Removed `--allow-legacy-snapshot-build` from
+  `scripts/run_settlement_probability_prd_gate.py`. Missing `--snapshot-run-id`
+  now always fails before dispatch, and the gate no longer dispatches
+  `research-snapshot.yml` as a fallback. Focused validation passed:
+  `python3 -m unittest tests.test_settlement_probability_prd_gate` and
+  `python3 -m py_compile scripts/run_settlement_probability_prd_gate.py
+  tests/test_settlement_probability_prd_gate.py`.
+- 2026-05-25: Agent-team review found no issues in the cleanup diff. Additional
+  validation passed:
+  `python3 -m unittest tests.test_settlement_probability_prd_gate
+  tests.test_persist_research_trace_contract`, Ruby YAML parse for
+  `settlement-probability-prd-gate.yml`,
+  `CARGO_TARGET_DIR=/tmp/ploy-legacy-cleanup-target /opt/homebrew/bin/timeout
+  300 rtk cargo test --locked --test workflow_security`, and
+  `rtk git diff --check`.
 
 ## Current Session - Ready Handoff Executor Dispatch (2026-05-24)
 
@@ -1670,6 +1720,8 @@ evidence is supplied.
 - [x] Reproduce the hosted failure as a snapshot contract mismatch.
 - [x] Leave snapshot-bound sampling options empty for retained snapshot runs.
 - [x] Keep legacy snapshot builds on explicit 30-second sampling defaults.
+      Superseded on 2026-05-25: the PRD gate's legacy snapshot-build exception
+      was removed, so retained snapshots are now required.
 - [x] Run focused validation.
 - [x] Commit, push, merge, and rerun the PRD gate from `main`.
 
@@ -1681,8 +1733,8 @@ evidence is supplied.
   those fields, causing hosted factor walk-forward run `26305481049` to fail
   closed before strategy evaluation. The fix keeps those options blank when an
   existing snapshot is supplied so the hosted workflow can resolve them from
-  `artifacts/research-snapshot/manifest.json`; legacy snapshot creation still
-  materializes the historical 30-second defaults.
+  `artifacts/research-snapshot/manifest.json`. The old legacy snapshot-creation
+  exception was later removed from the PRD gate on 2026-05-25.
 - 2026-05-23: Focused validation passed:
   `python3 -m unittest discover -s tests -p 'test_settlement_probability_prd_gate.py'`,
   `python3 -m py_compile scripts/run_settlement_probability_prd_gate.py tests/test_settlement_probability_prd_gate.py`,
@@ -6387,7 +6439,7 @@ evidence comes from Polymarket full CLOB depth, not top book.
 - [x] Route legacy snapshot-backed Factor Review V2 / Factor Walk-Forward V2
   workflow dispatches to GitHub-hosted artifact workflows. Direct
   `snapshot_run_id` requests now skip `ploy-ci-1`; the self-hosted branch is
-  retained only for fresh DB/private-network snapshot export.
+  retained only for fail-closed router compatibility.
 
 ## Review
 
