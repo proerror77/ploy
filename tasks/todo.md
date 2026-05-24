@@ -1,5 +1,45 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - AutoFactor Runtime Contract Catalog (2026-05-25)
+
+Evidence stage: `factor_attribution` / `runtime_parity` contract repair. This
+does not claim strategy profitability or dry-run readiness.
+
+### Tasks
+
+- [x] Verify current `main` already has durable `candidate_replay_tapes` and
+      Research Manager handoff execution, so this slice should not duplicate
+      that work.
+- [x] Add a shared AutoFactor runtime contract catalog for research input ->
+      runtime input projection and runtime blocker rules.
+- [x] Make Python promotion/replay helpers and Rust alpha-search consume the
+      shared catalog instead of mirrored input allow/block lists.
+- [x] Document the catalog as the source of truth for runtime input
+      canonicalization.
+- [x] Run focused Python/Rust validation.
+- [ ] Land through PR.
+
+### Review
+
+- 2026-05-25: Added `config/autofactor_runtime_contract_catalog.json` and made
+  Rust alpha-search plus Python promotion/replay validation consume it for
+  research-input projection and runtime-input blocker rules. Focused validation
+  passed:
+  `python3 -m unittest tests.test_autofactor_accounting_catalog tests.test_autofactor_strategy_promotion tests.test_build_autofactor_candidate_strategy_replay`,
+  `python3 -m unittest tests.test_persist_research_trace_contract tests.test_factor_research_os_registry`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-runtime-contract /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research runtime_contract --lib`,
+  `CARGO_TARGET_DIR=/tmp/ploy-autofactor-runtime-contract /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research autofactor_target_horizon_covers_repricing_and_settlement_catalog --lib`,
+  `rustfmt --edition 2024 --check crates/ploy-research/src/alpha_search.rs`,
+  and `rtk git diff --check`. Whole-file `rustfmt --check` on
+  `crates/ploy-research/src/autofactor.rs` still reports pre-existing formatting
+  drift outside this patch, so it was not used as a completion gate.
+- 2026-05-25: PR CI exposed a separate mainline test drift after the dry-run
+  config was promoted to
+  `autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted`.
+  Updated `tests/test_strategy_config_contracts.py` to assert the current
+  reviewed runtime score. Full legacy Python validation passed:
+  `python3 -m unittest discover -s tests -p 'test_*.py'` (`284` tests).
+
 ## Current Session - Ready Handoff Executor Dispatch (2026-05-24)
 
 Evidence stage: `dry_run_candidate` handoff execution planning. This creates

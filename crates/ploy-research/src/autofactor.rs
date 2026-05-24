@@ -23,8 +23,12 @@ const SELECTOR_GATE_FEATURES: [&str; 4] = [
 const ACCOUNTING_CATALOG_JSON: &str =
     include_str!("../../../config/autofactor_accounting_catalog.json");
 const ACCOUNTING_CATALOG_SCHEMA_VERSION: &str = "autofactor_accounting_catalog.v1";
+const RUNTIME_CONTRACT_CATALOG_JSON: &str =
+    include_str!("../../../config/autofactor_runtime_contract_catalog.json");
+const RUNTIME_CONTRACT_CATALOG_SCHEMA_VERSION: &str = "autofactor_runtime_contract_catalog.v1";
 
 static ACCOUNTING_CATALOG: OnceLock<AutoFactorAccountingCatalog> = OnceLock::new();
+static RUNTIME_CONTRACT_CATALOG: OnceLock<AutoFactorRuntimeContractCatalog> = OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
 struct AutoFactorAccountingCatalog {
@@ -43,6 +47,29 @@ pub struct AutoFactorTargetContract {
     pub full_depth_entry_required: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutoFactorRuntimeContractCatalog {
+    schema_version: String,
+    pub research_input_mappings: BTreeMap<String, AutoFactorRuntimeInputContract>,
+    pub formula_blockers: Vec<AutoFactorRuntimeFormulaBlocker>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutoFactorRuntimeInputContract {
+    #[serde(default)]
+    pub runtime_input_names: Vec<String>,
+    pub projection: Option<String>,
+    pub blocker: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutoFactorRuntimeFormulaBlocker {
+    #[serde(rename = "match")]
+    pub match_kind: String,
+    pub value: String,
+    pub blocker: String,
+}
+
 fn autofactor_accounting_catalog() -> &'static AutoFactorAccountingCatalog {
     ACCOUNTING_CATALOG.get_or_init(|| {
         let catalog: AutoFactorAccountingCatalog = serde_json::from_str(ACCOUNTING_CATALOG_JSON)
@@ -57,6 +84,19 @@ fn autofactor_accounting_catalog() -> &'static AutoFactorAccountingCatalog {
 
 pub fn autofactor_target_contract(target: &str) -> Option<&'static AutoFactorTargetContract> {
     autofactor_accounting_catalog().targets.get(target)
+}
+
+pub fn autofactor_runtime_contract_catalog() -> &'static AutoFactorRuntimeContractCatalog {
+    RUNTIME_CONTRACT_CATALOG.get_or_init(|| {
+        let catalog: AutoFactorRuntimeContractCatalog =
+            serde_json::from_str(RUNTIME_CONTRACT_CATALOG_JSON)
+                .expect("AutoFactor runtime contract catalog JSON must parse");
+        assert_eq!(
+            catalog.schema_version, RUNTIME_CONTRACT_CATALOG_SCHEMA_VERSION,
+            "unsupported AutoFactor runtime contract catalog schema"
+        );
+        catalog
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -3678,5 +3718,39 @@ mod tests {
         assert!(contract.full_depth_entry_required);
         assert_eq!(autofactor_target_horizon("experimental_target"), "unknown");
         assert!(autofactor_target_contract("experimental_target").is_none());
+    }
+
+    #[test]
+    fn autofactor_runtime_contract_catalog_covers_research_inputs_and_blockers() {
+        let catalog = autofactor_runtime_contract_catalog();
+        assert_eq!(
+            catalog.schema_version,
+            RUNTIME_CONTRACT_CATALOG_SCHEMA_VERSION
+        );
+        let near_strike = catalog
+            .research_input_mappings
+            .get("near_strike_score")
+            .expect("near strike mapping");
+        assert_eq!(
+            near_strike.runtime_input_names,
+            vec!["direction_sign", "distance_over_sigma"]
+        );
+        assert_eq!(
+            near_strike.projection.as_deref(),
+            Some("runtime_near_strike_score")
+        );
+        let external_pressure = catalog
+            .research_input_mappings
+            .get("external_pressure")
+            .expect("external pressure blocker");
+        assert_eq!(
+            external_pressure.blocker.as_deref(),
+            Some("runtime_input_semantics_mismatch:external_pressure")
+        );
+        assert!(catalog.formula_blockers.iter().any(|rule| {
+            rule.match_kind == "contains"
+                && rule.value == "iv_change"
+                && rule.blocker == "runtime_input_not_supplied:iv_change_1m"
+        }));
     }
 }

@@ -8,10 +8,18 @@ from scripts.autofactor_accounting_catalog import (
     autofactor_target_horizon,
     validate_autofactor_source_contract,
 )
+from scripts.autofactor_runtime_contract import (
+    RUNTIME_CONTRACT_CATALOG_SCHEMA_VERSION,
+    load_runtime_contract_catalog,
+    runtime_contract_supported_runtime_inputs,
+    runtime_input_blockers,
+    runtime_input_contract,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "config" / "autofactor_accounting_catalog.json"
+RUNTIME_CONTRACT_CATALOG = ROOT / "config" / "autofactor_runtime_contract_catalog.json"
 
 
 class AutoFactorAccountingCatalogTest(unittest.TestCase):
@@ -50,6 +58,31 @@ class AutoFactorAccountingCatalogTest(unittest.TestCase):
         self.assertEqual(
             validate_autofactor_source_contract(target="experimental", horizon="5m"),
             ["unknown_source_target:experimental"],
+        )
+
+    def test_runtime_contract_catalog_is_shared_input_mapping_source(self) -> None:
+        payload = json.loads(RUNTIME_CONTRACT_CATALOG.read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema_version"], RUNTIME_CONTRACT_CATALOG_SCHEMA_VERSION)
+        self.assertEqual(payload, load_runtime_contract_catalog())
+        self.assertEqual(
+            runtime_input_contract("near_strike_score"),
+            {
+                "runtime_input_names": ["direction_sign", "distance_over_sigma"],
+                "projection": "runtime_near_strike_score",
+            },
+        )
+        self.assertEqual(
+            runtime_input_contract("external_pressure"),
+            {"blocker": "runtime_input_semantics_mismatch:external_pressure"},
+        )
+        self.assertIn("settlement_edge", runtime_contract_supported_runtime_inputs())
+        self.assertIn("entry_capacity_ratio", runtime_contract_supported_runtime_inputs())
+        self.assertEqual(
+            runtime_input_blockers(["near_strike_score", "external_pressure", "iv_change_1m"]),
+            [
+                "runtime_input_semantics_mismatch:external_pressure",
+                "runtime_input_not_supplied:iv_change_1m",
+            ],
         )
 
 

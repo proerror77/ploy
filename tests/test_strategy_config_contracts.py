@@ -82,7 +82,7 @@ class StrategyConfigContractTests(unittest.TestCase):
         self.assertEqual(strategy["three_layer_strategy_profile"], "settlement_probability")
         self.assertEqual(
             strategy["three_layer_autofactor_runtime_score"],
-            "autofactor_formula:mcts_mcts_spread_adjusted_external_move_select_entry_price_quality_ge_025_select_entry_capacity_ge_025",
+            "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted",
         )
         self.assertEqual(Decimal(str(strategy["three_layer_min_entry_score"])), Decimal("0.10"))
 
