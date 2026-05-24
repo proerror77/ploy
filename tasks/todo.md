@@ -1,5 +1,55 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Evidence Inference (2026-05-24)
+
+Evidence stage: `walk_forward` / `executable_replay` closed-loop repair. This
+is not a dry-run or live promotion decision.
+
+### Tasks
+
+- [x] Rerun Research Trace Plan after replay-fed hosted walk-forward
+      `26362501135` persisted trace.
+- [x] Verify the remaining Research Manager blocker is true strategy
+      economics, not stale data/full-depth/runtime plumbing.
+- [x] Reproduce the executor gap where hidden runtime replay/full-depth proof
+      artifact ids were only carried when supplied manually.
+- [x] Make Research Manager executor infer the latest
+      `runtime_market_update_replay` artifact from trace-plan evidence.
+- [x] Make Research Manager executor infer reusable full-depth proof from the
+      latest hosted walk-forward artifact when the trace carries a valid
+      full-depth execution-surface proof.
+- [x] Teach hosted walk-forward to download full-depth proof from a prior
+      `factor-walk-forward-v2-*` artifact by stripping the embedded
+      `full-depth-execution-surface` directory.
+- [x] Run focused Python, workflow static, YAML, and Rust workflow-security
+      validation.
+- [ ] Commit, push, open PR, wait for CI, merge, then run Research Manager
+      executor from trace-plan `26362759645` in execute mode.
+
+### Review
+
+- 2026-05-24: Research Trace Plan run `26362759645` from
+  `main@b7e75f5` returned `theme=revise_prior`, `candidate_count=8`, actions
+  `generate_typed_llm_prior_json` and
+  `rerun_alpha_search_with_bounded_mutations`, and only blocker action
+  `strategy_economics -> mutate_or_reject_negative_runtime_edge`. No stale
+  `fix_data`, full-depth, settlement, or runtime-replay blocker reappeared.
+- 2026-05-24: Local executor replay against the real trace-plan artifact now
+  emits one ready hosted walk-forward dispatch with:
+  `candidate_strategy_replay_run_id=26355035577`,
+  `candidate_strategy_replay_artifact_name=runtime-candidate-replay-26355035577`,
+  `full_depth_execution_surface_run_id=26362501135`,
+  `full_depth_execution_surface_artifact_name=factor-walk-forward-v2-26362501135`,
+  and target lane `tradeable_full_depth_settlement_pnl`.
+- 2026-05-24: Focused validation passed:
+  `python3 -m unittest tests.test_research_manager_execute_plan
+  tests.test_factor_walk_forward_sweep` (`33` tests),
+  `python3 -m py_compile scripts/research_manager_execute_plan.py
+  tests/test_research_manager_execute_plan.py
+  tests/test_factor_walk_forward_sweep.py`, YAML parse for the touched
+  workflows, `rtk cargo test --locked --test workflow_security
+  factor_walk_forward` (`5` passed), and `rtk git diff --check`.
+
 ## Current Session - Research Manager Latest Blockers (2026-05-24)
 
 Evidence stage: Research Manager planning repair after `walk_forward` /
@@ -22,7 +72,7 @@ decision.
       blocker shape.
 - [x] Fix frontier-run blocker extraction so historical runs and unselected
       factor registry entries do not drive the current plan.
-- [ ] Commit, push, open PR, wait for CI, merge, then redeploy/refresh the
+- [x] Commit, push, open PR, wait for CI, merge, then redeploy/refresh the
       deployed `research-trace-plan` binary before rerunning the workflow.
 - [x] Run Research Manager executor in dry-run mode from corrected trace-plan
       artifact.

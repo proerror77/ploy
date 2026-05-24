@@ -196,6 +196,72 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
         self.assertEqual("revise_prior", prior["theme"])
         self.assertEqual(plan["plan"]["blocker_actions"], prior["blocker_actions"])
 
+    def test_revise_prior_infers_latest_replay_and_full_depth_artifacts(self) -> None:
+        plan = plan_payload(
+            "revise_prior",
+            ["generate_typed_llm_prior_json", "rerun_alpha_search_with_bounded_mutations"],
+        )
+        plan["input"]["latest_runs"] = {
+            "runs": [
+                {
+                    "run_id": "26362501135",
+                    "artifacts": [
+                        {
+                            "output_json": {
+                                "candidate_strategy_replay": {
+                                    "basis": "runtime_market_update_replay",
+                                    "runtime_score": "autofactor_formula:prior_candidate",
+                                    "source_workflow": "runtime-candidate-replay.yml",
+                                    "workflow_run_id": "26355035577",
+                                    "strategy_profile": "settlement_probability",
+                                    "decision_contract": {
+                                        "target": "tradeable_full_depth_settlement_pnl",
+                                        "horizon": "5m",
+                                    },
+                                },
+                                "source_snapshot_contract": {
+                                    "full_depth_execution_surface_proofs": [
+                                        {
+                                            "valid": True,
+                                            "surface": "clob_orderbook_snapshots",
+                                            "path": "artifacts/full-depth-execution-surface/full-depth-execution-surface.json",
+                                        }
+                                    ],
+                                    "satisfied_execution_surfaces": ["clob_orderbook_snapshots"],
+                                },
+                            }
+                        }
+                    ],
+                }
+            ]
+        }
+
+        payload = build_executor_payload(
+            base_args(
+                mode="execute",
+                execute_ack=EXECUTE_ACK,
+                snapshot_run_id="26354463118",
+            ),
+            plan,
+        )
+
+        options = json.loads(payload["dispatches"][0]["fields"]["options_json"])
+        self.assertEqual("26355035577", options["candidate_strategy_replay_run_id"])
+        self.assertEqual(
+            "runtime-candidate-replay-26355035577",
+            options["candidate_strategy_replay_artifact_name"],
+        )
+        self.assertEqual("26362501135", options["full_depth_execution_surface_run_id"])
+        self.assertEqual(
+            "factor-walk-forward-v2-26362501135",
+            options["full_depth_execution_surface_artifact_name"],
+        )
+        self.assertEqual(
+            "tradeable_full_depth_settlement_pnl",
+            options["alpha_search_plan_target"],
+        )
+        self.assertEqual("tradeable_full_depth_settlement_pnl", options["allowed_target"])
+
     def test_fix_runtime_plan_maps_to_candidate_replay_and_parity(self) -> None:
         payload = build_executor_payload(
             Namespace(

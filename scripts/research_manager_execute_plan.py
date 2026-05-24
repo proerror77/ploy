@@ -437,12 +437,17 @@ def _runtime_candidate_from_plan(
     return None
 
 
-def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str, str]:
+def _latest_run(plan_payload: dict[str, Any]) -> dict[str, Any]:
     latest_runs = ((plan_payload.get("input") or {}).get("latest_runs") or {})
     runs = latest_runs.get("runs")
-    if not isinstance(runs, list) or not runs:
-        return {}
-    artifacts = (runs[0] or {}).get("artifacts")
+    if isinstance(runs, list) and runs and isinstance(runs[0], dict):
+        return runs[0]
+    return {}
+
+
+def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str, str]:
+    latest_run = _latest_run(plan_payload)
+    artifacts = latest_run.get("artifacts")
     if not isinstance(artifacts, list):
         return {}
     for artifact in artifacts:
@@ -467,7 +472,46 @@ def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str,
             "horizon": str(contract.get("horizon") or source_factor.get("horizon") or ""),
             "runtime_score": str(replay.get("runtime_score") or ""),
             "strategy_profile": str(replay.get("strategy_profile") or ""),
+            "workflow_run_id": str(replay.get("workflow_run_id") or ""),
+            "source_workflow": str(replay.get("source_workflow") or ""),
         }
+    return {}
+
+
+def _latest_valid_full_depth_surface_artifact(plan_payload: dict[str, Any]) -> dict[str, str]:
+    latest_run = _latest_run(plan_payload)
+    latest_run_id = str(latest_run.get("run_id") or latest_run.get("workflow_run_id") or "")
+    if not latest_run_id:
+        return {}
+    artifacts = latest_run.get("artifacts")
+    if not isinstance(artifacts, list):
+        return {}
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        output = artifact.get("output_json")
+        if not isinstance(output, dict):
+            continue
+        snapshot_contract = output.get("source_snapshot_contract")
+        if not isinstance(snapshot_contract, dict):
+            continue
+        proofs = snapshot_contract.get("full_depth_execution_surface_proofs")
+        if not isinstance(proofs, list):
+            continue
+        for proof in proofs:
+            if not isinstance(proof, dict):
+                continue
+            if proof.get("valid") is not True:
+                continue
+            if proof.get("surface") != "clob_orderbook_snapshots":
+                continue
+            blockers = proof.get("blockers")
+            if isinstance(blockers, list) and blockers:
+                continue
+            return {
+                "run_id": latest_run_id,
+                "artifact_name": f"factor-walk-forward-v2-{latest_run_id}",
+            }
     return {}
 
 
@@ -544,6 +588,7 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
     action_names = {item["action"] for item in blocker_actions}
     snapshot_actions = {"rerun_snapshot_data_audit", "repair_or_exclude_missing_data_surface"}
     latest_replay_contract = _latest_candidate_replay_contract(plan_payload)
+    latest_full_depth_surface_artifact = _latest_valid_full_depth_surface_artifact(plan_payload)
     walk_forward_target = latest_replay_contract.get("target") or getattr(
         args,
         "runtime_source_target",
@@ -619,22 +664,32 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                     args,
                     "candidate_strategy_replay_run_id",
                     "",
-                ),
+                )
+                or latest_replay_contract.get("workflow_run_id", ""),
                 candidate_strategy_replay_artifact_name=getattr(
                     args,
                     "candidate_strategy_replay_artifact_name",
                     "",
+                )
+                or (
+                    f"runtime-candidate-replay-{latest_replay_contract['workflow_run_id']}"
+                    if latest_replay_contract.get("workflow_run_id")
+                    and latest_replay_contract.get("source_workflow")
+                    == "runtime-candidate-replay.yml"
+                    else ""
                 ),
                 full_depth_execution_surface_run_id=getattr(
                     args,
                     "full_depth_execution_surface_run_id",
                     "",
-                ),
+                )
+                or latest_full_depth_surface_artifact.get("run_id", ""),
                 full_depth_execution_surface_artifact_name=getattr(
                     args,
                     "full_depth_execution_surface_artifact_name",
                     "",
-                ),
+                )
+                or latest_full_depth_surface_artifact.get("artifact_name", ""),
             )
         )
 
