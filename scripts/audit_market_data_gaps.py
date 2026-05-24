@@ -269,6 +269,12 @@ def classify_coverage(row: dict[str, Any], target: GapTarget) -> tuple[str, list
     reasons: list[str] = []
     status = "ok"
 
+    expected_buckets = int(row.get("expected_buckets") or 0)
+    present_buckets = int(row.get("present_buckets") or 0)
+    if expected_buckets > 0 and present_buckets == 0:
+        status = "critical"
+        reasons.append(f"no covered buckets in audited window: 0/{expected_buckets}")
+
     if not target.ignore_max_gap:
         max_gap_minutes = int(row.get("max_gap_minutes") or 0)
         if max_gap_minutes >= target.max_gap_critical_minutes:

@@ -52,9 +52,9 @@ Expected: PASS
 - Create: `deployment/ploy-platform-watchdog.timer`
 - Historical modify target: `scripts/install-service.sh`
 
-Note: `scripts/install-service.sh` has since moved to
-`scripts/archive/legacy-root-runtime/install-service.sh`. The active
-maintenance/watchdog install path is now `scripts/install-platform-service.sh`
+Note: the old `scripts/install-service.sh` compatibility path has since been
+removed with the retired legacy root-runtime archive. The active
+maintenance/watchdog install path is `scripts/install-platform-service.sh`
 through `.github/workflows/release-platform.yml`.
 
 **Step 1: Add systemd units**

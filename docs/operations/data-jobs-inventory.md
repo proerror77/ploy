@@ -64,30 +64,19 @@ collection behavior.
 | --- | --- | --- | --- |
 | `scripts/install-platform-service.sh` | canonical platform release installer | release-platform | Active `release-platform.yml` bundle/install/execute path; now also owns host-support maintenance/watchdog unit installation; guarded by `tests/platform_release_workflow.rs`; do not archive. |
 
-## Archived Legacy Research Scripts
+## Removed Legacy Assets
 
-| Surface | Archived Path | Reason |
-| --- | --- | --- |
-| `scripts/simulate_backtest.py` | `scripts/archive/research-debug/simulate_backtest.py` | Legacy standalone simulator; canonical evidence is produced by Rust/backtest and hosted snapshot-backed workflows. |
-| `scripts/train_crypto_lob_mlp_onnx_from_db.py` | `scripts/archive/research-debug/train_crypto_lob_mlp_onnx_from_db.py` | Self-deprecated MLP trainer; active LOB ML docs point to the TCN training entry. |
-| `scripts/train_crypto_binance_threshold_tcn_onnx_from_db.py` | `scripts/archive/research-debug/train_crypto_binance_threshold_tcn_onnx_from_db.py` | Binance-first threshold trainer prototype; no active workflow, runbook, checklist, or test calls it. |
-| `scripts/train_crypto_lob_tick_settlement_onnx_from_db.py` | `scripts/archive/research-debug/train_crypto_lob_tick_settlement_onnx_from_db.py` | Legacy CLOB/trade-tick settlement trainer prototype; no active workflow, runbook, checklist, or test calls it. |
-| `scripts/copycat_dry_run.py` | `scripts/archive/research-debug/copycat_dry_run.py` | Public-profile copy-trading prototype; future copy-trading work should use canonical `MarketUpdate`/runtime path and runtime evidence. |
-| `scripts/reverse_engineered_strategy_dry_run.py` | `scripts/archive/research-debug/reverse_engineered_strategy_dry_run.py` | Public-profile reverse-engineering prototype; not a canonical research, replay, or dry-run handoff path. |
-| `scripts/check_db.rs` | `scripts/archive/legacy-research-tools/check_db.rs` | Duplicate DB diagnostic; canonical ops path is `/opt/ploy/bin/ploy-runner check-db`. |
-| `scripts/check_db_data.rs` | `scripts/archive/legacy-research-tools/check_db_data.rs` | Duplicate DB diagnostic; canonical ops path is `/opt/ploy/bin/ploy-runner check-db`. |
-| `scripts/collect_data.py` | `scripts/archive/legacy-research-tools/collect_data.py` | Generic Binance kline CSV collector; research now starts from retained snapshot artifacts. |
-| `scripts/collect_klines.sh` | `scripts/archive/legacy-research-tools/collect_klines.sh` | Generic Binance kline CSV collector; research now starts from retained snapshot artifacts. |
-| `scripts/discover_new_markets.py` | `scripts/archive/legacy-research-tools/discover_new_markets.py` | Local DB market discovery prototype; canonical discovery is Rust market-data / deployed collector flow. |
-| `scripts/discover_pm_updown_markets.py` | `scripts/archive/legacy-research-tools/discover_pm_updown_markets.py` | CLI-based discovery prototype; canonical discovery is Rust market-data / deployed collector flow. |
-| `scripts/install-service.sh` | `scripts/archive/legacy-root-runtime/install-service.sh` | Legacy host-support installer; maintenance/watchdog unit ownership moved to `install-platform-service.sh` and `release-platform.yml`. |
-| `scripts/backfill_quotes.py` | `scripts/archive/data-repair/backfill_quotes.py` | Historical synthetic quote repair for March 2026 gaps; no active workflow/test/runbook caller. |
-| `scripts/backfill_quotes.sh` | `scripts/archive/data-repair/backfill_quotes.sh` | Historical SQL quote repair variant; superseded by live collectors and retained as provenance only. |
-| `scripts/backfill_quotes_fixed.sh` | `scripts/archive/data-repair/backfill_quotes_fixed.sh` | Historical SQL quote repair variant; superseded by live collectors and retained as provenance only. |
-| `scripts/backfill_quotes_improved.sh` | `scripts/archive/data-repair/backfill_quotes_improved.sh` | Historical SQL quote repair variant; superseded by live collectors and retained as provenance only. |
-| `scripts/backfill_quotes_final.sh` | `scripts/archive/data-repair/backfill_quotes_final.sh` | Historical SQL quote repair variant; superseded by live collectors and retained as provenance only. |
-| `scripts/deploy_7_symbols.sh` | `scripts/archive/legacy-root-runtime/deploy_7_symbols.sh` | Manual host binary copy/restart script; deployment must use CI-built artifacts and workflows. |
-| `scripts/deploy-ploy-runner.sh` | `scripts/archive/legacy-root-runtime/deploy-ploy-runner.sh` | Manual host binary/config/systemd mutation script; deployment must use CI-built artifacts and workflows. |
+The repository no longer keeps executable legacy archives for retired
+root-runtime deploy scripts, local CSV research collectors, public-profile
+copy-trading prototypes, duplicate DB diagnostics, historical quote backfills,
+or inactive DB-backed ML trainers. Those paths were removed after active docs,
+tests, workflows, and runbooks had already moved to the canonical surfaces
+above.
+
+Historical provenance for those retired assets is preserved in git history and
+in the prior cleanup PRs referenced by the research architecture review. Do not
+reintroduce them as compatibility wrappers; create a new owner, runbook, and
+promotion-safe evidence path instead.
 
 ## Guardrails
 

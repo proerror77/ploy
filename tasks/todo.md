@@ -122,6 +122,46 @@ not a dry-run or live promotion decision.
   `snapshot_contract_blocks_execution_claim` blockers while correctly keeping
   official-settlement and ROI blockers.
 
+## Current Session - Legacy Archive Removal And Data Gate Repair (2026-05-24)
+
+Evidence stage: architecture/data-plane cleanup plus `walk_forward` /
+`executable_replay` gate repair. This is not a dry-run or live promotion
+decision.
+
+### Tasks
+
+- [x] Reconfirm project semantics and Event ML / AutoFactor workflow gates.
+- [x] Use Agent Team read-only review for retired archive candidates and current
+      data/research-chain blockers.
+- [x] Remove retired legacy root-runtime, research-debug, data-repair, and
+      archived workflow assets from the active repository.
+- [x] Update docs and inventories so active guidance no longer points at the
+      removed archive payload.
+- [x] Fail closed when a market-data coverage audit has zero covered buckets
+      even if missing buckets are otherwise ignored for sparse PM tables.
+- [x] Make walk-forward sweep ignore stale candidate replay artifacts when their
+      runtime score, target, or horizon belongs to a different candidate.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+### Review
+
+- 2026-05-24: Full-depth execution-surface proof is now consumed by main, but
+  latest replay-fed hosted run `26352016263` is still correctly blocked on
+  official settlement coverage and negative executable replay ROI. The strategy
+  is not ready for dry-run.
+- 2026-05-24: Agent Team review found the remaining architecture risk is not
+  orchestration availability; it is evidence split across sampled snapshot,
+  external full-depth proof, and candidate replay. This slice removes the
+  retired alternate architecture and tightens two fail-closed data gates before
+  the next research rerun.
+- 2026-05-24: Focused validation passed: `python3 -m unittest discover -s tests
+  -p 'test_*.py'` (`267` tests), targeted AutoFactor/audit tests (`106` tests),
+  Python compile for touched scripts plus `scripts/*.py` / `scripts/ci/*.py`,
+  `bash -n` for root shell scripts, active workflow YAML parse, `rtk cargo test
+  --locked --test workflow_security`, retired archive reference scan, and `rtk
+  git diff --check`.
+
 ## Current Session - Market Data Promotion Blocker Actions (2026-05-24)
 
 Evidence stage: architecture/data-plane cleanup and research workflow planning;
@@ -258,9 +298,8 @@ live data mutation.
 - 2026-05-24: `scripts/train_crypto_lob_tcn_onnx_from_db.py` remains active
   because the LOB ML architecture note and deploy checklist still name it as the
   training entrypoint. The Binance-threshold and CLOB/trade-tick settlement
-  trainers have only schema-map/inventory references, so they are being retained
-  under `scripts/archive/research-debug/` as research provenance instead of
-  executable-looking root scripts.
+  trainers had only schema-map/inventory references, so they were first isolated
+  from active root scripts and are now removed with the retired archive payload.
 - 2026-05-24: Focused validation passed: root active-reference check for the
   archived trainer names, Python compile for the two archived trainers plus the
   retained LOB TCN trainer, `python3 -m unittest
@@ -278,8 +317,8 @@ live data mutation.
 - [x] Start a fresh cleanup branch from current `origin/main`.
 - [x] Confirm quote backfill variants have no active workflow/test/runbook
       callers.
-- [x] Archive historical quote backfill variants under
-      `scripts/archive/data-repair/`.
+- [x] Archive historical quote backfill variants, then remove the retired
+      archive payload once active references were gone.
 - [x] Keep active orderbook archive, break-glass factor research, and LOB TCN
       training entrypoints unchanged.
 - [x] Run focused validation.
@@ -290,8 +329,8 @@ live data mutation.
 - 2026-05-24: The archived quote backfill scripts are historical synthetic
   quote repair variants for March 2026 gaps. They hard-code local DB defaults
   and old repair windows, and no active workflow, test, runbook, or README calls
-  them. They are retained under `scripts/archive/data-repair/` for repair
-  provenance instead of remaining executable-looking root scripts.
+  them. They were first isolated as provenance and are now removed from the
+  active repository; git history preserves the old repair variants.
 - 2026-05-24: Focused validation passed: active root-reference check,
   `bash -n` for archived shell scripts, `python3 -m py_compile` for archived
   Python, `python3 -m unittest tests.test_persist_research_trace_contract`, and
@@ -397,18 +436,15 @@ Evidence stage: architecture/data-plane cleanup after restored
 - 2026-05-24: PR #643 is merged as
   `54acdf3041a686ac0b4211705abb8cfa9ec9d404`; this slice continues legacy
   separation from current `main`.
-- 2026-05-24: `scripts/copycat_dry_run.py` and
-  `scripts/reverse_engineered_strategy_dry_run.py` are public-profile research
-  prototypes, not canonical `MarketUpdate`/runtime replay or dry-run handoff
-  paths, so they were moved under `scripts/archive/research-debug/` while
-  retaining their unit tests as archived-prototype compatibility checks.
+- 2026-05-24: The retired public-profile copy-trading and reverse-engineering
+  dry-run prototypes are not canonical `MarketUpdate`/runtime replay or dry-run
+  handoff paths. Their archived copies and archived-prototype tests are now
+  removed from the active repository.
 - 2026-05-24: Agent Team review confirmed `scripts/install-platform-service.sh`
   remains the active `release-platform.yml` host installer and must not be
   archived. `scripts/install-service.sh` was left for the follow-up
   maintenance/watchdog ownership cleanup.
 - 2026-05-24: Focused validation passed:
-  `python3 -B -m unittest tests.test_copycat_dry_run
-  tests.test_reverse_engineered_strategy`,
   `python3 -m py_compile` for the archived scripts and tests, root-script
   absence/archive-presence check, active import absence check, and
   `rtk git diff --check`.
@@ -436,8 +472,8 @@ Evidence stage: architecture/data-plane cleanup after restored
 - 2026-05-24: The active research chain is now artifact-backed:
   `research-snapshot.yml` -> hosted factor review/walk-forward -> durable
   trace -> runtime replay. Legacy local CSV and manual deploy helpers were
-  moved under `scripts/archive/` so active `scripts/` no longer advertises them
-  as runnable operational paths.
+  first isolated away from active root scripts and are now removed from the
+  active repository.
 - 2026-05-24: Focused validation passed: Python compile for archived Python
   scripts, `bash -n` for archived shell scripts, `python3 -m unittest
   tests.test_persist_research_trace_contract`, root-script absence check for
@@ -715,11 +751,9 @@ trace, not dry-run promotion.
   `26333447143` with the snapshot-scoped symbols succeeded, uploaded
   `research-trace/persisted.env`, and recorded
   `evidence_stages=factor_attribution,walk_forward`.
-- 2026-05-23: Archived `scripts/simulate_backtest.py` and the self-deprecated
-  `scripts/train_crypto_lob_mlp_onnx_from_db.py` under
-  `scripts/archive/research-debug/`. Kept `run_factor_research*.sh` as
-  explicit break-glass and left quote backfill scripts untouched pending repair
-  completion evidence.
+- 2026-05-23: Archived the retired standalone simulator and self-deprecated LOB
+  MLP trainer; the current cleanup removes that retired archive payload while
+  keeping direct factor research wrappers as explicit break-glass paths.
 - 2026-05-23: Added candidate replay stage/basis hardening.
   `persist_research_trace` now derives canonical replay `evidence_stage` from
   `basis` and rejects spoofed contradictions such as top-bucket diagnostic
@@ -11498,8 +11532,8 @@ Close `R-45` by making `tango-2-1` a first-class staging target with a dedicated
 
 - `.github/workflows/release-staging.yml`
   - owner: CI-built staging bundle, tracked SQLx migrations, and scoped dry-run service restart flow
-- `docs/AWS_EC2_DEPLOYMENT_RUNBOOK.md`
-  - owner: staging host/runbook guidance for `tango-2-1`
+- Removed EC2 deployment runbook
+  - historical owner: staging host/runbook guidance for `tango-2-1`
 - `docs/DRY_RUN_PLATFORM_CHECKLIST.md`
   - owner: preflight checklist for the staging release path
 - `tests/staging_workflow.rs`
@@ -11516,7 +11550,7 @@ Close `R-45` by making `tango-2-1` a first-class staging target with a dedicated
 ## Progress notes
 
 - 2026-03-12: Added [release-staging.yml](/Users/proerror/Documents/ploy-order-intent-clean/.github/workflows/release-staging.yml) with a dedicated build job, artifact upload/download flow, tracked `sqlx migrate run`, and a scoped restart list for `ploy-sports-pm`, `ploy-crypto-collector`, `ploy-crypto-dryrun`, `ploy-orderbook-history`, and `ploy-maintenance.timer`.
-- 2026-03-12: Updated [AWS_EC2_DEPLOYMENT_RUNBOOK.md](/Users/proerror/Documents/ploy-order-intent-clean/docs/AWS_EC2_DEPLOYMENT_RUNBOOK.md) and [DRY_RUN_PLATFORM_CHECKLIST.md](/Users/proerror/Documents/ploy-order-intent-clean/docs/DRY_RUN_PLATFORM_CHECKLIST.md) so `tango-2-1` is explicitly treated as the staging host and the first-class workflow is documented as the preferred path.
+- 2026-03-12: Updated the now-removed AWS EC2 deployment runbook and [DRY_RUN_PLATFORM_CHECKLIST.md](/Users/proerror/Documents/ploy-order-intent-clean/docs/DRY_RUN_PLATFORM_CHECKLIST.md) so `tango-2-1` is explicitly treated as the staging host and the first-class workflow is documented as the preferred path.
 - 2026-03-12: Added [staging_workflow.rs](/Users/proerror/Documents/ploy-order-intent-clean/tests/staging_workflow.rs) to guard `environment: staging`, `tango-2-1`, artifact upload/download, tracked SQLx migrations, and the absence of host-side Rust builds in the deploy job.
 - 2026-03-12: Validation passed:
   - `CARGO_TARGET_DIR=/tmp/ploy-r45-green rtk cargo test release_staging_workflow_is_first_class_and_artifact_based --test staging_workflow -- --exact --nocapture`

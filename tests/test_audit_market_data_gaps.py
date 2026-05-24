@@ -61,6 +61,36 @@ class AuditMarketDataGapsTests(unittest.TestCase):
         self.assertEqual(coverage_status, "critical")
         self.assertIn("max gap 3800m >= 15m", reasons)
 
+    def test_coverage_gate_blocks_zero_coverage_even_when_missing_buckets_are_ignored(self):
+        target = audit.GapTarget(
+            "polymarket_orderbooks",
+            "clob_orderbook_snapshots",
+            "received_at",
+            900,
+            ignore_max_gap=True,
+            ignore_missing_buckets=True,
+        )
+        row = {
+            "latest_at": "2026-05-09T13:05:00+08:00",
+            "latest_lag_seconds": 1,
+            "expected_buckets": 288,
+            "present_buckets": 0,
+            "max_gap_minutes": 1440,
+            "missing_buckets": 288,
+        }
+
+        status, reasons, _, _, coverage_status, coverage_reasons = audit.classify_gap_for_gate(
+            row,
+            target,
+            "coverage",
+            historical_window=True,
+        )
+
+        self.assertEqual(status, "critical")
+        self.assertEqual(coverage_status, "critical")
+        self.assertIn("no covered buckets in audited window: 0/288", reasons)
+        self.assertIn("no covered buckets in audited window: 0/288", coverage_reasons)
+
     def test_freshness_gate_still_blocks_stale_source(self):
         target = audit.GapTarget(
             "binance_agg_trades/BTCUSDT",

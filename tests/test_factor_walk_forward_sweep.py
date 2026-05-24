@@ -280,6 +280,64 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertEqual(summary["variants"][0]["qualified_count"], 1)
         self.assertIn("auto_settlement_conservative_settlement_edge", summary_md)
 
+    def test_external_replay_identity_mismatch_is_replaced_with_variant_replay(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = self.fake_binary(tmp)
+            subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--candidate-strategy-replay-json",
+                    str(
+                        self.replay_file(
+                            tmp,
+                            "autofactor_formula:stale_previous_candidate",
+                        )
+                    ),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            summary = json.loads((tmp / "out" / "sweep-summary.json").read_text(encoding="utf-8"))
+            replay = json.loads(
+                (tmp / "out" / "candidate-strategy-replay.json").read_text(encoding="utf-8")
+            )
+            promotion = json.loads(
+                (tmp / "out" / "autofactor-strategy-promotion.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        variant = summary["variants"][0]
+        self.assertIn(
+            "candidate_strategy_replay_runtime_score_mismatch:"
+            "autofactor_formula:stale_previous_candidate!="
+            "autofactor_formula:auto_settlement_conservative_settlement_edge",
+            variant["ignored_candidate_strategy_replay_reasons"],
+        )
+        self.assertEqual(variant["candidate_replay_exit_code"], 0)
+        self.assertEqual(replay["basis"], "factor_walk_forward_top_bucket_aggregate")
+        self.assertEqual(
+            replay["runtime_score"],
+            "autofactor_formula:auto_settlement_conservative_settlement_edge",
+        )
+        blockers = promotion["evaluated_factors"][0]["blockers"]
+        self.assertIn(
+            "candidate_strategy_replay_not_runtime_replay:"
+            "factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
+            blockers,
+        )
+        self.assertFalse(
+            any(
+                blocker.startswith("candidate_strategy_replay_runtime_score_mismatch:")
+                for blocker in blockers
+            )
+        )
+
     def test_builds_blocked_aggregate_candidate_replay_when_missing(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
