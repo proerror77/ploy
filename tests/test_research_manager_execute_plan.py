@@ -372,10 +372,27 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
         self.assertEqual("2026-04-21T00:00:00Z", full_depth_options["start_ts"])
         self.assertEqual("2026-04-21T12:00:00Z", full_depth_options["end_ts"])
         self.assertEqual(12, full_depth_options["max_hours"])
-        self.assertFalse(payload["dispatches"][2]["ready"])
-        self.assertIn(
-            "missing_bounded_settlement_repair_workflow",
-            payload["dispatches"][2]["blockers"],
+        self.assertTrue(payload["dispatches"][2]["ready"])
+        settlement_options = json.loads(payload["dispatches"][2]["fields"]["options_json"])
+        self.assertEqual("dry_run", settlement_options["mode"])
+        self.assertEqual("", payload["dispatches"][2]["fields"]["execute_ack"])
+        self.assertEqual("2026-04-21T00:00:00Z", settlement_options["start_ts"])
+        self.assertEqual("2026-04-23T00:00:00Z", settlement_options["end_ts"])
+
+    def test_execute_mode_passes_execute_to_settlement_repair_after_ack(self) -> None:
+        plan = plan_payload("fix_data", ["repair_official_settlement_coverage"])
+        payload = build_executor_payload(
+            base_args(mode="execute", execute_ack=EXECUTE_ACK),
+            plan,
+        )
+
+        self.assertEqual("execute", payload["mode"])
+        self.assertEqual("repair-official-settlement-coverage.yml", payload["dispatches"][0]["workflow"])
+        settlement_options = json.loads(payload["dispatches"][0]["fields"]["options_json"])
+        self.assertEqual("execute", settlement_options["mode"])
+        self.assertEqual(
+            "repair-official-settlement-coverage",
+            payload["dispatches"][0]["fields"]["execute_ack"],
         )
 
     def test_full_depth_action_without_snapshot_rerun_does_not_dispatch_sampled_snapshot(self) -> None:
