@@ -148,7 +148,10 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
     }
 
     if blocker_actions.iter().any(|item| {
-        item.blocker_family == "search_power" || item.blocker_family == "execution_fillability"
+        matches!(
+            item.blocker_family.as_str(),
+            "search_power" | "execution_fillability" | "strategy_economics"
+        )
     }) {
         return Ok(plan_with_blocker_actions(
             "revise_prior",
@@ -272,8 +275,7 @@ fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAc
     let mut actions = Vec::new();
     let latest = input.latest_runs.to_string().to_lowercase();
     let market_data = input.market_data_health.to_string().to_lowercase();
-    let rejected = input.rejected_factor_patterns.to_string().to_lowercase();
-    let runtime_or_promotion_blockers = format!("{latest} {rejected}");
+    let runtime_or_promotion_blockers = latest;
 
     if contains_any_text(
         &runtime_or_promotion_blockers,
@@ -328,6 +330,22 @@ fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAc
             "execution_fillability",
             "prefer_high_fillability_depth_filters",
             "Candidate selection must avoid thin depth or low-fillability entry surfaces.",
+        ));
+    }
+    if contains_any_text(
+        &runtime_or_promotion_blockers,
+        &[
+            "roi_too_low",
+            "candidate_strategy_replay_roi_too_low",
+            "total_pnl_nonpositive",
+            "walk_forward_oos",
+            "negative_runtime_edge",
+        ],
+    ) {
+        actions.push(blocker_action(
+            "strategy_economics",
+            "mutate_or_reject_negative_runtime_edge",
+            "Latest replay or walk-forward evidence failed economic/OOS gates.",
         ));
     }
     if contains_any_text(
@@ -582,9 +600,10 @@ mod tests {
         ))
         .expect("plan");
         assert_eq!(plan.theme, "revise_prior");
-        assert!(plan
-            .actions
-            .contains(&"generate_typed_llm_prior_json".to_string()));
+        assert!(
+            plan.actions
+                .contains(&"generate_typed_llm_prior_json".to_string())
+        );
     }
 
     #[test]
@@ -618,9 +637,10 @@ mod tests {
 
         let plan = plan_next_research(&input).expect("plan");
         assert_eq!(plan.theme, "candidate_to_runtime_replay");
-        assert!(plan
-            .actions
-            .contains(&"build_runtime_candidate_replay".to_string()));
+        assert!(
+            plan.actions
+                .contains(&"build_runtime_candidate_replay".to_string())
+        );
     }
 
     #[test]
@@ -637,12 +657,63 @@ mod tests {
         .expect("plan");
 
         assert_eq!(plan.theme, "revise_prior");
-        assert!(plan
-            .actions
-            .contains(&"generate_typed_llm_prior_json".to_string()));
+        assert!(
+            plan.actions
+                .contains(&"generate_typed_llm_prior_json".to_string())
+        );
         assert!(plan.blocker_actions.iter().any(|item| {
             item.blocker_family == "search_power"
                 && item.action == "increase_distinct_event_coverage_or_reduce_selectivity"
+        }));
+    }
+
+    #[test]
+    fn planner_routes_latest_negative_runtime_economics_to_revise_prior() {
+        let mut input = input(
+            "walk_forward",
+            serde_json::json!({
+                "latest_run": {
+                    "promotion_gate": {
+                        "blocked_gates": [
+                            "walk_forward_oos: no non-naive model has non-empty OOS windows"
+                        ]
+                    },
+                    "candidate_strategy_replay": {
+                        "blocking_risk_flags": [
+                            "roi_too_low:-0.079091<0.000000",
+                            "candidate_strategy_replay_roi_too_low:-0.079091<0.000000"
+                        ]
+                    }
+                }
+            }),
+            serde_json::json!({}),
+        );
+        input.rejected_factor_patterns = serde_json::json!({
+            "patterns": [{
+                "blockers_json": [
+                    "official_settlement_missing:48<51",
+                    "sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots",
+                    "candidate_strategy_replay_not_runtime_replay:factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay"
+                ],
+                "count": 8
+            }]
+        });
+
+        let plan = plan_next_research(&input).expect("plan");
+
+        assert_eq!(plan.theme, "revise_prior");
+        assert!(
+            plan.actions
+                .contains(&"generate_typed_llm_prior_json".to_string())
+        );
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "strategy_economics"
+                && item.action == "mutate_or_reject_negative_runtime_edge"
+        }));
+        assert!(!plan.blocker_actions.iter().any(|item| {
+            item.action == "repair_official_settlement_coverage"
+                || item.action == "collect_full_depth_execution_surface"
+                || item.action == "build_runtime_market_update_replay"
         }));
     }
 
@@ -663,12 +734,14 @@ mod tests {
         .expect("plan");
 
         assert_eq!(plan.theme, "fix_data");
-        assert!(plan
-            .actions
-            .contains(&"repair_official_settlement_coverage".to_string()));
-        assert!(plan
-            .actions
-            .contains(&"collect_full_depth_execution_surface".to_string()));
+        assert!(
+            plan.actions
+                .contains(&"repair_official_settlement_coverage".to_string())
+        );
+        assert!(
+            plan.actions
+                .contains(&"collect_full_depth_execution_surface".to_string())
+        );
         assert!(plan.blocker_actions.iter().any(|item| {
             item.blocker_family == "data_settlement"
                 && item.action == "repair_official_settlement_coverage"
