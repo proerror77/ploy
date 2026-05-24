@@ -3544,6 +3544,62 @@ mod tests {
     }
 
     #[test]
+    fn research_manager_typed_prior_metadata_deserializes_and_compiles_mutations() {
+        let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
+        let options = AutoFactorOptions {
+            min_observations: 40,
+            min_window_observations: 10,
+            min_icir: 0.1,
+            ..Default::default()
+        };
+        let prior: LlmPriorSpec = serde_json::from_value(serde_json::json!({
+            "schema_version": "research_manager_typed_prior.v1",
+            "source": "research_trace_plan",
+            "theme": "revise_prior",
+            "blocker_actions": [{
+                "blocker_family": "strategy_economics",
+                "action": "mutate_or_reject_negative_runtime_edge",
+                "reason": "Latest replay or walk-forward evidence failed economic/OOS gates."
+            }],
+            "constraints": [
+                "penalize losing runtime-replayed factor families and require positive executable ROI before handoff"
+            ],
+            "runtime_avoid_factors": [{
+                "base_factor": "auto_settlement_conservative_settlement_edge",
+                "factor_family": "auto_settlement_conservative_settlement_edge",
+                "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                "reason": "negative_runtime_edge",
+                "metrics": {"roi": -0.079091}
+            }],
+            "mutations": [{
+                "base_factor": "auto_settlement_model_full_depth_settlement_edge",
+                "mutation_type": "add_capacity_gate",
+                "name": "llm_model_full_depth_edge_full_depth_gate",
+                "feature": "full_depth_entry_fillable_gate"
+            }]
+        }))
+        .expect("Research Manager typed prior should be LlmPriorSpec-compatible");
+
+        assert_eq!(1, prior.runtime_avoid_factors.len());
+        assert_eq!(1, prior.mutations.len());
+
+        let reports = mine_domain_autofactors_from_v2_with_guidance(
+            &rows,
+            AutoFactorV2Target::FullDepthSettlementExecutablePnl,
+            &options,
+            &[],
+            Some(&prior),
+        )
+        .expect("reports");
+
+        let report = reports
+            .iter()
+            .find(|report| report.name == "llm_model_full_depth_edge_full_depth_gate")
+            .expect("Research Manager prior mutation should compile");
+        assert!(matches!(report.expr, FactorExpr::Gate { .. }));
+    }
+
+    #[test]
     fn keeps_settlement_native_generated_candidates_out_of_repricing_targets() {
         let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
         let options = AutoFactorOptions {

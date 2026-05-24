@@ -1,5 +1,45 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Negative Runtime Economics Prior Repair (2026-05-24)
+
+Evidence stage: `walk_forward` / `executable_replay` closed-loop search repair.
+This is not a dry-run or live promotion decision.
+
+### Tasks
+
+- [x] Confirm latest restored chain blocker is `strategy_economics ->
+      mutate_or_reject_negative_runtime_edge`, not data/full-depth/runtime
+      plumbing.
+- [x] Identify that Research Manager typed prior carried audit constraints but
+      did not emit Rust-consumed `mutations` / `runtime_avoid_factors`.
+- [x] Make `scripts/research_manager_execute_plan.py` convert negative
+      runtime replay economics into LlmPriorSpec-compatible
+      `runtime_avoid_factors` and fallback settlement mutations.
+- [x] Add focused executor regression coverage for negative runtime economics
+      prior payloads.
+- [x] Run focused Python/static validation.
+- [ ] Commit, push, open PR, wait for CI, merge, then rerun Research Manager
+      executor from trace-plan `26363701280`.
+
+### Review
+
+- 2026-05-24: Focused validation passed:
+  `python3 -m unittest tests.test_research_manager_execute_plan
+  tests.test_persist_research_trace_contract` (`33` tests),
+  `python3 -m py_compile scripts/research_manager_execute_plan.py
+  tests/test_research_manager_execute_plan.py
+  tests/test_persist_research_trace_contract.py`, `rtk git diff --check`,
+  `rtk cargo test --locked -p ploy-research typed_prior --lib` (`3` passed),
+  and a direct smoke assertion that
+  `mutate_or_reject_negative_runtime_edge` emits nonempty
+  `runtime_avoid_factors` plus LlmPriorSpec-shaped `mutations`.
+- 2026-05-24: Added a Rust boundary regression proving a complete
+  `research_manager_typed_prior.v1` with audit metadata still deserializes as
+  `LlmPriorSpec` and compiles a settlement mutation. A broad
+  `rustfmt --edition 2024 --check crates/ploy-research/src/autofactor.rs`
+  was not used as a completion gate because it reports pre-existing
+  whole-file formatting churn outside this patch.
+
 ## Current Session - Research Manager Evidence Inference (2026-05-24)
 
 Evidence stage: `walk_forward` / `executable_replay` closed-loop repair. This

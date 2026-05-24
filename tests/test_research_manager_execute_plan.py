@@ -143,6 +143,14 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
                                     "basis": "runtime_market_update_replay",
                                     "runtime_score": "autofactor_formula:prior_candidate",
                                     "strategy_profile": "settlement_probability",
+                                    "metrics": {
+                                        "trade_count": 53,
+                                        "unique_event_count": 53,
+                                        "entry_fill_rate": 1.0,
+                                        "roi": -0.079091,
+                                        "total_pnl": -62.8774,
+                                    },
+                                    "blocking_risk_flags": ["roi_too_low:-0.079091<0.000000"],
                                     "decision_contract": {
                                         "target": "tradeable_full_depth_settlement_pnl",
                                         "horizon": "5m",
@@ -195,6 +203,31 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
         self.assertEqual("research_manager_typed_prior.v1", prior["schema_version"])
         self.assertEqual("revise_prior", prior["theme"])
         self.assertEqual(plan["plan"]["blocker_actions"], prior["blocker_actions"])
+        self.assertEqual(
+            [
+                {
+                    "base_factor": "prior_candidate",
+                    "factor_family": "prior_candidate",
+                    "runtime_score": "autofactor_formula:prior_candidate",
+                    "reason": "negative_runtime_edge",
+                    "metrics": {
+                        "trade_count": 53,
+                        "unique_event_count": 53,
+                        "entry_fill_rate": 1.0,
+                        "roi": -0.079091,
+                        "total_pnl": -62.8774,
+                        "blocking_risk_flags": ["roi_too_low:-0.079091<0.000000"],
+                    },
+                }
+            ],
+            prior["runtime_avoid_factors"],
+        )
+        self.assertTrue(prior["mutations"])
+        self.assertEqual("add_capacity_gate", prior["mutations"][0]["mutation_type"])
+        self.assertEqual(
+            "auto_settlement_model_full_depth_settlement_edge",
+            prior["mutations"][0]["base_factor"],
+        )
 
     def test_revise_prior_infers_latest_replay_and_full_depth_artifacts(self) -> None:
         plan = plan_payload(
