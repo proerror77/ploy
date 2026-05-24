@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,10 @@ SETTLEMENT_RUNTIME_MAPPING = {
     "strategy_profile": "settlement_probability",
     "strategy_family": "settlement_probability",
 }
+RUNTIME_CONTRACT_CATALOG_SCHEMA_VERSION = "autofactor_runtime_contract_catalog.v1"
+RUNTIME_CONTRACT_CATALOG_PATH = (
+    Path(__file__).resolve().parents[1] / "config" / "autofactor_runtime_contract_catalog.json"
+)
 
 PREDICTIVE_FORMULA_BASES = (
     "amplitude_weighted_momentum_30s_sigma",
@@ -85,29 +90,38 @@ for _base in SETTLEMENT_FORMULA_BASES:
         }
 
 
-SUPPORTED_RUNTIME_INPUT_NAMES = {
-    "conservative_settlement_edge",
-    "full_depth_settlement_edge",
-    "model_conservative_settlement_edge",
-    "model_full_depth_settlement_edge",
-    "settlement_edge",
-    "entry_price",
-    "distance_over_sigma",
-    "direction_sign",
-    "drift_30s",
-    "sigma_horizon",
-    "entry_capacity_ratio",
-    "side_spread",
-    "pm_lag_secs",
-}
+@lru_cache(maxsize=1)
+def load_runtime_contract_catalog() -> dict[str, Any]:
+    payload = json.loads(RUNTIME_CONTRACT_CATALOG_PATH.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != RUNTIME_CONTRACT_CATALOG_SCHEMA_VERSION:
+        raise ValueError(
+            "unsupported AutoFactor runtime contract catalog schema: "
+            f"{payload.get('schema_version')!r}"
+        )
+    mappings = payload.get("research_input_mappings")
+    if not isinstance(mappings, dict):
+        raise ValueError("AutoFactor runtime contract catalog missing research_input_mappings")
+    return payload
 
-# These fields exist in the Rust scoring struct, but the current runtime fills
-# them from non-equivalent or placeholder values. Treat them as blocked until
-# research and runtime share the same source definition.
-BLOCKED_RUNTIME_INPUT_NAMES = {
-    "external_pressure": "runtime_input_semantics_mismatch:external_pressure",
-    "iv_change_1m": "runtime_input_not_supplied:iv_change_1m",
-}
+
+def runtime_input_contract(input_name: str) -> dict[str, Any] | None:
+    contract = load_runtime_contract_catalog()["research_input_mappings"].get(input_name)
+    if not isinstance(contract, dict):
+        return None
+    return dict(contract)
+
+
+def runtime_contract_supported_runtime_inputs() -> set[str]:
+    supported: set[str] = set()
+    for raw_contract in load_runtime_contract_catalog()["research_input_mappings"].values():
+        if not isinstance(raw_contract, dict):
+            continue
+        if raw_contract.get("blocker"):
+            continue
+        runtime_names = raw_contract.get("runtime_input_names")
+        if isinstance(runtime_names, list):
+            supported.update(str(item) for item in runtime_names if str(item))
+    return supported
 
 
 def normalize_formula_name(name: str) -> str:
@@ -191,9 +205,16 @@ def inferred_runtime_mapping(name: str) -> dict[str, str] | None:
 def runtime_input_blockers(input_names: list[str]) -> list[str]:
     blockers: list[str] = []
     for name in sorted({str(item) for item in input_names if str(item)}):
-        if name in BLOCKED_RUNTIME_INPUT_NAMES:
-            blockers.append(BLOCKED_RUNTIME_INPUT_NAMES[name])
-        elif name not in SUPPORTED_RUNTIME_INPUT_NAMES:
+        contract = runtime_input_contract(name)
+        if contract is None:
+            blockers.append(f"runtime_input_unsupported:{name}")
+            continue
+        blocker = contract.get("blocker")
+        if blocker:
+            blockers.append(str(blocker))
+            continue
+        runtime_names = contract.get("runtime_input_names")
+        if not isinstance(runtime_names, list) or not runtime_names:
             blockers.append(f"runtime_input_unsupported:{name}")
     return blockers
 

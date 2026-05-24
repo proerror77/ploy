@@ -145,6 +145,10 @@ When that preview is present, missing runtime contracts, contract blockers,
 unsupported inputs, semantic input mismatches, or placeholder runtime fields
 block promotion/replay handoff instead of falling back to factor-name
 inference.
+The cross-language runtime input mapping and formula-blocker rules live in
+`config/autofactor_runtime_contract_catalog.json`. Rust alpha-search and Python
+promotion/replay tooling must consume that catalog instead of maintaining
+separate runtime input allow/block lists.
 
 AutoFactor promotion and candidate replay must also consume the source
 snapshot manifest. If a `required_for_execution` surface is marked

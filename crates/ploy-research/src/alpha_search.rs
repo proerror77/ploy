@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::autofactor::{
     AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr, LlmPriorSpec,
-    autofactor_target_horizon, factor_expr_hash,
+    autofactor_runtime_contract_catalog, autofactor_target_horizon, factor_expr_hash,
 };
 
 const ALPHA_SEARCH_ARTIFACT_VERSION: &str = "alpha_search_artifacts_v1";
@@ -293,7 +293,7 @@ struct FactorRegistryPreviewArtifact {
 struct RuntimeInputMapping {
     ast_input_name: String,
     runtime_input_names: Vec<String>,
-    projection: &'static str,
+    projection: String,
 }
 
 #[derive(Debug)]
@@ -756,72 +756,40 @@ fn runtime_input_projection(ast_input_names: &[String]) -> RuntimeInputProjectio
     }
 }
 
-fn runtime_input_mapping(input: &str) -> Result<(Vec<String>, &'static str), String> {
-    let runtime_inputs = match input {
-        "conservative_settlement_edge"
-        | "full_depth_settlement_edge"
-        | "model_conservative_settlement_edge"
-        | "model_full_depth_settlement_edge"
-        | "settlement_edge" => (
-            vec!["settlement_edge".to_string()],
-            "settlement_edge_projection",
-        ),
-        "near_strike_score" => (
-            vec![
-                "direction_sign".to_string(),
-                "distance_over_sigma".to_string(),
-            ],
-            "runtime_near_strike_score",
-        ),
-        "entry_capacity_score" => (
-            vec!["entry_capacity_ratio".to_string()],
-            "runtime_entry_capacity_score",
-        ),
-        "full_depth_entry_fillable_gate" => (
-            vec!["entry_capacity_ratio".to_string()],
-            "runtime_full_depth_entry_gate",
-        ),
-        "entry_price_quality_score" => (
-            vec!["entry_price".to_string()],
-            "runtime_entry_price_quality_score",
-        ),
-        "external_move_since_poly_update" | "cex_return_30s_side" => (
-            vec!["direction_sign".to_string(), "drift_30s".to_string()],
-            "runtime_side_drift_30s",
-        ),
-        "sigma_horizon_pos" => (vec!["sigma_horizon".to_string()], "runtime_sigma_horizon"),
-        "poly_quote_age" => (vec!["pm_lag_secs".to_string()], "runtime_quote_age"),
-        "side_spread"
-        | "entry_price"
-        | "distance_over_sigma"
-        | "direction_sign"
-        | "drift_30s"
-        | "sigma_horizon"
-        | "entry_capacity_ratio"
-        | "pm_lag_secs" => (vec![input.to_string()], "runtime_native_input"),
-        "external_pressure" => {
-            return Err("runtime_input_semantics_mismatch:external_pressure".to_string());
-        }
-        "iv_change_1m" => return Err("runtime_input_not_supplied:iv_change_1m".to_string()),
-        other => return Err(format!("runtime_input_unsupported:{other}")),
+fn runtime_input_mapping(input: &str) -> Result<(Vec<String>, String), String> {
+    let Some(contract) = autofactor_runtime_contract_catalog()
+        .research_input_mappings
+        .get(input)
+    else {
+        return Err(format!("runtime_input_unsupported:{input}"));
     };
-    Ok(runtime_inputs)
+    if let Some(blocker) = contract.blocker.as_deref() {
+        return Err(blocker.to_string());
+    }
+    if contract.runtime_input_names.is_empty() {
+        return Err(format!("runtime_input_unsupported:{input}"));
+    }
+    Ok((
+        contract.runtime_input_names.clone(),
+        contract
+            .projection
+            .clone()
+            .unwrap_or_else(|| "runtime_native_input".to_string()),
+    ))
 }
 
 fn runtime_formula_blockers(name: &str) -> Vec<String> {
     let normalized = normalized_factor_key(name);
     let mut blockers = Vec::new();
-    if normalized.starts_with("auto_settlement_bayes_") {
-        blockers.push("runtime_contract_unmapped_bayes_formula".to_string());
-    }
-    if normalized.starts_with("poly_lag_pressure") {
-        blockers.push("runtime_input_semantics_mismatch:external_pressure".to_string());
-    }
-    if normalized.contains("external_pressure") {
-        blockers.push("runtime_input_semantics_mismatch:external_pressure".to_string());
-    }
-    if normalized.contains("iv_change") {
-        blockers.push("runtime_input_not_supplied:iv_change_1m".to_string());
+    for rule in &autofactor_runtime_contract_catalog().formula_blockers {
+        let matches = match rule.match_kind.as_str() {
+            "prefix" => normalized.starts_with(&rule.value),
+            "contains" => normalized.contains(&rule.value),
+            _ => false,
+        };
+        if matches {
+            blockers.push(rule.blocker.clone());
+        }
     }
     if is_predictive_formula_base(&normalized) && !is_predictive_settlement_formula(&normalized) {
         blockers.push("runtime_contract_unsupported_predictive_suffix".to_string());
