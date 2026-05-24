@@ -16,6 +16,12 @@ decision.
 - [x] Route latest negative runtime economics / OOS blockers to
       `revise_prior`.
 - [x] Run focused Rust validation.
+- [x] Deploy `main@e1d48299` to refresh the Tango `research-trace-plan`
+      binary.
+- [x] Rerun Research Trace Plan from deployed binary and verify the remaining
+      blocker shape.
+- [x] Fix frontier-run blocker extraction so historical runs and unselected
+      factor registry entries do not drive the current plan.
 - [ ] Commit, push, open PR, wait for CI, merge, then redeploy/refresh the
       deployed `research-trace-plan` binary before rerunning the workflow.
 
@@ -39,6 +45,25 @@ decision.
   crates/ploy-research/src/research_os/manager.rs`, `rtk cargo test --locked -p
   ploy-research research_os::manager --lib` (`11` passed), and
   `rtk git diff --check`.
+- 2026-05-24: Deployed `main@e1d48299` to Tango with
+  `deploy-tango-1-1.yml` run `26356840758`; the SSH path completed and Cloud
+  Assistant fallback was not needed. Research Trace Plan run `26357108585`
+  then proved the source fix was still incomplete: the latest run had the real
+  `strategy_economics` blocker, but the plan still selected `theme=fix_data`
+  because planner text scans were reading older runs and unselected
+  `promotion_registry.entries`.
+- 2026-05-24: Tightened Research Manager blocker extraction to the current
+  frontier run's decision artifacts, stripping unselected factor lists such as
+  `evaluated_factors` and `promotion_registry.entries`. If the frontier replay
+  contract proves `full_depth_entry=true` and `official_settlement=true`,
+  stale snapshot-level promotion blockers no longer override the current
+  strategy-economics decision. Validation passed:
+  `rustfmt --edition 2024 --check
+  crates/ploy-research/src/research_os/manager.rs`, `rtk cargo test --locked -p
+  ploy-research research_os::manager --lib` (`12` passed), and a local replay
+  of run `26357108585` input through `factor_evolve_daily_plan`, which now
+  returns `theme=revise_prior`, `candidate_count=8`, and only
+  `strategy_economics -> mutate_or_reject_negative_runtime_edge`.
 
 ## Current Session - Runtime Replay Selector Repair (2026-05-24)
 

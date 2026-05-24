@@ -89,6 +89,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
     }
 
     let blocker_actions = derive_blocker_actions(input);
+    let latest_decision = latest_run_decision_value(&input.latest_runs);
     if blocker_actions
         .iter()
         .any(|item| item.blocker_family.starts_with("data_"))
@@ -118,7 +119,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
     }
 
     if contains_string(
-        &input.latest_runs,
+        &latest_decision,
         &[
             "replay_parity_missing",
             "runtime_parity_missing",
@@ -129,7 +130,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
             "missing_runtime_strategy_mapping",
         ],
     ) || has_any_key_value(
-        &input.latest_runs,
+        &latest_decision,
         &["replay_parity_ready", "runtime_parity_ready"],
         &[false.into(), "false".into()],
     ) {
@@ -183,7 +184,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
     }
 
     if contains_string(
-        &input.latest_runs,
+        &latest_decision,
         &[
             "reward_stagnation",
             "empty_search",
@@ -273,9 +274,24 @@ fn plan_with_blocker_actions(
 
 fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAction> {
     let mut actions = Vec::new();
-    let latest = input.latest_runs.to_string().to_lowercase();
+    let latest_value = latest_run_decision_value(&input.latest_runs);
+    let latest = latest_value.to_string().to_lowercase();
     let market_data = input.market_data_health.to_string().to_lowercase();
     let runtime_or_promotion_blockers = latest;
+    let frontier_proves_full_depth = has_any_key_value(
+        &latest_value,
+        &[
+            "full_depth_entry",
+            "full_depth_execution_surface",
+            "full_fidelity",
+        ],
+        &[true.into(), "true".into()],
+    );
+    let frontier_proves_official_settlement = has_any_key_value(
+        &latest_value,
+        &["official_settlement", "official_settlement_ready"],
+        &[true.into(), "true".into()],
+    );
 
     if contains_any_text(
         &runtime_or_promotion_blockers,
@@ -377,29 +393,33 @@ fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAc
         ));
     }
 
-    if contains_any_text(
-        &market_data,
-        &[
-            "required_execution_surface_is_sampled_snapshot",
-            "sampled_snapshot_required_for_execution_surface",
-            "full_depth_missing",
-            "full-depth missing",
-        ],
-    ) {
+    if !frontier_proves_full_depth
+        && contains_any_text(
+            &market_data,
+            &[
+                "required_execution_surface_is_sampled_snapshot",
+                "sampled_snapshot_required_for_execution_surface",
+                "full_depth_missing",
+                "full-depth missing",
+            ],
+        )
+    {
         actions.push(blocker_action(
             "promotion_data_execution_surface",
             "collect_full_depth_execution_surface",
             "Research snapshot data health reports sampled execution surface; promotion needs full-depth evidence.",
         ));
     }
-    if contains_any_text(
-        &market_data,
-        &[
-            "required_execution_surface_not_materialized",
-            "pm_token_settlements",
-            "official_settlement_missing",
-        ],
-    ) {
+    if !frontier_proves_official_settlement
+        && contains_any_text(
+            &market_data,
+            &[
+                "required_execution_surface_not_materialized",
+                "pm_token_settlements",
+                "official_settlement_missing",
+            ],
+        )
+    {
         actions.push(blocker_action(
             "promotion_data_settlement",
             "repair_official_settlement_coverage",
@@ -408,6 +428,40 @@ fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAc
     }
 
     dedupe_blocker_actions(actions)
+}
+
+fn latest_run_decision_value(latest_runs: &serde_json::Value) -> serde_json::Value {
+    let frontier = latest_runs
+        .get("runs")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|runs| runs.first())
+        .unwrap_or(latest_runs);
+    strip_non_frontier_blocker_fields(frontier)
+}
+
+fn strip_non_frontier_blocker_fields(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut stripped = serde_json::Map::new();
+            for (key, item) in map {
+                if matches!(
+                    key.as_str(),
+                    "evaluated_factors" | "entries" | "recent_factors" | "patterns"
+                ) {
+                    continue;
+                }
+                stripped.insert(key.clone(), strip_non_frontier_blocker_fields(item));
+            }
+            serde_json::Value::Object(stripped)
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(strip_non_frontier_blocker_fields)
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 fn blocker_action(blocker_family: &str, action: &str, reason: &str) -> ResearchBlockerAction {
@@ -714,6 +768,92 @@ mod tests {
             item.action == "repair_official_settlement_coverage"
                 || item.action == "collect_full_depth_execution_surface"
                 || item.action == "build_runtime_market_update_replay"
+        }));
+    }
+
+    #[test]
+    fn planner_uses_frontier_run_decision_not_historical_or_unselected_factor_blockers() {
+        let plan = plan_next_research(&input(
+            "walk_forward",
+            serde_json::json!({
+                "source": "experiment_trace",
+                "runs": [
+                    {
+                        "run_id": "newest",
+                        "artifacts": [{
+                            "event_type": "autofactor_promotion",
+                            "output_json": {
+                                "candidate_strategy_replay": {
+                                    "basis": "runtime_market_update_replay",
+                                    "blockers": [
+                                        "roi_too_low:-0.079091<0.000000"
+                                    ],
+                                    "decision_contract": {
+                                        "official_settlement": true,
+                                        "full_depth_entry": true,
+                                        "one_decision_per_event": true
+                                    }
+                                },
+                                "promotion_gate": {
+                                    "blocked_gates": ["walk_forward_oos"]
+                                },
+                                "evaluated_factors": [{
+                                    "blockers": [
+                                        "official_settlement_missing:48<51",
+                                        "sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots",
+                                        "candidate_strategy_replay_not_runtime_replay:factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
+                                        "missing_runtime_contract"
+                                    ]
+                                }]
+                            }
+                        }]
+                    },
+                    {
+                        "run_id": "older",
+                        "artifacts": [{
+                            "output_json": {
+                                "candidate_strategy_replay": {
+                                    "blockers": [
+                                        "official_settlement_missing:48<51",
+                                        "sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots",
+                                        "candidate_strategy_replay_not_runtime_replay:factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay"
+                                    ]
+                                }
+                            }
+                        }]
+                    }
+                ]
+            }),
+            serde_json::json!({
+                "missing_blocks_promotion": true,
+                "critical_missing": false,
+                "promotion_blockers": [
+                    {
+                        "surface": "clob_orderbook_snapshots",
+                        "reason": "required_execution_surface_is_sampled_snapshot"
+                    },
+                    {
+                        "surface": "pm_token_settlements",
+                        "reason": "required_execution_surface_not_materialized"
+                    }
+                ]
+            }),
+        ))
+        .expect("plan");
+
+        assert_eq!(plan.theme, "revise_prior");
+        assert!(
+            plan.actions
+                .contains(&"generate_typed_llm_prior_json".to_string())
+        );
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "strategy_economics"
+                && item.action == "mutate_or_reject_negative_runtime_edge"
+        }));
+        assert!(!plan.blocker_actions.iter().any(|item| {
+            item.blocker_family.starts_with("data_")
+                || item.blocker_family == "runtime_replay"
+                || item.blocker_family == "runtime_contract"
         }));
     }
 
