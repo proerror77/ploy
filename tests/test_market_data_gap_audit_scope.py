@@ -143,6 +143,9 @@ class MarketDataGapAuditScopeTests(unittest.TestCase):
         self.assertIn('--end-ts "${audit_end_ts}"', workflow)
         self.assertIn("Gate mode: `{payload.get('gate_mode', 'unknown')}`", workflow)
         self.assertIn("Audit window: `{payload.get('audit_window_start_ts') or '<lookback-start>'}", workflow)
+        self.assertIn("remote snapshot data audit failed after ${attempt} attempts", workflow)
+        self.assertIn("copying snapshot data audit report failed after ${attempt} attempts", workflow)
+        self.assertIn("copying research snapshot tar failed after ${attempt} attempts", workflow)
 
 
 if __name__ == "__main__":
