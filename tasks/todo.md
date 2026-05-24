@@ -1,5 +1,48 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Runtime Replay Recording Provenance (2026-05-24)
+
+Evidence stage: `executable_replay` / replay provenance repair. This is not a
+dry-run or live promotion decision.
+
+### Tasks
+
+- [x] Approve Research Manager dispatched snapshot audit `26366091443` and
+      settlement repair `26366091933`.
+- [x] Verify snapshot audit failed on Binance LOB hot DB coverage, while
+      Polymarket full-depth orderbook archive was present and full-fidelity.
+- [x] Verify settlement repair succeeded but did not change rows, so the
+      previous official-settlement blocker was not a simple backfill gap.
+- [x] Rerun runtime candidate replay against the mutable active recording
+      `26366530448` and identify the non-reproducible tape problem.
+- [x] Rerun runtime candidate replay against the archived recording
+      `26366688853` and confirm the candidate passes replay gates on the
+      immutable tape.
+- [x] Fix runtime replay artifacts to carry recording provenance and make
+      mutable recording paths without SHA256 fail closed.
+- [ ] Commit, push, open PR, wait for CI, merge, then rerun the archived
+      recording replay from the fixed workflow so the passing replay carries a
+      recording SHA256.
+
+### Review
+
+- 2026-05-24: Research Snapshot `26366091443` failed because
+  `binance_lob/BTCUSDT`, `ETHUSDT`, and `SOLUSDT` had 33.333% hot DB coverage
+  and max gaps of 960 minutes in the 2026-05-17T00:00:00Z ->
+  2026-05-18T00:00:00Z window. The same artifact showed Polymarket
+  full-depth orderbook archive coverage was 24/24 hours with 2,214,371 rows and
+  `full_fidelity=true`.
+- 2026-05-24: Settlement repair `26366091933` ran in execute mode over 1,097
+  candidate markets and reported `settled_count=0`, `error_count=0`.
+- 2026-05-24: Runtime replay `26366530448` used the mutable active recording
+  and produced only 9 trades with ROI `-0.238054`; archived recording replay
+  `26366688853` used
+  `/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.20260524T155939.ndjson`
+  and produced 50 trades, 50 official settlements, fill rate `1.0`, ROI
+  `0.116538`, and `promotion_ready=true`. The passing run still lacks
+  `recording_sha256` because it used the pre-fix workflow, so it must be rerun
+  after this provenance fix lands.
+
 ## Current Session - Runtime Replay Priority After Prior Revision (2026-05-24)
 
 Evidence stage: `walk_forward` / `runtime_parity` closed-loop routing repair.

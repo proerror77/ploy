@@ -180,6 +180,8 @@ DEFAULT_REPLAY_PAYLOAD = {
         "runtime_score": "autofactor_formula:auto_settlement_conservative_settlement_edge",
         "strategy_profile": "settlement_probability",
         "workflow_run_id": "26306734877",
+        "recording_path": "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.20260524T155939.ndjson",
+        "recording_sha256": "a" * 64,
     },
     "evidence_stage": "executable_replay",
     "basis": "runtime_market_update_replay",
@@ -1187,6 +1189,27 @@ rank,name,target,decision,reason,n,spearman_ic,pearson_ic,window_count,icir,posi
         self.assertIn("candidate_strategy_replay_missing_workflow_run_url", first["blockers"])
         self.assertIn("candidate_strategy_replay_missing_artifact_name", first["blockers"])
         self.assertIn("Candidate strategy replay id: ``", handoff_md)
+
+    def test_blocks_mutable_runtime_replay_without_recording_hash(self):
+        replay = {
+            **DEFAULT_REPLAY_PAYLOAD,
+            "identity": {
+                **DEFAULT_REPLAY_PAYLOAD["identity"],
+                "recording_path": "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson",
+                "recording_sha256": "",
+            },
+        }
+
+        _, payload, _, handoff, _ = self.run_script(
+            READY_GATE + AUTOFACTOR_SETTLEMENT_AUTO_REPORT,
+            replay_payload=replay,
+        )
+
+        self.assertEqual(payload["decision"], "blocked")
+        self.assertEqual(handoff["status"], "blocked")
+        blockers = payload["evaluated_factors"][0]["blockers"]
+        self.assertIn("candidate_strategy_replay_missing_recording_sha256", blockers)
+        self.assertIn("candidate_strategy_replay_mutable_recording_without_sha256", blockers)
 
     def test_blocks_replay_without_executable_strategy_contract(self):
         replay = {

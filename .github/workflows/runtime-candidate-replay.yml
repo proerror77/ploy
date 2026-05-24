@@ -249,6 +249,36 @@ jobs:
           test -r "${config_path}"
           test -r "${recording_path}"
 
+          recording_provenance="${remote_dir}/recording-provenance.json"
+          recording_sha256="$(sha256sum "${recording_path}" | awk '{print $1}')"
+          recording_size_bytes="$(stat -c '%s' "${recording_path}")"
+          recording_mtime_epoch="$(stat -c '%Y' "${recording_path}")"
+          python3 - "${recording_path}" "${recording_sha256}" "${recording_size_bytes}" "${recording_mtime_epoch}" "${recording_provenance}" <<'PY'
+          import datetime as dt
+          import json
+          import sys
+          from pathlib import Path
+
+          path, sha256, size_bytes, mtime_epoch, output = sys.argv[1:]
+          mtime = dt.datetime.fromtimestamp(int(mtime_epoch), tz=dt.timezone.utc)
+          Path(output).write_text(
+              json.dumps(
+                  {
+                      "schema_version": "recording_provenance.v1",
+                      "recording_path": path,
+                      "recording_sha256": sha256,
+                      "recording_size_bytes": int(size_bytes),
+                      "recording_mtime_epoch": int(mtime_epoch),
+                      "recording_mtime_utc": mtime.isoformat().replace("+00:00", "Z"),
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+
           set -a
           . /opt/ploy/.env
           set +a
@@ -388,13 +418,14 @@ jobs:
             --settlements-json "${settlements_json}" \
             --report-json "${remote_dir}/runtime-evidence-enrichment.json"
 
-          ls -lh "${remote_dir}/runtime-evaluation.json" "${official_settlement_report}" "${remote_dir}/recording-enrichment.json" "${remote_dir}/runtime-evidence-enrichment.json"
+          ls -lh "${remote_dir}/runtime-evaluation.json" "${official_settlement_report}" "${remote_dir}/recording-enrichment.json" "${remote_dir}/runtime-evidence-enrichment.json" "${recording_provenance}"
           EOF
 
           scp tango-1-1:"${REMOTE_DIR}/runtime-evaluation.json" artifacts/runtime-replay/runtime-evaluation.json
           scp tango-1-1:"${REMOTE_DIR}/official-settlement-report.json" artifacts/runtime-replay/official-settlement-report.json
           scp tango-1-1:"${REMOTE_DIR}/recording-enrichment.json" artifacts/runtime-replay/recording-enrichment.json
           scp tango-1-1:"${REMOTE_DIR}/runtime-evidence-enrichment.json" artifacts/runtime-replay/runtime-evidence-enrichment.json
+          scp tango-1-1:"${REMOTE_DIR}/recording-provenance.json" artifacts/runtime-replay/recording-provenance.json
 
       - name: Build candidate strategy replay artifact
         env:
@@ -409,6 +440,21 @@ jobs:
           SOURCE_HORIZON: ${{ env.REPLAY_SOURCE_HORIZON }}
         run: |
           set -euo pipefail
+          recording_sha256="$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("artifacts/runtime-replay/recording-provenance.json")
+          if not path.is_file():
+              raise SystemExit("recording-provenance.json missing")
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          print(payload.get("recording_sha256") or "")
+          PY
+          )"
+          if [ -z "${recording_sha256}" ]; then
+            echo "recording sha256 missing from recording-provenance.json" >&2
+            exit 1
+          fi
           args=(
             --runtime-evaluation-json artifacts/runtime-replay/runtime-evaluation.json
             --runtime-score "${RUNTIME_SCORE}"
@@ -418,6 +464,7 @@ jobs:
             --workflow-run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             --artifact-name "runtime-candidate-replay-${GITHUB_RUN_ID}"
             --recording-path "${{ github.event.inputs.recording_path }}"
+            --recording-sha256 "${recording_sha256}"
             --config-path "${{ github.event.inputs.config_path }}"
             --runner-source "${GITHUB_WORKFLOW}:${GITHUB_REF_NAME}"
             --runner-git-sha "${GITHUB_SHA}"
@@ -445,6 +492,9 @@ jobs:
             echo "- Deployment: \`${{ github.event.inputs.deployment_id }}\`"
             echo "- Config: \`${{ github.event.inputs.config_path }}\`"
             echo "- Recording: \`${{ github.event.inputs.recording_path }}\`"
+            if [ -f artifacts/runtime-replay/recording-provenance.json ]; then
+              echo "- Recording SHA256: \`$(python3 -c 'import json; print(json.load(open("artifacts/runtime-replay/recording-provenance.json")).get("recording_sha256", ""))')\`"
+            fi
             echo "- Runtime score: \`${{ github.event.inputs.runtime_score }}\`"
             echo "- Artifact: \`runtime-candidate-replay-${{ github.run_id }}\`"
             if [ -f artifacts/runtime-replay/candidate-strategy-replay.json ]; then

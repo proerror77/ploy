@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from collections import Counter
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -24,6 +25,7 @@ from autofactor_accounting_catalog import (
 
 
 RUNTIME_REPLAY_BASIS = "runtime_market_update_replay"
+ARCHIVED_RECORDING_SUFFIX_RE = re.compile(r"\.\d{8}T\d{6}Z?$")
 COUNTERFACTUAL_THRESHOLDS = (
     ("0.05", "005"),
     ("0.10", "010"),
@@ -62,6 +64,17 @@ def sha256_file_if_present(raw_path: str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def looks_like_mutable_recording_path(raw_path: str) -> bool:
+    """Detect the active recording path, as opposed to timestamped archives."""
+    if not raw_path:
+        return False
+    name = Path(raw_path).name
+    if not name.endswith(".ndjson"):
+        return False
+    stem = name.removesuffix(".ndjson")
+    return ARCHIVED_RECORDING_SUFFIX_RE.search(stem) is None
 
 
 def canonical_sha256(payload: dict[str, Any]) -> str:
@@ -343,6 +356,12 @@ def build_artifact(
         blocking_flags.append(f"roi_too_low:{roi:.6f}<{min_roi:.6f}")
     if not entry_orders and not entry_fills:
         blocking_flags.append("zero_runtime_orders_and_fills")
+    if not recording_path:
+        blocking_flags.append("recording_path_missing")
+    if not recording_sha256:
+        blocking_flags.append("recording_sha256_missing")
+        if looks_like_mutable_recording_path(recording_path):
+            blocking_flags.append("mutable_recording_without_sha256")
 
     diagnostics = runtime_eval.get("strategy_diagnostics") or result.get("strategy_diagnostics") or {}
     counterfactual = score_counterfactual(diagnostics, configured_entry_threshold)
@@ -438,6 +457,8 @@ def render_markdown(artifact: dict[str, Any]) -> str:
         f"- Basis: `{artifact.get('basis')}`",
         f"- Runtime score: `{artifact.get('runtime_score')}`",
         f"- Strategy profile: `{artifact.get('strategy_profile')}`",
+        f"- Recording: `{artifact.get('recording_path')}`",
+        f"- Recording SHA256: `{artifact.get('recording_sha256')}`",
         f"- Updates processed: `{metrics.get('updates_processed')}`",
         f"- Intents submitted: `{metrics.get('intents_submitted')}`",
         f"- Trades: `{metrics.get('trade_count')}`",

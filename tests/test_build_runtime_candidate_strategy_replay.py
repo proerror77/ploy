@@ -114,6 +114,10 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
                     str(runtime_json),
                     "--runtime-score",
                     "autofactor_formula:auto_settlement_conservative_settlement_edge",
+                    "--recording-path",
+                    "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.20260524T155939.ndjson",
+                    "--recording-sha256",
+                    "a" * 64,
                     "--output-json",
                     str(output_json),
                     "--output-md",
@@ -150,6 +154,7 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         self.assertEqual(payload["source_workflow"], "runtime-candidate-replay.yml")
         self.assertEqual(payload["identity"]["runtime_score"], payload["runtime_score"])
         self.assertEqual(payload["identity"]["basis"], "runtime_market_update_replay")
+        self.assertEqual(payload["identity"]["recording_sha256"], "a" * 64)
         self.assertEqual(payload["source_factor"]["target"], "full_depth_settlement_executable_pnl")
         self.assertEqual(payload["source_factor"]["horizon"], "5m")
         self.assertEqual(payload["decision_contract"]["target"], "full_depth_settlement_executable_pnl")
@@ -172,6 +177,22 @@ class BuildRuntimeCandidateStrategyReplayTests(unittest.TestCase):
         self.assertEqual(payload["blocking_risk_flags"], [])
         self.assertIn("Promotion ready: `true`", markdown)
         self.assertIn("## Acceptance Criteria", markdown)
+
+    def test_blocks_mutable_recording_without_sha256(self):
+        payload, _ = self.run_script(
+            runtime_eval_payload(),
+            "--full-depth-entry",
+            "--min-trade-count",
+            "2",
+            "--recording-path",
+            "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson",
+            "--recording-sha256",
+            "",
+        )
+
+        self.assertFalse(payload["promotion_ready"])
+        self.assertIn("recording_sha256_missing", payload["blocking_risk_flags"])
+        self.assertIn("mutable_recording_without_sha256", payload["blocking_risk_flags"])
 
     def test_resolves_source_horizon_from_shared_catalog(self):
         payload, _ = self.run_script(
