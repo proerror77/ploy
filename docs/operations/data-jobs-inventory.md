@@ -76,7 +76,10 @@ diagnostics predated the current Research OS closed loop and are no longer an
 active strategy-discovery path. The old live-Parquet `optimize_backtest`
 example, deployed `optimize-backtest` binary path, verification gate script,
 and superseded optimize verification runbook were removed after `optimize.yml`
-became snapshot-only.
+became snapshot-only. The legacy direct-DB `factor_research` example and
+deployed `factor-research` binary path were also removed; Event ML now starts
+from retained event-root dataset artifacts instead of rebuilding datasets from
+database access in an active workflow or deploy bundle.
 
 Historical provenance for those retired assets is preserved in git history and
 in the prior cleanup PRs referenced by the research architecture review. Do not

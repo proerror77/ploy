@@ -102,13 +102,7 @@ jobs:
             --target "${PLATFORM_TARGET}" \
             -p ploy-strategy-bundles \
             --example run_backtest
-          cargo build --release --locked \
-            --target "${PLATFORM_TARGET}" \
-            -p ploy-research \
-            --features db,polars-export \
-            --example factor_research
           strip "target/${PLATFORM_TARGET}/release/examples/run_backtest" || true
-          strip "target/${PLATFORM_TARGET}/release/examples/factor_research" || true
 
       - name: Show sccache stats
         if: always()

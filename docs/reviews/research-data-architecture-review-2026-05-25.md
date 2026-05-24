@@ -90,6 +90,11 @@ sample size, not on buy-side fillability: `closed_trades=3`, `realized_pnl=-11.4
    snapshot-only, and the old `scripts/run_factor_research*.sh` direct-DB shell
    runners have been removed. Direct raw-table reads remain source compilation
    work for `research-snapshot.yml`, not a second factor-discovery path.
+   The legacy direct-DB `factor_research` exporter is also no longer registered
+   as a `ploy-research` example, built by Tango deploy, installed as
+   `/opt/ploy/bin/factor-research`, or packaged in the ACR research image.
+   Event ML now starts from retained event-root dataset artifacts rather than a
+   deployed direct-DB exporter.
 
 7. **The old PM5D matrix diagnostics are no longer active research entrypoints.**
 

@@ -1,5 +1,47 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Legacy Factor Research Binary Removal (2026-05-25)
+
+Evidence stage: `diagnostic` / architecture cleanup. This removes the old
+direct-DB `factor_research` exporter from the active build/deploy surface; it
+does not claim strategy profitability, dry-run readiness, or live-promotion
+evidence.
+
+### Tasks
+
+- [x] Restore `/Users/proerror/Documents/ploy` as the single clean main
+      checkout and archive stale worktrees before editing.
+- [x] Delete the legacy `crates/ploy-research/examples/factor_research.rs`
+      example and unregister it from `ploy-research`.
+- [x] Stop building, packaging, or installing the deployed `factor-research`
+      binary in Tango deploy and ACR research image paths.
+- [x] Add regression guards that prevent the legacy direct-DB factor research
+      binary from returning to active deploy surfaces.
+- [ ] Run focused validation and land through PR.
+
+### Review
+
+- 2026-05-25: Worktree cleanup reduced local Git worktrees to the single main
+  checkout at `/Users/proerror/Documents/ploy`. Dirty or stale work was
+  preserved through local archive tags
+  `archive/pm-quote-quality-warning-20260525`,
+  `archive/autofactor-runtime-feedback-20260525`, and
+  `archive/settlement-runtime-wip-20260525`, plus a local bundle and file
+  archive under
+  `/Users/proerror/Documents/ploy-worktrees/archives/20260525-worktree-cleanup`.
+- 2026-05-25: Current `main@8bef5d09` Tango deploy run `26372195020` was
+  triggered and approved after canceling stale waiting deploy run `26370807170`
+  for old `main@6e711725`.
+- 2026-05-25: Local validation passed for this cleanup slice:
+  `python3 -m unittest discover -s tests -p 'test_*.py'` (`286` tests),
+  `rtk cargo test --locked --test workflow_security` (`30` tests),
+  `cargo metadata --locked --no-deps --format-version 1`, Ruby YAML parse for
+  all workflows, `rtk git diff --check`, `rtk cargo check --locked -p
+  ploy-research --features db,polars-export --example
+  research_snapshot_compile --example persist_research_trace --example
+  research_trace_plan`, and `rtk cargo check --locked -p
+  ploy-strategy-bundles --example run_backtest`.
+
 ## Current Session - Research Matrix Legacy Retirement (2026-05-25)
 
 Evidence stage: `diagnostic` / architecture cleanup. This removes old PM5D

@@ -15,6 +15,9 @@ TANGO_DEPLOY = ROOT / ".github" / "workflows" / "deploy-tango-1-1.yml"
 RESEARCH_SNAPSHOT = ROOT / "crates" / "ploy-research" / "src" / "research_snapshot.rs"
 FACTOR_REVIEW_EXAMPLE = ROOT / "crates" / "ploy-research" / "examples" / "factor_review_v2.rs"
 FACTOR_WALK_EXAMPLE = ROOT / "crates" / "ploy-research" / "examples" / "factor_walk_forward_v2.rs"
+LEGACY_FACTOR_RESEARCH_EXAMPLE = (
+    ROOT / "crates" / "ploy-research" / "examples" / "factor_research.rs"
+)
 
 
 class PersistResearchTraceContractTest(unittest.TestCase):
@@ -310,12 +313,19 @@ class PersistResearchTraceContractTest(unittest.TestCase):
     def test_direct_db_factor_research_entrypoints_are_removed(self) -> None:
         self.assertFalse((ROOT / "scripts" / "run_factor_research.sh").exists())
         self.assertFalse((ROOT / "scripts" / "run_factor_research_matrix.sh").exists())
+        self.assertFalse(LEGACY_FACTOR_RESEARCH_EXAMPLE.exists())
         for path in [FACTOR_REVIEW_EXAMPLE, FACTOR_WALK_EXAMPLE]:
             source = path.read_text(encoding="utf-8")
             self.assertNotIn("--allow-direct-db-debug", source)
             self.assertNotIn("allow_direct_db_debug", source)
             self.assertNotIn("load_from_database_with_options", source)
             self.assertNotIn("load_research_lob_snapshots_sampled", source)
+        cargo = CARGO.read_text(encoding="utf-8")
+        self.assertNotIn('name = "factor_research"', cargo)
+        deploy = TANGO_DEPLOY.read_text(encoding="utf-8")
+        self.assertNotIn("--example factor_research", deploy)
+        self.assertNotIn("examples/factor_research", deploy)
+        self.assertIn("rm -f ${DEPLOY_ROOT}/bin/factor-research", deploy)
 
 
 if __name__ == "__main__":
