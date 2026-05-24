@@ -8,6 +8,7 @@ and OSS but cannot complete an SSH banner exchange with tango-1-1.
 from __future__ import annotations
 
 import json
+import base64
 import os
 import shlex
 import subprocess
@@ -237,7 +238,6 @@ def main() -> int:
     invoke_id = result["InvokeId"]
     print(f"Cloud Assistant research snapshot invoke_id={invoke_id}")
 
-    exit_code = -1
     for _ in range(150):
         status_result = run_json(
             [
@@ -258,11 +258,24 @@ def main() -> int:
         status = row.get("InvocationStatus")
         exit_code = int(row.get("ExitCode", -1))
         print(f"Cloud Assistant research snapshot status={status} exit={exit_code}")
-        if status in {"Success", "Failed", "Stopped", "Timeout"}:
-            break
-        time.sleep(5)
+        if status in {"Pending", "Running"}:
+            time.sleep(5)
+            continue
+
+        output = base64.b64decode((row.get("Output") or "").encode()).decode(
+            "utf-8",
+            "replace",
+        )
+        if output:
+            print(output)
+        if status != "Success":
+            return 1
+        break
     else:
-        print("Cloud Assistant research snapshot did not finish before polling timeout", file=sys.stderr)
+        print(
+            "Cloud Assistant research snapshot did not finish before polling timeout",
+            file=sys.stderr,
+        )
         return 1
 
     try:
