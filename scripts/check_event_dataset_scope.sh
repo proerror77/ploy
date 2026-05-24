@@ -90,12 +90,6 @@ while IFS= read -r path; do
   fi
 done <<< "${changed_files}"
 
-if git diff --quiet "${range}" -- crates/ploy-strategy-bundles/examples/optimize_backtest.rs; then
-  :
-else
-  failures+=("optimize_backtest hot path changed")
-fi
-
 if git diff --quiet "${range}" -- crates/ploy-research/Cargo.toml; then
   :
 else

@@ -1,6 +1,6 @@
 # Data Jobs Inventory
 
-Date: 2026-05-24
+Date: 2026-05-25
 
 This inventory classifies repo-local data scripts, jobs, and workflow surfaces so
 Phase 6 cleanup can retire duplicates without guessing. It does not change live
@@ -16,7 +16,7 @@ collection behavior.
 | `ploy-feed-loaders` | canonical historical DB loader | research/backtest adapters | Owns SQLx historical `MarketUpdate` loading outside strategy-bundles. |
 | `scripts/export_parquet.sh` | canonical export helper | data/export host | Keep as the explicit Parquet export entrypoint until replaced by Rust datactl. |
 | `.github/workflows/backtest.yml` | canonical CI backtest lane | CI/backtest host | Should remain separated from trade-host deploy assumptions. |
-| `.github/workflows/optimize.yml` | canonical optimization lane | CI/backtest host | Same data-source assumptions as backtest lane. |
+| `.github/workflows/optimize.yml` | canonical snapshot optimization lane | CI/backtest host | Requires a retained complete sampled research snapshot artifact. |
 | `.github/workflows/deploy-trade.yml` | canonical trade-host deploy lane | trade host | Should own trading artifacts only. |
 
 ## Compatibility Or Transitional Live Collection
@@ -67,9 +67,16 @@ collection behavior.
 The repository no longer keeps executable legacy archives for retired
 root-runtime deploy scripts, local CSV research collectors, public-profile
 copy-trading prototypes, duplicate DB diagnostics, historical quote backfills,
-or inactive DB-backed ML trainers. Those paths were removed after active docs,
-tests, workflows, and runbooks had already moved to the canonical surfaces
-above.
+inactive DB-backed ML trainers, or the old PM5D matrix-diagnostic workflow
+family. The removed matrix family included `strategy-research-matrix.yml`,
+`dryrun-correction-matrix.yml`, their `ploy-research` example binaries, and
+their artifact analyzers. The old unreferenced `factor_scan` and
+`collector_data_utilization` direct-DB examples were also removed. Those
+diagnostics predated the current Research OS closed loop and are no longer an
+active strategy-discovery path. The old live-Parquet `optimize_backtest`
+example, deployed `optimize-backtest` binary path, verification gate script,
+and superseded optimize verification runbook were removed after `optimize.yml`
+became snapshot-only.
 
 Historical provenance for those retired assets is preserved in git history and
 in the prior cleanup PRs referenced by the research architecture review. Do not

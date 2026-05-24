@@ -45,13 +45,13 @@ def base_args(**overrides):
         "full_depth_execution_surface_run_id": "",
         "full_depth_execution_surface_artifact_name": "",
         "max_snapshot_window_days": 2,
-        "max_full_depth_surface_hours": 12,
+        "max_full_depth_surface_hours": 0,
         "runtime_deployment_id": "pm5d.threelayer.settlement-probability-btc-eth.dryrun",
         "runtime_config_path": "/opt/ploy/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
         "runtime_recording_path": "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson",
         "runtime_score": "",
         "runtime_strategy_profile": "settlement_probability",
-        "runtime_issue_number": "538",
+        "runtime_issue_number": "",
         "runtime_min_trade_count": "50",
         "runtime_min_fill_rate": "0.30",
         "runtime_min_roi": "0",
@@ -63,6 +63,17 @@ def base_args(**overrides):
 
 
 class ResearchManagerExecutePlanTest(unittest.TestCase):
+    def test_workflow_passes_issue_number_to_downstream_dispatches(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github" / "workflows" / "research-manager-execute-plan.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            '--runtime-issue-number "${{ github.event.inputs.issue_number }}"',
+            workflow,
+        )
+
     def test_fix_data_plan_creates_snapshot_dispatch_in_dry_run(self) -> None:
         payload = build_executor_payload(
             Namespace(
@@ -679,8 +690,9 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
         self.assertTrue(payload["dispatches"][1]["ready"])
         full_depth_options = json.loads(payload["dispatches"][1]["fields"]["options_json"])
         self.assertEqual("2026-04-21T00:00:00Z", full_depth_options["start_ts"])
-        self.assertEqual("2026-04-21T12:00:00Z", full_depth_options["end_ts"])
-        self.assertEqual(12, full_depth_options["max_hours"])
+        self.assertEqual("2026-04-23T00:00:00Z", full_depth_options["end_ts"])
+        self.assertEqual(48, full_depth_options["max_hours"])
+        self.assertTrue(full_depth_options["fail_if_incomplete"])
         self.assertTrue(payload["dispatches"][2]["ready"])
         settlement_options = json.loads(payload["dispatches"][2]["fields"]["options_json"])
         self.assertEqual("dry_run", settlement_options["mode"])
@@ -715,6 +727,18 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             "collect-full-depth-execution-surface.yml",
             payload["dispatches"][0]["workflow"],
         )
+
+    def test_full_depth_collection_can_be_explicitly_bounded_for_diagnostics(self) -> None:
+        payload = build_executor_payload(
+            base_args(max_full_depth_surface_hours=12),
+            plan_payload("fix_data", ["collect_full_depth_execution_surface"]),
+        )
+
+        options = json.loads(payload["dispatches"][0]["fields"]["options_json"])
+        self.assertEqual("2026-04-21T00:00:00Z", options["start_ts"])
+        self.assertEqual("2026-04-21T12:00:00Z", options["end_ts"])
+        self.assertEqual(12, options["max_hours"])
+        self.assertTrue(options["fail_if_incomplete"])
 
     def test_cli_records_dispatch_failures_without_dropping_executor_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

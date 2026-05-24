@@ -34,4 +34,3 @@ rust_decimal_macros.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-optimizer.workspace = true

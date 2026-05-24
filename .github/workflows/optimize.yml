@@ -36,16 +36,16 @@ on:
         required: false
         default: "BTCUSDT,ETHUSDT"
       snapshot_run_id:
-        description: "Research Snapshot workflow run id; required for canonical optimizer runs"
-        required: false
+        description: "Research Snapshot workflow run id"
+        required: true
         default: ""
       options_json:
-        description: "Advanced options JSON: timestamps, diagnostic data_dir, limits, preflight_only, timeout, local snapshot registry, min_trades"
+        description: "Advanced options JSON: timestamps, timeout, local snapshot registry, min_trades, issue_number"
         required: false
-        default: '{"train_start_ts":"","train_end_ts":"","val_start_ts":"","val_end_ts":"","data_dir":"/tmp/ploy-parquet","max_preflight_rows":15000000,"max_preflight_bytes":"80GiB","max_symbols":6,"max_days":8,"allow_large_window":false,"preflight_only":false,"max_updates":"","duckdb_memory_limit":"6GB","optimize_timeout_minutes":90,"allow_live_parquet_debug":false,"issue_number":"","snapshot_registry_dir":"","min_trades":""}'
+        default: '{"train_start_ts":"","train_end_ts":"","val_start_ts":"","val_end_ts":"","optimize_timeout_minutes":90,"issue_number":"","snapshot_registry_dir":"","min_trades":""}'
 
 concurrency:
-  group: optimize-${{ github.event.inputs.git_ref || github.ref }}-${{ github.event.inputs.strategy_profile || 'mixed' }}-${{ github.event.inputs.snapshot_run_id || 'live' }}-${{ github.event.inputs.train_start }}-${{ github.event.inputs.train_end }}-${{ github.event.inputs.val_start }}-${{ github.event.inputs.val_end }}
+  group: optimize-${{ github.event.inputs.git_ref || github.ref }}-${{ github.event.inputs.strategy_profile || 'mixed' }}-${{ github.event.inputs.snapshot_run_id }}-${{ github.event.inputs.train_start }}-${{ github.event.inputs.train_end }}-${{ github.event.inputs.val_start }}-${{ github.event.inputs.val_end }}
   cancel-in-progress: true
 
 permissions:
@@ -81,7 +81,6 @@ jobs:
         run: echo "/home/runner/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Configure snapshot optimizer cargo target
-        if: ${{ github.event.inputs.snapshot_run_id != '' }}
         run: |
           scripts/configure_research_cargo_target.sh \
             --profile pm5d-snapshot-optimize \
@@ -101,22 +100,12 @@ jobs:
               "train_end_ts": "",
               "val_start_ts": "",
               "val_end_ts": "",
-              "data_dir": "/tmp/ploy-parquet",
-              "max_preflight_rows": "15000000",
-              "max_preflight_bytes": "80GiB",
-              "max_symbols": "6",
-              "max_days": "8",
-              "allow_large_window": "false",
-              "preflight_only": "false",
-              "max_updates": "",
-              "duckdb_memory_limit": "6GB",
               "optimize_timeout_minutes": "90",
-              "allow_live_parquet_debug": "false",
               "issue_number": "",
               "snapshot_registry_dir": "",
               "min_trades": "",
           }
-          bool_keys = {"allow_large_window", "preflight_only", "allow_live_parquet_debug"}
+          bool_keys = set()
           raw = os.environ.get("OPTIONS_JSON", "").strip()
           data = json.loads(raw) if raw else {}
           if not isinstance(data, dict):
@@ -151,8 +140,15 @@ jobs:
                   handle.write(f"OPT_{key.upper()}={value}\n")
           PY
 
+      - name: Require snapshot artifact
+        run: |
+          set -euo pipefail
+          if [ -z "${{ github.event.inputs.snapshot_run_id }}" ]; then
+            echo "snapshot_run_id is required; run research-snapshot.yml first and pass its retained artifact run id." >&2
+            exit 2
+          fi
+
       - name: Download research snapshot
-        if: ${{ github.event.inputs.snapshot_run_id != '' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SNAPSHOT_RUN_ID: ${{ github.event.inputs.snapshot_run_id }}
@@ -210,45 +206,11 @@ jobs:
           . /home/runner/.cargo/env
           cargo_target_dir="${CARGO_TARGET_DIR:-target}"
           mkdir -p target/release/examples
-          if [ -n "${{ github.event.inputs.snapshot_run_id }}" ]; then
-            cargo build --release --locked \
-              -p ploy-research \
-              --example three_layer_snapshot_optimize
-            cp "${cargo_target_dir}/release/examples/three_layer_snapshot_optimize" target/release/examples/optimize-runner
-          else
-            cargo build --release --locked \
-              -p ploy-strategy-bundles \
-              --features ploy-strategy-bundles/parquet-feed \
-              --example optimize_backtest
-            cp "${cargo_target_dir}/release/examples/optimize_backtest" target/release/examples/optimize-runner
-          fi
+          cargo build --release --locked \
+            -p ploy-research \
+            --example three_layer_snapshot_optimize
+          cp "${cargo_target_dir}/release/examples/three_layer_snapshot_optimize" target/release/examples/optimize-runner
           chmod +x target/release/examples/optimize-runner
-
-      - name: Sync Parquet data from Tango-1-1
-        run: |
-          set -euo pipefail
-          if [ -n "${{ github.event.inputs.snapshot_run_id }}" ] || [ "${OPT_ALLOW_LIVE_PARQUET_DEBUG}" != "true" ]; then
-            echo "No direct live parquet debug requested; skipping rsync."
-            exit 0
-          fi
-          mkdir -p ~/.ssh
-          echo "${{ secrets.TANGO_SSH_KEY }}" > ~/.ssh/tango_key
-          chmod 600 ~/.ssh/tango_key
-          mkdir -p "${OPT_DATA_DIR}"
-          rsync -az \
-            -e "ssh -i ~/.ssh/tango_key -o StrictHostKeyChecking=no" \
-            root@172.16.0.204:/opt/ploy/data/parquet/ \
-            "${OPT_DATA_DIR}/"
-
-      - name: Prepare DuckDB spill directory
-        if: ${{ github.event.inputs.snapshot_run_id == '' }}
-        run: |
-          DUCKDB_TEMP_DIR="${RUNNER_TEMP:-/tmp}/ploy-optimize-duckdb-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          rm -rf "${DUCKDB_TEMP_DIR}"
-          mkdir -p "${DUCKDB_TEMP_DIR}"
-          echo "PLOY_DUCKDB_TEMP_DIR=${DUCKDB_TEMP_DIR}" >> "${GITHUB_ENV}"
-          echo "PLOY_DUCKDB_MEMORY_LIMIT=${OPT_DUCKDB_MEMORY_LIMIT}" >> "${GITHUB_ENV}"
-          echo "DuckDB spill directory: ${DUCKDB_TEMP_DIR}" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Publish snapshot provenance
         if: ${{ hashFiles('artifacts/research-snapshot/manifest.json') != '' }}
@@ -297,93 +259,13 @@ jobs:
           fi
           cat artifacts/optimize/snapshot-provenance.txt >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Preflight Parquet manifest
-        if: ${{ github.event.inputs.snapshot_run_id == '' }}
-        run: |
-          set -euo pipefail
-          . /home/runner/.cargo/env
-          mkdir -p artifacts/optimize
-          started=$(date +%s)
-
-          time_flags=()
-          if [ -n "${OPT_TRAIN_START_TS}" ]; then
-            time_flags+=(--train-start-ts "${OPT_TRAIN_START_TS}")
-          fi
-          if [ -n "${OPT_TRAIN_END_TS}" ]; then
-            time_flags+=(--train-end-ts "${OPT_TRAIN_END_TS}")
-          fi
-          if [ -n "${OPT_VAL_START_TS}" ]; then
-            time_flags+=(--val-start-ts "${OPT_VAL_START_TS}")
-          fi
-          if [ -n "${OPT_VAL_END_TS}" ]; then
-            time_flags+=(--val-end-ts "${OPT_VAL_END_TS}")
-          fi
-
-          extra_flags=()
-          if [ "${OPT_ALLOW_LARGE_WINDOW}" = "true" ]; then
-            extra_flags+=(--allow-large-window)
-          fi
-          if [ -n "${OPT_MAX_UPDATES}" ]; then
-            extra_flags+=(--max-updates "${OPT_MAX_UPDATES}")
-          fi
-          if [ "${OPT_ALLOW_LIVE_PARQUET_DEBUG}" = "true" ]; then
-            extra_flags+=(--allow-live-parquet-debug)
-          fi
-
-          set +e
-          ./target/release/examples/optimize-runner \
-            --preflight-only \
-            --strategy-variant three_layer \
-            --config config/strategies/02-pm5d-threelayer.unified.toml \
-            --data-dir "${OPT_DATA_DIR}" \
-            --train-start "${{ github.event.inputs.train_start }}" \
-            --train-end "${{ github.event.inputs.train_end }}" \
-            --val-start "${{ github.event.inputs.val_start }}" \
-            --val-end "${{ github.event.inputs.val_end }}" \
-            --symbols "${{ github.event.inputs.symbols }}" \
-            --trials "${{ github.event.inputs.trials }}" \
-            --require-official-settlement \
-            --require-lob-liquidity \
-            --max-preflight-rows "${OPT_MAX_PREFLIGHT_ROWS}" \
-            --max-preflight-bytes "${OPT_MAX_PREFLIGHT_BYTES}" \
-            --max-symbols "${OPT_MAX_SYMBOLS}" \
-            --max-days "${OPT_MAX_DAYS}" \
-            --duckdb-memory-limit "${OPT_DUCKDB_MEMORY_LIMIT}" \
-            --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
-            --timing-json artifacts/optimize/preflight-timing.json \
-            "${time_flags[@]}" \
-            "${extra_flags[@]}" \
-            2>&1 | tee artifacts/optimize/preflight-report.txt
-          status=${PIPESTATUS[0]}
-          elapsed=$(( $(date +%s) - started ))
-          printf '{"phase":"optimize_preflight_workflow_step","wall_secs":%s,"status":%s}\n' "${elapsed}" "${status}" \
-            > artifacts/optimize/preflight-workflow-timing.json
-          {
-            echo "## Optimize preflight host health"
-            echo '```'
-            date -u
-            free -h || true
-            df -h "${OPT_DATA_DIR}" "${PLOY_DUCKDB_TEMP_DIR}" || true
-            ps -eo pid,ppid,stat,%mem,%cpu,comm,args --sort=-%mem | head -25 || true
-            echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
-          rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
-          exit "${status}"
-
       - name: Run optimize
         run: |
           set -euo pipefail
-          if [ "${OPT_PREFLIGHT_ONLY}" = "true" ]; then
-            echo "preflight_only=true; skipping optimize replay" >> "${GITHUB_STEP_SUMMARY}"
-            exit 0
-          fi
           . /home/runner/.cargo/env
           mkdir -p artifacts/optimize
           started=$(date +%s)
-          if [ ! -f artifacts/research-snapshot/manifest.json ]; then
-            rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
-            mkdir -p "${PLOY_DUCKDB_TEMP_DIR}"
-          fi
+          test -f artifacts/research-snapshot/manifest.json
 
           time_flags=()
           if [ -n "${OPT_TRAIN_START_TS}" ]; then
@@ -399,24 +281,13 @@ jobs:
             time_flags+=(--val-end-ts "${OPT_VAL_END_TS}")
           fi
 
-          extra_flags=()
           snapshot_flags=()
-          if [ "${OPT_ALLOW_LARGE_WINDOW}" = "true" ]; then
-            extra_flags+=(--allow-large-window)
-          fi
-          if [ -n "${OPT_MAX_UPDATES}" ]; then
-            extra_flags+=(--max-updates "${OPT_MAX_UPDATES}")
-          fi
-          if [ "${OPT_ALLOW_LIVE_PARQUET_DEBUG}" = "true" ]; then
-            extra_flags+=(--allow-live-parquet-debug)
-          fi
           if [ -n "${OPT_MIN_TRADES}" ]; then
             snapshot_flags+=(--min-trades "${OPT_MIN_TRADES}")
           fi
 
           set +e
-          if [ -f artifacts/research-snapshot/manifest.json ]; then
-            timeout --preserve-status "${OPT_OPTIMIZE_TIMEOUT_MINUTES}m" \
+          timeout --preserve-status "${OPT_OPTIMIZE_TIMEOUT_MINUTES}m" \
             ./target/release/examples/optimize-runner \
               --snapshot-dir artifacts/research-snapshot \
               --train-start "${{ github.event.inputs.train_start }}" \
@@ -431,52 +302,18 @@ jobs:
               "${time_flags[@]}" \
               "${snapshot_flags[@]}" \
               2>&1 | tee artifacts/optimize/report.txt
-            status=${PIPESTATUS[0]}
-          else
-            timeout --preserve-status "${OPT_OPTIMIZE_TIMEOUT_MINUTES}m" \
-            ./target/release/examples/optimize-runner \
-              --strategy-variant three_layer \
-              --config config/strategies/02-pm5d-threelayer.unified.toml \
-              --data-dir "${OPT_DATA_DIR}" \
-              --train-start "${{ github.event.inputs.train_start }}" \
-              --train-end "${{ github.event.inputs.train_end }}" \
-              --val-start "${{ github.event.inputs.val_start }}" \
-              --val-end "${{ github.event.inputs.val_end }}" \
-              --symbols "${{ github.event.inputs.symbols }}" \
-              --trials "${{ github.event.inputs.trials }}" \
-              --require-official-settlement \
-              --require-lob-liquidity \
-              --max-preflight-rows "${OPT_MAX_PREFLIGHT_ROWS}" \
-              --max-preflight-bytes "${OPT_MAX_PREFLIGHT_BYTES}" \
-              --max-symbols "${OPT_MAX_SYMBOLS}" \
-              --max-days "${OPT_MAX_DAYS}" \
-              --duckdb-memory-limit "${OPT_DUCKDB_MEMORY_LIMIT}" \
-              --duckdb-temp-dir "${PLOY_DUCKDB_TEMP_DIR}" \
-              --timing-json artifacts/optimize/timing.json \
-              "${time_flags[@]}" \
-              "${extra_flags[@]}" \
-              2>&1 | tee artifacts/optimize/report.txt
-            status=${PIPESTATUS[0]}
-          fi
+          status=${PIPESTATUS[0]}
 
-          snapshot_backed=false
-          if [ -f artifacts/research-snapshot/manifest.json ]; then
-            snapshot_backed=true
-          fi
           elapsed=$(( $(date +%s) - started ))
           printf '{"phase":"optimize_workflow_step","wall_secs":%s,"status":%s,"snapshot_backed":%s}\n' \
-            "${elapsed}" "${status}" "${snapshot_backed}" \
+            "${elapsed}" "${status}" "true" \
             > artifacts/optimize/workflow-timing.json
           {
             echo "## Optimize host health"
             echo '```'
             date -u
             free -h || true
-            if [ -f artifacts/research-snapshot/manifest.json ]; then
-              df -h "${OPT_DATA_DIR}" || true
-            else
-              df -h "${OPT_DATA_DIR}" "${PLOY_DUCKDB_TEMP_DIR}" || true
-            fi
+            df -h artifacts/research-snapshot || true
             ps -eo pid,ppid,stat,%mem,%cpu,comm,args --sort=-%mem | head -25 || true
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -490,9 +327,6 @@ jobs:
             fi
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
-          if [ ! -f artifacts/research-snapshot/manifest.json ]; then
-            rm -rf "${PLOY_DUCKDB_TEMP_DIR}"
-          fi
           exit "${status}"
 
       - name: Upload optimize provenance

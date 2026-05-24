@@ -6,9 +6,8 @@ evidence.
 
 Reviewed refs:
 
-- `origin/main` at `6e711725c4ef90852b52239dcdae4912351824fd`
-- cleanup branch `cleanup/remove-direct-db-factor-research` at
-  `3e4413bd` before PR merge
+- `origin/main` at `1a938f7f0f5c68ea8690b0a28af3c8d43af1dfc5`
+- cleanup branch `cleanup/research-legacy-docs-and-review`
 
 ## Executive Verdict
 
@@ -92,6 +91,25 @@ sample size, not on buy-side fillability: `closed_trades=3`, `realized_pnl=-11.4
    runners have been removed. Direct raw-table reads remain source compilation
    work for `research-snapshot.yml`, not a second factor-discovery path.
 
+7. **The old PM5D matrix diagnostics are no longer active research entrypoints.**
+
+   The former `strategy-research-matrix.yml` and `dryrun-correction-matrix.yml`
+   family predated the current Research OS loop. Those workflows, their
+   `ploy-research` example binaries, and their artifact-only analyzers have
+   been retired so strategy discovery routes through retained snapshots,
+   hosted factor/search workflows, runtime replay, durable trace, and Research
+   Manager actions instead of a parallel `ploy-ci-1` matrix surface.
+   Unreferenced direct-DB diagnostic examples `factor_scan` and
+   `collector_data_utilization` have also been removed.
+
+8. **The optimizer workflow is snapshot-only.**
+
+   `.github/workflows/optimize.yml` now requires a retained complete sampled
+   research snapshot artifact and builds only the `three_layer_snapshot_optimize`
+   runner. The old live-Parquet / `optimize_backtest` workflow branch, deploy
+   binary, example source, and verification script/runbook have been retired
+   from the active research surface.
+
 ## Remaining Architecture Problems
 
 ### P0 - Full-depth trace is coded but not deployed on Tango yet
@@ -105,6 +123,15 @@ Done means deploy run `26370807170` or a newer `main` deploy succeeds, the
 remote migration is applied, `/opt/ploy/bin/research-trace-plan` is refreshed,
 and a `research-trace-plan.yml` run proves that Research Manager can read
 `full_depth_execution_surfaces`.
+
+### P0 - Research Manager full-depth collection must cover the whole evidence window
+
+Research Manager-dispatched full-depth surface repair must produce a proof that
+can satisfy `research_trace_plan` coverage checks for the sampled snapshot
+window. This cleanup branch fixes the executor default so Research Manager
+collects the full dataset window and marks incomplete collection fail-closed;
+bounded hour caps should be treated as diagnostic-only, not promotion-grade
+repair evidence until the fix is merged and deployed.
 
 ### P0 - Official settlement completeness remains a hard blocker
 

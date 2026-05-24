@@ -2,7 +2,12 @@
 
 Date: 2026-04-23
 
-Status: accepted for the tick-preserving optimize redesign team slice
+Status: superseded by snapshot-only optimization in
+`docs/runbooks/strategy-research-cicd.md`
+
+This document is retained as historical context for the removed
+`optimize_backtest` live-Parquet path. Current optimizer runs consume retained
+complete sampled research snapshot artifacts through `.github/workflows/optimize.yml`.
 
 ## Context
 

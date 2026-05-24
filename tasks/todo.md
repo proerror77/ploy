@@ -1,5 +1,84 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Matrix Legacy Retirement (2026-05-25)
+
+Evidence stage: `diagnostic` / architecture cleanup. This removes old PM5D
+matrix diagnostics from the active workflow/code surface after the Research OS
+closed loop replaced them; it does not claim strategy profitability, dry-run
+readiness, or live-promotion evidence.
+
+### Scope
+
+- `.github/workflows/strategy-research-matrix.yml`
+- `.github/workflows/dryrun-correction-matrix.yml`
+- `crates/ploy-research/examples/three_layer_edge_matrix.rs`
+- `crates/ploy-research/examples/dryrun_correction_matrix.rs`
+- `crates/ploy-research/examples/factor_scan.rs`
+- `crates/ploy-research/examples/collector_data_utilization.rs`
+- `scripts/analyze_edge_matrix_artifact.py`
+- `scripts/analyze_dryrun_correction_matrix.py`
+- `tests/test_edge_matrix_artifact_analysis.py`
+- `crates/ploy-research/Cargo.toml`
+- `.github/workflows/optimize.yml`
+- `.github/workflows/deploy-tango-1-1.yml`
+- `crates/ploy-strategy-bundles/examples/optimize_backtest.rs`
+- `crates/ploy-strategy-bundles/Cargo.toml`
+- `scripts/check_optimize_verification_gates.sh`
+- `scripts/ci/deploy_tango_cloud_assist.py`
+- `scripts/check_event_dataset_scope.sh`
+- `docs/runbooks/tick-preserving-optimize-verification.md`
+- `docs/architecture/pm5d-tick-preserving-optimize-guardrails.md`
+- `docs/operations/data-jobs-inventory.md`
+- `docs/reviews/research-data-architecture-review-2026-05-25.md`
+
+### Tasks
+
+- [x] Verify current `main` is clean and includes the direct-DB factor research
+      retirement from PR `#690`.
+- [x] Identify PM5D matrix diagnostics that are not part of the current
+      snapshot -> hosted research -> Research OS trace -> Research Manager loop.
+- [x] Remove the old matrix workflows, Rust examples, artifact analyzers, and
+      analyzer unit test from the active repo surface.
+- [x] Remove unreferenced direct-DB diagnostic examples `factor_scan` and
+      `collector_data_utilization` from `ploy-research`.
+- [x] Make `optimize.yml` snapshot-only and remove the old live-Parquet
+      optimizer verification script/runbook.
+- [x] Remove the old `optimize_backtest` example and stop shipping
+      `/opt/ploy/bin/optimize-backtest` in Tango deploy bundles.
+- [x] Update inventory/review docs and run focused validation.
+
+### Review
+
+- 2026-05-25: Retired the old PM5D matrix-diagnostic family from active code:
+  `strategy-research-matrix.yml`, `dryrun-correction-matrix.yml`,
+  `three_layer_edge_matrix`, `dryrun_correction_matrix`, and the artifact
+  analyzer scripts/tests. This keeps strategy discovery on the current
+  artifact-backed Research OS loop instead of a parallel `ploy-ci-1` matrix
+  path. Also removed unreferenced direct-DB diagnostic examples `factor_scan`
+  and `collector_data_utilization`. Made `optimize.yml` require
+  `snapshot_run_id`, removed its live-Parquet / `optimize_backtest` fallback
+  branch, deleted the old `optimize_backtest` example, stopped deploying
+  `/opt/ploy/bin/optimize-backtest`, and retired
+  `scripts/check_optimize_verification_gates.sh` plus the superseded
+  tick-preserving optimize verification runbook.
+- 2026-05-25: Fixed Research Manager full-depth follow-up dispatch so the
+  default collection window covers the entire dataset window and incomplete
+  collection fails closed. The executor workflow now passes its `issue_number`
+  input into downstream runtime replay / parity / handoff dispatches instead
+  of using a hardcoded issue.
+- 2026-05-25: Validation passed: Ruby YAML parse for all workflows,
+  `python3 -m unittest discover -s tests -p 'test_*.py'` (`286` tests),
+  `cargo metadata --locked --no-deps --format-version 1`,
+  `CARGO_TARGET_DIR=/tmp/ploy-research-legacy-cleanup-target
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test
+  workflow_security` (`29` tests),
+  `CARGO_TARGET_DIR=/tmp/ploy-strategy-bundles-cleanup-target
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p
+  ploy-strategy-bundles --lib` (`193` tests),
+  `CARGO_TARGET_DIR=/tmp/ploy-snapshot-optimize-cleanup-target
+  /opt/homebrew/bin/timeout 300 rtk cargo check --locked -p ploy-research
+  --example three_layer_snapshot_optimize`, and `rtk git diff --check`.
+
 ## Current Session - Direct DB Factor Research Retirement (2026-05-25)
 
 Evidence stage: `diagnostic` / architecture cleanup. This removes remaining
@@ -18,7 +97,7 @@ evidence.
       examples.
 - [x] Update data-job inventory and architecture review text.
 - [x] Run final focused validation.
-- [ ] Land through PR.
+- [x] Land through PR.
 
 ### Review
 
@@ -37,6 +116,9 @@ evidence.
   --example factor_review_v2 --features db`, `CARGO_TARGET_DIR=/tmp/ploy-legacy-cleanup-target
   /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research
   --example factor_walk_forward_v2 --features db`, and `rtk git diff --check`.
+- 2026-05-25: PR `#690` merged to `main` as
+  `1a938f7f Remove direct-DB factor research entrypoints (#690)`. Main Test run
+  `26371298927` passed.
 
 ## Current Session - Full-Depth Execution Surface Trace (2026-05-25)
 

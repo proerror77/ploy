@@ -96,7 +96,8 @@ jobs:
             --snapshot-run-id "${{ github.event.inputs.snapshot_run_id }}" \
             --symbols "${{ github.event.inputs.symbols }}" \
             --stake-usd "${{ github.event.inputs.stake_usd }}" \
-            --chain-remaining "${{ github.event.inputs.chain_remaining }}"
+            --chain-remaining "${{ github.event.inputs.chain_remaining }}" \
+            --runtime-issue-number "${{ github.event.inputs.issue_number }}"
           cat artifacts/research-manager-executor/research-manager-executor.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload executor artifact
