@@ -391,6 +391,115 @@ def _recorded_replay_parity_dispatch(
     }
 
 
+def _ready_handoff_from_plan(plan_payload: dict[str, Any]) -> dict[str, str]:
+    latest_runs = ((plan_payload.get("input") or {}).get("latest_runs") or {})
+    runs = latest_runs.get("runs")
+    if not isinstance(runs, list):
+        return {}
+
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        run_id = str(run.get("run_id") or run.get("workflow_run_id") or "")
+        if not run_id:
+            continue
+        artifacts = run.get("artifacts")
+        if not isinstance(artifacts, list):
+            continue
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            output = artifact.get("output_json")
+            if not isinstance(output, dict):
+                continue
+            if output.get("kind") != "autofactor_strategy_handoff":
+                continue
+            if output.get("status") != "ready":
+                continue
+            if output.get("recommended_action") != "create_dry_run_handoff":
+                continue
+            strategies = output.get("strategies")
+            strategy = strategies[0] if isinstance(strategies, list) and strategies else {}
+            if not isinstance(strategy, dict):
+                strategy = {}
+            replay = output.get("candidate_strategy_replay")
+            if not isinstance(replay, dict):
+                replay = {}
+            contract = replay.get("decision_contract")
+            if not isinstance(contract, dict):
+                contract = {}
+
+            return {
+                "factor_walk_forward_run_id": run_id,
+                "artifact_name": f"factor-walk-forward-v2-{run_id}",
+                "required_strategy_profile": str(
+                    strategy.get("strategy_profile")
+                    or replay.get("strategy_profile")
+                    or "settlement_probability"
+                ),
+                "allowed_target": str(
+                    strategy.get("target")
+                    or contract.get("target")
+                    or "full_depth_settlement_executable_pnl"
+                ),
+                "runtime_score": str(
+                    strategy.get("runtime_score") or replay.get("runtime_score") or ""
+                ),
+                "strategy_config": (
+                    "config/strategies/"
+                    "02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"
+                ),
+            }
+    return {}
+
+
+def _autofactor_promotion_handoff_dispatch(
+    *,
+    plan_payload: dict[str, Any],
+    git_ref: str,
+    create_handoff_issue: bool,
+    create_config_pr: bool,
+    issue_number: str,
+) -> dict[str, Any]:
+    ready_handoff = _ready_handoff_from_plan(plan_payload)
+    blockers: list[str] = []
+    if not ready_handoff:
+        blockers.append("missing_ready_autofactor_handoff")
+    if not create_handoff_issue and not create_config_pr:
+        blockers.append("missing_ready_handoff_side_effect")
+
+    fields = {
+        "git_ref": git_ref,
+        "factor_walk_forward_run_id": ready_handoff.get("factor_walk_forward_run_id", ""),
+        "artifact_name": ready_handoff.get("artifact_name", ""),
+        "required_strategy_profile": ready_handoff.get(
+            "required_strategy_profile",
+            "settlement_probability",
+        ),
+        "allowed_target": ready_handoff.get(
+            "allowed_target",
+            "full_depth_settlement_executable_pnl",
+        ),
+        "issue_number": issue_number,
+        "create_handoff_issue": "true" if create_handoff_issue else "false",
+        "create_config_pr": "true" if create_config_pr else "false",
+        "strategy_config": ready_handoff.get(
+            "strategy_config",
+            "config/strategies/"
+            "02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+        ),
+        "fail_if_blocked": "true",
+    }
+    return {
+        "workflow": "autofactor-strategy-promotion.yml",
+        "reason": "execute ready AutoFactor handoff through durable trace-gated promotion workflow",
+        "ready": not blockers,
+        "blockers": blockers,
+        "fields": fields,
+        "runtime_score": ready_handoff.get("runtime_score", ""),
+    }
+
+
 def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -910,6 +1019,20 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                 deployment_id=args.runtime_deployment_id,
                 config_path=args.runtime_config_path,
                 recording_path=args.runtime_recording_path,
+                issue_number=args.runtime_issue_number,
+            )
+        )
+
+    if plan.get("theme") == "ready_handoff" or any(
+        action in {"create_dry_run_handoff_issue", "open_config_pr_from_ready_handoff"}
+        for action in actions
+    ):
+        dispatches.append(
+            _autofactor_promotion_handoff_dispatch(
+                plan_payload=plan_payload,
+                git_ref=args.git_ref,
+                create_handoff_issue="create_dry_run_handoff_issue" in actions,
+                create_config_pr="open_config_pr_from_ready_handoff" in actions,
                 issue_number=args.runtime_issue_number,
             )
         )

@@ -477,6 +477,99 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             dispatch["fields"]["runtime_score"],
         )
 
+    def test_ready_handoff_maps_to_autofactor_promotion_side_effects(self) -> None:
+        plan = plan_payload(
+            "ready_handoff",
+            ["create_dry_run_handoff_issue", "open_config_pr_from_ready_handoff"],
+        )
+        plan["input"]["latest_runs"] = {
+            "runs": [
+                {
+                    "run_id": "26367562792",
+                    "artifacts": [
+                        {
+                            "output_json": {
+                                "kind": "autofactor_strategy_handoff",
+                                "status": "ready",
+                                "recommended_action": "create_dry_run_handoff",
+                                "strategies": [
+                                    {
+                                        "runtime_score": (
+                                            "autofactor_formula:"
+                                            "mut_auto_settlement_model_full_depth_"
+                                            "settlement_edge_x_capacity_spread_adjusted"
+                                        ),
+                                        "strategy_profile": "settlement_probability",
+                                        "target": "tradeable_full_depth_settlement_pnl",
+                                    }
+                                ],
+                                "candidate_strategy_replay": {
+                                    "basis": "runtime_market_update_replay",
+                                    "runtime_score": (
+                                        "autofactor_formula:"
+                                        "mut_auto_settlement_model_full_depth_"
+                                        "settlement_edge_x_capacity_spread_adjusted"
+                                    ),
+                                    "strategy_profile": "settlement_probability",
+                                    "decision_contract": {
+                                        "target": "tradeable_full_depth_settlement_pnl",
+                                        "horizon": "5m",
+                                    },
+                                },
+                            }
+                        }
+                    ],
+                }
+            ]
+        }
+
+        payload = build_executor_payload(
+            base_args(mode="execute", execute_ack=EXECUTE_ACK),
+            plan,
+        )
+
+        self.assertEqual("execute", payload["mode"])
+        self.assertEqual(1, payload["executable_dispatch_count"])
+        dispatch = payload["dispatches"][0]
+        self.assertTrue(dispatch["ready"])
+        self.assertEqual("autofactor-strategy-promotion.yml", dispatch["workflow"])
+        self.assertEqual("26367562792", dispatch["fields"]["factor_walk_forward_run_id"])
+        self.assertEqual(
+            "factor-walk-forward-v2-26367562792",
+            dispatch["fields"]["artifact_name"],
+        )
+        self.assertEqual(
+            "tradeable_full_depth_settlement_pnl",
+            dispatch["fields"]["allowed_target"],
+        )
+        self.assertEqual(
+            "settlement_probability",
+            dispatch["fields"]["required_strategy_profile"],
+        )
+        self.assertEqual("true", dispatch["fields"]["create_handoff_issue"])
+        self.assertEqual("true", dispatch["fields"]["create_config_pr"])
+        self.assertEqual("true", dispatch["fields"]["fail_if_blocked"])
+        self.assertEqual(
+            "config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+            dispatch["fields"]["strategy_config"],
+        )
+
+    def test_ready_handoff_blocks_without_ready_source_artifact(self) -> None:
+        payload = build_executor_payload(
+            base_args(mode="execute", execute_ack=EXECUTE_ACK),
+            plan_payload(
+                "ready_handoff",
+                ["create_dry_run_handoff_issue", "open_config_pr_from_ready_handoff"],
+            ),
+        )
+
+        self.assertEqual(0, payload["executable_dispatch_count"])
+        self.assertEqual("autofactor-strategy-promotion.yml", payload["dispatches"][0]["workflow"])
+        self.assertIn(
+            "missing_ready_autofactor_handoff",
+            payload["blocked_dispatches"][0]["blockers"],
+        )
+
     def test_cli_writes_executor_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
