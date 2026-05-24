@@ -1,6 +1,14 @@
 use std::path::Path;
 
 const RETIRED_SOURCE_PATHS: &[&str] = &[
+    "apps/ploy-runner",
+    "deployment/aws",
+    "deploy-docker.sh",
+    "docker-compose.prod.yml",
+    "docker-compose.yml",
+    "nginx.conf",
+    "start.sh",
+    "stop.sh",
     "src/CLAUDE.md",
     "src/account",
     "src/adapters",

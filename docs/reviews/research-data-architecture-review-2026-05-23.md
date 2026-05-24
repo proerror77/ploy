@@ -1,7 +1,7 @@
 # Research Data Architecture Review - 2026-05-23
 
 Last updated: 2026-05-24 against `main`
-`a3e43c6aba40b1679ad2e5ce5e3d3d05db21926c`.
+`f887d944ed8fd1c3d1232244fd65b839dfc821cc`.
 
 ## Scope
 
@@ -27,7 +27,7 @@ reserved for `executable_replay` evidence.
 | Alpha-search | Hosted artifact walk-forward emits registry previews, typed runtime contracts, MCTS tree, search feedback, promotion/handoff artifacts | Usable for factor discovery and attribution |
 | Candidate replay | `candidate_replay_tapes` exists and `persist_research_trace` can link replay artifacts to factor evaluations | Durable replay identity exists, and hosted walk-forward can now fan out runtime replay requests from unblocked runtime contracts |
 | Durable trace | Hosted walk-forward defaults to trace persistence and writes Research OS rows when DB secrets and deployed binaries are available | Current `main` run `26350924329` persisted trace and uploaded `research-trace/persisted.env` |
-| Research Manager | `research_trace_plan` can read durable DB trace and emit next-plan JSON; `research-manager-execute-plan.yml` and hosted walk-forward can dispatch bounded follow-up evidence | Main runs have proven executor dispatch, recorded replay parity, and closed-loop runtime replay fan-out |
+| Research Manager | `research_trace_plan` can read durable DB trace and emit next-plan JSON; `research-manager-execute-plan.yml` and hosted walk-forward can dispatch bounded follow-up evidence | Main runs have proven planner -> executor -> hosted walk-forward -> durable trace -> planner recovery with runtime replay and full-depth evidence inherited automatically |
 | Legacy research paths | Factor routers and Event ML rolling evidence are artifact-backed only | Former direct `ploy-ci-1` DB execution/export branches have been removed from the active research chain |
 | Diagnostic backtest | `backtest.yml` now emits `evidence-stage` artifacts with `promotion_ready=false` | Useful diagnostic replay/backtest surface; not promotion evidence |
 | Legacy repo entrypoints | Retired local CSV/discovery/debug helpers, public-profile dry-run prototypes, legacy root-runtime workflows, and archived systemd assets have been removed from the active repository | Active docs now point to artifact-backed research, canonical platform release, and runtime replay surfaces |
@@ -126,6 +126,14 @@ reserved for `executable_replay` evidence.
     fallback failures print decoded remote output. This restored the remote
     snapshot path without compiling Rust on the trading host.
 
+13. **Research Manager executor now inherits evidence artifacts from trace.**
+
+    PR `#673` made `research-manager-execute-plan.yml` infer the latest
+    `runtime_market_update_replay` artifact and reusable full-depth execution
+    proof from the Research Trace Plan input. The follow-up hosted
+    walk-forward run no longer needs manual hidden artifact IDs to avoid
+    falling back to aggregate replay or sampled execution blockers.
+
 ## Current Verified Runs
 
 | Run | Git ref / source | Result | Meaning |
@@ -148,6 +156,11 @@ reserved for `executable_replay` evidence.
 | `26351573860` | full-depth execution-surface collection | Succeeded; `schema_version=full_depth_execution_surface.v1`; `full_fidelity=true`; `checked_hours=24`; `existing_hours=24`; `row_count=2214371` | Raw full-depth CLOB archive evidence exists for the checked 24h window |
 | `26351573853` | official settlement repair dry-run | Succeeded; `candidate_market_count=1097`; `would_settle_count=2194`; `error_count=0`; `dry_run=true` | Settlement coverage can likely be repaired, but execute mode is a DB mutation requiring explicit ACK |
 | `26352016263` | `main@a3e43c6a` replay-fed hosted walk-forward with runtime replay plus full-depth surface proof | Succeeded; `source_snapshot_contract.blocking_risk_flags=[]`; `satisfied_execution_surfaces=["clob_orderbook_snapshots"]`; closed-loop `decision=fix_data`; blockers remain official settlement and negative ROI | Full-depth handoff wiring is fixed; strategy promotion remains correctly blocked on settlement and economics |
+| `26362501135` | `main@b7e75f5` replay-fed hosted walk-forward with matching target lane | Succeeded; consumed `runtime_market_update_replay` `26355035577`; `entry_fill_rate=1.0`; `53` trades; ROI `-0.079091`; `source_snapshot_contract.blocking_risk_flags=[]`; persisted trace | Research chain is restored through replay/full-depth evidence; remaining blocker is strategy economics, not data plumbing |
+| `26362759645` | `main@b7e75f5` Research Trace Plan | Succeeded; `theme=revise_prior`; `candidate_count=8`; only blocker action `strategy_economics -> mutate_or_reject_negative_runtime_edge` | Durable trace planning no longer regresses to stale `fix_data` blockers |
+| `26363545147` | `main@f887d944` Research Manager executor | Succeeded; dispatched child hosted walk-forward `26363548647`; executor artifact carried replay `26355035577`, full-depth proof from `26362501135`, and target `tradeable_full_depth_settlement_pnl` | Executor can now infer hidden replay/full-depth artifact evidence from trace-plan input |
+| `26363548647` | `main@f887d944` hosted walk-forward from executor | Succeeded; downloaded candidate replay and full-depth proof; persisted trace; candidate replay remained `basis=runtime_market_update_replay`, `53` trades, `entry_fill_rate=1.0`, ROI `-0.079091`, blocker `roi_too_low` | Automatic closed-loop research works end-to-end and correctly rejects the current negative-ROI candidate |
+| `26363701280` | `main@f887d944` Research Trace Plan after executor child | Succeeded; `theme=revise_prior`; `candidate_count=8`; only blocker action `strategy_economics -> mutate_or_reject_negative_runtime_edge` | Post-executor durable trace still classifies the next step as prior revision, not data/runtime repair |
 
 ## Repository Cleanup Evidence
 
@@ -173,26 +186,27 @@ The current walk-forward/runtime replay evidence is deliberately blocked:
 
 ## Remaining Problems
 
-1. **Runtime replay dispatch is proven, but strategy discovery is not.**
+1. **The automated research loop is proven, but strategy discovery is not.**
 
    `research_trace_plan` produces a typed plan from DB trace, and
    `research-manager-execute-plan.yml` has executed bounded follow-up actions.
    Hosted walk-forward now turns positive runtime-mapped rows into bounded
    `runtime-candidate-replay.yml` requests without manual artifact
-   interpretation. The current result is still not a dry-run handoff: the best
-   fresh runtime replay has 29 trades, complete fills, positive ROI, and
-   incomplete official settlement coverage, so promotion correctly blocks. The
-   remaining discovery gap is denser candidate formation over more event tape,
-   not lowering thresholds.
+   interpretation. After PR `#673`, the executor also carries prior runtime
+   replay and full-depth proof into the next hosted walk-forward without hidden
+   manual inputs. The current result is still not a dry-run handoff: the latest
+   replay-fed candidate has `53` trades, complete fills, complete settlement
+   rows, and `entry_fill_rate=1.0`, but ROI is `-0.079091` with total PnL
+   `-62.877407450996`. The remaining discovery gap is finding a different
+   profitable runtime-mappable factor, not lowering fillability or replay
+   gates.
 
    Current answer to "can it automatically research/backtest/discover
    strategies": it can automatically produce factor attribution, persist trace,
-   fan out runtime replay, feed replay evidence back into hosted walk-forward,
-   and reject weak candidates. The latest replay batch also proves the path can
-   reach the 50-trade and fillability gates. It has not yet proven an
-   automatically tradable strategy because the candidates are negative ROI,
-   backed by sampled execution-surface research snapshots, and not fully
-   settled.
+   plan the next action, execute bounded follow-up research, consume runtime
+   replay/full-depth evidence, and reject weak candidates. It has not yet found
+   an automatically tradable strategy because the current candidate is negative
+   ROI under executable runtime replay.
 
 2. **Feature snapshots are still sampled research products, but full-depth
    execution proof is now consumable.**
@@ -253,11 +267,10 @@ The current walk-forward/runtime replay evidence is deliberately blocked:
 
 | Priority | Work | Done when |
 | --- | --- | --- |
-| P0 | Complete official settlement coverage for runtime replay candidates | Runtime replay artifacts include official settlement for all traded events before any handoff can become ready |
+| P0 | Keep official settlement completeness as a hard runtime replay gate | Every replay-fed handoff proves official settlement for all traded events, and missing coverage routes to settlement repair instead of economics analysis |
 | P0 | Attach full-depth execution-surface proof to every executable handoff | Hosted walk-forward, standalone promotion, trace persistence, and Research Manager plans all carry the verified full-depth proof without manual run-id stitching |
-| P0 | Reject or revise negative executable replay candidates after data gates are fixed | A replay-fed closed-loop run with complete settlement/full-depth evidence converts persistent `roi_too_low` into a machine-readable prior mutation or rejection instead of redispatching equivalent candidates |
 | P0 | Keep Research Manager candidate replay contract-driven | Executor replays only explicit or trace-derived unblocked runtime contracts and fails closed without one |
-| P0 | Convert runtime replay blockers into next search mutations | `fix_data`, `trade_count_too_small`, settlement gaps, and sampled execution-surface blockers produce machine-readable next actions instead of manual interpretation |
+| P0 | Convert negative runtime economics into stronger next search mutations or rejection | Persistent `roi_too_low` replay evidence changes the typed prior search space or closes the candidate family instead of rediscovering equivalent formulas |
 | P1 | Promote runtime input canonicalization to a generated shared contract | Rust runtime scoring, Rust alpha-search, and Python promotion/replay use one source of truth instead of mirrored catalogs |
 | P1 | Complete full-depth executable evidence layer | Runtime replay and full-depth lake evidence become first-class queryable trace objects, not only workflow artifacts |
 | P1 | Generate shared non-AutoFactor label contracts | Runtime, research, replay, and trace persistence derive 30s / 60s / 5m / 15m label definitions from one source |
@@ -295,7 +308,7 @@ blocked runtime candidate
 ```
 
 The system can now automatically research, persist trace, dispatch replay/parity
-evidence, and reject a weak candidate. The latest evidence moved the blocker
-from "too few runtime trades" to "negative executable ROI plus incomplete
-settlement." It should not be described as having found an automatically
-tradable strategy yet.
+evidence, carry replay/full-depth proof into the next hosted search, and reject
+a weak candidate. The latest evidence moved the blocker from "chain plumbing"
+to "negative executable ROI." It should not be described as having found an
+automatically tradable strategy yet.

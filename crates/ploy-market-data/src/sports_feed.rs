@@ -345,8 +345,7 @@ mod tests {
 
     #[test]
     fn fixture_messages_normalize_into_sports_state_updates() {
-        let fixture =
-            include_str!("../../../apps/ploy-runner/tests/fixtures/polymarket_sports_ws.jsonl");
+        let fixture = include_str!("../tests/fixtures/polymarket_sports_ws.jsonl");
         let mut updates = Vec::new();
 
         for (idx, line) in fixture.lines().enumerate() {

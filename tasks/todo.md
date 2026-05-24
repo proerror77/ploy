@@ -23,8 +23,11 @@ is not a dry-run or live promotion decision.
       `full-depth-execution-surface` directory.
 - [x] Run focused Python, workflow static, YAML, and Rust workflow-security
       validation.
-- [ ] Commit, push, open PR, wait for CI, merge, then run Research Manager
+- [x] Commit, push, open PR, wait for CI, merge, then run Research Manager
       executor from trace-plan `26362759645` in execute mode.
+- [x] Verify executor-dispatched hosted walk-forward `26363548647` and
+      post-run Research Trace Plan `26363701280`.
+- [x] Start legacy cleanup / research-data architecture review pass.
 
 ### Review
 
@@ -49,6 +52,63 @@ is not a dry-run or live promotion decision.
   tests/test_factor_walk_forward_sweep.py`, YAML parse for the touched
   workflows, `rtk cargo test --locked --test workflow_security
   factor_walk_forward` (`5` passed), and `rtk git diff --check`.
+- 2026-05-24: PR `#673` merged as
+  `f887d944ed8fd1c3d1232244fd65b839dfc821cc`. Research Manager executor run
+  `26363545147` succeeded from `main@f887d944` and dispatched hosted
+  walk-forward `26363548647` with automatically inferred
+  `runtime-candidate-replay-26355035577`, full-depth proof from
+  `factor-walk-forward-v2-26362501135`, and target lane
+  `tradeable_full_depth_settlement_pnl`.
+- 2026-05-24: Hosted walk-forward `26363548647` succeeded, downloaded both
+  inherited evidence artifacts, persisted trace, and stayed blocked only on
+  real strategy economics: runtime replay basis
+  `runtime_market_update_replay`, `53` trades, `entry_fill_rate=1.0`, ROI
+  `-0.079091`, total PnL `-62.877407`, blocker `roi_too_low`. Post-run
+  Research Trace Plan `26363701280` again returned `theme=revise_prior` with
+  only `strategy_economics -> mutate_or_reject_negative_runtime_edge`.
+
+## Current Session - Legacy Cleanup And Research Architecture Review (2026-05-24)
+
+Evidence stage: `architecture_review` / documentation cleanup. This is not a
+dry-run or live promotion decision.
+
+### Tasks
+
+- [x] Cut new branch `cleanup/research-legacy-architecture-review` from
+      `origin/main@f887d944`.
+- [x] Downgrade legacy single-binary `ploy ...` README examples to archived
+      compatibility and point active operation to `new-ployd`, `ployctl`, and
+      `new-ploy-runner`.
+- [x] Update the research/data architecture review with PR `#673`, executor
+      run `26363545147`, child walk-forward `26363548647`, and trace-plan
+      `26363701280` evidence.
+- [x] Finish Agent Team legacy/data review pass and remove or document any
+      remaining low-risk stale references.
+- [ ] Run focused docs/search validation, commit, push, open PR, and merge if
+      CI passes.
+
+### Review
+
+- 2026-05-24: README no longer presents old `ploy trade`, `ploy momentum`,
+  `ploy sports`, or `ploy strategy` examples as the active operator surface.
+  Active examples now point to `new-ployd`, `ployctl`, deployment manifests,
+  and `new-ploy-runner`; older direct commands are explicitly archived
+  compatibility.
+- 2026-05-24: Architecture review now says the automated research loop is
+  proven through trace planning, executor dispatch, hosted walk-forward, trace
+  persistence, and post-run planning, while the current strategy remains
+  non-tradable because executable runtime replay ROI is negative.
+- 2026-05-24: Removed the obsolete AWS installer, docker-compose/nginx deploy
+  path, and root `start.sh` / `stop.sh` scripts. Moved the remaining sports WS
+  fixture out of the retired `apps/ploy-runner` tree into
+  `crates/ploy-market-data/tests/fixtures/`, rewired the sports-feed unit test,
+  and expanded `tests/workspace_runtime_retirement.rs` so these legacy paths
+  cannot reappear.
+- 2026-05-24: Updated `config/default.toml`,
+  `docs/runbooks/operator-terminal.md`, and
+  `docs/data_collection_fix_plan.md` so they no longer direct new work toward
+  the archived single-binary runtime, old dashboard/server commands, or retired
+  `apps/ploy-runner` ownership path.
 
 ## Current Session - Research Manager Latest Blockers (2026-05-24)
 
