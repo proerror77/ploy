@@ -26,6 +26,32 @@ enable live trading.
   tests/test_research_manager_execute_plan.py`, real-plan dry-run rendering
   against trace-plan `26368346028`, and `rtk git diff --check`.
 
+## Current Session - AutoFactor Promotion PR Fallback (2026-05-24)
+
+Evidence stage: `dry_run_candidate` handoff execution hardening. This keeps
+reviewable dry-run config branches from failing the workflow when repository
+policy blocks GitHub Actions from creating pull requests.
+
+### Tasks
+
+- [x] Dispatch Research Manager executor run `26368780915` from merged
+      `main`; verify it successfully dispatched `autofactor-strategy-promotion.yml`.
+- [x] Inspect promotion run `26368784765` and confirm handoff validation,
+      config update, and branch push succeeded, while `gh pr create` failed on
+      repository policy.
+- [x] Align standalone AutoFactor promotion with the hosted walk-forward
+      fallback: keep the pushed config branch as successful reviewable output
+      and write a manual PR URL when automatic PR creation is blocked.
+
+### Review
+
+- 2026-05-24: Promotion run `26368784765` pushed
+  `autofactor/handoff-26368784765` with runtime score
+  `autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted`,
+  but failed with `GitHub Actions is not permitted to create or approve pull
+  requests`. The fallback patch changes this from a workflow failure into a
+  reviewable branch/manual-PR output.
+
 ## Current Session - Runtime Replay Recording Provenance (2026-05-24)
 
 Evidence stage: `executable_replay` / replay provenance repair. This is not a
