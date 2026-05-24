@@ -7,6 +7,7 @@ MIGRATION_042 = ROOT / "migrations" / "042_factor_research_os_registry.sql"
 MIGRATION_043 = ROOT / "migrations" / "043_research_os_trace_constraints.sql"
 MIGRATION_044 = ROOT / "migrations" / "044_candidate_replay_tapes.sql"
 MIGRATION_046 = ROOT / "migrations" / "046_factor_registry_blockers.sql"
+MIGRATION_047 = ROOT / "migrations" / "047_full_depth_execution_surfaces.sql"
 
 
 def research_os_sql() -> str:
@@ -16,6 +17,7 @@ def research_os_sql() -> str:
             MIGRATION_043.read_text(encoding="utf-8"),
             MIGRATION_044.read_text(encoding="utf-8"),
             MIGRATION_046.read_text(encoding="utf-8"),
+            MIGRATION_047.read_text(encoding="utf-8"),
         ]
     )
 
@@ -29,6 +31,7 @@ class FactorResearchOsRegistryMigrationTest(unittest.TestCase):
             "factor_evaluations",
             "experiment_trace",
             "candidate_replay_tapes",
+            "full_depth_execution_surfaces",
         ]:
             self.assertIn(f"CREATE TABLE IF NOT EXISTS {table}", sql)
         self.assertRegex(
@@ -85,6 +88,33 @@ class FactorResearchOsRegistryMigrationTest(unittest.TestCase):
         for snippet in required_snippets:
             self.assertIn(snippet, sql)
 
+    def test_full_depth_execution_surface_schema_and_links_exist(self) -> None:
+        sql = research_os_sql()
+        required_snippets = [
+            "full_depth_execution_surface_id TEXT PRIMARY KEY",
+            "schema_version TEXT NOT NULL DEFAULT 'full_depth_execution_surface.v1'",
+            "artifact_sha256 TEXT NOT NULL",
+            "CONSTRAINT uq_full_depth_execution_surfaces_artifact_sha256 UNIQUE (artifact_sha256)",
+            "surface TEXT NOT NULL",
+            "source TEXT NOT NULL",
+            "window_start_ts TIMESTAMPTZ NOT NULL",
+            "window_end_ts TIMESTAMPTZ NOT NULL",
+            "checked_hours INTEGER NOT NULL",
+            "existing_hours INTEGER NOT NULL",
+            "row_count BIGINT NOT NULL",
+            "full_fidelity BOOLEAN NOT NULL DEFAULT false",
+            "incomplete BOOLEAN NOT NULL DEFAULT true",
+            "valid BOOLEAN NOT NULL DEFAULT false",
+            "blockers_json JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "idx_full_depth_execution_surfaces_surface_window",
+            "idx_full_depth_execution_surfaces_valid",
+            "ADD COLUMN IF NOT EXISTS full_depth_execution_surface_id TEXT",
+            "fk_experiment_trace_full_depth_execution_surface",
+            "REFERENCES full_depth_execution_surfaces(full_depth_execution_surface_id)",
+        ]
+        for snippet in required_snippets:
+            self.assertIn(snippet, sql)
+
     def test_experiment_trace_is_append_only_by_trigger(self) -> None:
         sql = research_os_sql()
         self.assertIn("prevent_experiment_trace_update", sql)
@@ -119,6 +149,7 @@ class FactorResearchOsRegistryMigrationTest(unittest.TestCase):
         self.assertIn("043_research_os_trace_constraints.sql", workflow)
         self.assertIn("044_candidate_replay_tapes.sql", workflow)
         self.assertIn("046_factor_registry_blockers.sql", workflow)
+        self.assertIn("047_full_depth_execution_surfaces.sql", workflow)
 
 
 if __name__ == "__main__":

@@ -107,6 +107,34 @@ pub struct CandidateReplayTapeRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FullDepthExecutionSurfaceRecord {
+    pub full_depth_execution_surface_id: String,
+    pub run_id: String,
+    pub source_workflow: String,
+    pub workflow_run_id: Option<String>,
+    pub workflow_run_url: Option<String>,
+    pub artifact_name: Option<String>,
+    pub artifact_sha256: String,
+    pub artifact_json: serde_json::Value,
+    pub schema_version: String,
+    pub surface: String,
+    pub source: String,
+    pub data_snapshot_id: Option<String>,
+    pub window_start_ts: DateTime<Utc>,
+    pub window_end_ts: DateTime<Utc>,
+    pub checked_hours: i32,
+    pub existing_hours: i32,
+    pub exported_hours: i32,
+    pub row_count: i64,
+    pub full_fidelity: bool,
+    pub incomplete: bool,
+    pub valid: bool,
+    #[serde(default = "default_json_array")]
+    pub blockers_json: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExperimentTraceRecord {
     pub trace_id: String,
     pub run_id: String,
@@ -115,6 +143,7 @@ pub struct ExperimentTraceRecord {
     pub data_snapshot_id: Option<String>,
     pub dsl_hash: Option<String>,
     pub candidate_replay_id: Option<String>,
+    pub full_depth_execution_surface_id: Option<String>,
     pub artifact_kind: String,
     pub evidence_stage: String,
     pub promotion_decision: Option<String>,

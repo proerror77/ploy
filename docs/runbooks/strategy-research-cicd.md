@@ -96,9 +96,10 @@ Research data products are intentionally split into four layers:
 3. Candidate replay tapes: exact `MarketUpdate` sequences and runtime scorer
    inputs used to test one candidate/event lifecycle.
 4. Durable research trace: `research_dataset_snapshots`, `factor_registry`,
-   `factor_evaluations`, and append-only `experiment_trace` rows tying
-   `dsl_hash`, `ast_json`, `runtime_contract`, run id, dataset window, blockers,
-   and promotion decision together.
+   `factor_evaluations`, `candidate_replay_tapes`,
+   `full_depth_execution_surfaces`, and append-only `experiment_trace` rows
+   tying `dsl_hash`, `ast_json`, `runtime_contract`, run id, dataset window,
+   execution-surface proof, blockers, and promotion decision together.
 
 Do not call a sampled research snapshot "full data". It can be a complete
 retained research artifact for a chosen cadence and window, but full-resolution
@@ -115,6 +116,7 @@ rtk cargo run -p ploy-research --example persist_research_trace --features db --
   --alpha-search-dir <alpha-search-artifact-dir> \
   --registry-json <optional-promotion-registry.json> \
   --handoff-json <optional-strategy-handoff.json> \
+  --full-depth-execution-surface-json <optional-full-depth-execution-surface.json> \
   --db-url "$DATABASE_URL"
 ```
 
@@ -128,7 +130,10 @@ or live promotion evidence; candidate factors remain `continue` / `candidate`
 until executable replay, runtime scorer parity, and dry-run evidence are
 attached through the later gates. Candidate replay tapes must use their own
 `candidate_replay_id` instead of being collapsed into the sampled research
-snapshot identity.
+snapshot identity. Full-depth CLOB execution proof must use a
+`full_depth_execution_surface_id` and be queryable through
+`full_depth_execution_surfaces`; Research Manager must not infer
+execution-surface coverage only by reverse-reading promotion JSON.
 
 As of current mainline evidence, this chain has been proven through a durable
 trace-backed plan, but not through automatic strategy discovery. Hosted

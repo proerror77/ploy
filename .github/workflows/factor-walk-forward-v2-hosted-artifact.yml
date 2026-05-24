@@ -603,6 +603,10 @@ jobs:
           if [ -z "${candidate_strategy_replay_json}" ]; then
             candidate_strategy_replay_json="$(find artifacts/factor-walk-forward-v2 -name 'candidate-strategy-replay.json' -print -quit 2>/dev/null || true)"
           fi
+          full_depth_execution_surface_json="${WALK_FULL_DEPTH_EXECUTION_SURFACE_JSON:-}"
+          if [ -z "${full_depth_execution_surface_json}" ] && [ -f artifacts/full-depth-execution-surface/full-depth-execution-surface.json ]; then
+            full_depth_execution_surface_json="artifacts/full-depth-execution-surface/full-depth-execution-surface.json"
+          fi
           if [ -d artifacts/factor-walk-forward-v2/alpha-search ]; then
             trace_args+=(--alpha-search-dir artifacts/factor-walk-forward-v2/alpha-search)
           fi
@@ -617,6 +621,9 @@ jobs:
           fi
           if [ -n "${candidate_strategy_replay_json}" ] && [ -f "${candidate_strategy_replay_json}" ]; then
             trace_args+=(--candidate-replay-json "${candidate_strategy_replay_json}")
+          fi
+          if [ -n "${full_depth_execution_surface_json}" ] && [ -f "${full_depth_execution_surface_json}" ]; then
+            trace_args+=(--full-depth-execution-surface-json "${full_depth_execution_surface_json}")
           fi
 
           case "${db_host}" in
@@ -673,6 +680,11 @@ jobs:
                 cp "${candidate_strategy_replay_json}" \
                   /tmp/research-trace-input/candidate-strategy-replay/candidate-strategy-replay.json
               fi
+              if [ -n "${full_depth_execution_surface_json}" ] && [ -f "${full_depth_execution_surface_json}" ]; then
+                mkdir -p /tmp/research-trace-input/full-depth-execution-surface
+                cp "${full_depth_execution_surface_json}" \
+                  /tmp/research-trace-input/full-depth-execution-surface/full-depth-execution-surface.json
+              fi
               tar -C /tmp/research-trace-input -cf /tmp/research-trace-input.tar .
               # shellcheck disable=SC2029
               ssh tango-1-1 "rm -rf '${remote_dir}' && mkdir -p '${remote_dir}'"
@@ -705,6 +717,9 @@ jobs:
           fi
           if [ -f "${remote_dir}/candidate-strategy-replay/candidate-strategy-replay.json" ]; then
             trace_args+=(--candidate-replay-json "${remote_dir}/candidate-strategy-replay/candidate-strategy-replay.json")
+          fi
+          if [ -f "${remote_dir}/full-depth-execution-surface/full-depth-execution-surface.json" ]; then
+            trace_args+=(--full-depth-execution-surface-json "${remote_dir}/full-depth-execution-surface/full-depth-execution-surface.json")
           fi
           DATABASE_URL="${db_url}" "${persist_bin}" "${trace_args[@]}"
           EOF

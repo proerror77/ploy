@@ -1,5 +1,50 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Full-Depth Execution Surface Trace (2026-05-25)
+
+Evidence stage: `diagnostic` / `execution_quality` trace repair. This makes
+full-depth CLOB execution-surface proofs queryable by Research Manager; it is
+not dry-run or live-promotion evidence.
+
+### Tasks
+
+- [x] Add a durable Research OS table for full-depth execution-surface proofs.
+- [x] Teach `persist_research_trace` to persist
+      `full_depth_execution_surface.v1` artifacts and append trace rows.
+- [x] Pass hosted walk-forward full-depth proof artifacts into durable trace
+      persistence.
+- [x] Teach Research Trace Plan to use valid full-depth proof coverage when
+      classifying sampled execution-surface blockers.
+- [x] Run focused migration, writer, workflow, and planner tests.
+- [ ] Land through PR after CI.
+
+### Review
+
+- 2026-05-25: Added `full_depth_execution_surfaces` as a first-class Research
+  OS table and linked `experiment_trace.full_depth_execution_surface_id` to it.
+  `persist_research_trace` now accepts `--full-depth-execution-surface-json`,
+  validates `full_depth_execution_surface.v1` fail-closed, persists blockers,
+  and appends an `executable_replay` trace row. Hosted walk-forward now passes
+  downloaded full-depth proof artifacts into trace persistence on both local DB
+  and remote Tango DB paths. Research Trace Plan reads valid proof coverage from
+  the durable table before classifying sampled execution surfaces as promotion
+  blockers.
+- 2026-05-25: Focused validation passed:
+  `python3 -m unittest tests.test_factor_research_os_registry
+  tests.test_persist_research_trace_contract
+  tests.test_factor_walk_forward_sweep tests.test_research_manager_execute_plan`
+  (`59` tests), `CARGO_TARGET_DIR=/tmp/ploy-full-depth-trace-target
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research
+  --example persist_research_trace --features db` (`10` tests),
+  `CARGO_TARGET_DIR=/tmp/ploy-full-depth-trace-target
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research
+  --example research_trace_plan --features db` (`0` tests),
+  `CARGO_TARGET_DIR=/tmp/ploy-full-depth-trace-target
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research
+  research_os --lib` (`20` tests), workflow security (`29` tests), Ruby YAML
+  parse for hosted walk-forward and Tango deploy workflows, and
+  `rtk git diff --check`.
+
 ## Current Session - Factor Router Workflow Removal (2026-05-25)
 
 Evidence stage: `diagnostic` / workflow architecture cleanup. This removes

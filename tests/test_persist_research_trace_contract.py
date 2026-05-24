@@ -34,6 +34,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "factor_evaluations",
             "experiment_trace",
             "candidate_replay_tapes",
+            "full_depth_execution_surfaces",
         ]:
             self.assertIn(table, source)
         self.assertIn("ON CONFLICT (data_snapshot_id) DO UPDATE", source)
@@ -43,10 +44,15 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("SELECT eval_id::text", source)
         self.assertIn("trace_hash(", source)
         self.assertIn("--candidate-replay-json", source)
+        self.assertIn("--full-depth-execution-surface-json", source)
         self.assertIn("candidate_replay_tape", source)
+        self.assertIn("full_depth_execution_surface", source)
         self.assertIn("evaluation_kind = 'candidate_replay'", source)
         self.assertIn("candidate_replay_id = $3", source)
         self.assertIn("ON CONFLICT (candidate_replay_id) DO UPDATE", source)
+        self.assertIn("ON CONFLICT (full_depth_execution_surface_id) DO UPDATE", source)
+        self.assertIn("full_depth_execution_surface.v1", source)
+        self.assertIn("full_depth_surface_valid", source)
         self.assertIn("canonical_candidate_replay_evidence_stage", source)
         self.assertIn("contradicts basis", source)
         self.assertIn('"promotion_registry" | "autofactor_promotion" | "strategy_handoff" => "walk_forward"', source)
@@ -195,7 +201,9 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "--promotion-json artifacts/factor-walk-forward-v2/autofactor-strategy-promotion.json",
             "--handoff-json artifacts/factor-walk-forward-v2/autofactor-strategy-handoff.json",
             "--candidate-replay-json",
+            "--full-depth-execution-surface-json",
             "candidate-strategy-replay/candidate-strategy-replay.json",
+            "full-depth-execution-surface/full-depth-execution-surface.json",
             "--snapshot-manifest-json artifacts/research-snapshot/manifest.json",
             "validate_autofactor_handoff_replay_gate.py",
             "factor walk-forward report is required for durable trace persistence.",
@@ -238,6 +246,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("--example research_trace_plan", workflow)
         self.assertIn("044_candidate_replay_tapes.sql", workflow)
         self.assertIn("045_candidate_replay_basis_stage_constraint.sql", workflow)
+        self.assertIn("047_full_depth_execution_surfaces.sql", workflow)
 
     def test_research_trace_plan_reads_durable_tables(self) -> None:
         source = TRACE_PLAN.read_text(encoding="utf-8")
@@ -246,12 +255,16 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "factor_registry",
             "factor_evaluations",
             "research_dataset_snapshots",
+            "full_depth_execution_surfaces",
         ]:
             self.assertIn(table, source)
         self.assertIn("plan_next_research", source)
         self.assertIn('"research_trace_plan.v1"', source)
         self.assertIn("GROUP BY run_id", source)
         self.assertIn("source_surface_blockers", source)
+        self.assertIn("latest_full_depth_execution_surfaces", source)
+        self.assertIn("valid = true", source)
+        self.assertIn("execution_surfaces", source)
         self.assertIn("missing_blocks_promotion", source)
 
     def test_trace_plan_workflow_accepts_candidate_runtime_replay_theme(self) -> None:
