@@ -1,5 +1,31 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Ready Handoff Executor Dispatch (2026-05-24)
+
+Evidence stage: `dry_run_candidate` handoff execution planning. This creates
+reviewable dry-run handoff issue/config PR work only; it does not deploy or
+enable live trading.
+
+### Tasks
+
+- [x] Verify post-deploy Research Trace Plan `26368346028` emits
+      `theme=ready_handoff` with actions `create_dry_run_handoff_issue` and
+      `open_config_pr_from_ready_handoff`.
+- [x] Confirm Research Manager executor did not previously map those actions
+      to a workflow dispatch.
+- [x] Add executor support that routes ready handoff actions through the
+      existing durable trace-gated `autofactor-strategy-promotion.yml` workflow.
+- [x] Validate the real plan artifact produces a ready dry-run handoff dispatch
+      for walk-forward run `26367562792`.
+
+### Review
+
+- 2026-05-24: Focused validation passed:
+  `python3 -m unittest tests.test_research_manager_execute_plan`,
+  `python3 -m py_compile scripts/research_manager_execute_plan.py
+  tests/test_research_manager_execute_plan.py`, real-plan dry-run rendering
+  against trace-plan `26368346028`, and `rtk git diff --check`.
+
 ## Current Session - Runtime Replay Recording Provenance (2026-05-24)
 
 Evidence stage: `executable_replay` / replay provenance repair. This is not a
