@@ -4,8 +4,11 @@ Evidence stage: `diagnostic` / architecture review. This review describes data
 and research-chain readiness. It is not dry-run, live, or strategy promotion
 evidence.
 
-Reviewed ref: `origin/main` at
-`82361657c1e8ec4feb99aa720a85fce25a5255f8`.
+Reviewed refs:
+
+- `origin/main` at `6e711725c4ef90852b52239dcdae4912351824fd`
+- cleanup branch `cleanup/remove-direct-db-factor-research` at
+  `3e4413bd` before PR merge
 
 ## Executive Verdict
 
@@ -25,13 +28,13 @@ That means Ploy can automatically produce factor attribution, walk-forward
 diagnostics, durable trace rows, Research Manager plans, bounded follow-up
 workflow dispatches, runtime candidate replay, and rejection decisions.
 
-It has not yet proven an automatically tradable strategy. The latest dry-run
-candidate evidence is explicitly blocked: dry-run candidate gate run
-`26369050956` found residual runtime evidence after config sync
-(`82` buy orders, `80` closed trades, `2` open positions), and the report
-summary at that time showed `266` trades, `264` closed trades, win rate
-`39.8%`, and realized PnL `-714.35`. That is a clean-baseline blocker, not a
-strategy approval.
+It has not yet proven an automatically tradable strategy. The contaminated
+dry-run baseline was reset in run `26369076183`, which reported zero orders,
+zero trades, zero closed trades, and zero open positions after reset. The
+following candidate-quality gate run `26370065657` then failed on economics and
+sample size, not on buy-side fillability: `closed_trades=3`, `realized_pnl=-11.49`,
+`profit_factor=0.2372`, `buy_fill_rate_pct=99.59`, and
+`max_drawdown=-15.0571`. That is a reject/revise signal, not strategy approval.
 
 ## Current Data Shape
 
@@ -41,7 +44,7 @@ strategy approval.
 | Full-depth CLOB archive | `/opt/ploy/data/lake/orderbook_snapshots/date=YYYY-MM-DD/hour=HH/` with Parquet/ZSTD, manifests, and `_SUCCESS` markers | This is the right execution-depth lake. It is full-fidelity by policy and separate from sampled research snapshots. |
 | Research snapshots | Retained `research-snapshot.yml` artifacts with manifest, source surfaces, sampling, quality report, and data audit | Correct canonical input for factor search and walk-forward, but still sampled. A sampled snapshot is not full-depth execution proof. |
 | Runtime replay tapes | `runtime-candidate-replay.yml` artifacts and `candidate_replay_tapes` Research OS rows | Correct pre-dry-run proof surface when `basis=runtime_market_update_replay`, official settlement is complete, and full-depth entry is confirmed. |
-| Durable Research OS state | PostgreSQL tables `research_dataset_snapshots`, `factor_registry`, `factor_evaluations`, `experiment_trace`, and `candidate_replay_tapes` | Correct durable layer. This should remain the queryable system of record for research lineage and promotion decisions. |
+| Durable Research OS state | PostgreSQL tables `research_dataset_snapshots`, `factor_registry`, `factor_evaluations`, `experiment_trace`, `candidate_replay_tapes`, and `full_depth_execution_surfaces` | Correct durable layer. This should remain the queryable system of record for research lineage, execution-surface coverage, and promotion decisions. |
 | DuckDB | Local/CI Parquet query accelerator and export helper | Useful execution engine, not durable state. The problem is not "data is not in DuckDB"; the problem is whether artifacts preserve the right fidelity and are linked into trace. |
 
 ## What Is Now Correct
@@ -62,11 +65,12 @@ strategy approval.
 
 3. **Research lineage has durable queryable state.**
 
-   Migrations `042`, `043`, and `044` define `factor_registry`,
+   Migrations `042`, `043`, `044`, and `047` define `factor_registry`,
    `factor_evaluations`, append-only `experiment_trace`,
-   `research_dataset_snapshots`, and `candidate_replay_tapes`. This is the
-   correct place for `dsl_hash`, `ast_json`, runtime contract, run id, dataset
-   window, blockers, replay identity, and promotion decision.
+   `research_dataset_snapshots`, `candidate_replay_tapes`, and
+   `full_depth_execution_surfaces`. This is the correct place for `dsl_hash`,
+   `ast_json`, runtime contract, run id, dataset window, blockers, replay
+   identity, full-depth proof identity, and promotion decision.
 
 4. **Legacy router workflows are removed.**
 
@@ -81,32 +85,26 @@ strategy approval.
    walk-forward can consume that proof to satisfy execution-surface blockers
    for matching windows.
 
+6. **Manual direct-DB factor research has been retired from active code.**
+
+   The active examples `factor_review_v2` and `factor_walk_forward_v2` are now
+   snapshot-only, and the old `scripts/run_factor_research*.sh` direct-DB shell
+   runners have been removed. Direct raw-table reads remain source compilation
+   work for `research-snapshot.yml`, not a second factor-discovery path.
+
 ## Remaining Architecture Problems
 
-### P0 - Dry-run evidence is contaminated until reset/clean baseline passes
+### P0 - Full-depth trace is coded but not deployed on Tango yet
 
-The dry-run config was synced, but dry-run candidate gate run `26369050956`
-failed in `clean-baseline` mode because old runtime evidence remained:
+`full_depth_execution_surfaces` is now in `origin/main`, and
+`research_trace_plan` can query durable full-depth coverage. The latest Tango
+deploy for `main@6e711725` is still waiting on the protected `tango-1-1`
+environment, so the remote database/binaries have not yet been refreshed.
 
-- `buy_orders=82`
-- `closed_trades=80`
-- `open_positions=2`
-- `reason=residual_runtime_evidence`
-
-Do not evaluate the new dry-run candidate quality until the runtime evidence
-reset has completed, the strategy has restarted cleanly, and a fresh candidate
-gate run proves the baseline has no residual orders/fills.
-
-### P0 - Full-depth execution proof is still artifact-first, not fully trace-first
-
-The full-depth execution surface exists and hosted walk-forward can consume it,
-but it is still primarily passed around as a workflow artifact/run id. It should
-be a first-class durable Research OS object, keyed by surface, window, archive
-root, manifest hashes, row count, and completeness status, then linked from
-factor evaluations and candidate replay tapes.
-
-Done means Research Manager can query full-depth coverage from durable trace
-without recovering hidden artifact ids from prior workflow runs.
+Done means deploy run `26370807170` or a newer `main` deploy succeeds, the
+remote migration is applied, `/opt/ploy/bin/research-trace-plan` is refreshed,
+and a `research-trace-plan.yml` run proves that Research Manager can read
+`full_depth_execution_surfaces`.
 
 ### P0 - Official settlement completeness remains a hard blocker
 
@@ -186,8 +184,8 @@ architecture less auditable.
 
 | Priority | Work | Done when |
 | --- | --- | --- |
-| P0 | Reset contaminated dry-run evidence and rerun clean-baseline gate | Candidate gate reports no residual orders/fills for the target deployment before candidate-quality evaluation |
-| P0 | Promote full-depth execution surface into Research OS trace | Research Manager can query full-depth proof by window/surface without manual artifact ids |
+| P0 | Deploy current `main` to Tango and rerun Research Trace Plan | Protected deploy succeeds, migration `047` is applied, and `research-trace-plan.yml` reads `full_depth_execution_surfaces` |
+| P0 | Reject/revise the current dry-run candidate based on clean candidate-quality evidence | Research Manager uses run `26370065657` economics/sample-size failure as a blocker instead of re-promoting the same candidate |
 | P0 | Keep official settlement completeness fail-closed | Every replay-fed handoff proves official settlement for all traded events |
 | P0 | Split sampled factor snapshots from tick/full-depth execution tapes in manifests and trace | Agents cannot use sampled factor rows as full-depth execution evidence |
 | P1 | Generate shared multi-horizon label contracts | Research, replay, runtime, and trace persistence use one target/horizon/accounting schema |
@@ -199,12 +197,11 @@ architecture less auditable.
 
 Yes, but only in the strict loop:
 
-1. Reset and prove clean dry-run baseline before judging candidate-quality.
-2. Use retained research snapshots for factor discovery.
-3. Require typed runtime contracts before candidate replay.
-4. Require runtime MarketUpdate replay, full-depth entry, official settlement,
+1. Use retained research snapshots for factor discovery.
+2. Require typed runtime contracts before candidate replay.
+3. Require runtime MarketUpdate replay, full-depth entry, official settlement,
    and positive executable ROI before dry-run handoff.
-5. Treat sampled snapshot metrics, fillability diagnostics, and backtest-only
+4. Treat sampled snapshot metrics, fillability diagnostics, and backtest-only
    PnL as research evidence, not tradable strategy evidence.
 
 The architecture is good enough to continue automated discovery. It is not good
