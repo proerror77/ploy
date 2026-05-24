@@ -219,6 +219,17 @@ def classify_blockers(blockers: list[str]) -> str | None:
     if any(
         token in text
         for token in [
+            "data_audit_zero_coverage",
+            "snapshot_contract_blocks_execution_claim",
+            "sampled_snapshot_required_for_execution_surface",
+            "official_settlement_missing",
+            "candidate_strategy_replay_missing_contract:official_settlement",
+        ]
+    ):
+        return "fix_data"
+    if any(
+        token in text
+        for token in [
             "candidate_strategy_replay_not_runtime_replay",
             "requires_runtime_replay_not_top_bucket_aggregate",
             "candidate_strategy_replay_identity_basis_mismatch",
