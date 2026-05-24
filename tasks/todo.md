@@ -10,12 +10,17 @@ dry-run or live promotion decision.
 - [x] Inspect failed `research-snapshot.yml` run `26349101142` provenance.
 - [x] Identify the exact data blocker instead of guessing from the workflow
       failure.
-- [ ] Run a later 24h high-density PM5D execution snapshot that avoids the
-      known Binance LOB gap.
-- [ ] Run hosted factor walk-forward from the successful full snapshot.
-- [ ] Record promotion/replay blockers from the new artifacts and update the
+- [x] Add snapshot audit visibility, SSH retry, Cloud Assistant fallback, and
+      fallback diagnostics fixes through PRs `#656` / `#657` / `#658` / `#659`.
+- [x] Run a later clean 24h complete sampled PM5D research snapshot that avoids
+      the known Binance LOB gap.
+- [x] Run hosted factor walk-forward from the successful sampled snapshot.
+- [x] Confirm automatic runtime replay fan-out from the walk-forward trace.
+- [x] Feed runtime replay evidence back into hosted walk-forward on the matching
+      AutoFactor target.
+- [x] Record promotion/replay blockers from the new artifacts and update the
       architecture review.
-- [ ] Commit and push any code/docs fixes needed to keep this chain
+- [x] Commit and push the evidence sync that keeps this chain
       reproducible.
 
 ### Review
@@ -25,6 +30,44 @@ dry-run or live promotion decision.
   BTC/ETH/SOL. The max gap was `960m`, from `2026-05-16T00:00:00Z` to
   `2026-05-16T16:00:00Z`. Polymarket quotes/orderbooks and Binance
   price/agg-trades were not the blocking surfaces in that artifact.
+- 2026-05-24: PRs `#656` through `#659` restored the snapshot path by making
+  data audit reports show the exact `audit_window`, retrying SSH audit/copy
+  steps, adding Cloud Assistant fallback, and printing terminal fallback remote
+  output.
+- 2026-05-24: Research snapshot run `26350607546` succeeded from
+  `main@1281f567b6b5dfd9100d773b80555259ef43174d` for
+  `2026-05-17T00:00:00Z -> 2026-05-18T00:00:00Z`, `BTCUSDT,ETHUSDT,SOLUSDT`,
+  `lob_sample_secs=5`, `pm_book_sample_secs=30`, and
+  `observation_sample_secs=5`. The data audit passed in `coverage` mode and
+  the complete sampled snapshot contained `87616` observations and `35180`
+  sampled PM book rows.
+- 2026-05-24: Hosted walk-forward run `26350924329` succeeded from snapshot
+  `26350607546`, persisted Research OS trace with stages
+  `factor_attribution,walk_forward`, and automatically dispatched five runtime
+  candidate replay runs: `26351022434`, `26351022707`, `26351022987`,
+  `26351023244`, and `26351023528`.
+- 2026-05-24: The five runtime replay runs all completed with
+  `basis=runtime_market_update_replay`, `51` trades, `51` unique events,
+  event-level one-decision accounting, and `entry_fill_rate=1.0`. They are not
+  promotion-ready: all five report `roi=-0.125651`, total PnL `-96.123274`,
+  `official_settlement_missing:48<51`, and
+  `roi_too_low:-0.125651<0.000000`.
+- 2026-05-24: Replay-fed hosted walk-forward run `26351209485` succeeded and
+  consumed replay `26351022434`, but it intentionally reported a target
+  mismatch because the replay was generated for
+  `tradeable_full_depth_settlement_pnl` while the run used the default
+  `full_depth_settlement_executable_pnl` target. The first replay-fed attempt
+  `26351190753` failed before Rust because `end_date` is parsed as an inclusive
+  date plus one day; the valid 24h snapshot window uses
+  `start_date=2026-05-17,end_date=2026-05-17`.
+- 2026-05-24: Correct target replay-fed hosted walk-forward run `26351351355`
+  succeeded with `allowed_target=tradeable_full_depth_settlement_pnl`,
+  `alpha_search_plan_target=tradeable_full_depth_settlement_pnl`, and
+  `dispatch_runtime_replay_requests=false`. It persisted trace and classified
+  the next action as `fix_data`, with no runtime replay requests. The blockers
+  are now the real gates: sampled execution surface
+  `clob_orderbook_snapshots`, `official_settlement_missing:48<51`, and
+  `roi_too_low:-0.125651<0.000000`.
 
 ## Current Session - Market Data Promotion Blocker Actions (2026-05-24)
 
