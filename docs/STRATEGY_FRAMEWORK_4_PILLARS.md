@@ -2,6 +2,14 @@
 
 本文件把你提出的「四大策略」框架，對照到目前 `ploy` repo 的真實模組、指令入口、配置點，並標記已完成/缺口與下一步。
 
+Status note (2026-05-24): this is a historical strategy taxonomy and should
+not be used as the active runtime or promotion runbook. Current runtime work
+flows through `new-ployd`, `ployctl`, `new-ploy-runner`, strategy TOML configs,
+and the artifact-backed research workflows described in
+`docs/runbooks/strategy-research-cicd.md`. Legacy `src/strategy/*` and
+`ploy ...` CLI examples below are compatibility references unless a newer
+runbook explicitly re-promotes them.
+
 ---
 
 ## 0) TL;DR

@@ -1,5 +1,13 @@
 # Polymarket 5m Binary Options 数据收集完整修复方案
 
+> Historical note (2026-05-24): this document is an April 2026 incident plan,
+> not the current implementation runbook. The old `apps/ploy-runner/*`
+> ownership path has been retired. Current data collection ownership lives in
+> `crates/ploy-market-data`, `crates/ploy-runner-host`,
+> `.github/workflows/deploy-tango-1-1.yml`, and
+> `docs/COLLECTOR_RUNBOOK.md`. Current research evidence must flow through
+> `docs/runbooks/strategy-research-cicd.md`.
+
 ## 问题诊断（2026-04-01）
 
 ### 用户需求
@@ -64,7 +72,8 @@ let pattern = format!("%-updown-{}-%", self.config.timeframe);
 
 **目标**: 在每个市场的 `start_time` 捕获 Chainlink 价格
 
-**实现位置**: `apps/ploy-runner/src/scanner.rs`
+**历史实现位置**: `apps/ploy-runner/src/scanner.rs`（已退休；当前实现应从
+`crates/ploy-market-data` / `crates/ploy-runner-host` 查找）
 
 **当前代码**:
 ```rust

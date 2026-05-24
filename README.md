@@ -287,7 +287,7 @@ sqlx migrate run
 | `PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD` | No | Hard sports domain daily loss stop |
 | `PLOY_RISK__MAX_DRAWDOWN_USD` | No | Hard drawdown stop (runtime cumulative realized curve) |
 | `PLOY_ACCOUNT_ID` | No | Runtime account scope identifier (default `default`) |
-| `PLOY_API_PORT` | No | API listen port for `ploy serve` and dashboard operator polling (default `8081`) |
+| `PLOY_API_PORT` | No | API listen port for `new-ployd` and operator clients (default `8081`) |
 | `PLOY_API_ADMIN_TOKEN` | No | Admin token for protected API routes, including operator terminal actions |
 | `PLOY_ADMIN_TOKEN` | No | Dashboard-side fallback token name for operator polling/actions if `PLOY_API_ADMIN_TOKEN` is unset |
 | `PLOY_DRY_RUN__ENABLED` | No | Force runtime dry-run mode (`true`/`false`) |
@@ -358,23 +358,22 @@ export PLOY_ALLOW_DIRECT_LIVE=true
 --config   / -c    Config file path (default: config/default.toml)
 ```
 
-### Core Commands
+### Current Operator Commands
+
+Use the workspace control-plane binaries as the active operator surface:
 
 ```bash
-ploy run                                       # Legacy bot loop (dry-run unless PLOY_ALLOW_DIRECT_LIVE=true)
-ploy test                                      # Test Polymarket API connectivity
-ploy serve --port 8081                         # API server for dashboards / control-plane clients
-ploy dashboard --demo                          # TUI dashboard with sample data
-ploy dashboard                                 # TUI dashboard with live data
-ploy search "bitcoin"                          # Search Polymarket for markets
-ploy book <token_id>                           # Show order book for a token
-ploy current <series_id>                       # Show active market for a series
-ploy watch --series 10423                      # Watch live market data in terminal
-ploy account --positions                       # Show account balance and positions
-ploy claim --check-only                        # Check claimable resolved positions
-ploy history --limit 50                        # View recent trading history
-ploy ev --price 95 --probability 97            # Calculate expected value for near-settlement bets
+cargo run -p new-ployd
+cargo run -p ployctl -- system status
+cargo run -p ployctl -- deployments list
+cargo run -p ployctl -- trading status
+cargo run -p new-ploy-runner --features full -- run --config config/strategies/02-pm5d.unified.toml --dry-run
 ```
+
+Older `ploy run`, `ploy serve`, `ploy dashboard`, `ploy search`, `ploy book`,
+`ploy current`, `ploy watch`, `ploy account`, `ploy claim`, `ploy history`, and
+`ploy ev` examples are archived compatibility references. Do not use them as
+the default runtime, research, or deployment path for new work.
 
 ### Collector And Backfill
 
@@ -396,16 +395,11 @@ See [docs/COLLECTOR_RUNBOOK.md](docs/COLLECTOR_RUNBOOK.md) for examples and work
 
 ### Strategies
 
-```bash
-ploy trade --series 10423 --shares 50 --dry-run          # Two-leg arbitrage on a price series
-ploy momentum --symbols BTCUSDT --shares 100 --dry-run   # Binance BTCUSDT is the underlying signal feed; execution is PM YES/NO tokens
-ploy momentum --predictive --min-time 300 --dry-run      # Predictive mode: early entry with TP/SL
-ploy split-arb --max-entry 35 --shares 100 --dry-run     # Split arbitrage (time-separated hedge)
-ploy market-make --token <token_id>            # Market making opportunity analysis
-ploy scan --series 10423 --watch               # Continuous arbitrage scan
-ploy analyze --event <event_id>                # Analyze multi-outcome market
-ploy paper --symbols BTCUSDT,ETHUSDT           # Paper mode using Binance underlyings (signals only, no PM orders)
-```
+Strategy work should flow through reviewed strategy configs,
+`new-ploy-runner`, and the artifact-backed research workflows. Treat older
+direct strategy commands such as `ploy trade`, `ploy momentum`,
+`ploy split-arb`, `ploy market-make`, `ploy scan`, `ploy analyze`, and
+`ploy paper` as archived compatibility examples, not deployable evidence.
 
 Post-settlement claiming is not handled by an in-process Ploy claimer daemon on
 the current workspace path. Use Polymarket account auto-claim for normal
@@ -430,54 +424,43 @@ export PLOY_RISK__CRYPTO_DAILY_LOSS_LIMIT_USD=45
 export PLOY_RISK__SPORTS_DAILY_LOSS_LIMIT_USD=45
 ```
 
-### Event-Edge Scanner
+### Archived Event-Edge And Agent CLI
 
-```bash
-ploy event-edge --title "Which company has the best AI model?"   # One-shot mispricing scan
-ploy event-edge --title "..." --watch --interval-secs 30         # Continuous monitoring
-ploy event-edge --event <id> --watch --trade --min-edge 0.08     # Auto-trade when +EV
-```
-
-### AI Agent
-
-```bash
-ploy agent --mode advisory                     # Get trading recommendations
-ploy agent --mode autonomous --enable-trading  # (blocked by default; prefer platform mode)
-ploy agent --chat                              # Interactive conversation
-ploy agent --mode sports --sports-url <url>    # Sports-specific analysis
-```
+The old `ploy event-edge ...` and `ploy agent ...` commands are archived
+compatibility examples. Do not use them as promotion evidence, dry-run handoff,
+or live execution paths. New strategy research should create artifact-backed
+evidence through the workflows in
+[docs/runbooks/strategy-research-cicd.md](docs/runbooks/strategy-research-cicd.md).
 
 ### Domain: Crypto
 
 ```bash
-ploy crypto split-arb --coins SOL,ETH,BTC --dry-run      # Split-arb on crypto UP/DOWN markets
-ploy crypto monitor --coins SOL,ETH             # Monitor crypto markets
+# Archived compatibility examples only:
+# ploy crypto split-arb --coins SOL,ETH,BTC --dry-run
+# ploy crypto monitor --coins SOL,ETH
 ```
 
 ### Domain: Sports
 
 ```bash
-ploy sports split-arb --leagues NBA --dry-run              # Split-arb on sports markets
-ploy sports monitor --leagues NBA                # Monitor sports markets
-ploy sports draftkings --sport nba --min-edge 5  # DraftKings odds comparison
-ploy sports analyze --team1 LAL --team2 BOS      # Analyze a specific matchup
-ploy sports polymarket --league nba --live       # Browse Polymarket sports markets
-ploy sports chain --team1 LAL --team2 BOS        # Full decision chain (Grok -> Claude -> DK -> PM)
-ploy sports live-scan --sport nba --min-edge 3   # Continuous live edge scanner
+# Archived compatibility examples only:
+# ploy sports split-arb --leagues NBA --dry-run
+# ploy sports monitor --leagues NBA
+# ploy sports draftkings --sport nba --min-edge 5
+# ploy sports analyze --team1 LAL --team2 BOS
+# ploy sports polymarket --league nba --live
+# ploy sports chain --team1 LAL --team2 BOS
+# ploy sports live-scan --sport nba --min-edge 3
 ```
 
 ### Strategy Management
 
 ```bash
-ploy strategy list                              # List all strategies and status
-ploy strategy start momentum --dry-run          # Start a strategy
-ploy strategy stop momentum                     # Stop a running strategy
-ploy strategy status                            # Show status of all strategies
-ploy strategy logs momentum --follow            # Tail strategy logs
-ploy strategy reload momentum                   # Hot-reload strategy config
-ploy strategy nba-seed-stats --season 2025-26   # Seed NBA comeback stats into DB
-ploy strategy nba-comeback --dry-run            # Run NBA comeback agent standalone
-ploy strategy accuracy --lookback-hours 12      # Report prediction accuracy
+cargo run -p ployctl -- deployments list
+cargo run -p ployctl -- deployments inspect <deployment-id>
+cargo run -p ployctl -- deployments pause <deployment-id>
+cargo run -p ployctl -- deployments resume <deployment-id>
+cargo run -p ployctl -- deployments stop <deployment-id>
 ```
 
 ### Archived Single-Binary Platform CLI
@@ -487,25 +470,25 @@ Use [`docs/runbooks/platform-startup.md`](docs/runbooks/platform-startup.md) for
 
 ### Operator Terminal
 
-The dashboard now includes an `Operator` tab backed by the admin API. It is meant for runtime operations only and does not introduce a direct live order path.
+Use `ployctl` for scripted operator actions and `ploytui` for the terminal
+console. Both are clients of the `new-ployd` control plane and do not introduce
+a direct live order path.
 
-Start the control plane and dashboard together:
+Start the control plane and terminal console:
 
 ```bash
 export PLOY_API_ADMIN_TOKEN=change-me
-ploy serve --port 8081
-ploy dashboard
+cargo run -p new-ployd
+cargo run -p ploytui
 ```
 
 Behavior:
 
-- `ploy dashboard` polls `http://127.0.0.1:${PLOY_API_PORT:-8081}` for `GET /api/operator/status`
-- the dashboard sends operator actions with `x-ploy-admin-token`
-- if `PLOY_API_ADMIN_TOKEN` is unset in the dashboard shell, it falls back to `PLOY_ADMIN_TOKEN`
-- the first version supports only global/domain ops actions: `pause`, `resume`, `force_close`, `claim_check`, and `claim_run`
-- all operator actions still flow through the existing coordinator/control plane
+- `ployctl` and `ploytui` connect to `http://127.0.0.1:${PLOY_API_PORT:-8081}`.
+- operator requests use `x-ploy-admin-token`.
+- all operator actions flow through the workspace control plane.
 
-If the admin token is missing, the Operator tab remains visible but action requests fail closed.
+If the admin token is missing, protected operator requests fail closed.
 See [docs/runbooks/operator-terminal.md](docs/runbooks/operator-terminal.md) for the minimal operator flow.
 
 Deployment matrix entries support runtime scope controls:
