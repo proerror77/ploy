@@ -22,7 +22,7 @@ profitability, dry-run readiness, or live-promotion evidence.
 - [x] Teach Research Trace Plan to clear `pm_token_settlements` materialization
       blockers when a valid coverage proof spans the snapshot window.
 - [x] Run focused validation.
-- [ ] Land through PR and rerun trace-plan/manager follow-up evidence.
+- [x] Land through PR and rerun trace-plan/manager follow-up evidence.
 
 ### Review
 
@@ -57,6 +57,48 @@ profitability, dry-run readiness, or live-promotion evidence.
   `promotion_data_settlement` because the repair artifact was not yet persisted
   as a queryable Research OS settlement-coverage surface. This slice adds that
   missing durable coverage layer.
+- 2026-05-25: PR `#694` landed as `main@6065667d` and deploy
+  `26374420569` succeeded. Execute-mode settlement repair `26375651179`
+  persisted `official_settlement_coverage:c9580ac9585c7b7715a8960e2e54de54`
+  for `2026-05-17T00:00:00Z` through `2026-05-18T00:00:00Z` with
+  `candidate_market_count=1097`, `settlement_token_count=2194`, `valid=true`,
+  and no blockers. Trace Plan `26375853818` consumed that surface and reported
+  `market_data_health.surface_blockers=[]`, but still emitted a
+  `promotion_data_settlement` blocker action because the planner searched the
+  whole market-data JSON and matched the healthy `pm_token_settlements` surface
+  name. The follow-up planner fix below makes blocker action derivation read
+  only structured blocker arrays.
+
+## Current Session - Research Manager Settlement Blocker Precision (2026-05-25)
+
+Evidence stage: `diagnostic` / Research Manager repair-loop hardening. This
+fixes false-positive blocker routing after durable settlement coverage is
+available; it does not claim strategy profitability, dry-run readiness, or
+live-promotion evidence.
+
+### Tasks
+
+- [x] Verify current durable settlement coverage evidence on `main@6065667d`.
+- [x] Reproduce the false-positive `promotion_data_settlement` blocker from
+      Research Trace Plan `26375853818`.
+- [x] Restrict market-data blocker-action derivation to structured blocker
+      fields instead of full JSON text matching.
+- [x] Add regression coverage for healthy materialized settlement-surface
+      metadata.
+- [ ] Land through PR and rerun Research Trace Plan to confirm only the real
+      runtime blocker remains.
+
+### Review
+
+- 2026-05-25: The data layer is no longer the settlement blocker for the latest
+  one-day snapshot: `settlement_surfaces.source=official_settlement_coverage_checks`,
+  `valid=true`, `blockers=[]`, and snapshot `promotion_blockers=[]`. The remaining
+  false blocker was planner logic, not missing data. Local validation passed:
+  `CARGO_TARGET_DIR=/tmp/ploy-research-manager-target /opt/homebrew/bin/timeout
+  300 rtk cargo test --locked -p ploy-research research_os::manager --lib`
+  (`15` tests) and `CARGO_TARGET_DIR=/tmp/ploy-research-manager-target
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research
+  --example research_trace_plan --features db` (`2` tests).
 
 ## Current Session - Legacy Factor Research Binary Removal (2026-05-25)
 
