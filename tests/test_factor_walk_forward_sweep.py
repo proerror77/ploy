@@ -738,6 +738,8 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertIn("--snapshot-data-audit-json artifacts/research-snapshot/data-gap-audit.json", workflow)
         self.assertIn("full_depth_execution_surface_run_id", workflow)
         self.assertIn("Download full-depth execution surface artifact", workflow)
+        self.assertIn('[[ "${artifact_name}" == factor-walk-forward-v2-* ]]', workflow)
+        self.assertIn("--strip-prefix full-depth-execution-surface", workflow)
         self.assertIn("--full-depth-execution-surface-json", workflow)
 
     def test_snapshot_manifest_passes_to_candidate_replay_and_promotion(self):

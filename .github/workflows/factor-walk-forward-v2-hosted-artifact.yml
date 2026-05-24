@@ -404,11 +404,16 @@ jobs:
           if [ -z "${artifact_name}" ]; then
             artifact_name="full-depth-execution-surface-${WALK_FULL_DEPTH_EXECUTION_SURFACE_RUN_ID}"
           fi
-          python3 scripts/download_github_artifact.py \
-            --run-id "${WALK_FULL_DEPTH_EXECUTION_SURFACE_RUN_ID}" \
-            --name "${artifact_name}" \
-            --output-dir artifacts/full-depth-execution-surface \
+          download_args=(
+            --run-id "${WALK_FULL_DEPTH_EXECUTION_SURFACE_RUN_ID}"
+            --name "${artifact_name}"
+            --output-dir artifacts/full-depth-execution-surface
             --require full-depth-execution-surface.json
+          )
+          if [[ "${artifact_name}" == factor-walk-forward-v2-* ]]; then
+            download_args+=(--strip-prefix full-depth-execution-surface)
+          fi
+          python3 scripts/download_github_artifact.py "${download_args[@]}"
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2

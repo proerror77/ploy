@@ -636,7 +636,7 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
     let candidate_section = hosted
         .split("- name: Download candidate strategy replay artifact")
         .nth(1)
-        .and_then(|tail| tail.split("- name: Cache cargo build").next())
+        .and_then(|tail| tail.split("- name: Download full-depth execution surface artifact").next())
         .unwrap_or("");
     if candidate_section.contains("--strip-prefix") {
         offenders.push(
