@@ -18,7 +18,7 @@ This is not a dry-run or live promotion decision.
 - [x] Add regression coverage for lower-ranked matching runtime replay
       artifacts.
 - [x] Run focused validation.
-- [ ] Commit, push, open PR, wait for CI, merge, and rerun hosted
+- [x] Commit, push, open PR, wait for CI, merge, and rerun hosted
       walk-forward from `main`.
 
 ### Review
@@ -50,6 +50,19 @@ This is not a dry-run or live promotion decision.
   tests.test_autofactor_strategy_promotion` (`82` tests),
   `python3 -m py_compile` for the touched scripts/tests, and
   `rtk git diff --check`.
+- 2026-05-24: PR `#667` merged to `main` as
+  `c65e60d3f81a94c6334406371c5f7a5d7f8bc89f`. Replay-fed hosted
+  walk-forward run `26356028562` succeeded from main and now preserves the
+  downloaded runtime replay in both `candidate-strategy-replay/` and
+  `factor-walk-forward-v2/candidate-strategy-replay.json` with
+  `basis=runtime_market_update_replay`, runtime score
+  `autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_spread_adjusted_capacity`,
+  `trade_count=53`, `unique_event_count=53`, `entry_fill_rate=1.0`,
+  `roi=-0.07909107855471195`, and total PnL `-62.877407450996`. Promotion
+  remains blocked, but the blocker is now the real economics/OOS gate:
+  `roi_too_low`, `candidate_strategy_replay_roi_too_low`, and
+  `walk_forward_oos`. Closed-loop action is `revise_prior`, with no runtime
+  replay requests.
 
 ## Current Session - PM5D Research Chain Recovery (2026-05-24)
 
