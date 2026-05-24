@@ -1,7 +1,7 @@
 # Research Data Architecture Review - 2026-05-23
 
 Last updated: 2026-05-24 against `main`
-`1126c2d1fb6e3bbaafb884b67b8c9396667c7367`.
+`1281f567b6b5dfd9100d773b80555259ef43174d`.
 
 ## Scope
 
@@ -26,7 +26,7 @@ reserved for `executable_replay` evidence.
 | Research snapshot | `research_snapshot_compile` emits immutable complete sampled artifacts with source-surface metadata and canonical `gate_category` values | Canonical factor-search input; not full-resolution execution replay evidence |
 | Alpha-search | Hosted artifact walk-forward emits registry previews, typed runtime contracts, MCTS tree, search feedback, promotion/handoff artifacts | Usable for factor discovery and attribution |
 | Candidate replay | `candidate_replay_tapes` exists and `persist_research_trace` can link replay artifacts to factor evaluations | Durable replay identity exists, and hosted walk-forward can now fan out runtime replay requests from unblocked runtime contracts |
-| Durable trace | Hosted walk-forward defaults to trace persistence and writes Research OS rows when DB secrets and deployed binaries are available | Current `main` run `26344749058` persisted trace and uploaded `research-trace/persisted.env` |
+| Durable trace | Hosted walk-forward defaults to trace persistence and writes Research OS rows when DB secrets and deployed binaries are available | Current `main` run `26350924329` persisted trace and uploaded `research-trace/persisted.env` |
 | Research Manager | `research_trace_plan` can read durable DB trace and emit next-plan JSON; `research-manager-execute-plan.yml` and hosted walk-forward can dispatch bounded follow-up evidence | Main runs have proven executor dispatch, recorded replay parity, and closed-loop runtime replay fan-out |
 | Legacy research paths | Factor routers and Event ML rolling evidence are artifact-backed only | Former direct `ploy-ci-1` DB execution/export branches have been removed from the active research chain |
 | Diagnostic backtest | `backtest.yml` now emits `evidence-stage` artifacts with `promotion_ready=false` | Useful diagnostic replay/backtest surface; not promotion evidence |
@@ -116,6 +116,14 @@ reserved for `executable_replay` evidence.
     host, and verifies timer status after deploy. The legacy installer remains
     archived for historical context only.
 
+12. **Research snapshot orchestration now has observable fallbacks.**
+
+    PRs `#656`, `#657`, `#658`, and `#659` made the snapshot data audit report
+    show the exact gate/window being audited, retried SSH audit/compile/copy
+    steps, added a Cloud Assistant fallback for `tango-1-1`, and made terminal
+    fallback failures print decoded remote output. This restored the remote
+    snapshot path without compiling Rust on the trading host.
+
 ## Current Verified Runs
 
 | Run | Git ref / source | Result | Meaning |
@@ -129,6 +137,12 @@ reserved for `executable_replay` evidence.
 | `26344523079` | `main` at `a74f030b7e8c288144b5fd5a35a75da9b589bc78` | Hosted walk-forward succeeded; `persisted=true`; dispatched five runtime replay requests from `runtime_replay_requests` | Snapshot -> walk-forward -> durable trace -> runtime replay fan-out is working |
 | `26344588318` / `26344588684` / `26344589064` / `26344589439` / `26344589743` | runtime candidate replay batch | All succeeded with `basis=runtime_market_update_replay`; trade counts were `29`, `29`, `8`, `16`, and `15`; fill rate was `1.0` for all | Runtime replay automation works, but every candidate remains below the 50-trade promotion gate |
 | `26344749058` | `main` hosted walk-forward with replay `26344588318` | Succeeded; consumed true runtime replay evidence; closed-loop action became `fix_data` with zero replay requests | Promotion now sees runtime replay evidence and blocks on data/trade-count/settlement gates instead of runtime provenance |
+| `26350607546` | `main` at `1281f567b6b5dfd9100d773b80555259ef43174d` | Research snapshot succeeded for `2026-05-17T00:00:00Z -> 2026-05-18T00:00:00Z`, `BTCUSDT,ETHUSDT,SOLUSDT`; data audit `ok`, gate mode `coverage`, `87616` observations, `35180` sampled PM book rows | The clean 24h sampled snapshot path is restored after the 2026-05-16 Binance LOB gap |
+| `26350924329` | `main` at `1281f567b6b5dfd9100d773b80555259ef43174d` | Hosted walk-forward succeeded from snapshot `26350607546`; `persisted=true`; stages `factor_attribution,walk_forward`; dispatched five runtime candidate replay requests | Snapshot -> hosted walk-forward -> durable trace -> runtime replay fan-out works on current main |
+| `26351022434` / `26351022707` / `26351022987` / `26351023244` / `26351023528` | runtime candidate replay batch | All succeeded with `basis=runtime_market_update_replay`, `51` trades, `51` unique events, `entry_fill_rate=1.0`, `roi=-0.125651`, total PnL `-96.123274`, and blockers `official_settlement_missing:48<51` plus `roi_too_low` | The chain now reaches executable replay trade count/fillability gates, but the candidates are economically negative and settlement coverage is incomplete |
+| `26351190753` | replay-fed hosted walk-forward attempt | Failed before Rust: `end_date=2026-05-18` was parsed as `2026-05-19T00:00:00Z`, outside the one-day snapshot | Workflow date inputs are inclusive day strings; for this snapshot the valid 24h window is `2026-05-17` to `2026-05-17` |
+| `26351209485` | replay-fed hosted walk-forward with replay `26351022434` | Succeeded, but correctly reported target mismatch because the replay was generated for `tradeable_full_depth_settlement_pnl` and the run used default `full_depth_settlement_executable_pnl` | Promotion/replay contracts fail closed when target names do not match |
+| `26351351355` | replay-fed hosted walk-forward with matching `tradeable_full_depth_settlement_pnl` target | Succeeded; `persisted=true`; closed-loop `decision=fix_data`; no runtime replay requests; blockers are sampled execution surface, `official_settlement_missing:48<51`, and `roi_too_low:-0.125651<0.000000` | The chain now consumes true runtime replay evidence and routes to data repair instead of repeating replay fan-out |
 
 ## Repository Cleanup Evidence
 
@@ -141,11 +155,11 @@ reserved for `executable_replay` evidence.
 The current walk-forward/runtime replay evidence is deliberately blocked:
 
 - `sweep-summary.json` still reports `decision=blocked`.
-- Candidate replay is no longer only a diagnostic aggregate for the selected
-  replay-fed run: it uses `basis=runtime_market_update_replay`, but remains
-  blocked by `trade_count_too_small:29<50`,
-  `official_settlement_missing:25<29`, and
-  `candidate_strategy_replay_missing_contract:official_settlement`.
+- Candidate replay is no longer only a diagnostic aggregate: the fresh batch
+  uses `basis=runtime_market_update_replay`, reaches `51` trades on `51`
+  distinct events, and reports `entry_fill_rate=1.0`. It remains blocked by
+  `official_settlement_missing:48<51` and
+  `roi_too_low:-0.125651<0.000000`.
 - Snapshot contract blockers include
   `sampled_snapshot_required_for_execution_surface:clob_orderbook_snapshots`,
   so the run cannot make full-depth executable handoff claims.
@@ -168,8 +182,12 @@ The current walk-forward/runtime replay evidence is deliberately blocked:
 
    Current answer to "can it automatically research/backtest/discover
    strategies": it can automatically produce factor attribution, persist trace,
-   fan out runtime replay, and reject weak candidates. It has not yet proven an
-   automatically tradable strategy.
+   fan out runtime replay, feed replay evidence back into hosted walk-forward,
+   and reject weak candidates. The latest replay batch also proves the path can
+   reach the 50-trade and fillability gates. It has not yet proven an
+   automatically tradable strategy because the candidates are negative ROI,
+   backed by sampled execution-surface research snapshots, and not fully
+   settled.
 
 2. **Feature snapshots are still sampled research products, not full execution
    tapes.**
@@ -229,9 +247,9 @@ The current walk-forward/runtime replay evidence is deliberately blocked:
 
 | Priority | Work | Done when |
 | --- | --- | --- |
-| P0 | Increase runtime replay event density without lowering promotion gates | Runtime replay candidates naturally reach the 50-trade minimum on distinct events, or the candidate family is rejected/revised |
-| P0 | Repair or replace sampled execution-surface evidence | Full-depth CLOB lake or runtime replay evidence replaces sampled `clob_orderbook_snapshots` for executable handoff |
 | P0 | Complete official settlement coverage for runtime replay candidates | Runtime replay artifacts include official settlement for all traded events before any handoff can become ready |
+| P0 | Repair or replace sampled execution-surface evidence | Full-depth CLOB lake or runtime replay evidence replaces sampled `clob_orderbook_snapshots` for executable handoff |
+| P0 | Reject or revise negative executable replay candidates after data gates are fixed | A replay-fed closed-loop run with complete settlement/full-depth evidence converts persistent `roi_too_low` into a machine-readable prior mutation or rejection instead of redispatching equivalent candidates |
 | P0 | Keep Research Manager candidate replay contract-driven | Executor replays only explicit or trace-derived unblocked runtime contracts and fails closed without one |
 | P0 | Convert runtime replay blockers into next search mutations | `fix_data`, `trade_count_too_small`, settlement gaps, and sampled execution-surface blockers produce machine-readable next actions instead of manual interpretation |
 | P1 | Promote runtime input canonicalization to a generated shared contract | Rust runtime scoring, Rust alpha-search, and Python promotion/replay use one source of truth instead of mirrored catalogs |
@@ -263,11 +281,15 @@ The missing sequence is now:
 
 ```text
 blocked runtime candidate
-  -> closed-loop prior revision / new runtime-mappable candidate
+  -> closed-loop fix_data for settlement/full-depth evidence gaps
+  -> closed-loop prior revision / new runtime-mappable candidate if ROI stays negative
   -> runtime_market_update_replay with at least 50 distinct event trades
+  -> positive executable ROI and complete official settlement coverage
   -> handoff only if full-depth execution, official settlement, ROI, fillability, and parity gates pass
 ```
 
 The system can now automatically research, persist trace, dispatch replay/parity
-evidence, and reject a weak candidate. It should not be described as having
-found an automatically tradable strategy yet.
+evidence, and reject a weak candidate. The latest evidence moved the blocker
+from "too few runtime trades" to "negative executable ROI plus incomplete
+settlement." It should not be described as having found an automatically
+tradable strategy yet.
