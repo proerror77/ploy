@@ -55,7 +55,7 @@ when the mismatch is understood and tracked as a follow-up issue.
 | Research snapshot | `.github/workflows/research-snapshot.yml` | Compile reusable research evidence from remote data |
 | Factor diagnostics | `.github/workflows/factor-review-v2-hosted-artifact.yml` | GitHub-hosted factor review from a retained complete sampled research snapshot artifact |
 | Walk-forward diagnostics | `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml` | GitHub-hosted walk-forward from a retained complete sampled research snapshot artifact |
-| Parameter optimization | `.github/workflows/optimize.yml` | Bounded train/validation optimization from a snapshot or explicit debug data source |
+| Parameter optimization | `.github/workflows/optimize.yml` | Bounded train/validation optimization from a retained complete sampled research snapshot artifact |
 | Replay/backtest accounting | `.github/workflows/backtest.yml` | Build and run replay/backtest accounting in one job on `ploy-ci-1` |
 | Candidate strategy replay | `.github/workflows/runtime-candidate-replay.yml` | Required pre-dry-run proof that the selected runtime score emits executable runtime decisions on a Tango MarketUpdate recording |
 | Replay/dry-run parity | `.github/workflows/replay-dryrun-parity.yml` | Compare replay/backtest evidence against a dry-run JSON report |

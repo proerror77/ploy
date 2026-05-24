@@ -159,13 +159,6 @@ jobs:
           strip "target/${PLATFORM_TARGET}/release/examples/persist_research_trace" || true
           strip "target/${PLATFORM_TARGET}/release/examples/research_trace_plan" || true
 
-      - name: Build optimize-backtest
-        run: |
-          cargo build --release --locked \
-            --target "${PLATFORM_TARGET}" \
-            -p ploy-strategy-bundles --example optimize_backtest
-          strip "target/${PLATFORM_TARGET}/release/examples/optimize_backtest" || true
-
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
@@ -181,7 +174,6 @@ jobs:
           cp "target/${PLATFORM_TARGET}/release/examples/research_snapshot_compile" dist/bin/research-snapshot-compile
           cp "target/${PLATFORM_TARGET}/release/examples/persist_research_trace" dist/bin/persist-research-trace
           cp "target/${PLATFORM_TARGET}/release/examples/research_trace_plan" dist/bin/research-trace-plan
-          cp "target/${PLATFORM_TARGET}/release/examples/optimize_backtest" dist/bin/optimize-backtest
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
           cp config/strategies/02-pm5d.live.toml dist/config/strategies/02-pm5d.live.toml
           cp config/strategies/02-pm5d-threelayer.unified.toml dist/config/strategies/02-pm5d-threelayer.unified.toml
@@ -498,7 +490,6 @@ jobs:
             install -m 0755 ./bin/research-snapshot-compile ${DEPLOY_ROOT}/bin/research-snapshot-compile
             install -m 0755 ./bin/persist-research-trace ${DEPLOY_ROOT}/bin/persist-research-trace
             install -m 0755 ./bin/research-trace-plan ${DEPLOY_ROOT}/bin/research-trace-plan
-            install -m 0755 ./bin/optimize-backtest ${DEPLOY_ROOT}/bin/optimize-backtest
             install -m 0644 ./config/strategies/02-pm5d.unified.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.unified.toml
             install -m 0644 ./config/strategies/02-pm5d.live.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.live.toml
             install -m 0644 ./config/strategies/02-pm5d-threelayer.unified.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.unified.toml

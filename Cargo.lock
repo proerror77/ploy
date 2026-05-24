@@ -5416,7 +5416,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "duckdb",
- "optimizer",
  "ploy-feed-loaders",
  "ploy-market-contracts",
  "ploy-operator-contracts",

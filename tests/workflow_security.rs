@@ -1261,6 +1261,19 @@ fn optimize_workflow_builds_and_runs_in_one_job() {
             "optimize.yml: must not pass optimize_backtest through a binary artifact".to_string(),
         );
     }
+    for forbidden in [
+        "optimize_backtest",
+        "allow_live_parquet_debug",
+        "Sync Parquet data from Tango-1-1",
+        "snapshot_run_id == ''",
+        "ploy-strategy-bundles/parquet-feed",
+    ] {
+        if content.contains(forbidden) {
+            offenders.push(format!(
+                "optimize.yml: removed live/legacy optimizer path still contains `{forbidden}`"
+            ));
+        }
+    }
     if content.contains("Swatinem/rust-cache") {
         offenders.push(
             "optimize.yml: must not use Swatinem/rust-cache after cache post-step hangs"
@@ -1269,6 +1282,15 @@ fn optimize_workflow_builds_and_runs_in_one_job() {
     }
     if !content.contains("name: Build and run optimize on ploy-ci-1") {
         offenders.push("optimize.yml: must use the single build-and-run job".to_string());
+    }
+    if !content.contains("required: true")
+        || !content.contains("--example three_layer_snapshot_optimize")
+        || !content.contains("snapshot_run_id is required")
+    {
+        offenders.push(
+            "optimize.yml: must require retained snapshots and run the snapshot optimizer"
+                .to_string(),
+        );
     }
 
     assert!(

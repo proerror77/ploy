@@ -147,8 +147,8 @@ def _bounded_execution_surface_window(
 ) -> dict[str, Any]:
     start = _parse_utc_ts(market_data.get("dataset_start_ts"))
     end = _parse_utc_ts(market_data.get("dataset_end_ts"))
-    max_hours = max(1, max_hours)
     if not start or not end or end <= start:
+        max_hours = max(1, max_hours)
         return {
             "start_date": _date_from_ts(market_data.get("dataset_start_ts")),
             "end_date": _date_from_ts(market_data.get("dataset_end_ts")),
@@ -157,6 +157,8 @@ def _bounded_execution_surface_window(
             "truncated": False,
             "max_hours": max_hours,
         }
+    if max_hours <= 0:
+        max_hours = max(1, int((end - start + timedelta(seconds=3599)).total_seconds() // 3600))
     capped_end = min(end, start + timedelta(hours=max_hours))
     return {
         "start_date": start.date().isoformat(),
@@ -181,7 +183,7 @@ def _full_depth_execution_surface_dispatch(
         "start_ts": window["start_ts"],
         "end_ts": window["end_ts"],
         "max_hours": window["max_hours"],
-        "fail_if_incomplete": False,
+        "fail_if_incomplete": True,
     }
     blockers: list[str] = []
     if not window["start_ts"] or not window["end_ts"]:
@@ -926,7 +928,7 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
             _full_depth_execution_surface_dispatch(
                 plan=plan_payload,
                 git_ref=args.git_ref,
-                max_hours=getattr(args, "max_full_depth_surface_hours", 12),
+                max_hours=getattr(args, "max_full_depth_surface_hours", 0),
             )
         )
 
@@ -998,7 +1000,7 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                 recording_path=args.runtime_recording_path,
                 runtime_score=replay_args["runtime_score"],
                 strategy_profile=replay_args["strategy_profile"],
-                issue_number=args.runtime_issue_number,
+                issue_number=getattr(args, "runtime_issue_number", ""),
                 min_trade_count=args.runtime_min_trade_count,
                 min_fill_rate=args.runtime_min_fill_rate,
                 min_roi=args.runtime_min_roi,
@@ -1019,7 +1021,7 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                 deployment_id=args.runtime_deployment_id,
                 config_path=args.runtime_config_path,
                 recording_path=args.runtime_recording_path,
-                issue_number=args.runtime_issue_number,
+                issue_number=getattr(args, "runtime_issue_number", ""),
             )
         )
 
@@ -1033,7 +1035,7 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                 git_ref=args.git_ref,
                 create_handoff_issue="create_dry_run_handoff_issue" in actions,
                 create_config_pr="open_config_pr_from_ready_handoff" in actions,
-                issue_number=args.runtime_issue_number,
+                issue_number=getattr(args, "runtime_issue_number", ""),
             )
         )
 
@@ -1122,7 +1124,12 @@ def main() -> None:
     parser.add_argument("--full-depth-execution-surface-run-id", default="")
     parser.add_argument("--full-depth-execution-surface-artifact-name", default="")
     parser.add_argument("--max-snapshot-window-days", type=int, default=2)
-    parser.add_argument("--max-full-depth-surface-hours", type=int, default=12)
+    parser.add_argument(
+        "--max-full-depth-surface-hours",
+        type=int,
+        default=0,
+        help="Cap full-depth collection hours; 0 means cover the full dataset window.",
+    )
     parser.add_argument(
         "--runtime-deployment-id",
         default="pm5d.threelayer.settlement-probability-btc-eth.dryrun",
@@ -1140,7 +1147,7 @@ def main() -> None:
         default="",
     )
     parser.add_argument("--runtime-strategy-profile", default="settlement_probability")
-    parser.add_argument("--runtime-issue-number", default="538")
+    parser.add_argument("--runtime-issue-number", default="")
     parser.add_argument("--runtime-min-trade-count", default="50")
     parser.add_argument("--runtime-min-fill-rate", default="0.30")
     parser.add_argument("--runtime-min-roi", default="0")
