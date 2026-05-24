@@ -251,6 +251,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("044_candidate_replay_tapes.sql", workflow)
         self.assertIn("045_candidate_replay_basis_stage_constraint.sql", workflow)
         self.assertIn("047_full_depth_execution_surfaces.sql", workflow)
+        self.assertIn("048_official_settlement_coverage_checks.sql", workflow)
 
     def test_research_trace_plan_reads_durable_tables(self) -> None:
         source = TRACE_PLAN.read_text(encoding="utf-8")
@@ -260,6 +261,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "factor_evaluations",
             "research_dataset_snapshots",
             "full_depth_execution_surfaces",
+            "official_settlement_coverage_checks",
         ]:
             self.assertIn(table, source)
         self.assertIn("plan_next_research", source)
@@ -267,8 +269,10 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("GROUP BY run_id", source)
         self.assertIn("source_surface_blockers", source)
         self.assertIn("latest_full_depth_execution_surfaces", source)
+        self.assertIn("latest_official_settlement_coverage_checks", source)
         self.assertIn("valid = true", source)
         self.assertIn("execution_surfaces", source)
+        self.assertIn("settlement_surfaces", source)
         self.assertIn("missing_blocks_promotion", source)
 
     def test_trace_plan_workflow_accepts_candidate_runtime_replay_theme(self) -> None:

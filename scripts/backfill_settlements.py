@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,12 @@ def parser() -> argparse.ArgumentParser:
     parsed.add_argument("--symbols", default=DEFAULT_SYMBOLS)
     parsed.add_argument("--dry-run", action="store_true")
     parsed.add_argument("--report-json", type=Path)
+    parsed.add_argument("--persist-coverage", action="store_true")
+    parsed.add_argument("--run-id", default="")
+    parsed.add_argument("--source-workflow", default="repair-official-settlement-coverage.yml")
+    parsed.add_argument("--workflow-run-id", default="")
+    parsed.add_argument("--workflow-run-url", default="")
+    parsed.add_argument("--artifact-name", default="")
     return parsed
 
 
@@ -161,6 +168,133 @@ async def upsert_settlement(
     return result != "INSERT 0 0"
 
 
+def report_sha256(report: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def coverage_blockers(report: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    candidate_count = int(report.get("candidate_market_count") or 0)
+    settled_count = int(report.get("settled_count") or 0)
+    unchanged_count = int(report.get("unchanged_count") or 0)
+    settlement_token_count = settled_count + unchanged_count
+    if report.get("dry_run"):
+        blockers.append("dry_run_not_durable_coverage")
+    if candidate_count <= 0:
+        blockers.append("candidate_market_count_empty")
+    expected_token_count = candidate_count * 2
+    if settlement_token_count != expected_token_count:
+        blockers.append(f"settlement_token_count:{settlement_token_count}!={expected_token_count}")
+    for key in [
+        "active_reset_count",
+        "open_market_count",
+        "malformed_payload_count",
+        "unresolved_price_count",
+        "token_mismatch_count",
+        "skipped_count",
+        "error_count",
+    ]:
+        value = int(report.get(key) or 0)
+        if value > 0:
+            blockers.append(f"{key}:{value}")
+    return sorted(set(blockers))
+
+
+async def persist_coverage_check(
+    conn: "asyncpg.Connection",
+    *,
+    report: dict[str, Any],
+    args: argparse.Namespace,
+) -> str:
+    blockers = coverage_blockers(report)
+    content_sha256 = report_sha256(report)
+    settlement_coverage_id = f"official_settlement_coverage:{content_sha256[:32]}"
+    settlement_token_count = int(report.get("settled_count") or 0) + int(
+        report.get("unchanged_count") or 0
+    )
+    valid = not blockers
+    report["settlement_coverage_id"] = settlement_coverage_id
+    report["settlement_token_count"] = settlement_token_count
+    report["valid"] = valid
+    report["blockers"] = blockers
+    artifact_sha256 = report_sha256(report)
+    await conn.execute(
+        """
+        INSERT INTO official_settlement_coverage_checks (
+            settlement_coverage_id,
+            run_id,
+            source_workflow,
+            workflow_run_id,
+            workflow_run_url,
+            artifact_name,
+            artifact_sha256,
+            artifact_json,
+            schema_version,
+            surface,
+            window_start_ts,
+            window_end_ts,
+            symbols_json,
+            candidate_market_count,
+            settlement_token_count,
+            settled_count,
+            unchanged_count,
+            skipped_count,
+            error_count,
+            valid,
+            blockers_json
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 'pm_token_settlements',
+            $10, $11, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20::jsonb
+        )
+        ON CONFLICT (settlement_coverage_id) DO UPDATE SET
+            run_id = EXCLUDED.run_id,
+            source_workflow = EXCLUDED.source_workflow,
+            workflow_run_id = EXCLUDED.workflow_run_id,
+            workflow_run_url = EXCLUDED.workflow_run_url,
+            artifact_name = EXCLUDED.artifact_name,
+            artifact_sha256 = EXCLUDED.artifact_sha256,
+            artifact_json = EXCLUDED.artifact_json,
+            schema_version = EXCLUDED.schema_version,
+            surface = EXCLUDED.surface,
+            window_start_ts = EXCLUDED.window_start_ts,
+            window_end_ts = EXCLUDED.window_end_ts,
+            symbols_json = EXCLUDED.symbols_json,
+            candidate_market_count = EXCLUDED.candidate_market_count,
+            settlement_token_count = EXCLUDED.settlement_token_count,
+            settled_count = EXCLUDED.settled_count,
+            unchanged_count = EXCLUDED.unchanged_count,
+            skipped_count = EXCLUDED.skipped_count,
+            error_count = EXCLUDED.error_count,
+            valid = EXCLUDED.valid,
+            blockers_json = EXCLUDED.blockers_json
+        """,
+        settlement_coverage_id,
+        args.run_id or args.workflow_run_id or "manual",
+        args.source_workflow,
+        args.workflow_run_id or None,
+        args.workflow_run_url or None,
+        args.artifact_name or None,
+        artifact_sha256,
+        json.dumps(report, sort_keys=True),
+        report["schema_version"],
+        parse_utc_ts(report["start_ts"]),
+        parse_utc_ts(report["end_ts"]),
+        json.dumps(report.get("symbols") or [], sort_keys=True),
+        int(report.get("candidate_market_count") or 0),
+        settlement_token_count,
+        int(report.get("settled_count") or 0),
+        int(report.get("unchanged_count") or 0),
+        int(report.get("skipped_count") or 0),
+        int(report.get("error_count") or 0),
+        valid,
+        json.dumps(blockers, sort_keys=True),
+    )
+    return settlement_coverage_id
+
+
 async def run(args: argparse.Namespace) -> dict[str, Any]:
     db_url = args.db_url or args.legacy_db_url
     if not db_url:
@@ -275,7 +409,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 
                 await asyncio.sleep(0.2)
 
-        return {
+        report = {
             "schema_version": "official_settlement_repair.v1",
             "dry_run": args.dry_run,
             "start_ts": args.start_ts,
@@ -293,6 +427,12 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "skipped_count": skipped,
             "error_count": errors,
         }
+        report["settlement_token_count"] = settled + unchanged
+        report["blockers"] = coverage_blockers(report)
+        report["valid"] = not report["blockers"]
+        if args.persist_coverage:
+            await persist_coverage_check(conn, report=report, args=args)
+        return report
     finally:
         await conn.close()
 
