@@ -9,6 +9,9 @@ AUDIT_SCRIPT = ROOT / "scripts" / "audit_market_data_gaps.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "market-data-gap-audit.yml"
 RESEARCH_SNAPSHOT_WORKFLOW = ROOT / ".github" / "workflows" / "research-snapshot.yml"
 CLOUD_ASSIST_SCRIPT = ROOT / "scripts" / "ci" / "run_tango_market_data_audit_cloud_assist.py"
+RESEARCH_SNAPSHOT_CLOUD_ASSIST_SCRIPT = (
+    ROOT / "scripts" / "ci" / "run_tango_research_snapshot_cloud_assist.py"
+)
 
 
 def load_audit_module():
@@ -141,6 +144,9 @@ class MarketDataGapAuditScopeTests(unittest.TestCase):
         self.assertIn('audit_end_ts="${SNAPSHOT_END_TS:-${{ github.event.inputs.end_date }}}"', workflow)
         self.assertIn('--start-ts "${audit_start_ts}"', workflow)
         self.assertIn('--end-ts "${audit_end_ts}"', workflow)
+        self.assertIn('"orderbook_archive_root": "/opt/ploy/data/lake"', workflow)
+        self.assertIn('--orderbook-archive-root "${orderbook_archive_root}"', workflow)
+        self.assertIn('--pm-book-archive-dir "${orderbook_archive_root}/orderbook_snapshots"', workflow)
         self.assertIn("Gate mode: `{payload.get('gate_mode', 'unknown')}`", workflow)
         self.assertIn("Audit window: `{payload.get('audit_window_start_ts') or '<lookback-start>'}", workflow)
         self.assertIn("remote snapshot data audit failed after ${attempt} attempts", workflow)
@@ -148,6 +154,10 @@ class MarketDataGapAuditScopeTests(unittest.TestCase):
         self.assertIn("copying research snapshot tar failed after ${attempt} attempts", workflow)
         self.assertIn("Compile snapshot via Cloud Assistant fallback", workflow)
         self.assertIn("scripts/ci/run_tango_research_snapshot_cloud_assist.py", workflow)
+        cloud_assist = RESEARCH_SNAPSHOT_CLOUD_ASSIST_SCRIPT.read_text()
+        self.assertIn("--orderbook-archive-root", cloud_assist)
+        self.assertIn("--pm-book-archive-dir", cloud_assist)
+        self.assertIn('SNAPSHOT_ORDERBOOK_ARCHIVE_ROOT", "/opt/ploy/data/lake"', cloud_assist)
 
 
 if __name__ == "__main__":

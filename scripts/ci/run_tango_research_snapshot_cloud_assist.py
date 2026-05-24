@@ -117,6 +117,7 @@ PLOY_DATABASE__URL="${{PLOY_DATABASE__URL}}" \\
     --bucket-minutes 5 \\
     --symbols {q(require_env("SNAPSHOT_SYMBOLS"))} \\
     --required-sources {q(require_env("REQUIRED_SOURCES"))} \\
+    --orderbook-archive-root {q(env("SNAPSHOT_ORDERBOOK_ARCHIVE_ROOT", "/opt/ploy/data/lake"))} \\
     --statement-timeout-seconds 20 \\
     --psql-timeout-seconds 30 \\
     --format json \\
@@ -159,6 +160,7 @@ timeout 3600 "${{compiler}}" \\
   --stake-usd {q(require_env("SNAPSHOT_STAKE_USD"))} \\
   --lob-sample-secs {q(require_env("SNAPSHOT_LOB_SAMPLE_SECS"))} \\
   --pm-book-sample-secs {q(require_env("SNAPSHOT_PM_BOOK_SAMPLE_SECS"))} \\
+  --pm-book-archive-dir {q(env("SNAPSHOT_ORDERBOOK_ARCHIVE_ROOT", "/opt/ploy/data/lake") + "/orderbook_snapshots")} \\
   --observation-sample-secs {q(require_env("SNAPSHOT_OBSERVATION_SAMPLE_SECS"))} \\
   --max-quote-age-secs {q(require_env("SNAPSHOT_MAX_QUOTE_AGE_SECS"))} \\
   --output-dir research-snapshot \\

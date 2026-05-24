@@ -17,7 +17,8 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 DB_URL = (
@@ -29,6 +30,7 @@ DB_URL = (
 DEFAULT_SYMBOLS = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,BNBUSDT"
 STATUS_ORDER = {"ok": 0, "warn": 1, "unknown": 2, "critical": 3}
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+ORDERBOOK_ARCHIVE_TZ = timezone(timedelta(hours=8))
 
 SOURCE_PROFILES = {
     "all": ["*"],
@@ -109,6 +111,195 @@ def run_json(query: str, timeout: int) -> dict[str, Any]:
     if not raw:
         raise RuntimeError("SQL returned no rows")
     return json.loads(raw)
+
+
+def parse_utc_datetime(raw: str) -> datetime:
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def archive_hour_keys(start_ts: str, end_ts: str) -> list[tuple[str, str]]:
+    start = parse_utc_datetime(start_ts)
+    end = parse_utc_datetime(end_ts)
+    current = start.replace(minute=0, second=0, microsecond=0)
+    keys: list[tuple[str, str]] = []
+    while current < end:
+        local = current.astimezone(ORDERBOOK_ARCHIVE_TZ)
+        keys.append((local.strftime("%Y-%m-%d"), local.strftime("%H")))
+        current += timedelta(hours=1)
+    return keys
+
+
+def audit_orderbook_archive_coverage(
+    *,
+    archive_root: str,
+    start_ts: str,
+    end_ts: str,
+    bucket_minutes: int,
+) -> dict[str, Any]:
+    root = Path(archive_root)
+    base = root / "orderbook_snapshots"
+    hour_keys = archive_hour_keys(start_ts, end_ts)
+    manifests: list[dict[str, Any]] = []
+    missing_hours: list[dict[str, str]] = []
+    invalid_hours: list[dict[str, str]] = []
+    row_count = 0
+    full_fidelity = True
+    for date, hour in hour_keys:
+        hour_dir = base / f"date={date}" / f"hour={hour}"
+        marker = hour_dir / "_SUCCESS"
+        manifest_path = hour_dir / "manifest.json"
+        parquet_path = hour_dir / "snapshots.parquet"
+        if not marker.exists() or not manifest_path.exists() or not parquet_path.exists():
+            missing_hours.append(
+                {
+                    "date": date,
+                    "hour": hour,
+                    "path": str(hour_dir),
+                }
+            )
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            invalid_hours.append(
+                {
+                    "date": date,
+                    "hour": hour,
+                    "path": str(manifest_path),
+                    "reason": f"manifest_unreadable:{exc}",
+                }
+            )
+            continue
+        try:
+            hour_rows = int(manifest.get("row_count") or 0)
+        except (TypeError, ValueError):
+            hour_rows = 0
+        if hour_rows <= 0:
+            invalid_hours.append(
+                {
+                    "date": date,
+                    "hour": hour,
+                    "path": str(manifest_path),
+                    "reason": "row_count_empty",
+                }
+            )
+            continue
+        if manifest.get("full_fidelity") is not True:
+            full_fidelity = False
+            invalid_hours.append(
+                {
+                    "date": date,
+                    "hour": hour,
+                    "path": str(manifest_path),
+                    "reason": "not_full_fidelity",
+                }
+            )
+            continue
+        row_count += hour_rows
+        manifests.append(
+            {
+                "date": date,
+                "hour": hour,
+                "path": str(manifest_path),
+                "row_count": hour_rows,
+                "start_ts": manifest.get("start_ts", ""),
+                "end_ts": manifest.get("end_ts", ""),
+                "sha256": manifest.get("sha256", ""),
+            }
+        )
+
+    start = parse_utc_datetime(start_ts)
+    end = parse_utc_datetime(end_ts)
+    expected_buckets = max(0, int((end - start).total_seconds() // (bucket_minutes * 60)))
+    expected_hours = len(hour_keys)
+    present_hours = len(manifests)
+    status = "ok"
+    reasons: list[str] = []
+    if expected_hours == 0:
+        status = "critical"
+        reasons.append("archive audit window has no expected hours")
+    if missing_hours:
+        status = "critical"
+        reasons.append(f"missing archive hours {len(missing_hours)}/{expected_hours}")
+    if invalid_hours:
+        status = "critical"
+        reasons.append(f"invalid archive hours {len(invalid_hours)}/{expected_hours}")
+    if not full_fidelity:
+        status = "critical"
+        reasons.append("archive contains non-full-fidelity manifests")
+    if row_count <= 0:
+        status = "critical"
+        reasons.append("archive row_count is empty")
+    if not reasons:
+        reasons.append("archive full-depth orderbook coverage available")
+
+    return {
+        "schema_version": "orderbook_snapshot_archive_coverage.v1",
+        "source_id": "polymarket_orderbooks",
+        "surface": "clob_orderbook_snapshots",
+        "source": "orderbook_snapshot_archive",
+        "archive_root": str(root),
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+        "expected_hours": expected_hours,
+        "present_hours": present_hours,
+        "missing_hours": len(missing_hours),
+        "invalid_hours": len(invalid_hours),
+        "expected_buckets": expected_buckets,
+        "present_buckets": expected_buckets if status == "ok" else 0,
+        "coverage_pct": 100.0 if status == "ok" and expected_buckets > 0 else 0.0,
+        "row_count": row_count,
+        "full_fidelity": full_fidelity,
+        "status": status,
+        "reasons": reasons,
+        "missing_hour_examples": missing_hours[:8],
+        "invalid_hour_examples": invalid_hours[:8],
+        "manifests": manifests[:24],
+    }
+
+
+def apply_orderbook_archive_coverage(
+    row: dict[str, Any],
+    target: GapTarget,
+    *,
+    start_ts: str | None,
+    end_ts: str | None,
+    bucket_minutes: int,
+    orderbook_archive_root: str,
+) -> dict[str, Any]:
+    if (
+        target.source_id != "polymarket_orderbooks"
+        or not start_ts
+        or not end_ts
+        or not orderbook_archive_root
+    ):
+        return row
+    archive = audit_orderbook_archive_coverage(
+        archive_root=orderbook_archive_root,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        bucket_minutes=bucket_minutes,
+    )
+    row["archive_coverage"] = archive
+    row["hot_table_expected_buckets"] = row.get("expected_buckets")
+    row["hot_table_present_buckets"] = row.get("present_buckets")
+    row["hot_table_missing_buckets"] = row.get("missing_buckets")
+    row["hot_table_coverage_pct"] = row.get("coverage_pct")
+    if archive.get("status") != "ok":
+        return row
+    row["coverage_source"] = archive["source"]
+    row["expected_buckets"] = archive["expected_buckets"]
+    row["present_buckets"] = archive["present_buckets"]
+    row["missing_buckets"] = 0
+    row["coverage_pct"] = archive["coverage_pct"]
+    row["max_gap_buckets"] = 0
+    row["max_gap_minutes"] = 0
+    row["max_gap_start"] = None
+    row["max_gap_end"] = None
+    return row
 
 
 def target_predicate(target: GapTarget, alias: str = "t") -> str:
@@ -244,7 +435,11 @@ def classify_gap(row: dict[str, Any], target: GapTarget) -> tuple[str, list[str]
     if coverage_status != "ok":
         reasons.extend(coverage_reasons)
     if not reasons:
-        reasons.append("coverage within thresholds")
+        coverage_source = row.get("coverage_source")
+        if coverage_source:
+            reasons.append(f"coverage via {coverage_source}")
+        else:
+            reasons.append("coverage within thresholds")
     return status, reasons
 
 
@@ -348,6 +543,7 @@ def audit_gap_target(
     gate_mode: str,
     start_ts: Optional[str] = None,
     end_ts: Optional[str] = None,
+    orderbook_archive_root: str = "",
 ) -> dict[str, Any]:
     started = time.monotonic()
     historical_window = bool(start_ts and end_ts)
@@ -363,6 +559,14 @@ def audit_gap_target(
                 end_ts=end_ts,
             ),
             psql_timeout_seconds,
+        )
+        row = apply_orderbook_archive_coverage(
+            row,
+            target,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            bucket_minutes=bucket_minutes,
+            orderbook_archive_root=orderbook_archive_root,
         )
         (
             status,
@@ -824,6 +1028,14 @@ def main() -> int:
             "freshness enforces only latest-row staleness while still reporting coverage"
         ),
     )
+    parser.add_argument(
+        "--orderbook-archive-root",
+        default=os.environ.get("PLOY_ORDERBOOK_ARCHIVE_ROOT", "/opt/ploy/data/lake"),
+        help=(
+            "root that contains orderbook_snapshots/date=YYYY-MM-DD/hour=HH archives; "
+            "used for explicit historical polymarket_orderbooks coverage"
+        ),
+    )
     args = parser.parse_args()
 
     if args.lookback_hours <= 0:
@@ -863,6 +1075,7 @@ def main() -> int:
             gate_mode=args.gate_mode,
             start_ts=start_ts or None,
             end_ts=end_ts or None,
+            orderbook_archive_root=args.orderbook_archive_root,
         )
         for target in selected_gap_targets
     ]
@@ -897,6 +1110,7 @@ def main() -> int:
         "bucket_minutes": args.bucket_minutes,
         "recent_minutes": args.recent_minutes,
         "gate_mode": args.gate_mode,
+        "orderbook_archive_root": args.orderbook_archive_root,
         "symbols": symbols,
         "required_sources": source_requirements,
         "overall_status": overall_status(items),

@@ -1,5 +1,7 @@
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,6 +16,155 @@ SPEC.loader.exec_module(audit)
 
 
 class AuditMarketDataGapsTests(unittest.TestCase):
+    def write_archive_hour(
+        self,
+        root: Path,
+        date: str,
+        hour: str,
+        *,
+        row_count: int = 100,
+        full_fidelity: bool = True,
+    ) -> None:
+        hour_dir = root / "orderbook_snapshots" / f"date={date}" / f"hour={hour}"
+        hour_dir.mkdir(parents=True)
+        (hour_dir / "snapshots.parquet").write_text("placeholder", encoding="utf-8")
+        (hour_dir / "_SUCCESS").touch()
+        (hour_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "table": "clob_orderbook_snapshots",
+                    "row_count": row_count,
+                    "full_fidelity": full_fidelity,
+                    "start_ts": f"{date} {hour}:00:00+08",
+                    "end_ts": f"{date} {hour}:59:59+08",
+                    "sha256": "abc123",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_historical_pm_orderbooks_use_archive_coverage_when_hot_table_empty(self):
+        target = audit.GapTarget(
+            "polymarket_orderbooks",
+            "clob_orderbook_snapshots",
+            "received_at",
+            900,
+            ignore_max_gap=True,
+            ignore_missing_buckets=True,
+        )
+        row = {
+            "latest_at": None,
+            "latest_lag_seconds": None,
+            "expected_buckets": 24,
+            "present_buckets": 0,
+            "max_gap_minutes": 120,
+            "missing_buckets": 24,
+            "coverage_pct": 0.0,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_archive_hour(root, "2026-05-17", "08")
+            self.write_archive_hour(root, "2026-05-17", "09")
+
+            updated = audit.apply_orderbook_archive_coverage(
+                row,
+                target,
+                start_ts="2026-05-17T00:00:00Z",
+                end_ts="2026-05-17T02:00:00Z",
+                bucket_minutes=5,
+                orderbook_archive_root=str(root),
+            )
+            status, reasons, freshness_status, _, coverage_status, _ = (
+                audit.classify_gap_for_gate(
+                    updated,
+                    target,
+                    "coverage",
+                    historical_window=True,
+                )
+            )
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(freshness_status, "critical")
+        self.assertEqual(coverage_status, "ok")
+        self.assertEqual(updated["coverage_source"], "orderbook_snapshot_archive")
+        self.assertEqual(updated["present_buckets"], 24)
+        self.assertEqual(updated["missing_buckets"], 0)
+        self.assertEqual(updated["hot_table_present_buckets"], 0)
+        self.assertEqual(updated["archive_coverage"]["present_hours"], 2)
+        self.assertIn("freshness not enforced for historical window", "; ".join(reasons))
+
+    def test_historical_pm_orderbooks_fail_closed_when_archive_hour_missing(self):
+        target = audit.GapTarget(
+            "polymarket_orderbooks",
+            "clob_orderbook_snapshots",
+            "received_at",
+            900,
+            ignore_max_gap=True,
+            ignore_missing_buckets=True,
+        )
+        row = {
+            "latest_at": None,
+            "latest_lag_seconds": None,
+            "expected_buckets": 24,
+            "present_buckets": 0,
+            "max_gap_minutes": 120,
+            "missing_buckets": 24,
+            "coverage_pct": 0.0,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            updated = audit.apply_orderbook_archive_coverage(
+                row,
+                target,
+                start_ts="2026-05-17T00:00:00Z",
+                end_ts="2026-05-17T02:00:00Z",
+                bucket_minutes=5,
+                orderbook_archive_root=tmp,
+            )
+            status, reasons, _, _, coverage_status, coverage_reasons = (
+                audit.classify_gap_for_gate(
+                    updated,
+                    target,
+                    "coverage",
+                    historical_window=True,
+                )
+            )
+
+        self.assertEqual(status, "critical")
+        self.assertEqual(coverage_status, "critical")
+        self.assertIn("no covered buckets in audited window: 0/24", reasons)
+        self.assertIn("no covered buckets in audited window: 0/24", coverage_reasons)
+        self.assertEqual(updated["archive_coverage"]["status"], "critical")
+        self.assertNotIn("coverage_source", updated)
+
+    def test_archive_hour_keys_use_shanghai_partition_hours(self):
+        self.assertEqual(
+            audit.archive_hour_keys(
+                "2026-05-17T00:00:00Z",
+                "2026-05-17T03:00:00Z",
+            ),
+            [("2026-05-17", "08"), ("2026-05-17", "09"), ("2026-05-17", "10")],
+        )
+
+    def test_orderbook_archive_coverage_blocks_non_full_fidelity_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_archive_hour(root, "2026-05-17", "08", full_fidelity=False)
+
+            result = audit.audit_orderbook_archive_coverage(
+                archive_root=str(root),
+                start_ts="2026-05-17T00:00:00Z",
+                end_ts="2026-05-17T01:00:00Z",
+                bucket_minutes=5,
+            )
+
+        self.assertEqual(result["status"], "critical")
+        self.assertFalse(result["full_fidelity"])
+        self.assertEqual(result["present_hours"], 0)
+        self.assertEqual(result["invalid_hours"], 1)
+        self.assertIn("archive contains non-full-fidelity manifests", result["reasons"])
+
     def test_freshness_gate_allows_historical_gap_but_reports_it(self):
         target = audit.GapTarget(
             "binance_price/BTCUSDT",
