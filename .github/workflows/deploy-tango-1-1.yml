@@ -150,11 +150,9 @@ jobs:
             --target "${PLATFORM_TARGET}" \
             --features db,polars-export \
             -p ploy-research \
-            --example factor_research \
             --example research_snapshot_compile \
             --example persist_research_trace \
             --example research_trace_plan
-          strip "target/${PLATFORM_TARGET}/release/examples/factor_research" || true
           strip "target/${PLATFORM_TARGET}/release/examples/research_snapshot_compile" || true
           strip "target/${PLATFORM_TARGET}/release/examples/persist_research_trace" || true
           strip "target/${PLATFORM_TARGET}/release/examples/research_trace_plan" || true
@@ -170,7 +168,6 @@ jobs:
           mkdir -p dist/bin dist/config/strategies dist/config/deployments dist/migrations dist/deployment/systemd dist/scripts dist/scripts/drills
           cp "target/${PLATFORM_TARGET}/release/new-ployd" dist/bin/ployd
           cp "target/${PLATFORM_TARGET}/release/new-ploy-runner" dist/bin/ploy-runner
-          cp "target/${PLATFORM_TARGET}/release/examples/factor_research" dist/bin/factor-research
           cp "target/${PLATFORM_TARGET}/release/examples/research_snapshot_compile" dist/bin/research-snapshot-compile
           cp "target/${PLATFORM_TARGET}/release/examples/persist_research_trace" dist/bin/persist-research-trace
           cp "target/${PLATFORM_TARGET}/release/examples/research_trace_plan" dist/bin/research-trace-plan
@@ -486,7 +483,7 @@ jobs:
             # Install artifacts into the live runtime root used by systemd.
             install -m 0755 ./bin/ployd ${DEPLOY_ROOT}/bin/ployd
             install -m 0755 ./bin/ploy-runner ${DEPLOY_ROOT}/bin/ploy-runner
-            install -m 0755 ./bin/factor-research ${DEPLOY_ROOT}/bin/factor-research
+            rm -f ${DEPLOY_ROOT}/bin/factor-research
             install -m 0755 ./bin/research-snapshot-compile ${DEPLOY_ROOT}/bin/research-snapshot-compile
             install -m 0755 ./bin/persist-research-trace ${DEPLOY_ROOT}/bin/persist-research-trace
             install -m 0755 ./bin/research-trace-plan ${DEPLOY_ROOT}/bin/research-trace-plan

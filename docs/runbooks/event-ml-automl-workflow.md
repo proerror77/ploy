@@ -8,8 +8,8 @@ parameters. AutoML-style factor attribution comes before hyperparameter search.
 
 ## Scope
 
-Use this workflow when the input is an event-root dataset produced by
-`factor_research` / `DatasetBuildManifest`, with Parquet observation splits:
+Use this workflow when the input is a retained event-root dataset artifact with
+a `DatasetBuildManifest` and Parquet observation splits:
 
 - `event_manifest.json`
 - `observations_train.parquet`
@@ -319,7 +319,10 @@ Polymarket full-book rows.
 Dispatch `factor-walk-forward-v2-hosted-artifact.yml` directly with
 `snapshot_run_id`. The former `factor-walk-forward-v2.yml` and
 `factor-review-v2.yml` router workflows have been removed, so requests without
-a retained snapshot artifact no longer have a workflow entrypoint.
+a retained snapshot artifact no longer have a workflow entrypoint. The old
+direct-DB `factor_research` exporter is no longer built or deployed; Event ML
+evidence starts from retained event-root dataset artifacts, not from rebuilding
+datasets inside an active deploy bundle.
 
 Advanced promotion and issue-handoff controls live in `options_json` to stay
 within the GitHub Actions 10-input limit. Defaults are

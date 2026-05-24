@@ -1301,6 +1301,69 @@ fn optimize_workflow_builds_and_runs_in_one_job() {
 }
 
 #[test]
+fn deployed_research_tools_do_not_ship_legacy_factor_research_binary() {
+    let deploy = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
+    let acr = workflow_contents(".github/workflows/build-push-acr.yml");
+    let dockerfile = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("Dockerfile.research"),
+    )
+    .expect("read Dockerfile.research");
+    let cargo = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/ploy-research/Cargo.toml"),
+    )
+    .expect("read ploy-research Cargo.toml");
+    let mut offenders = Vec::new();
+
+    for (name, content) in [
+        ("build-push-acr.yml", acr.as_str()),
+        ("Dockerfile.research", dockerfile.as_str()),
+        ("crates/ploy-research/Cargo.toml", cargo.as_str()),
+    ] {
+        if content.contains("factor_research") {
+            offenders.push(format!(
+                "{name}: legacy direct-DB factor research example still contains `factor_research`"
+            ));
+        }
+    }
+    for forbidden in ["--example factor_research", "examples/factor_research"] {
+        if deploy.contains(forbidden) {
+            offenders.push(format!(
+                "deploy-tango-1-1.yml: legacy direct-DB factor research build still contains `{forbidden}`"
+            ));
+        }
+    }
+    for (name, content) in [
+        ("build-push-acr.yml", acr.as_str()),
+        ("Dockerfile.research", dockerfile.as_str()),
+        ("crates/ploy-research/Cargo.toml", cargo.as_str()),
+    ] {
+        if content.contains("factor-research") {
+            offenders.push(format!(
+                "{name}: legacy factor-research binary packaging is still active"
+            ));
+        }
+    }
+    if !deploy.contains("rm -f ${DEPLOY_ROOT}/bin/factor-research") {
+        offenders.push(
+            "deploy-tango-1-1.yml: must remove stale factor-research binary on deploy"
+                .to_string(),
+        );
+    }
+    if !acr.contains("--example run_backtest") {
+        offenders.push("build-push-acr.yml: should still build run_backtest".to_string());
+    }
+    if !dockerfile.contains("/opt/ploy/bin/run_backtest") {
+        offenders.push("Dockerfile.research: should still package run_backtest".to_string());
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "legacy factor research deploy guard failed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
 fn checked_in_platform_service_enforces_guardrails() {
     let content = workflow_contents("deployment/ployd.service");
     let required = [

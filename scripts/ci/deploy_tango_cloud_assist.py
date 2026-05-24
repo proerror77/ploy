@@ -199,7 +199,7 @@ done
 
 install -m 0755 ./bin/ployd "${{DEPLOY_ROOT}}/bin/ployd"
 install -m 0755 ./bin/ploy-runner "${{DEPLOY_ROOT}}/bin/ploy-runner"
-install -m 0755 ./bin/factor-research "${{DEPLOY_ROOT}}/bin/factor-research"
+rm -f "${{DEPLOY_ROOT}}/bin/factor-research"
 install -m 0755 ./bin/research-snapshot-compile "${{DEPLOY_ROOT}}/bin/research-snapshot-compile"
 install -m 0755 ./bin/persist-research-trace "${{DEPLOY_ROOT}}/bin/persist-research-trace"
 install -m 0755 ./bin/research-trace-plan "${{DEPLOY_ROOT}}/bin/research-trace-plan"

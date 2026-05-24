@@ -1,4 +1,4 @@
-# Runtime image for backtest and factor research jobs
+# Runtime image for backtest jobs.
 # Binaries are built by CI and copied in at build time
 FROM debian:bookworm-slim
 
@@ -12,8 +12,7 @@ RUN mkdir -p /opt/ploy/bin /opt/ploy/config/strategies
 
 # Binaries copied by CI pipeline
 COPY target/x86_64-unknown-linux-gnu/release/examples/run_backtest /opt/ploy/bin/run_backtest
-COPY target/x86_64-unknown-linux-gnu/release/examples/factor_research /opt/ploy/bin/factor-research
-RUN chmod +x /opt/ploy/bin/run_backtest /opt/ploy/bin/factor-research
+RUN chmod +x /opt/ploy/bin/run_backtest
 
 WORKDIR /opt/ploy
 
