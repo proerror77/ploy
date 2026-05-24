@@ -130,6 +130,82 @@ def _research_snapshot_dispatch(
     }
 
 
+def _bounded_execution_surface_window(
+    market_data: dict[str, Any],
+    max_hours: int,
+) -> dict[str, Any]:
+    start = _parse_utc_ts(market_data.get("dataset_start_ts"))
+    end = _parse_utc_ts(market_data.get("dataset_end_ts"))
+    max_hours = max(1, max_hours)
+    if not start or not end or end <= start:
+        return {
+            "start_date": _date_from_ts(market_data.get("dataset_start_ts")),
+            "end_date": _date_from_ts(market_data.get("dataset_end_ts")),
+            "start_ts": market_data.get("dataset_start_ts") or "",
+            "end_ts": market_data.get("dataset_end_ts") or "",
+            "truncated": False,
+            "max_hours": max_hours,
+        }
+    capped_end = min(end, start + timedelta(hours=max_hours))
+    return {
+        "start_date": start.date().isoformat(),
+        "end_date": capped_end.date().isoformat(),
+        "start_ts": _format_utc_ts(start),
+        "end_ts": _format_utc_ts(capped_end),
+        "truncated": capped_end < end,
+        "max_hours": max_hours,
+        "source_end_ts": _format_utc_ts(end),
+    }
+
+
+def _full_depth_execution_surface_dispatch(
+    *,
+    plan: dict[str, Any],
+    git_ref: str,
+    max_hours: int,
+) -> dict[str, Any]:
+    market_data = ((plan.get("input") or {}).get("market_data_health") or {})
+    window = _bounded_execution_surface_window(market_data, max_hours=max_hours)
+    options = {
+        "start_ts": window["start_ts"],
+        "end_ts": window["end_ts"],
+        "max_hours": window["max_hours"],
+        "fail_if_incomplete": False,
+    }
+    blockers: list[str] = []
+    if not window["start_ts"] or not window["end_ts"]:
+        blockers.append("missing_dataset_window")
+    fields = {
+        "git_ref": git_ref,
+        "start_date": window["start_date"],
+        "end_date": window["end_date"],
+        "options_json": json.dumps(options, separators=(",", ":"), sort_keys=True),
+    }
+    return {
+        "workflow": "collect-full-depth-execution-surface.yml",
+        "reason": "materialize full-fidelity Polymarket CLOB archive evidence for promotion surface",
+        "ready": not blockers,
+        "blockers": blockers,
+        "fields": fields,
+        "bounded_window": window,
+    }
+
+
+def _blocked_followup_dispatch(
+    *,
+    workflow: str,
+    reason: str,
+    blocker: str,
+) -> dict[str, Any]:
+    return {
+        "workflow": workflow,
+        "reason": reason,
+        "ready": False,
+        "blockers": [blocker],
+        "fields": {},
+    }
+
+
 def _walk_forward_dispatch(
     *,
     git_ref: str,
@@ -383,9 +459,11 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
     dispatches: list[dict[str, Any]] = []
     typed_prior: dict[str, Any] | None = None
 
-    if plan.get("theme") == "fix_data" or any(
-        action in {"rerun_snapshot_data_audit", "repair_or_exclude_missing_data_surface"}
-        for action in actions
+    action_names = {item["action"] for item in blocker_actions}
+    snapshot_actions = {"rerun_snapshot_data_audit", "repair_or_exclude_missing_data_surface"}
+
+    if any(action in snapshot_actions for action in actions) or (
+        plan.get("theme") == "fix_data" and not actions
     ):
         dispatches.append(
             _research_snapshot_dispatch(
@@ -394,6 +472,31 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                 symbols=args.symbols,
                 stake_usd=args.stake_usd,
                 max_snapshot_window_days=args.max_snapshot_window_days,
+            )
+        )
+
+    if "collect_full_depth_execution_surface" in actions or (
+        "collect_full_depth_execution_surface" in action_names
+    ):
+        dispatches.append(
+            _full_depth_execution_surface_dispatch(
+                plan=plan_payload,
+                git_ref=args.git_ref,
+                max_hours=getattr(args, "max_full_depth_surface_hours", 12),
+            )
+        )
+
+    if "repair_official_settlement_coverage" in actions or (
+        "repair_official_settlement_coverage" in action_names
+    ):
+        dispatches.append(
+            _blocked_followup_dispatch(
+                workflow="repair-official-settlement-coverage.yml",
+                reason=(
+                    "official settlement repair is required, but no bounded ACK-safe "
+                    "Research Manager settlement repair workflow exists yet"
+                ),
+                blocker="missing_bounded_settlement_repair_workflow",
             )
         )
 
@@ -541,6 +644,7 @@ def main() -> None:
     parser.add_argument("--stake-usd", default="15")
     parser.add_argument("--chain-remaining", type=int, default=1)
     parser.add_argument("--max-snapshot-window-days", type=int, default=2)
+    parser.add_argument("--max-full-depth-surface-hours", type=int, default=12)
     parser.add_argument(
         "--runtime-deployment-id",
         default="pm5d.threelayer.settlement-probability-btc-eth.dryrun",

@@ -41,6 +41,7 @@ def base_args(**overrides):
         "stake_usd": "15",
         "chain_remaining": 1,
         "max_snapshot_window_days": 2,
+        "max_full_depth_surface_hours": 12,
         "runtime_deployment_id": "pm5d.threelayer.settlement-probability-btc-eth.dryrun",
         "runtime_config_path": "/opt/ploy/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
         "runtime_recording_path": "/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson",
@@ -339,6 +340,54 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
         self.assertIn(
             "block promotion until official settlement coverage exists for all replay-traded events",
             prior["constraints"],
+        )
+
+    def test_blocker_actions_map_to_full_depth_and_settlement_followups(self) -> None:
+        plan = plan_payload("fix_data", ["rerun_snapshot_data_audit"])
+        plan["plan"]["blocker_actions"] = [
+            {
+                "blocker_family": "promotion_data_execution_surface",
+                "action": "collect_full_depth_execution_surface",
+                "reason": "Research snapshot data health reports sampled execution surface.",
+            },
+            {
+                "blocker_family": "data_settlement",
+                "action": "repair_official_settlement_coverage",
+                "reason": "Runtime replay traded events are missing official settlement labels.",
+            },
+        ]
+        payload = build_executor_payload(base_args(), plan)
+
+        workflows = [item["workflow"] for item in payload["dispatches"]]
+        self.assertEqual(
+            [
+                "research-snapshot.yml",
+                "collect-full-depth-execution-surface.yml",
+                "repair-official-settlement-coverage.yml",
+            ],
+            workflows,
+        )
+        self.assertTrue(payload["dispatches"][1]["ready"])
+        full_depth_options = json.loads(payload["dispatches"][1]["fields"]["options_json"])
+        self.assertEqual("2026-04-21T00:00:00Z", full_depth_options["start_ts"])
+        self.assertEqual("2026-04-21T12:00:00Z", full_depth_options["end_ts"])
+        self.assertEqual(12, full_depth_options["max_hours"])
+        self.assertFalse(payload["dispatches"][2]["ready"])
+        self.assertIn(
+            "missing_bounded_settlement_repair_workflow",
+            payload["dispatches"][2]["blockers"],
+        )
+
+    def test_full_depth_action_without_snapshot_rerun_does_not_dispatch_sampled_snapshot(self) -> None:
+        payload = build_executor_payload(
+            base_args(),
+            plan_payload("fix_data", ["collect_full_depth_execution_surface"]),
+        )
+
+        self.assertEqual(1, len(payload["dispatches"]))
+        self.assertEqual(
+            "collect-full-depth-execution-surface.yml",
+            payload["dispatches"][0]["workflow"],
         )
 
     def test_cli_records_dispatch_failures_without_dropping_executor_artifact(self) -> None:
