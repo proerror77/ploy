@@ -674,6 +674,7 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertIn("--train-window-hours \"${WALK_TRAIN_WINDOW_HOURS}\"", workflow)
         self.assertIn("--candidate-strategy-replay-json", workflow)
         self.assertIn("--snapshot-manifest-json artifacts/research-snapshot/manifest.json", workflow)
+        self.assertIn("--snapshot-data-audit-json artifacts/research-snapshot/data-gap-audit.json", workflow)
         self.assertIn("full_depth_execution_surface_run_id", workflow)
         self.assertIn("Download full-depth execution surface artifact", workflow)
         self.assertIn("--full-depth-execution-surface-json", workflow)

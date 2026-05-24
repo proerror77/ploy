@@ -161,6 +161,45 @@ decision.
   `bash -n` for root shell scripts, active workflow YAML parse, `rtk cargo test
   --locked --test workflow_security`, retired archive reference scan, and `rtk
   git diff --check`.
+- 2026-05-24: PR `#662` merged to `main` as
+  `ba8d06a25e6cfcf32c7eedb1814854b69cd25f2a`. CI was green; the follow-up
+  issue job was intentionally skipped.
+- 2026-05-24: Real replay-fed hosted walk-forward run `26352511938` succeeded
+  from `main@ba8d06a25e6cfcf32c7eedb1814854b69cd25f2a` and proved stale
+  candidate replay is now downgraded to a variant-local blocked aggregate replay.
+  It also exposed that retained old snapshot artifacts can still carry
+  `polymarket_orderbooks` zero coverage with `status=ok`, so the consumer-side
+  snapshot contract must validate data audit contradictions too.
+
+## Current Session - Snapshot Data Audit Consumer Gate (2026-05-24)
+
+Evidence stage: `walk_forward` / `executable_replay` data-contract gate repair.
+This is not a dry-run or live promotion decision.
+
+### Tasks
+
+- [x] Reproduce the retained snapshot data-audit contradiction from real
+      walk-forward run `26352511938`.
+- [x] Add snapshot-contract consumer validation for zero-covered required data
+      audit sources.
+- [x] Pass `data-gap-audit.json` from hosted walk-forward into candidate replay
+      and promotion consumers.
+- [x] Add focused promotion, replay-builder, workflow, and audit tests.
+- [x] Run focused validation.
+- [ ] Commit, push, open PR, wait for CI, and merge.
+
+### Review
+
+- 2026-05-24: Local replay of run `26352511938` artifacts through the updated
+  promotion evaluator now blocks on
+  `data_audit_zero_coverage:polymarket_orderbooks:0<288` even when the retained
+  artifact's own `overall_status` is `ok` and full-depth execution proof is
+  present.
+- 2026-05-24: Focused validation passed: `python3 -m unittest discover -s tests
+  -p 'test_*.py'` (`269` tests), targeted AutoFactor/audit tests (`77` tests),
+  Python compile for touched scripts and `scripts/*.py` / `scripts/ci/*.py`,
+  hosted walk-forward YAML parse, `rtk cargo test --locked --test
+  workflow_security`, and `rtk git diff --check`.
 
 ## Current Session - Market Data Promotion Blocker Actions (2026-05-24)
 

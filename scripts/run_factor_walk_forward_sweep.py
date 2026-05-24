@@ -191,6 +191,8 @@ def promotion_args(
     command.extend(["--candidate-strategy-replay-json", replay_json])
     if args.snapshot_manifest_json:
         command.extend(["--snapshot-manifest-json", args.snapshot_manifest_json])
+    if args.snapshot_data_audit_json:
+        command.extend(["--snapshot-data-audit-json", args.snapshot_data_audit_json])
     if args.full_depth_execution_surface_json:
         command.extend(
             ["--full-depth-execution-surface-json", args.full_depth_execution_surface_json]
@@ -231,6 +233,8 @@ def candidate_replay_args(
         command.append("--require-runtime-contract")
     if args.snapshot_manifest_json:
         command.extend(["--snapshot-manifest-json", args.snapshot_manifest_json])
+    if args.snapshot_data_audit_json:
+        command.extend(["--snapshot-data-audit-json", args.snapshot_data_audit_json])
     if args.full_depth_execution_surface_json:
         command.extend(
             ["--full-depth-execution-surface-json", args.full_depth_execution_surface_json]
@@ -663,6 +667,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--replay-parity-json", default="")
     parser.add_argument("--candidate-strategy-replay-json", default="")
     parser.add_argument("--snapshot-manifest-json", default="")
+    parser.add_argument("--snapshot-data-audit-json", default="")
     parser.add_argument("--full-depth-execution-surface-json", default="")
     parser.add_argument("--alpha-search-output-dir", default="")
     parser.add_argument("--alpha-search-plan-json", default="")

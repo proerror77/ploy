@@ -100,10 +100,57 @@ def _load_full_depth_execution_surface_proof(
     }
 
 
+def _load_data_audit_contract(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    audit_path = Path(path)
+    payload = json.loads(audit_path.read_text(encoding="utf-8"))
+    required_sources = {str(item) for item in payload.get("required_sources") or []}
+    blockers: list[str] = []
+    checked_sources: list[dict[str, Any]] = []
+    for item in (payload.get("gap_audits") or []) + (payload.get("window_audits") or []):
+        if not isinstance(item, dict):
+            continue
+        source_id = str(item.get("source_id") or "")
+        if required_sources and source_id not in required_sources:
+            continue
+        try:
+            expected_buckets = int(item.get("expected_buckets") or 0)
+            present_buckets = int(item.get("present_buckets") or 0)
+        except (TypeError, ValueError):
+            expected_buckets = 0
+            present_buckets = 0
+        if expected_buckets > 0 and present_buckets == 0:
+            blockers.append(
+                f"data_audit_zero_coverage:{source_id}:0<{expected_buckets}"
+            )
+        checked_sources.append(
+            {
+                "source_id": source_id,
+                "status": item.get("status", ""),
+                "coverage_status": item.get("coverage_status", ""),
+                "expected_buckets": expected_buckets,
+                "present_buckets": present_buckets,
+                "missing_buckets": item.get("missing_buckets"),
+                "coverage_pct": item.get("coverage_pct"),
+            }
+        )
+    return {
+        "path": str(audit_path),
+        "overall_status": payload.get("overall_status", ""),
+        "audit_window_start_ts": payload.get("audit_window_start_ts", ""),
+        "audit_window_end_ts": payload.get("audit_window_end_ts", ""),
+        "required_sources": sorted(required_sources),
+        "checked_sources": checked_sources,
+        "blocking_risk_flags": sorted(set(blockers)),
+    }
+
+
 def load_snapshot_execution_contract(
     path: str | None,
     *,
     full_depth_execution_surface_json: str | None = None,
+    data_audit_report_json: str | None = None,
 ) -> dict[str, Any]:
     if not path:
         return {}
@@ -139,6 +186,8 @@ def load_snapshot_execution_contract(
         f"sampled_snapshot_required_for_execution_surface:{name}"
         for name in sorted(unsatisfied_sampled_surfaces)
     ]
+    data_audit_contract = _load_data_audit_contract(data_audit_report_json)
+    blocking_flags.extend(data_audit_contract.get("blocking_risk_flags") or [])
     for item in execution_surface_proofs:
         if item.get("valid"):
             continue
@@ -158,6 +207,7 @@ def load_snapshot_execution_contract(
         ),
         "satisfied_execution_surfaces": sorted(satisfied_execution_surfaces),
         "full_depth_execution_surface_proofs": execution_surface_proofs,
+        "data_audit_contract": data_audit_contract,
         "blocking_risk_flags": blocking_flags,
     }
 
