@@ -213,6 +213,32 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             )
             self.assertEqual(decision["decision"], "fix_runtime")
 
+    def test_data_audit_blocker_takes_priority_over_aggregate_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = artifact(
+                Path(tmp),
+                chain_reason="continue",
+                should_dispatch=True,
+                promotion={
+                    "decision": "blocked",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "snapshot_contract_blocks_execution_claim:"
+                                "data_audit_zero_coverage:polymarket_orderbooks:0<288",
+                                "requires_runtime_replay_not_top_bucket_aggregate",
+                            ]
+                        }
+                    ],
+                },
+            )
+            decision = agent.closed_loop_decision(
+                [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            )
+
+        self.assertEqual(decision["decision"], "fix_data")
+        self.assertEqual(decision["reason"], "promotion_blockers_require_fix_data")
+
     def test_unmapped_best_candidate_revises_prior_with_runtime_avoid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = artifact(

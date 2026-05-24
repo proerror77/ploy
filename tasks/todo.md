@@ -184,6 +184,8 @@ This is not a dry-run or live promotion decision.
       audit sources.
 - [x] Pass `data-gap-audit.json` from hosted walk-forward into candidate replay
       and promotion consumers.
+- [x] Route closed-loop decisions with data-audit blockers to `fix_data` even
+      when aggregate replay blockers are also present.
 - [x] Add focused promotion, replay-builder, workflow, and audit tests.
 - [x] Run focused validation.
 - [ ] Commit, push, open PR, wait for CI, and merge.
@@ -196,7 +198,8 @@ This is not a dry-run or live promotion decision.
   artifact's own `overall_status` is `ok` and full-depth execution proof is
   present.
 - 2026-05-24: Focused validation passed: `python3 -m unittest discover -s tests
-  -p 'test_*.py'` (`269` tests), targeted AutoFactor/audit tests (`77` tests),
+  -p 'test_*.py'` (`270` tests), targeted closed-loop/AutoFactor/audit tests
+  (`107` tests),
   Python compile for touched scripts and `scripts/*.py` / `scripts/ci/*.py`,
   hosted walk-forward YAML parse, `rtk cargo test --locked --test
   workflow_security`, and `rtk git diff --check`.
