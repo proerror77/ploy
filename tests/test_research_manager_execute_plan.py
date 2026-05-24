@@ -133,6 +133,27 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             "revise_prior",
             ["generate_typed_llm_prior_json", "rerun_alpha_search_with_bounded_mutations"],
         )
+        plan["input"]["latest_runs"] = {
+            "runs": [
+                {
+                    "artifacts": [
+                        {
+                            "output_json": {
+                                "candidate_strategy_replay": {
+                                    "basis": "runtime_market_update_replay",
+                                    "runtime_score": "autofactor_formula:prior_candidate",
+                                    "strategy_profile": "settlement_probability",
+                                    "decision_contract": {
+                                        "target": "tradeable_full_depth_settlement_pnl",
+                                        "horizon": "5m",
+                                    },
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
         plan["plan"]["blocker_actions"] = [
             {
                 "blocker_family": "strategy_economics",
@@ -165,6 +186,11 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             options["full_depth_execution_surface_artifact_name"],
         )
         self.assertEqual("26355035577", options["candidate_strategy_replay_run_id"])
+        self.assertEqual(
+            "tradeable_full_depth_settlement_pnl",
+            options["alpha_search_plan_target"],
+        )
+        self.assertEqual("tradeable_full_depth_settlement_pnl", options["allowed_target"])
         prior = json.loads(options["alpha_search_llm_prior_json"])
         self.assertEqual("research_manager_typed_prior.v1", prior["schema_version"])
         self.assertEqual("revise_prior", prior["theme"])

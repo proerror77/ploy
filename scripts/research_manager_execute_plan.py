@@ -235,6 +235,8 @@ def _walk_forward_dispatch(
     symbols: str,
     stake_usd: str,
     chain_remaining: int,
+    alpha_search_plan_target: str = "",
+    allowed_target: str = "",
     alpha_search_llm_prior: dict[str, Any] | None = None,
     candidate_strategy_replay_run_id: str = "",
     candidate_strategy_replay_artifact_name: str = "",
@@ -254,6 +256,10 @@ def _walk_forward_dispatch(
         "fail_if_blocked": False,
         "persist_research_trace": True,
     }
+    if alpha_search_plan_target:
+        options["alpha_search_plan_target"] = alpha_search_plan_target
+    if allowed_target:
+        options["allowed_target"] = allowed_target
     if alpha_search_llm_prior:
         options["alpha_search_llm_prior_json"] = json.dumps(
             alpha_search_llm_prior,
@@ -431,6 +437,40 @@ def _runtime_candidate_from_plan(
     return None
 
 
+def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str, str]:
+    latest_runs = ((plan_payload.get("input") or {}).get("latest_runs") or {})
+    runs = latest_runs.get("runs")
+    if not isinstance(runs, list) or not runs:
+        return {}
+    artifacts = (runs[0] or {}).get("artifacts")
+    if not isinstance(artifacts, list):
+        return {}
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        output = artifact.get("output_json")
+        if not isinstance(output, dict):
+            continue
+        replay = output.get("candidate_strategy_replay")
+        if not isinstance(replay, dict):
+            continue
+        if replay.get("basis") != "runtime_market_update_replay":
+            continue
+        contract = replay.get("decision_contract")
+        if not isinstance(contract, dict):
+            contract = {}
+        source_factor = replay.get("source_factor")
+        if not isinstance(source_factor, dict):
+            source_factor = {}
+        return {
+            "target": str(contract.get("target") or source_factor.get("target") or ""),
+            "horizon": str(contract.get("horizon") or source_factor.get("horizon") or ""),
+            "runtime_score": str(replay.get("runtime_score") or ""),
+            "strategy_profile": str(replay.get("strategy_profile") or ""),
+        }
+    return {}
+
+
 def _runtime_replay_args(args: argparse.Namespace, plan_payload: dict[str, Any]) -> dict[str, Any]:
     selected = _runtime_candidate_from_plan(
         plan_payload,
@@ -503,6 +543,12 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
 
     action_names = {item["action"] for item in blocker_actions}
     snapshot_actions = {"rerun_snapshot_data_audit", "repair_or_exclude_missing_data_surface"}
+    latest_replay_contract = _latest_candidate_replay_contract(plan_payload)
+    walk_forward_target = latest_replay_contract.get("target") or getattr(
+        args,
+        "runtime_source_target",
+        "full_depth_settlement_executable_pnl",
+    )
 
     if (
         plan.get("theme") == "revise_prior"
@@ -566,6 +612,8 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                 symbols=args.symbols,
                 stake_usd=args.stake_usd,
                 chain_remaining=args.chain_remaining,
+                alpha_search_plan_target=walk_forward_target,
+                allowed_target=walk_forward_target,
                 alpha_search_llm_prior=typed_prior,
                 candidate_strategy_replay_run_id=getattr(
                     args,
