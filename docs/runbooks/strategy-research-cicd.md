@@ -211,7 +211,7 @@ typed, unblocked runtime contract in the Research Trace Plan
 closed instead of replaying a hardcoded default score.
 
 The current architecture review is
-`docs/reviews/research-data-architecture-review-2026-05-23.md`.
+`docs/reviews/research-data-architecture-review-2026-05-25.md`.
 
 Research Manager plans also carry machine-readable `blocker_actions` when
 runtime replay or promotion evidence explains why a candidate stayed blocked.
