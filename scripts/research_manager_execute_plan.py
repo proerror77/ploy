@@ -445,7 +445,7 @@ def _latest_run(plan_payload: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str, str]:
+def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str, Any]:
     latest_run = _latest_run(plan_payload)
     artifacts = latest_run.get("artifacts")
     if not isinstance(artifacts, list):
@@ -467,6 +467,12 @@ def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str,
         source_factor = replay.get("source_factor")
         if not isinstance(source_factor, dict):
             source_factor = {}
+        metrics = replay.get("metrics") if isinstance(replay.get("metrics"), dict) else {}
+        blocking_flags = replay.get("blocking_risk_flags")
+        if not isinstance(blocking_flags, list):
+            blocking_flags = replay.get("blockers")
+        if not isinstance(blocking_flags, list):
+            blocking_flags = []
         return {
             "target": str(contract.get("target") or source_factor.get("target") or ""),
             "horizon": str(contract.get("horizon") or source_factor.get("horizon") or ""),
@@ -474,6 +480,22 @@ def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str,
             "strategy_profile": str(replay.get("strategy_profile") or ""),
             "workflow_run_id": str(replay.get("workflow_run_id") or ""),
             "source_workflow": str(replay.get("source_workflow") or ""),
+            "source_factor_name": str(
+                source_factor.get("name") or source_factor.get("factor_name") or ""
+            ),
+            "metrics": {
+                key: metrics[key]
+                for key in (
+                    "trade_count",
+                    "unique_event_count",
+                    "entry_fill_rate",
+                    "roi",
+                    "total_pnl",
+                    "avg_entry_price",
+                )
+                if key in metrics
+            },
+            "blocking_risk_flags": [str(item) for item in blocking_flags if str(item)],
         }
     return {}
 
@@ -572,7 +594,144 @@ def _typed_prior_constraints(blocker_actions: list[dict[str, str]]) -> list[str]
         constraints.append("block promotion until official settlement coverage exists for all replay-traded events")
     if "repair_runtime_contract_mapping" in action_names:
         constraints.append("only select factors with typed unblocked runtime contracts")
+    if "mutate_or_reject_negative_runtime_edge" in action_names:
+        constraints.append(
+            "penalize losing runtime-replayed factor families and require positive executable ROI before handoff"
+        )
     return constraints
+
+
+def _runtime_score_base_factor(runtime_score: str) -> str:
+    prefix = "autofactor_formula:"
+    if runtime_score.startswith(prefix):
+        return runtime_score[len(prefix) :]
+    return runtime_score
+
+
+def _normalized_factor_key(raw: str) -> str:
+    value = _runtime_score_base_factor(str(raw or "").strip())
+    while True:
+        next_value = value
+        for prefix in ("mut2_", "llm_", "mcts_", "mut_"):
+            if next_value.startswith(prefix):
+                next_value = next_value[len(prefix) :]
+                break
+        if next_value == value:
+            break
+        value = next_value
+    marker = "_runtime_pass_through_"
+    if marker in value:
+        value = value.split(marker, 1)[0]
+    return value
+
+
+def _normalized_factor_family(raw: str) -> str:
+    value = _normalized_factor_key(raw)
+    suffixes = (
+        "_runtime_pass_through_add_spread_penalty",
+        "_runtime_pass_through_add_capacity_gate",
+        "_add_spread_penalty",
+        "_add_capacity_gate",
+        "_add_feature_gate",
+        "_entry_price_quality",
+        "_full_depth_entry_gate",
+        "_spread_adjusted",
+        "_near_strike",
+        "_capacity",
+        "_squashed",
+        "_pm_lag",
+        "_clip",
+    )
+    changed = True
+    while changed:
+        changed = False
+        for suffix in suffixes:
+            if value.endswith(suffix) and len(value) > len(suffix):
+                value = value[: -len(suffix)]
+                changed = True
+                break
+        if not changed and value.endswith("_x") and len(value) > 2:
+            value = value[:-2]
+            changed = True
+    return value
+
+
+def _negative_economics_prior_payload(
+    blocker_actions: list[dict[str, str]],
+    replay_contract: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    action_names = {item["action"] for item in blocker_actions}
+    if "mutate_or_reject_negative_runtime_edge" not in action_names:
+        return {"runtime_avoid_factors": [], "mutations": []}
+
+    runtime_score = str(replay_contract.get("runtime_score") or "")
+    base_factor = str(
+        replay_contract.get("source_factor_name") or ""
+    ) or _runtime_score_base_factor(runtime_score)
+    factor_family = _normalized_factor_family(base_factor)
+    metrics = (
+        replay_contract.get("metrics") if isinstance(replay_contract.get("metrics"), dict) else {}
+    )
+    flags = replay_contract.get("blocking_risk_flags")
+    if not isinstance(flags, list):
+        flags = []
+
+    runtime_avoid_factors: list[dict[str, Any]] = []
+    if base_factor and factor_family:
+        runtime_avoid_factors.append(
+            {
+                "base_factor": base_factor,
+                "factor_family": factor_family,
+                "runtime_score": runtime_score,
+                "reason": "negative_runtime_edge",
+                "metrics": {
+                    **metrics,
+                    "blocking_risk_flags": flags,
+                },
+            }
+        )
+
+    fallback_specs = [
+        {
+            "base_factor": "auto_settlement_model_full_depth_settlement_edge",
+            "mutation_type": "add_capacity_gate",
+            "name": "llm_model_full_depth_edge_full_depth_gate",
+            "feature": "full_depth_entry_fillable_gate",
+        },
+        {
+            "base_factor": "auto_settlement_model_full_depth_settlement_edge",
+            "mutation_type": "add_spread_penalty",
+            "name": "llm_model_full_depth_edge_spread_penalty",
+            "feature": "side_spread",
+            "constant": 0.01,
+        },
+        {
+            "base_factor": "auto_settlement_full_depth_settlement_edge",
+            "mutation_type": "add_near_strike_interaction",
+            "name": "llm_full_depth_edge_near_strike",
+        },
+        {
+            "base_factor": "auto_settlement_conservative_settlement_edge",
+            "mutation_type": "invert_or_contrarian",
+            "name": "llm_conservative_settlement_edge_contrarian",
+        },
+    ]
+    avoided_families = {item["factor_family"] for item in runtime_avoid_factors}
+    mutations = [
+        item
+        for item in fallback_specs
+        if _normalized_factor_family(item["base_factor"]) not in avoided_families
+    ]
+    if not mutations:
+        mutations = fallback_specs[:1]
+    for item in mutations:
+        item["feedback_reason"] = "negative_runtime_edge"
+        item["runtime_metrics"] = metrics
+
+    return {
+        "runtime_avoid_factors": runtime_avoid_factors,
+        "mutations": mutations,
+    }
 
 
 def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any]) -> dict[str, Any]:
@@ -594,6 +753,10 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
         "runtime_source_target",
         "full_depth_settlement_executable_pnl",
     )
+    negative_economics_prior = _negative_economics_prior_payload(
+        blocker_actions,
+        latest_replay_contract,
+    )
 
     if (
         plan.get("theme") == "revise_prior"
@@ -608,6 +771,8 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
             "actions": actions,
             "blocker_actions": blocker_actions,
             "constraints": _typed_prior_constraints(blocker_actions),
+            "runtime_avoid_factors": negative_economics_prior["runtime_avoid_factors"],
+            "mutations": negative_economics_prior["mutations"],
         }
 
     if any(action in snapshot_actions for action in actions) or (
