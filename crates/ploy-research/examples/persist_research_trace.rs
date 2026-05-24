@@ -34,6 +34,7 @@ struct TracePlan {
     promotion_json: Option<PathBuf>,
     handoff_json: Option<PathBuf>,
     candidate_replay_jsons: Vec<PathBuf>,
+    full_depth_execution_surface_jsons: Vec<PathBuf>,
     dry_run: bool,
 }
 
@@ -115,6 +116,33 @@ struct CandidateReplayTapeRow {
 }
 
 #[derive(Debug, Clone)]
+struct FullDepthExecutionSurfaceRow {
+    full_depth_execution_surface_id: String,
+    run_id: String,
+    source_workflow: String,
+    workflow_run_id: Option<String>,
+    workflow_run_url: Option<String>,
+    artifact_name: Option<String>,
+    artifact_sha256: String,
+    artifact_json: Value,
+    schema_version: String,
+    surface: String,
+    source: String,
+    data_snapshot_id: String,
+    window_start_ts: DateTime<Utc>,
+    window_end_ts: DateTime<Utc>,
+    checked_hours: i64,
+    existing_hours: i64,
+    exported_hours: i64,
+    row_count: i64,
+    full_fidelity: bool,
+    incomplete: bool,
+    valid: bool,
+    blockers_json: Value,
+    artifact_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 struct ArtifactTrace {
     event_type: String,
     artifact_path: PathBuf,
@@ -160,7 +188,7 @@ fn flag_present(args: &[String], flag: &str) -> bool {
 }
 
 fn usage() -> &'static str {
-    "usage: persist_research_trace --run-id <id> --snapshot-dir <dir> [--db-url <url>|DATABASE_URL] [--alpha-search-dir <dir>] [--registry-json <path>] [--promotion-json <path>] [--handoff-json <path>] [--candidate-replay-json <path>...] [--dry-run]"
+    "usage: persist_research_trace --run-id <id> --snapshot-dir <dir> [--db-url <url>|DATABASE_URL] [--alpha-search-dir <dir>] [--registry-json <path>] [--promotion-json <path>] [--handoff-json <path>] [--candidate-replay-json <path>...] [--full-depth-execution-surface-json <path>...] [--dry-run]"
 }
 
 fn parse_args(args: &[String]) -> Result<TracePlan> {
@@ -178,6 +206,13 @@ fn parse_args(args: &[String]) -> Result<TracePlan> {
             .into_iter()
             .map(PathBuf::from)
             .collect(),
+        full_depth_execution_surface_jsons: flag_values(
+            args,
+            "--full-depth-execution-surface-json",
+        )
+        .into_iter()
+        .map(PathBuf::from)
+        .collect(),
         dry_run: flag_present(args, "--dry-run"),
     })
 }
@@ -191,14 +226,16 @@ async fn main() -> Result<()> {
     let traces = collect_artifact_traces(&plan)?;
     let factor_rows = collect_factor_preview_rows(&plan)?;
     let candidate_replay_rows = collect_candidate_replay_rows(&plan, &dataset)?;
+    let full_depth_surface_rows = collect_full_depth_execution_surface_rows(&plan, &dataset)?;
 
     eprintln!(
-        "persist_research_trace: run_id={} snapshot={} factors={} candidate_replays={} traces={} dry_run={}",
+        "persist_research_trace: run_id={} snapshot={} factors={} candidate_replays={} full_depth_surfaces={} traces={} dry_run={}",
         plan.run_id,
         dataset.data_snapshot_id,
         factor_rows.len(),
         candidate_replay_rows.len(),
-        traces.len() + candidate_replay_rows.len() + 1,
+        full_depth_surface_rows.len(),
+        traces.len() + candidate_replay_rows.len() + full_depth_surface_rows.len() + 1,
         plan.dry_run
     );
 
@@ -224,11 +261,15 @@ async fn main() -> Result<()> {
         upsert_candidate_replay_tape(&pool, replay).await?;
         upsert_candidate_replay_evaluation(&pool, replay).await?;
     }
+    for surface in &full_depth_surface_rows {
+        upsert_full_depth_execution_surface(&pool, surface).await?;
+    }
 
     append_experiment_trace(
         &pool,
         &plan.run_id,
         Some(&dataset.data_snapshot_id),
+        None,
         None,
         None,
         "research_snapshot_manifest",
@@ -244,6 +285,7 @@ async fn main() -> Result<()> {
             &pool,
             &plan.run_id,
             Some(&dataset.data_snapshot_id),
+            None,
             None,
             None,
             &trace.event_type,
@@ -262,12 +304,34 @@ async fn main() -> Result<()> {
             Some(&dataset.data_snapshot_id),
             replay.dsl_hash.as_deref(),
             Some(&replay.candidate_replay_id),
+            None,
             "candidate_replay_tape",
             "candidate_replay_tape",
             &replay.evidence_stage,
             Some(&replay.promotion_decision),
             &replay.artifact_path,
             &replay.artifact_json,
+        )
+        .await?;
+    }
+    for surface in &full_depth_surface_rows {
+        append_experiment_trace(
+            &pool,
+            &plan.run_id,
+            Some(&dataset.data_snapshot_id),
+            None,
+            None,
+            Some(&surface.full_depth_execution_surface_id),
+            "full_depth_execution_surface",
+            "full_depth_execution_surface",
+            "executable_replay",
+            if surface.valid {
+                Some("continue")
+            } else {
+                Some("blocked")
+            },
+            &surface.artifact_path,
+            &surface.artifact_json,
         )
         .await?;
     }
@@ -522,6 +586,124 @@ fn candidate_replay_row(
     })
 }
 
+fn collect_full_depth_execution_surface_rows(
+    plan: &TracePlan,
+    dataset: &DatasetSnapshotRow,
+) -> Result<Vec<FullDepthExecutionSurfaceRow>> {
+    let mut rows = Vec::new();
+    for path in &plan.full_depth_execution_surface_jsons {
+        rows.push(full_depth_execution_surface_row(plan, dataset, path)?);
+    }
+    rows.sort_by(|left, right| {
+        left.full_depth_execution_surface_id
+            .cmp(&right.full_depth_execution_surface_id)
+    });
+    Ok(rows)
+}
+
+fn full_depth_execution_surface_row(
+    plan: &TracePlan,
+    dataset: &DatasetSnapshotRow,
+    path: &Path,
+) -> Result<FullDepthExecutionSurfaceRow> {
+    let artifact_json: Value = read_json(path)?;
+    let artifact_sha256 = file_sha256(path)?;
+    let schema_version =
+        string_field(&artifact_json, "schema_version").unwrap_or_else(|| "".to_string());
+    let surface = string_field(&artifact_json, "surface").unwrap_or_default();
+    let source = string_field(&artifact_json, "source").unwrap_or_else(|| "unknown".to_string());
+    let window_start_ts = timestamp_field(&artifact_json, "start_ts")
+        .or_else(|| timestamp_field(&artifact_json, "start"))
+        .with_context(|| format!("{} missing start_ts", path.display()))?;
+    let window_end_ts = timestamp_field(&artifact_json, "end_ts")
+        .or_else(|| timestamp_field(&artifact_json, "end"))
+        .with_context(|| format!("{} missing end_ts", path.display()))?;
+    let checked_hours = integer_field(&artifact_json, "checked_hours").unwrap_or(0);
+    let existing_hours = integer_field(&artifact_json, "existing_hours").unwrap_or(0);
+    let exported_hours = integer_field(&artifact_json, "exported_hours").unwrap_or(0);
+    let row_count = integer_field(&artifact_json, "row_count").unwrap_or(0);
+    let full_fidelity = artifact_json
+        .get("full_fidelity")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let incomplete = artifact_json
+        .get("incomplete")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let mut blockers = Vec::new();
+    if schema_version != "full_depth_execution_surface.v1" {
+        blockers.push("unsupported_schema_version".to_string());
+    }
+    if surface.is_empty() {
+        blockers.push("missing_surface".to_string());
+    }
+    if !full_fidelity {
+        blockers.push("not_full_fidelity".to_string());
+    }
+    if incomplete {
+        blockers.push("incomplete".to_string());
+    }
+    if checked_hours <= 0 {
+        blockers.push("checked_hours_empty".to_string());
+    }
+    if existing_hours < checked_hours {
+        blockers.push(format!("missing_hours:{existing_hours}<{checked_hours}"));
+    }
+    if row_count <= 0 {
+        blockers.push("row_count_empty".to_string());
+    }
+    if window_start_ts >= window_end_ts {
+        blockers.push("invalid_window".to_string());
+    }
+    if window_start_ts > dataset.dataset_start_ts || window_end_ts < dataset.dataset_end_ts {
+        blockers.push(format!(
+            "window_not_covered:{}->{}!covers{}->{}",
+            window_start_ts.to_rfc3339(),
+            window_end_ts.to_rfc3339(),
+            dataset.dataset_start_ts.to_rfc3339(),
+            dataset.dataset_end_ts.to_rfc3339()
+        ));
+    }
+    blockers.sort();
+    blockers.dedup();
+    let valid = full_depth_surface_valid(&blockers);
+
+    Ok(FullDepthExecutionSurfaceRow {
+        full_depth_execution_surface_id: string_field(
+            &artifact_json,
+            "full_depth_execution_surface_id",
+        )
+        .unwrap_or_else(|| format!("full_depth_execution_surface:{}", &artifact_sha256[..32])),
+        run_id: plan.run_id.clone(),
+        source_workflow: string_field(&artifact_json, "source_workflow")
+            .unwrap_or_else(|| "collect-full-depth-execution-surface.yml".to_string()),
+        workflow_run_id: string_field(&artifact_json, "workflow_run_id"),
+        workflow_run_url: string_field(&artifact_json, "workflow_run_url"),
+        artifact_name: string_field(&artifact_json, "artifact_name"),
+        artifact_sha256,
+        artifact_json: artifact_json.clone(),
+        schema_version,
+        surface,
+        source,
+        data_snapshot_id: dataset.data_snapshot_id.clone(),
+        window_start_ts,
+        window_end_ts,
+        checked_hours,
+        existing_hours,
+        exported_hours,
+        row_count,
+        full_fidelity,
+        incomplete,
+        valid,
+        blockers_json: Value::Array(blockers.into_iter().map(Value::String).collect()),
+        artifact_path: path.to_path_buf(),
+    })
+}
+
+fn full_depth_surface_valid(blockers: &[String]) -> bool {
+    blockers.is_empty()
+}
+
 fn canonical_candidate_replay_evidence_stage(
     basis: &str,
     explicit_evidence_stage: Option<&str>,
@@ -610,6 +792,22 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|raw| !raw.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn integer_field(value: &Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(|raw| {
+        raw.as_i64()
+            .or_else(|| raw.as_u64().and_then(|item| i64::try_from(item).ok()))
+            .or_else(|| raw.as_str().and_then(|item| item.parse::<i64>().ok()))
+    })
+}
+
+fn timestamp_field(value: &Value, key: &str) -> Option<DateTime<Utc>> {
+    value.get(key).and_then(Value::as_str).and_then(|raw| {
+        DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|parsed| parsed.with_timezone(&Utc))
+    })
 }
 
 fn merged_blockers(factor: &Value, runtime_contract: &Value) -> Value {
@@ -1235,12 +1433,98 @@ fn candidate_replay_promotion_status(row: &CandidateReplayTapeRow) -> &'static s
     }
 }
 
+async fn upsert_full_depth_execution_surface(
+    pool: &PgPool,
+    row: &FullDepthExecutionSurfaceRow,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO full_depth_execution_surfaces (
+            full_depth_execution_surface_id,
+            run_id,
+            source_workflow,
+            workflow_run_id,
+            workflow_run_url,
+            artifact_name,
+            artifact_sha256,
+            artifact_json,
+            schema_version,
+            surface,
+            source,
+            data_snapshot_id,
+            window_start_ts,
+            window_end_ts,
+            checked_hours,
+            existing_hours,
+            exported_hours,
+            row_count,
+            full_fidelity,
+            incomplete,
+            valid,
+            blockers_json
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14,
+            $15, $16, $17, $18, $19, $20, $21, $22::jsonb
+        )
+        ON CONFLICT (full_depth_execution_surface_id) DO UPDATE SET
+            run_id = EXCLUDED.run_id,
+            source_workflow = EXCLUDED.source_workflow,
+            workflow_run_id = EXCLUDED.workflow_run_id,
+            workflow_run_url = EXCLUDED.workflow_run_url,
+            artifact_name = EXCLUDED.artifact_name,
+            artifact_sha256 = EXCLUDED.artifact_sha256,
+            artifact_json = EXCLUDED.artifact_json,
+            schema_version = EXCLUDED.schema_version,
+            surface = EXCLUDED.surface,
+            source = EXCLUDED.source,
+            data_snapshot_id = EXCLUDED.data_snapshot_id,
+            window_start_ts = EXCLUDED.window_start_ts,
+            window_end_ts = EXCLUDED.window_end_ts,
+            checked_hours = EXCLUDED.checked_hours,
+            existing_hours = EXCLUDED.existing_hours,
+            exported_hours = EXCLUDED.exported_hours,
+            row_count = EXCLUDED.row_count,
+            full_fidelity = EXCLUDED.full_fidelity,
+            incomplete = EXCLUDED.incomplete,
+            valid = EXCLUDED.valid,
+            blockers_json = EXCLUDED.blockers_json
+        "#,
+    )
+    .bind(&row.full_depth_execution_surface_id)
+    .bind(&row.run_id)
+    .bind(&row.source_workflow)
+    .bind(&row.workflow_run_id)
+    .bind(&row.workflow_run_url)
+    .bind(&row.artifact_name)
+    .bind(&row.artifact_sha256)
+    .bind(row.artifact_json.to_string())
+    .bind(&row.schema_version)
+    .bind(&row.surface)
+    .bind(&row.source)
+    .bind(&row.data_snapshot_id)
+    .bind(row.window_start_ts)
+    .bind(row.window_end_ts)
+    .bind(row.checked_hours)
+    .bind(row.existing_hours)
+    .bind(row.exported_hours)
+    .bind(row.row_count)
+    .bind(row.full_fidelity)
+    .bind(row.incomplete)
+    .bind(row.valid)
+    .bind(row.blockers_json.to_string())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn append_experiment_trace(
     pool: &PgPool,
     run_id: &str,
     data_snapshot_id: Option<&str>,
     dsl_hash: Option<&str>,
     candidate_replay_id: Option<&str>,
+    full_depth_execution_surface_id: Option<&str>,
     event_type: &str,
     artifact_kind: &str,
     evidence_stage: &str,
@@ -1285,6 +1569,7 @@ async fn append_experiment_trace(
             data_snapshot_id,
             dsl_hash,
             candidate_replay_id,
+            full_depth_execution_surface_id,
             artifact_kind,
             evidence_stage,
             promotion_decision,
@@ -1294,7 +1579,7 @@ async fn append_experiment_trace(
             hash_prev,
             hash_current
         )
-        VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15)
+        VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15, $16)
         "#,
     )
     .bind(Uuid::new_v4().to_string())
@@ -1304,6 +1589,7 @@ async fn append_experiment_trace(
     .bind(data_snapshot_id)
     .bind(dsl_hash)
     .bind(candidate_replay_id)
+    .bind(full_depth_execution_surface_id)
     .bind(artifact_kind)
     .bind(evidence_stage)
     .bind(promotion_decision)
@@ -1408,6 +1694,7 @@ mod tests {
             promotion_json: None,
             handoff_json: None,
             candidate_replay_jsons: Vec::new(),
+            full_depth_execution_surface_jsons: Vec::new(),
             dry_run: true,
         }
     }

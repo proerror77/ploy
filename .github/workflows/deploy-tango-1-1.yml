@@ -55,6 +55,7 @@ env:
     044_candidate_replay_tapes.sql
     045_candidate_replay_basis_stage_constraint.sql
     046_factor_registry_blockers.sql
+    047_full_depth_execution_surfaces.sql
 
 jobs:
   build-and-deploy:

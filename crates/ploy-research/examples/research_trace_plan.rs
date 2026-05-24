@@ -211,7 +211,9 @@ async fn latest_snapshot_health(pool: &PgPool) -> Result<Value> {
 
     Ok(match row {
         Some(row) => {
-            let surface_blockers = source_surface_blockers(&row.3);
+            let execution_surfaces =
+                latest_full_depth_execution_surfaces(pool, row.1, row.2).await?;
+            let surface_blockers = source_surface_blockers(&row.3, &execution_surfaces);
             let data_repair_blockers = blockers_by_type(&surface_blockers, "data_repair");
             let promotion_blockers = blockers_by_type(&surface_blockers, "promotion");
             let has_surface_blockers = !surface_blockers.is_empty();
@@ -223,6 +225,7 @@ async fn latest_snapshot_health(pool: &PgPool) -> Result<Value> {
                 "dataset_end_ts": row.2,
                 "source_surfaces": row.3,
                 "row_counts": row.4,
+                "execution_surfaces": execution_surfaces,
                 "surface_blockers": surface_blockers,
                 "data_repair_blockers": data_repair_blockers,
                 "promotion_blockers": promotion_blockers,
@@ -238,6 +241,72 @@ async fn latest_snapshot_health(pool: &PgPool) -> Result<Value> {
     })
 }
 
+async fn latest_full_depth_execution_surfaces(
+    pool: &PgPool,
+    dataset_start_ts: DateTime<Utc>,
+    dataset_end_ts: DateTime<Utc>,
+) -> Result<Value> {
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        i32,
+        i32,
+        i64,
+        bool,
+        bool,
+        Value,
+    )> = sqlx::query_as(
+        r#"
+            SELECT
+                full_depth_execution_surface_id,
+                surface,
+                source,
+                window_start_ts,
+                window_end_ts,
+                checked_hours,
+                existing_hours,
+                row_count,
+                full_fidelity,
+                incomplete,
+                blockers_json
+            FROM full_depth_execution_surfaces
+            WHERE valid = true
+              AND window_start_ts <= $1
+              AND window_end_ts >= $2
+            ORDER BY created_at DESC
+            LIMIT 50
+            "#,
+    )
+    .bind(dataset_start_ts)
+    .bind(dataset_end_ts)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(json!({
+        "source": "full_depth_execution_surfaces",
+        "dataset_start_ts": dataset_start_ts,
+        "dataset_end_ts": dataset_end_ts,
+        "surfaces": rows.into_iter().map(|row| {
+            json!({
+                "full_depth_execution_surface_id": row.0,
+                "surface": row.1,
+                "source": row.2,
+                "window_start_ts": row.3,
+                "window_end_ts": row.4,
+                "checked_hours": row.5,
+                "existing_hours": row.6,
+                "row_count": row.7,
+                "full_fidelity": row.8,
+                "incomplete": row.9,
+                "blockers": row.10,
+            })
+        }).collect::<Vec<_>>()
+    }))
+}
+
 fn blockers_by_type(blockers: &[Value], blocker_type: &str) -> Vec<Value> {
     blockers
         .iter()
@@ -251,7 +320,7 @@ fn blockers_by_type(blockers: &[Value], blocker_type: &str) -> Vec<Value> {
         .collect()
 }
 
-fn source_surface_blockers(source_surfaces: &Value) -> Vec<Value> {
+fn source_surface_blockers(source_surfaces: &Value, execution_surfaces: &Value) -> Vec<Value> {
     let Some(items) = source_surfaces.as_array() else {
         return vec![json!({
             "surface": "<invalid>",
@@ -276,18 +345,21 @@ fn source_surface_blockers(source_surfaces: &Value) -> Vec<Value> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let requires_execution = gate_category == "required_for_execution";
+            let full_depth_covered = execution_surface_covered(execution_surfaces, name);
 
             let blocker = if gate_category == "missing_blocks_promotion" {
                 Some(("surface_declared_missing_blocks_promotion", "promotion"))
             } else if requires_execution && row_count == Some(0) {
                 Some(("required_execution_surface_empty", "data_repair"))
-            } else if requires_execution && row_count.is_none() {
-                Some(("required_execution_surface_not_materialized", "promotion"))
+            } else if requires_execution && snapshot_sampled && full_depth_covered {
+                None
             } else if requires_execution && snapshot_sampled {
                 Some((
                     "required_execution_surface_is_sampled_snapshot",
                     "promotion",
                 ))
+            } else if requires_execution && row_count.is_none() {
+                Some(("required_execution_surface_not_materialized", "promotion"))
             } else {
                 None
             };
@@ -302,4 +374,23 @@ fn source_surface_blockers(source_surfaces: &Value) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn execution_surface_covered(execution_surfaces: &Value, surface_name: &str) -> bool {
+    execution_surfaces
+        .get("surfaces")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("surface").and_then(Value::as_str) == Some(surface_name)
+                    && item
+                        .get("full_fidelity")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    && !item
+                        .get("incomplete")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true)
+            })
+        })
 }
