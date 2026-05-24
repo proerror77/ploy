@@ -47,7 +47,7 @@ body:
     attributes:
       label: Workflow plan
       description: Name the workflow and inputs that should test this idea.
-      placeholder: research-snapshot.yml, factor-review-v2.yml, optimize.yml, backtest.yml, or replay-dryrun-parity.yml with exact inputs
+      placeholder: research-snapshot.yml, factor-review-v2-hosted-artifact.yml, optimize.yml, backtest.yml, or replay-dryrun-parity.yml with exact inputs
     validations:
       required: true
   - type: textarea

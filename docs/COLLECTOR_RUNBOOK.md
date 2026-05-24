@@ -88,16 +88,16 @@ that every execution surface is full-fidelity.
 Use hosted artifact workflows after a snapshot exists:
 
 ```bash
-gh workflow run factor-review-v2.yml \
+gh workflow run factor-review-v2-hosted-artifact.yml \
   -f git_ref=main \
   -f snapshot_run_id=<snapshot-run-id>
 
-gh workflow run factor-walk-forward-v2.yml \
+gh workflow run factor-walk-forward-v2-hosted-artifact.yml \
   -f git_ref=main \
   -f snapshot_run_id=<snapshot-run-id>
 ```
 
-Snapshot-backed requests route to GitHub-hosted artifact workflows. Requests
+These requests run directly on GitHub-hosted artifact workflows. Requests
 without `snapshot_run_id` fail closed instead of running direct DB research.
 
 For AutoFactor / PM5D work, evidence stages must stay separated:

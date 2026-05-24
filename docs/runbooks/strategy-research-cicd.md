@@ -54,8 +54,7 @@ when the mismatch is understood and tracked as a follow-up issue.
 | Legacy Python compatibility | `.github/workflows/legacy-python-tools.yml` | Isolated, path-scoped checks for remaining Python helper scripts; not part of the Rust-first required CI contract |
 | Research snapshot | `.github/workflows/research-snapshot.yml` | Compile reusable research evidence from remote data |
 | Factor diagnostics | `.github/workflows/factor-review-v2-hosted-artifact.yml` | GitHub-hosted factor review from a retained complete sampled research snapshot artifact |
-| Factor diagnostics router | `.github/workflows/factor-review-v2.yml` | Snapshot-backed router to the hosted artifact workflow; fails closed when `snapshot_run_id` is missing |
-| Walk-forward diagnostics router | `.github/workflows/factor-walk-forward-v2.yml` | Snapshot-backed router to the hosted artifact workflow; fails closed when `snapshot_run_id` is missing |
+| Walk-forward diagnostics | `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml` | GitHub-hosted walk-forward from a retained complete sampled research snapshot artifact |
 | Parameter optimization | `.github/workflows/optimize.yml` | Bounded train/validation optimization from a snapshot or explicit debug data source |
 | Replay/backtest accounting | `.github/workflows/backtest.yml` | Build and run replay/backtest accounting in one job on `ploy-ci-1` |
 | Candidate strategy replay | `.github/workflows/runtime-candidate-replay.yml` | Required pre-dry-run proof that the selected runtime score emits executable runtime decisions on a Tango MarketUpdate recording |
@@ -426,11 +425,10 @@ different.
   the source event-root dataset is artifactized. Pass `source_dataset_run_id`
   to `event-ml-rolling-evidence.yml`; the workflow no longer exposes its
   former direct-DB `ploy-ci-1` export branch.
-- `factor-review-v2.yml` and `factor-walk-forward-v2.yml` are now router-only
-  workflows. They do not build research binaries, do not run on `ploy-ci-1`,
-  and do not expose direct-DB debug execution. Run `research-snapshot.yml`
-  first and pass `snapshot_run_id` so the request routes to the hosted artifact
-  workflow.
+- `factor-review-v2.yml` and `factor-walk-forward-v2.yml` have been removed.
+  Run `research-snapshot.yml` first, then dispatch the hosted artifact
+  workflows directly with `snapshot_run_id`. Factor search no longer has a
+  legacy router workflow or direct-DB execution path.
 - Remaining DB-mode research workflows must fail closed unless the research
   database URL targets Tango's private VPC endpoint `172.16.0.204`. A public
   Tango endpoint can turn large backtest query results into billable公网出流量.

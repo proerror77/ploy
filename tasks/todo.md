@@ -1,5 +1,49 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Factor Router Workflow Removal (2026-05-25)
+
+Evidence stage: `diagnostic` / workflow architecture cleanup. This removes
+legacy factor-router entrypoints and does not claim strategy profitability,
+dry-run readiness, or live-promotion evidence.
+
+### Tasks
+
+- [x] Lock current router behavior expectations with targeted research trace
+      and workflow security tests before deletion.
+- [x] Delete the legacy `factor-review-v2.yml` and
+      `factor-walk-forward-v2.yml` router workflows.
+- [x] Update docs, issue templates, and regression tests to dispatch hosted
+      artifact workflows directly with `snapshot_run_id`.
+- [x] Verify no direct-DB/debug router path remains in the factor research
+      workflow surface.
+- [ ] Land through PR after focused validation.
+
+### Review
+
+- 2026-05-25: Runtime evidence reset run `26369076183` succeeded before this
+  cleanup slice. Its artifact showed a clean baseline after reset:
+  `total_orders=0`, `total_trades=0`, `closed_trades=0`,
+  `open_positions=0`, `reason=zero_runtime_evidence`; the backup manifest
+  reported `orders=83`, `fills=83` before reset and `orders=0`, `fills=0`
+  after reset.
+- 2026-05-25: Dry-run candidate-quality gate run `26370065657` failed closed
+  for candidate quality, not fillability. The artifact showed
+  `closed_trades=3` below the `50` minimum, `realized_pnl=-11.49`,
+  `profit_factor=0.2372`, `buy_fill_rate_pct=99.59`, and
+  `max_drawdown=-15.0571`.
+- 2026-05-25: Pre-edit behavior locks passed:
+  `python3 -m unittest tests.test_persist_research_trace_contract` (`17`
+  tests) and `CARGO_TARGET_DIR=/tmp/ploy-router-cleanup-target
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test
+  workflow_security` (`29` tests).
+- 2026-05-25: Post-delete validation passed:
+  `python3 -m unittest tests.test_persist_research_trace_contract` (`17`
+  tests), `CARGO_TARGET_DIR=/tmp/ploy-router-cleanup-target
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test
+  workflow_security` (`29` tests), Ruby YAML parse for hosted factor
+  review/walk-forward and settlement PRD gate workflows, and
+  `rtk git diff --check`.
+
 ## Current Session - AutoFactor Runtime Contract Catalog (2026-05-25)
 
 Evidence stage: `factor_attribution` / `runtime_parity` contract repair. This

@@ -387,7 +387,8 @@ research workflows. Treat older `ploy collect`, `ploy orderbook-history`, and
   diagnostics on the data host, not promotion evidence.
 - `.github/workflows/research-snapshot.yml` creates retained sampled research
   artifacts.
-- `factor-review-v2.yml`, `factor-walk-forward-v2.yml`, and
+- `factor-review-v2-hosted-artifact.yml`,
+  `factor-walk-forward-v2-hosted-artifact.yml`, and
   `runtime-candidate-replay.yml` produce attribution, walk-forward, and runtime
   replay evidence from retained artifacts.
 

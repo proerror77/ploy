@@ -8,11 +8,10 @@ TRACE_PLAN = ROOT / "crates" / "ploy-research" / "examples" / "research_trace_pl
 CARGO = ROOT / "crates" / "ploy-research" / "Cargo.toml"
 RUNBOOK = ROOT / "docs" / "runbooks" / "strategy-research-cicd.md"
 HOSTED_WALK = ROOT / ".github" / "workflows" / "factor-walk-forward-v2-hosted-artifact.yml"
+HOSTED_FACTOR_REVIEW = ROOT / ".github" / "workflows" / "factor-review-v2-hosted-artifact.yml"
 AUTOFACTOR_PROMOTION = ROOT / ".github" / "workflows" / "autofactor-strategy-promotion.yml"
 TRACE_PLAN_WORKFLOW = ROOT / ".github" / "workflows" / "research-trace-plan.yml"
 TANGO_DEPLOY = ROOT / ".github" / "workflows" / "deploy-tango-1-1.yml"
-LEGACY_FACTOR_REVIEW = ROOT / ".github" / "workflows" / "factor-review-v2.yml"
-LEGACY_WALK_FORWARD = ROOT / ".github" / "workflows" / "factor-walk-forward-v2.yml"
 RESEARCH_SNAPSHOT = ROOT / "crates" / "ploy-research" / "src" / "research_snapshot.rs"
 FACTOR_RESEARCH_SCRIPT = ROOT / "scripts" / "run_factor_research.sh"
 FACTOR_RESEARCH_MATRIX_SCRIPT = ROOT / "scripts" / "run_factor_research_matrix.sh"
@@ -284,12 +283,11 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertNotIn("cargo run", workflow)
         self.assertNotIn("StrictHostKeyChecking no", workflow)
 
-    def test_legacy_db_workflows_are_removed_from_factor_routers(self) -> None:
-        for path in [LEGACY_FACTOR_REVIEW, LEGACY_WALK_FORWARD]:
+    def test_factor_router_workflows_are_removed(self) -> None:
+        self.assertFalse((ROOT / ".github" / "workflows" / "factor-review-v2.yml").exists())
+        self.assertFalse((ROOT / ".github" / "workflows" / "factor-walk-forward-v2.yml").exists())
+        for path in [HOSTED_FACTOR_REVIEW, HOSTED_WALK]:
             workflow = path.read_text(encoding="utf-8")
-            self.assertIn("Reject non-snapshot", workflow)
-            self.assertIn("snapshot-backed router only", workflow)
-            self.assertIn("direct DB research is no longer available", workflow)
             self.assertIn("snapshot_run_id", workflow)
             self.assertNotIn("allow_direct_db_debug", workflow)
             self.assertNotIn("legacy_db_debug_ack", workflow)

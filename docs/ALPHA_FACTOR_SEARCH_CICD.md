@@ -39,8 +39,6 @@ exploration and CI evidence.
 The repo now has the core alpha-search factory, not only the downstream
 promotion half:
 
-- `factor-walk-forward-v2.yml`: router-only compatibility entrypoint that
-  requires `snapshot_run_id` and forwards to the hosted artifact workflow.
 - `factor-walk-forward-v2-hosted-artifact.yml`: GitHub-hosted path that consumes
   a retained complete sampled research snapshot artifact, emits alpha-search artifacts, and
   can chain bounded follow-up search runs.
@@ -348,8 +346,8 @@ dimension such as capacity, stability, or overfit risk.
 
 - `factor-walk-forward-v2-hosted-artifact.yml` should be the default efficient
   search surface once a complete sampled snapshot artifact exists.
-- `factor-walk-forward-v2.yml` is retained only as a snapshot-backed router.
-  Build or select a retained `research-snapshot.yml` artifact first, then pass
+- Build or select a retained `research-snapshot.yml` artifact first, then
+  dispatch `factor-walk-forward-v2-hosted-artifact.yml` directly with
   `snapshot_run_id` so the hosted artifact workflow performs the search.
 - `pm5d-execution` settlement-probability searches should not require Deribit by
   default. Use `options_json.require_deribit=true` only when the hypothesis
