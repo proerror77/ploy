@@ -257,11 +257,12 @@ The current walk-forward/runtime replay evidence is deliberately blocked:
 
    The retired archived executable assets have been removed. The remaining
    active Python/shell helpers are not all wrong: some are still deployed
-   collector/repair surfaces, while others are break-glass or prototype paths.
-   The current inventory keeps direct-DB factor research as an explicit
-   ACK-only exception and keeps the LOB TCN trainer active only while the ML
-   lane still references it. These should be retired only after a replacement
-   or explicit owner exists.
+   collector/repair surfaces, while others are prototype paths. Manual
+   direct-DB factor research is no longer an active break-glass entrypoint:
+   factor review and walk-forward are snapshot-only active examples, and
+   `scripts/run_factor_research*.sh` have been retired. The LOB TCN trainer
+   remains active only while the ML lane still references it; retire it after a
+   replacement or explicit owner exists.
 
 ## Required Next Work
 
@@ -274,7 +275,7 @@ The current walk-forward/runtime replay evidence is deliberately blocked:
 | P1 | Promote runtime input canonicalization to a generated shared contract | Rust runtime scoring, Rust alpha-search, and Python promotion/replay use one source of truth instead of mirrored catalogs |
 | P1 | Complete full-depth executable evidence layer | Runtime replay and full-depth lake evidence become first-class queryable trace objects, not only workflow artifacts |
 | P1 | Generate shared non-AutoFactor label contracts | Runtime, research, replay, and trace persistence derive 30s / 60s / 5m / 15m label definitions from one source |
-| P1 | Finish remaining active compatibility ownership decisions | One-shot repairs, direct-DB debug runners, and compatibility collectors are either proven active, moved behind stronger break-glass gates, or replaced |
+| P1 | Finish remaining active compatibility ownership decisions | One-shot repairs, prototype trainers, and compatibility collectors are either proven active, moved behind stronger ownership gates, or replaced |
 
 ## Verdict
 

@@ -13,8 +13,8 @@ AUTOFACTOR_PROMOTION = ROOT / ".github" / "workflows" / "autofactor-strategy-pro
 TRACE_PLAN_WORKFLOW = ROOT / ".github" / "workflows" / "research-trace-plan.yml"
 TANGO_DEPLOY = ROOT / ".github" / "workflows" / "deploy-tango-1-1.yml"
 RESEARCH_SNAPSHOT = ROOT / "crates" / "ploy-research" / "src" / "research_snapshot.rs"
-FACTOR_RESEARCH_SCRIPT = ROOT / "scripts" / "run_factor_research.sh"
-FACTOR_RESEARCH_MATRIX_SCRIPT = ROOT / "scripts" / "run_factor_research_matrix.sh"
+FACTOR_REVIEW_EXAMPLE = ROOT / "crates" / "ploy-research" / "examples" / "factor_review_v2.rs"
+FACTOR_WALK_EXAMPLE = ROOT / "crates" / "ploy-research" / "examples" / "factor_walk_forward_v2.rs"
 
 
 class PersistResearchTraceContractTest(unittest.TestCase):
@@ -307,14 +307,15 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             self.assertNotIn("runs-on: [self-hosted, ploy-ci-1]", workflow)
             self.assertNotIn("--allow-direct-db-debug", workflow)
 
-    def test_manual_factor_research_scripts_require_direct_db_ack(self) -> None:
-        script = FACTOR_RESEARCH_SCRIPT.read_text(encoding="utf-8")
-        matrix = FACTOR_RESEARCH_MATRIX_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("PLOY_ALLOW_DIRECT_FACTOR_RESEARCH", script)
-        self.assertIn("manual-direct-factor-research", script)
-        self.assertIn("manual direct-DB debug path", script)
-        self.assertIn("PLOY_ALLOW_DIRECT_FACTOR_RESEARCH", matrix)
-        self.assertIn("break-glass ACK requirement", matrix)
+    def test_direct_db_factor_research_entrypoints_are_removed(self) -> None:
+        self.assertFalse((ROOT / "scripts" / "run_factor_research.sh").exists())
+        self.assertFalse((ROOT / "scripts" / "run_factor_research_matrix.sh").exists())
+        for path in [FACTOR_REVIEW_EXAMPLE, FACTOR_WALK_EXAMPLE]:
+            source = path.read_text(encoding="utf-8")
+            self.assertNotIn("--allow-direct-db-debug", source)
+            self.assertNotIn("allow_direct_db_debug", source)
+            self.assertNotIn("load_from_database_with_options", source)
+            self.assertNotIn("load_research_lob_snapshots_sampled", source)
 
 
 if __name__ == "__main__":
