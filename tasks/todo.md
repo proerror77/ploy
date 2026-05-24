@@ -1,5 +1,45 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Latest Blockers (2026-05-24)
+
+Evidence stage: Research Manager planning repair after `walk_forward` /
+`executable_replay` evidence. This is not a dry-run or live promotion
+decision.
+
+### Tasks
+
+- [x] Run Research Trace Plan from durable trace after replay-fed walk-forward
+      `26356028562`.
+- [x] Identify stale blocker contamination in Research Manager planning.
+- [x] Make latest run blockers drive blocker actions instead of historical
+      rejected-factor patterns.
+- [x] Route latest negative runtime economics / OOS blockers to
+      `revise_prior`.
+- [x] Run focused Rust validation.
+- [ ] Commit, push, open PR, wait for CI, merge, then redeploy/refresh the
+      deployed `research-trace-plan` binary before rerunning the workflow.
+
+### Review
+
+- 2026-05-24: Research Trace Plan run `26356462154` succeeded after
+  environment approval, but returned stale `theme=fix_data` with actions
+  `collect_full_depth_execution_surface`, `repair_official_settlement_coverage`,
+  and `rerun_snapshot_data_audit`. That conflicts with run `26356028562`, where
+  the full-depth surface and runtime replay were already consumed and the
+  remaining blockers are `roi_too_low`,
+  `candidate_strategy_replay_roi_too_low`, and `walk_forward_oos`.
+- 2026-05-24: Fixed `crates/ploy-research/src/research_os/manager.rs` so
+  blocker actions are derived from `latest_runs`, not historical
+  `rejected_factor_patterns`, and latest negative runtime economics/OOS evidence
+  maps to `strategy_economics ->
+  mutate_or_reject_negative_runtime_edge`, which routes the plan to
+  `revise_prior`.
+- 2026-05-24: Focused validation passed:
+  `rustfmt --edition 2024 --check
+  crates/ploy-research/src/research_os/manager.rs`, `rtk cargo test --locked -p
+  ploy-research research_os::manager --lib` (`11` passed), and
+  `rtk git diff --check`.
+
 ## Current Session - Runtime Replay Selector Repair (2026-05-24)
 
 Evidence stage: `walk_forward` / `executable_replay` promotion-chain repair.
