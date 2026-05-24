@@ -243,6 +243,14 @@ This is not a dry-run or live promotion decision.
   scripts/ci/*.py`, active workflow YAML parse for all workflows,
   `rtk cargo test --locked --test workflow_security`, focused audit/workflow
   tests (`20` tests), and `rtk git diff --check`.
+- 2026-05-24: PR `#665` merged to `main` as
+  `3310b591a0acca9dc710e84f03702459a2ec7167`. The first real rerun
+  `26354172536` proved the next coupling bug: the workflow checkout had the new
+  audit script, but both SSH and Cloud Assistant paths executed
+  `/opt/ploy/scripts/audit_market_data_gaps.py` from the last deployed bundle.
+  Cloud Assistant failed with `unrecognized arguments:
+  --orderbook-archive-root`, so the snapshot workflow must carry the checked-out
+  audit script to the remote workspace instead of depending on a prior deploy.
 
 ## Current Session - Market Data Promotion Blocker Actions (2026-05-24)
 
