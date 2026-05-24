@@ -216,6 +216,13 @@ collection, broader distinct-event coverage, and high-fillability/depth-filter
 mutation. `scripts/research_manager_execute_plan.py` copies those actions into
 `research_manager_typed_prior.v1` so the next hosted search can consume the
 constraint instead of relying on a human to reinterpret the markdown blocker.
+Full-depth execution-surface collection is a separate lane from sampled research
+snapshot refresh: `collect_full_depth_execution_surface` dispatches
+`.github/workflows/collect-full-depth-execution-surface.yml`, which uses the
+deployed CLOB archive exporter on `tango-1-1` and emits
+`full_depth_execution_surface.v1`. Official-settlement repair remains blocked
+in the executor until there is a bounded, ACK-safe repair workflow; do not treat
+a sampled snapshot rerun as settlement repair.
 
 `recorded-replay-parity.yml` defaults `since=auto` and `until=auto`. In auto
 mode it scans the target recording on `tango-1-1`, intersects that recording
