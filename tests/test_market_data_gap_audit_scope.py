@@ -146,6 +146,8 @@ class MarketDataGapAuditScopeTests(unittest.TestCase):
         self.assertIn("remote snapshot data audit failed after ${attempt} attempts", workflow)
         self.assertIn("copying snapshot data audit report failed after ${attempt} attempts", workflow)
         self.assertIn("copying research snapshot tar failed after ${attempt} attempts", workflow)
+        self.assertIn("Compile snapshot via Cloud Assistant fallback", workflow)
+        self.assertIn("scripts/ci/run_tango_research_snapshot_cloud_assist.py", workflow)
 
 
 if __name__ == "__main__":
