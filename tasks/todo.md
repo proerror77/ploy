@@ -1,5 +1,43 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Direct DB Factor Research Retirement (2026-05-25)
+
+Evidence stage: `diagnostic` / architecture cleanup. This removes remaining
+manual direct-DB factor research entrypoints from the active research chain; it
+does not claim strategy profitability, dry-run readiness, or live-promotion
+evidence.
+
+### Tasks
+
+- [x] Restore a clean current `main` worktree after stale worktree cleanup.
+- [x] Add a regression guard that active factor review/walk-forward examples
+      no longer expose direct-DB debug execution.
+- [x] Delete `scripts/run_factor_research.sh` and
+      `scripts/run_factor_research_matrix.sh`.
+- [x] Make `factor_review_v2` and `factor_walk_forward_v2` snapshot-only active
+      examples.
+- [x] Update data-job inventory and architecture review text.
+- [x] Run final focused validation.
+- [ ] Land through PR.
+
+### Review
+
+- 2026-05-25: Cleaned stale local worktrees from `47` down to `4`, preserving
+  the two dirty/protected worktrees and creating one clean mainline worktree at
+  `/Users/proerror/Documents/ploy-mainline`. The latest Tango deploy for
+  `main@6e711725` remains waiting on protected environment approval, so remote
+  Research Trace binaries/migrations are not yet refreshed.
+- 2026-05-25: Retired the remaining manual direct-DB factor research path from
+  active code. `factor_review_v2` and `factor_walk_forward_v2` now require
+  retained research snapshots, and the old shell runners were deleted. Focused
+  validation passed: `python3 -m unittest
+  tests.test_persist_research_trace_contract tests.test_factor_walk_forward_sweep
+  tests.test_settlement_probability_prd_gate`, `CARGO_TARGET_DIR=/tmp/ploy-legacy-cleanup-target
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research
+  --example factor_review_v2 --features db`, `CARGO_TARGET_DIR=/tmp/ploy-legacy-cleanup-target
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research
+  --example factor_walk_forward_v2 --features db`, and `rtk git diff --check`.
+
 ## Current Session - Full-Depth Execution Surface Trace (2026-05-25)
 
 Evidence stage: `diagnostic` / `execution_quality` trace repair. This makes

@@ -5,8 +5,6 @@
 //! scores executable PnL after PM CLOB fillability.
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
-use ploy_market_contracts::MarketUpdate;
 use ploy_research::{
     AlphaSearchRuntimeFeedback, AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options,
     FactorObservation, FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
@@ -16,18 +14,17 @@ use ploy_research::{
     SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
     SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
     autofactor_matrix_from_v2, build_factor_observations_v2_with_deribit_and_pm_books,
-    build_factor_observations_with_lob_sampled, build_factor_stability_report,
-    build_full_depth_execution_matrix, build_settlement_probability_promotion_gate_report,
-    format_autofactor_reports, format_factor_combo_v1_report, format_factor_stability_report,
+    build_factor_stability_report, build_full_depth_execution_matrix,
+    build_settlement_probability_promotion_gate_report, format_autofactor_reports,
+    format_factor_combo_v1_report, format_factor_stability_report,
     format_factor_walk_forward_v2_report, format_fillability_review_v1_report,
     format_full_depth_execution_matrix_report, format_liquidity_gate_v1_report,
     format_liquidity_gated_alpha_v1_report, format_meta_label_walk_forward_v1_report,
     format_repricing_ic_report, format_settlement_probability_promotion_gate_report,
     format_settlement_probability_report, format_settlement_probability_walk_forward_report,
     format_trade_formation_v1_report, liquidity_gate_v1_with_deribit_and_pm_books,
-    liquidity_gated_alpha_v1_with_deribit_and_pm_books, load_deribit_feature_snapshots,
-    load_research_lob_snapshots_sampled, load_research_pm_book_snapshots_sampled,
-    load_research_snapshot, mine_domain_autofactors_from_v2_with_guidance, read_mcts_search_state,
+    liquidity_gated_alpha_v1_with_deribit_and_pm_books, load_research_snapshot,
+    mine_domain_autofactors_from_v2_with_guidance, read_mcts_search_state,
     review_fillability_v1_with_deribit_and_pm_books, review_repricing_ic_with_deribit_and_pm_books,
     review_trade_formation_v1_with_deribit_and_pm_books, validate_snapshot_request_coverage,
     walk_forward_factor_combo_v1_with_deribit_and_pm_books,
@@ -35,9 +32,7 @@ use ploy_research::{
     walk_forward_meta_label_v1_with_deribit_and_pm_books,
     write_alpha_search_artifacts_with_state_and_runtime_feedback,
 };
-use sqlx::postgres::PgPoolOptions;
 use std::collections::HashSet;
-use std::time::Duration;
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2)
@@ -352,19 +347,13 @@ fn filter_autofactor_reports(
         .collect()
 }
 
-fn slice_by_time<T, F>(items: &[T], start: DateTime<Utc>, end: DateTime<Utc>, ts_fn: F) -> &[T]
-where
-    F: Fn(&T) -> DateTime<Utc>,
-{
-    let lo = items.partition_point(|item| ts_fn(item) < start);
-    let hi = items.partition_point(|item| ts_fn(item) < end);
-    &items[lo..hi]
-}
-
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let db_url = flag_value(&args, "--db-url");
+    if flag_value(&args, "--db-url").is_some() {
+        eprintln!("ERROR: direct DB factor walk-forward has been removed; pass --snapshot-dir");
+        std::process::exit(2);
+    }
     let start = flag_value(&args, "--start-ts")
         .map(|raw| parse_timestamp(&raw))
         .unwrap_or_else(|| {
@@ -454,7 +443,6 @@ async fn main() {
     let alpha_search_plan_json = flag_value(&args, "--alpha-search-plan-json");
     let alpha_search_llm_prior_json = flag_value(&args, "--alpha-search-llm-prior-json");
     let alpha_search_state_json = flag_value(&args, "--alpha-search-state-json");
-    let allow_direct_db_debug = flag_present(&args, "--allow-direct-db-debug");
     let data_quality_mode = parse_data_quality_mode(flag_value(&args, "--data-quality-mode"));
     let require_deribit = flag_present(&args, "--require-deribit");
     let min_event_complete_events = flag_value(&args, "--min-event-complete-events")
@@ -468,10 +456,10 @@ async fn main() {
         .unwrap_or_else(|| {
             SettlementProbabilityPromotionGateOptions::default().min_entry_fill_rate
         });
-    if snapshot_dir.is_some() && db_url.is_some() {
-        eprintln!("ERROR: --snapshot-dir cannot be combined with --db-url");
+    let snapshot_dir = snapshot_dir.unwrap_or_else(|| {
+        eprintln!("ERROR: --snapshot-dir is required for factor_walk_forward_v2");
         std::process::exit(2);
-    }
+    });
     let mut snapshot_provenance: Option<String> = None;
     let snapshot_data_audit_status: Option<String>;
     let include_deribit: bool;
@@ -479,7 +467,7 @@ async fn main() {
         Vec<FactorObservation>,
         Vec<_>,
         Vec<_>,
-    ) = if let Some(snapshot_dir) = snapshot_dir {
+    ) = {
         let started = std::time::Instant::now();
         let snapshot =
             load_research_snapshot(&snapshot_dir).expect("load research snapshot failed");
@@ -590,119 +578,6 @@ async fn main() {
             pm_book_snapshots.len()
         );
         (observations, deribit_snapshots, pm_book_snapshots)
-    } else {
-        if !allow_direct_db_debug {
-            eprintln!(
-                "ERROR: direct DB factor walk-forward is non-canonical; pass --snapshot-dir or explicit --allow-direct-db-debug"
-            );
-            std::process::exit(2);
-        }
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(Duration::from_secs(120))
-            .connect(
-                db_url
-                    .as_deref()
-                    .expect("--db-url required without --snapshot-dir"),
-            )
-            .await
-            .expect("database connection failed");
-
-        let mut phase_timings = Vec::new();
-        let history_start = start - chrono::Duration::hours(1) - chrono::Duration::seconds(300);
-        let historical_sample_secs = u32::try_from(lob_sample_secs.max(1)).unwrap_or(1);
-        let started = std::time::Instant::now();
-        let all_updates = load_from_database_with_options(
-            &pool,
-            &symbols,
-            history_start,
-            end,
-            &HistoricalLoadOptions {
-                require_official_settlement: true,
-                include_l2: false,
-                spot_sample_secs: historical_sample_secs,
-                lob_sample_secs: historical_sample_secs,
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("bulk historical load failed");
-        phase_timings.push((
-            "historical_updates",
-            started.elapsed().as_millis(),
-            all_updates.len(),
-        ));
-        eprintln!("updates: {}", all_updates.len());
-
-        let started = std::time::Instant::now();
-        let all_lob_snapshots = load_research_lob_snapshots_sampled(
-            &pool,
-            &symbols,
-            history_start,
-            end,
-            lob_sample_secs,
-        )
-        .await
-        .expect("bulk lob snapshot load failed");
-        phase_timings.push((
-            "cex_lob_snapshots",
-            started.elapsed().as_millis(),
-            all_lob_snapshots.len(),
-        ));
-        eprintln!("lob_snapshots: {}", all_lob_snapshots.len());
-
-        let started = std::time::Instant::now();
-        let all_pm_book_snapshots = load_research_pm_book_snapshots_sampled(
-            &pool,
-            &symbols,
-            history_start,
-            end,
-            pm_book_sample_secs,
-        )
-        .await
-        .expect("bulk PM book snapshot load failed");
-        phase_timings.push((
-            "pm_book_snapshots",
-            started.elapsed().as_millis(),
-            all_pm_book_snapshots.len(),
-        ));
-        eprintln!("pm_book_snapshots: {}", all_pm_book_snapshots.len());
-
-        let started = std::time::Instant::now();
-        let deribit_snapshots =
-            load_deribit_feature_snapshots(&pool, &symbols, start, end, observation_sample_secs)
-                .await;
-        phase_timings.push((
-            "deribit_snapshots",
-            started.elapsed().as_millis(),
-            deribit_snapshots.len(),
-        ));
-        eprintln!("deribit_snapshots: {}", deribit_snapshots.len());
-
-        let updates_slice = slice_by_time(&all_updates, history_start, end, MarketUpdate::sort_ts);
-        let lob_slice = slice_by_time(&all_lob_snapshots, history_start, end, |snapshot| {
-            snapshot.ts
-        });
-
-        let started = std::time::Instant::now();
-        let observations: Vec<FactorObservation> = build_factor_observations_with_lob_sampled(
-            updates_slice,
-            lob_slice,
-            max_quote_age_secs,
-            observation_sample_secs,
-        );
-        phase_timings.push((
-            "factor_observations",
-            started.elapsed().as_millis(),
-            observations.len(),
-        ));
-        for (phase, elapsed_ms, rows) in phase_timings {
-            eprintln!("phase {phase:<24} {elapsed_ms:>8} ms rows={rows}");
-        }
-        eprintln!("factor_observations: {}", observations.len());
-        snapshot_data_audit_status = None;
-        include_deribit = !deribit_snapshots.is_empty();
-        (observations, deribit_snapshots, all_pm_book_snapshots)
     };
 
     if observations.is_empty() {
