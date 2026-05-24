@@ -55,6 +55,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("ON CONFLICT (candidate_replay_id) DO UPDATE", source)
         self.assertIn("ON CONFLICT (full_depth_execution_surface_id) DO UPDATE", source)
         self.assertIn("full_depth_execution_surface.v1", source)
+        self.assertIn("existing_hours + exported_hours", source)
         self.assertIn("full_depth_surface_valid", source)
         self.assertIn("canonical_candidate_replay_evidence_stage", source)
         self.assertIn("contradicts basis", source)
@@ -298,6 +299,27 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertNotIn("cargo build", workflow)
         self.assertNotIn("cargo run", workflow)
         self.assertNotIn("StrictHostKeyChecking no", workflow)
+
+    def test_collect_full_depth_workflow_persists_standalone_surface(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "collect-full-depth-execution-surface.yml").read_text(
+            encoding="utf-8"
+        )
+        required = [
+            '"persist_research_trace":true',
+            '"max_hours":48',
+            '"fail_if_incomplete":true',
+            "scripts/persist_full_depth_execution_surface.py",
+            "full-depth-execution-surface-persist.json",
+            "--db-url \"${PLOY_DATABASE__URL}\"",
+            "--require-valid",
+            "Durable Trace Persistence",
+            "source_workflow",
+            "workflow_run_id",
+            "workflow_run_url",
+            "artifact_name",
+        ]
+        for snippet in required:
+            self.assertIn(snippet, workflow)
 
     def test_factor_router_workflows_are_removed(self) -> None:
         self.assertFalse((ROOT / ".github" / "workflows" / "factor-review-v2.yml").exists())

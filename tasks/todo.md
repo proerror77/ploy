@@ -1,5 +1,49 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Durable Repair Evidence (2026-05-25)
+
+Evidence stage: `diagnostic` / `factor_attribution` repair-loop hardening.
+This makes Research Manager data-repair follow-ups produce durable, queryable
+evidence and clearer settlement repair accounting; it does not claim strategy
+profitability, dry-run readiness, or live-promotion evidence.
+
+### Tasks
+
+- [x] Refresh current `main` trace-plan evidence after latest Tango deploy.
+- [x] Close stale Agent Team workers before spawning more work.
+- [x] Make standalone full-depth execution-surface collection persist a
+      Research OS `full_depth_execution_surfaces` row by default.
+- [x] Treat newly exported full-depth archive hours as covered hours in
+      full-depth validation.
+- [x] Add official settlement repair reason counters so no-op / already
+      matching settlement evidence is visible.
+- [x] Run focused validation.
+- [ ] Land through PR and rerun trace-plan/manager follow-up evidence.
+
+### Review
+
+- 2026-05-25: Latest `Research Trace Plan` run `26373097591` on
+  `main@d7af34ea` succeeded with theme `fix_runtime`, actions
+  `run_recorded_replay_parity` and `compare_runtime_scorer_contract`, plus
+  blockers for `runtime_contract`, `promotion_data_execution_surface`, and
+  `promotion_data_settlement`. This confirms the current blocker is not
+  workflow availability; the repair-loop evidence still needs to become
+  durable/queryable and runtime contracts still block promotion.
+- 2026-05-25: Local validation passed for this repair slice: workflow YAML
+  parse and extracted shell `bash -n` for the two modified workflows,
+  `python3 -m py_compile scripts/persist_full_depth_execution_surface.py
+  scripts/backfill_settlements.py`, targeted Python unit tests for full-depth
+  persistence / settlement repair / trace contracts, full
+  `python3 -m unittest discover -s tests -p 'test_*.py'` (`291` tests),
+  `CARGO_TARGET_DIR=/tmp/ploy-durable-repair-evidence-target
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked --test
+  workflow_security` (`30` tests), `CARGO_TARGET_DIR=/tmp/ploy-durable-repair-evidence-target
+  /opt/homebrew/bin/timeout 300 rtk cargo test --locked -p ploy-research
+  --example persist_research_trace --features db` (`10` tests), single-file
+  `rustfmt --edition 2021 --check
+  crates/ploy-research/examples/persist_research_trace.rs`, and
+  `rtk git diff --check`.
+
 ## Current Session - Legacy Factor Research Binary Removal (2026-05-25)
 
 Evidence stage: `diagnostic` / architecture cleanup. This removes the old

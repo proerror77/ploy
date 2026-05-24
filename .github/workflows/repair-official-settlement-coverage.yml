@@ -217,7 +217,12 @@ jobs:
               f"- Candidate markets: `{payload.get('candidate_market_count')}`",
               f"- Would settle: `{payload.get('would_settle_count')}`",
               f"- Settled: `{payload.get('settled_count')}`",
+              f"- Already matching: `{payload.get('unchanged_count')}`",
               f"- Active reset: `{payload.get('active_reset_count')}`",
+              f"- Open markets: `{payload.get('open_market_count')}`",
+              f"- Malformed payloads: `{payload.get('malformed_payload_count')}`",
+              f"- Unresolved prices: `{payload.get('unresolved_price_count')}`",
+              f"- Token mismatches: `{payload.get('token_mismatch_count')}`",
               f"- Skipped: `{payload.get('skipped_count')}`",
               f"- Errors: `{payload.get('error_count')}`",
           ]

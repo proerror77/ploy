@@ -8,15 +8,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
-use ploy_research::ResearchSnapshotManifest;
 use ploy_research::autofactor_target_horizon;
 use ploy_research::research_os::trace::trace_hash;
-use serde_json::{Value, json};
+use ploy_research::ResearchSnapshotManifest;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 const WRITER_AGENT: &str = "persist_research_trace";
@@ -646,8 +646,9 @@ fn full_depth_execution_surface_row(
     if checked_hours <= 0 {
         blockers.push("checked_hours_empty".to_string());
     }
-    if existing_hours < checked_hours {
-        blockers.push(format!("missing_hours:{existing_hours}<{checked_hours}"));
+    let covered_hours = existing_hours + exported_hours;
+    if covered_hours < checked_hours {
+        blockers.push(format!("missing_hours:{covered_hours}<{checked_hours}"));
     }
     if row_count <= 0 {
         blockers.push("row_count_empty".to_string());

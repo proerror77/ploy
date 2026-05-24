@@ -1,7 +1,11 @@
 import unittest
 from datetime import datetime, timezone
 
-from scripts.backfill_settlements import parse_utc_ts, settlement_rows_from_gamma
+from scripts.backfill_settlements import (
+    parse_utc_ts,
+    settlement_rows_from_gamma,
+    settlement_rows_with_reason_from_gamma,
+)
 
 
 class BackfillSettlementsTest(unittest.TestCase):
@@ -29,6 +33,46 @@ class BackfillSettlementsTest(unittest.TestCase):
             [("up-token", "winner", 1.0), ("down-token", "loser", 0.0)],
             rows,
         )
+
+    def test_settlement_rows_reports_skip_reasons(self) -> None:
+        cases = [
+            ({"closed": False}, "not_closed"),
+            ({"closed": True, "clobTokenIds": "not json", "outcomePrices": "[]"}, "malformed_gamma_payload"),
+            (
+                {
+                    "closed": True,
+                    "clobTokenIds": '["up-token", "down-token"]',
+                    "outcomePrices": '["0.50", "0.50"]',
+                },
+                "unresolved_prices",
+            ),
+            (
+                {
+                    "closed": True,
+                    "clobTokenIds": '["other-up", "other-down"]',
+                    "outcomePrices": '["1", "0"]',
+                },
+                "token_mismatch",
+            ),
+            (
+                {
+                    "closed": True,
+                    "clobTokenIds": '["up-token", "up-token"]',
+                    "outcomePrices": '["1", "0"]',
+                },
+                "token_mismatch",
+            ),
+        ]
+
+        for payload, reason in cases:
+            with self.subTest(reason=reason):
+                rows, actual_reason = settlement_rows_with_reason_from_gamma(
+                    payload,
+                    up_token="up-token",
+                    down_token="down-token",
+                )
+                self.assertEqual([], rows)
+                self.assertEqual(reason, actual_reason)
 
 
 if __name__ == "__main__":
