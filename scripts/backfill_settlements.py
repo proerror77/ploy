@@ -8,10 +8,10 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-import asyncpg
-import httpx
+if TYPE_CHECKING:
+    import asyncpg
 
 
 DEFAULT_SYMBOLS = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT"
@@ -43,7 +43,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 async def load_candidate_markets(
-    conn: asyncpg.Connection,
+    conn: "asyncpg.Connection",
     *,
     start_ts: datetime,
     end_ts: datetime | None,
@@ -107,7 +107,7 @@ def settlement_rows_from_gamma(
 
 
 async def upsert_settlement(
-    conn: asyncpg.Connection,
+    conn: "asyncpg.Connection",
     *,
     market_slug: str,
     token_id: str,
@@ -149,6 +149,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     if start_ts is None:
         raise SystemExit("--start-ts is required")
     end_ts = parse_utc_ts(args.end_ts)
+    import asyncpg
+    import httpx
 
     conn = await asyncpg.connect(db_url)
     try:
