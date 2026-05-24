@@ -161,7 +161,12 @@ def factor_args(
     return command
 
 
-def promotion_args(args: argparse.Namespace, report: Path, variant_dir: Path) -> list[str]:
+def promotion_args(
+    args: argparse.Namespace,
+    report: Path,
+    variant_dir: Path,
+    candidate_strategy_replay_json: str | None = None,
+) -> list[str]:
     command = [
         sys.executable,
         args.evaluator,
@@ -180,7 +185,7 @@ def promotion_args(args: argparse.Namespace, report: Path, variant_dir: Path) ->
         "--required-strategy-profile",
         args.required_strategy_profile,
     ]
-    replay_json = args.candidate_strategy_replay_json or str(
+    replay_json = candidate_strategy_replay_json or str(
         variant_dir / "candidate-strategy-replay.json"
     )
     command.extend(["--candidate-strategy-replay-json", replay_json])
@@ -316,6 +321,47 @@ def is_runtime_contract_blocker(blocker: str) -> bool:
         or blocker.startswith("missing_runtime_")
         or blocker.startswith("incomplete_runtime_contract_")
     )
+
+
+def replay_identity_mismatch_blockers(promotion: dict[str, Any]) -> list[str]:
+    prefixes = (
+        "candidate_strategy_replay_runtime_score_mismatch:",
+        "candidate_strategy_replay_target_mismatch:",
+        "candidate_strategy_replay_horizon_mismatch:",
+        "candidate_strategy_replay_contract_target_mismatch:",
+        "candidate_strategy_replay_contract_horizon_mismatch:",
+    )
+    evaluated = promotion.get("evaluated_factors") or []
+    selected_items: list[dict[str, Any]] = []
+    for item in evaluated:
+        factor = item.get("factor") if isinstance(item.get("factor"), dict) else {}
+        blockers = [str(blocker) for blocker in item.get("blockers") or []]
+        if factor.get("decision") != "candidate" or factor.get("reason") != "passed":
+            continue
+        if not item.get("runtime_mapping"):
+            continue
+        if "empty_runtime_strategy_profile" in blockers:
+            continue
+        if any(is_runtime_contract_blocker(blocker) for blocker in blockers):
+            continue
+        selected_items.append(item)
+    if not selected_items:
+        return []
+
+    def rank(item: dict[str, Any]) -> float:
+        factor = item.get("factor") if isinstance(item.get("factor"), dict) else {}
+        try:
+            return float(factor.get("rank") or 10_000)
+        except (TypeError, ValueError):
+            return 10_000.0
+
+    selected = min(selected_items, key=rank)
+    mismatches: list[str] = []
+    for blocker in selected.get("blockers") or []:
+        blocker_text = str(blocker)
+        if blocker_text.startswith(prefixes):
+            mismatches.append(blocker_text)
+    return sorted(set(mismatches))
 
 
 def _factor_score(item: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
@@ -494,7 +540,12 @@ def run_variant(
             return item
 
     eval_result = subprocess.run(
-        promotion_args(args, report_path, variant_dir),
+        promotion_args(
+            args,
+            report_path,
+            variant_dir,
+            args.candidate_strategy_replay_json or None,
+        ),
         cwd=args.cwd,
         text=True,
         capture_output=True,
@@ -507,7 +558,53 @@ def run_variant(
     if eval_result.returncode not in {0, 3}:
         item["status"] = "evaluation_failed"
         return item
-    promotion = json.loads((variant_dir / "autofactor-strategy-promotion.json").read_text(encoding="utf-8"))
+    promotion = json.loads(
+        (variant_dir / "autofactor-strategy-promotion.json").read_text(encoding="utf-8")
+    )
+    mismatches = replay_identity_mismatch_blockers(promotion)
+    if args.candidate_strategy_replay_json and mismatches:
+        item["ignored_candidate_strategy_replay_json"] = args.candidate_strategy_replay_json
+        item["ignored_candidate_strategy_replay_reasons"] = mismatches
+        replay_result = subprocess.run(
+            candidate_replay_args(args, report_path, variant_dir),
+            cwd=args.cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        (variant_dir / "candidate-strategy-replay-output.json").write_text(
+            replay_result.stdout,
+            encoding="utf-8",
+        )
+        if replay_result.stderr:
+            (variant_dir / "candidate-strategy-replay-stderr.txt").write_text(
+                replay_result.stderr,
+                encoding="utf-8",
+            )
+        item["candidate_replay_exit_code"] = replay_result.returncode
+        if replay_result.returncode != 0:
+            item["status"] = "candidate_replay_failed"
+            return item
+        eval_result = subprocess.run(
+            promotion_args(args, report_path, variant_dir),
+            cwd=args.cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        (variant_dir / "evaluator-output.json").write_text(eval_result.stdout, encoding="utf-8")
+        if eval_result.stderr:
+            (variant_dir / "evaluator-stderr.txt").write_text(
+                eval_result.stderr,
+                encoding="utf-8",
+            )
+        item["evaluator_exit_code"] = eval_result.returncode
+        if eval_result.returncode not in {0, 3}:
+            item["status"] = "evaluation_failed"
+            return item
+        promotion = json.loads(
+            (variant_dir / "autofactor-strategy-promotion.json").read_text(encoding="utf-8")
+        )
     item["decision"] = promotion.get("decision")
     item["qualified_count"] = len(promotion.get("qualified_strategies") or [])
     item["promotion_gate_ready"] = bool((promotion.get("promotion_gate") or {}).get("ready"))

@@ -1,7 +1,7 @@
 # Research Data Architecture Review - 2026-05-23
 
 Last updated: 2026-05-24 against `main`
-`1281f567b6b5dfd9100d773b80555259ef43174d`.
+`a3e43c6aba40b1679ad2e5ce5e3d3d05db21926c`.
 
 ## Scope
 
@@ -30,7 +30,7 @@ reserved for `executable_replay` evidence.
 | Research Manager | `research_trace_plan` can read durable DB trace and emit next-plan JSON; `research-manager-execute-plan.yml` and hosted walk-forward can dispatch bounded follow-up evidence | Main runs have proven executor dispatch, recorded replay parity, and closed-loop runtime replay fan-out |
 | Legacy research paths | Factor routers and Event ML rolling evidence are artifact-backed only | Former direct `ploy-ci-1` DB execution/export branches have been removed from the active research chain |
 | Diagnostic backtest | `backtest.yml` now emits `evidence-stage` artifacts with `promotion_ready=false` | Useful diagnostic replay/backtest surface; not promotion evidence |
-| Legacy repo entrypoints | Low-risk local CSV/discovery/debug helpers, public-profile dry-run prototypes, and the legacy host-support installer are archived under `scripts/archive/` | Active docs now point to artifact-backed research, canonical platform release, and runtime replay surfaces |
+| Legacy repo entrypoints | Retired local CSV/discovery/debug helpers, public-profile dry-run prototypes, legacy root-runtime workflows, and archived systemd assets have been removed from the active repository | Active docs now point to artifact-backed research, canonical platform release, and runtime replay surfaces |
 
 ## Fixed In This Migration
 
@@ -98,23 +98,25 @@ reserved for `executable_replay` evidence.
    semantic mismatches such as `external_pressure`, are excluded before
    dispatch.
 
-10. **Legacy research and host-support entrypoints are cut out of active
-    paths.**
+10. **Legacy research and host-support entrypoints are removed from the active
+    repository.**
 
-    PRs `#643`, `#644`, and `#645` archived duplicate DB diagnostics, local CSV
-    collectors, market-discovery prototypes, public-profile dry-run scripts,
-    manual root-runtime deploy helpers, and the old `install-service.sh`
-    entrypoint. `release-platform.yml` and `install-platform-service.sh` now own
+    PRs `#643`, `#644`, and `#645` first isolated duplicate DB diagnostics,
+    local CSV collectors, market-discovery prototypes, public-profile dry-run
+    scripts, manual root-runtime deploy helpers, and the old
+    `install-service.sh` entrypoint. The current cleanup removes those archived
+    executable assets instead of preserving a second runnable architecture in
+    the repo. `release-platform.yml` and `install-platform-service.sh` own
     platform service plus maintenance/watchdog timer installation.
 
-11. **The active release path preserves host guardrails while removing the old
+11. **The active release path preserves host guardrails without the old
     installer.**
 
     `install-platform-service.sh` now installs `ployd.service`,
     `ploy-maintenance.timer`, and `ploy-platform-watchdog.timer`. The release
     workflow bundles the timer units and support scripts, installs them on the
-    host, and verifies timer status after deploy. The legacy installer remains
-    archived for historical context only.
+    host, and verifies timer status after deploy. The retired installer is no
+    longer kept as an executable repo asset.
 
 12. **Research snapshot orchestration now has observable fallbacks.**
 
@@ -143,6 +145,9 @@ reserved for `executable_replay` evidence.
 | `26351190753` | replay-fed hosted walk-forward attempt | Failed before Rust: `end_date=2026-05-18` was parsed as `2026-05-19T00:00:00Z`, outside the one-day snapshot | Workflow date inputs are inclusive day strings; for this snapshot the valid 24h window is `2026-05-17` to `2026-05-17` |
 | `26351209485` | replay-fed hosted walk-forward with replay `26351022434` | Succeeded, but correctly reported target mismatch because the replay was generated for `tradeable_full_depth_settlement_pnl` and the run used default `full_depth_settlement_executable_pnl` | Promotion/replay contracts fail closed when target names do not match |
 | `26351351355` | replay-fed hosted walk-forward with matching `tradeable_full_depth_settlement_pnl` target | Succeeded; `persisted=true`; closed-loop `decision=fix_data`; no runtime replay requests; blockers are sampled execution surface, `official_settlement_missing:48<51`, and `roi_too_low:-0.125651<0.000000` | The chain now consumes true runtime replay evidence and routes to data repair instead of repeating replay fan-out |
+| `26351573860` | full-depth execution-surface collection | Succeeded; `schema_version=full_depth_execution_surface.v1`; `full_fidelity=true`; `checked_hours=24`; `existing_hours=24`; `row_count=2214371` | Raw full-depth CLOB archive evidence exists for the checked 24h window |
+| `26351573853` | official settlement repair dry-run | Succeeded; `candidate_market_count=1097`; `would_settle_count=2194`; `error_count=0`; `dry_run=true` | Settlement coverage can likely be repaired, but execute mode is a DB mutation requiring explicit ACK |
+| `26352016263` | `main@a3e43c6a` replay-fed hosted walk-forward with runtime replay plus full-depth surface proof | Succeeded; `source_snapshot_contract.blocking_risk_flags=[]`; `satisfied_execution_surfaces=["clob_orderbook_snapshots"]`; closed-loop `decision=fix_data`; blockers remain official settlement and negative ROI | Full-depth handoff wiring is fixed; strategy promotion remains correctly blocked on settlement and economics |
 
 ## Repository Cleanup Evidence
 
@@ -189,20 +194,19 @@ The current walk-forward/runtime replay evidence is deliberately blocked:
    backed by sampled execution-surface research snapshots, and not fully
    settled.
 
-2. **Feature snapshots are still sampled research products, not full execution
-   tapes.**
+2. **Feature snapshots are still sampled research products, but full-depth
+   execution proof is now consumable.**
 
    Snapshot manifests carry source surfaces, cadence, `raw_full_fidelity`,
    `snapshot_sampled`, and `gate_category`. AutoFactor promotion and aggregate
-   candidate replay now consume that manifest and attach blocking flags when a
-   `required_for_execution` surface is sampled, so sampled rows cannot suppress
-   full-depth fillability blockers. The remaining data-layer gap is the
-   positive replacement: durable full-depth lake/runtime replay evidence must
-   become the normal executable handoff source.
+   candidate replay consume that manifest and now also consume verified
+   `full_depth_execution_surface.v1` proof. A valid proof removes the sampled
+   CLOB execution-surface blocker only for the matching covered window; invalid
+   or incomplete proof remains fail-closed.
 
-   The orderbook snapshot archive exists and is deployed, but the AutoFactor
-   handoff path still treats sampled `clob_orderbook_snapshots` as a blocker
-   instead of consuming a promotion-grade full-depth execution tape by default.
+   The remaining data-layer gap is making this full-depth proof a normal
+   trace-attached input for every executable handoff, not an optional follow-up
+   artifact that must be discovered run by run.
 
 3. **Runtime input canonicalization is now gated for AutoFactor promotion/replay,
    but not yet a shared cross-language source of truth.**
@@ -233,29 +237,31 @@ The current walk-forward/runtime replay evidence is deliberately blocked:
    DuckDB can be used for local Parquet scans, but not as the authoritative
    strategy discovery state layer.
 
-6. **Legacy one-shot repair and ML prototype scripts still need ownership
+6. **Legacy archives are no longer a second runnable architecture, but some
+   active compatibility collectors and repair jobs still need ownership
    decisions.**
 
-   The remaining active Python/shell helpers are not all wrong. Some are still
-   deployed collector/repair surfaces, while others are break-glass or
-   prototype paths. The current inventory keeps direct-DB factor research as an
-   explicit ACK-only exception and keeps ONNX trainer scripts active only while
-   the ML lane still references them. These should be retired only after a
-   replacement or explicit archive decision exists.
+   The retired archived executable assets have been removed. The remaining
+   active Python/shell helpers are not all wrong: some are still deployed
+   collector/repair surfaces, while others are break-glass or prototype paths.
+   The current inventory keeps direct-DB factor research as an explicit
+   ACK-only exception and keeps the LOB TCN trainer active only while the ML
+   lane still references it. These should be retired only after a replacement
+   or explicit owner exists.
 
 ## Required Next Work
 
 | Priority | Work | Done when |
 | --- | --- | --- |
 | P0 | Complete official settlement coverage for runtime replay candidates | Runtime replay artifacts include official settlement for all traded events before any handoff can become ready |
-| P0 | Repair or replace sampled execution-surface evidence | Full-depth CLOB lake or runtime replay evidence replaces sampled `clob_orderbook_snapshots` for executable handoff |
+| P0 | Attach full-depth execution-surface proof to every executable handoff | Hosted walk-forward, standalone promotion, trace persistence, and Research Manager plans all carry the verified full-depth proof without manual run-id stitching |
 | P0 | Reject or revise negative executable replay candidates after data gates are fixed | A replay-fed closed-loop run with complete settlement/full-depth evidence converts persistent `roi_too_low` into a machine-readable prior mutation or rejection instead of redispatching equivalent candidates |
 | P0 | Keep Research Manager candidate replay contract-driven | Executor replays only explicit or trace-derived unblocked runtime contracts and fails closed without one |
 | P0 | Convert runtime replay blockers into next search mutations | `fix_data`, `trade_count_too_small`, settlement gaps, and sampled execution-surface blockers produce machine-readable next actions instead of manual interpretation |
 | P1 | Promote runtime input canonicalization to a generated shared contract | Rust runtime scoring, Rust alpha-search, and Python promotion/replay use one source of truth instead of mirrored catalogs |
-| P1 | Complete full-depth executable evidence layer | Runtime replay or full-depth lake evidence replaces sampled snapshot rows for executable handoff |
+| P1 | Complete full-depth executable evidence layer | Runtime replay and full-depth lake evidence become first-class queryable trace objects, not only workflow artifacts |
 | P1 | Generate shared non-AutoFactor label contracts | Runtime, research, replay, and trace persistence derive 30s / 60s / 5m / 15m label definitions from one source |
-| P1 | Finish remaining legacy ownership decisions | One-shot quote backfills, direct-DB debug runners, and DB-backed ML trainers are either proven active, moved behind stronger break-glass gates, or archived |
+| P1 | Finish remaining active compatibility ownership decisions | One-shot repairs, direct-DB debug runners, and compatibility collectors are either proven active, moved behind stronger break-glass gates, or replaced |
 
 ## Verdict
 
