@@ -17,6 +17,10 @@ profitability, dry-run readiness, or live-promotion evidence.
       full-depth validation.
 - [x] Add official settlement repair reason counters so no-op / already
       matching settlement evidence is visible.
+- [x] Add durable `official_settlement_coverage_checks` rows for executed
+      settlement coverage repair evidence.
+- [x] Teach Research Trace Plan to clear `pm_token_settlements` materialization
+      blockers when a valid coverage proof spans the snapshot window.
 - [x] Run focused validation.
 - [ ] Land through PR and rerun trace-plan/manager follow-up evidence.
 
@@ -43,6 +47,16 @@ profitability, dry-run readiness, or live-promotion evidence.
   `rustfmt --edition 2021 --check
   crates/ploy-research/examples/persist_research_trace.rs`, and
   `rtk git diff --check`.
+- 2026-05-25: After deploy `26373626601`, full-depth execution-surface
+  collection `26373823385` persisted valid coverage for `2026-05-17T00:00:00Z`
+  through `2026-05-18T00:00:00Z`: 24/24 hours, 2,214,371 rows,
+  `dry_run=false`, `valid=true`, and no blockers. Settlement repair
+  `26373866980` proved 1,097 markets / 2,194 settlement tokens already matched
+  official settlement with no API, payload, unresolved-price, token-mismatch, or
+  error counters. Trace Plan `26374076688` still reported
+  `promotion_data_settlement` because the repair artifact was not yet persisted
+  as a queryable Research OS settlement-coverage surface. This slice adds that
+  missing durable coverage layer.
 
 ## Current Session - Legacy Factor Research Binary Removal (2026-05-25)
 

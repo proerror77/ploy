@@ -8,6 +8,7 @@ MIGRATION_043 = ROOT / "migrations" / "043_research_os_trace_constraints.sql"
 MIGRATION_044 = ROOT / "migrations" / "044_candidate_replay_tapes.sql"
 MIGRATION_046 = ROOT / "migrations" / "046_factor_registry_blockers.sql"
 MIGRATION_047 = ROOT / "migrations" / "047_full_depth_execution_surfaces.sql"
+MIGRATION_048 = ROOT / "migrations" / "048_official_settlement_coverage_checks.sql"
 
 
 def research_os_sql() -> str:
@@ -18,6 +19,7 @@ def research_os_sql() -> str:
             MIGRATION_044.read_text(encoding="utf-8"),
             MIGRATION_046.read_text(encoding="utf-8"),
             MIGRATION_047.read_text(encoding="utf-8"),
+            MIGRATION_048.read_text(encoding="utf-8"),
         ]
     )
 
@@ -32,6 +34,7 @@ class FactorResearchOsRegistryMigrationTest(unittest.TestCase):
             "experiment_trace",
             "candidate_replay_tapes",
             "full_depth_execution_surfaces",
+            "official_settlement_coverage_checks",
         ]:
             self.assertIn(f"CREATE TABLE IF NOT EXISTS {table}", sql)
         self.assertRegex(
@@ -115,6 +118,24 @@ class FactorResearchOsRegistryMigrationTest(unittest.TestCase):
         for snippet in required_snippets:
             self.assertIn(snippet, sql)
 
+    def test_official_settlement_coverage_schema_exists(self) -> None:
+        sql = research_os_sql()
+        required_snippets = [
+            "settlement_coverage_id TEXT PRIMARY KEY",
+            "schema_version TEXT NOT NULL DEFAULT 'official_settlement_repair.v1'",
+            "surface TEXT NOT NULL DEFAULT 'pm_token_settlements'",
+            "symbols_json JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "candidate_market_count INTEGER NOT NULL",
+            "settlement_token_count INTEGER NOT NULL",
+            "unchanged_count INTEGER NOT NULL DEFAULT 0",
+            "valid BOOLEAN NOT NULL DEFAULT false",
+            "CONSTRAINT uq_official_settlement_coverage_artifact_sha256 UNIQUE (artifact_sha256)",
+            "idx_official_settlement_coverage_surface_window",
+            "idx_official_settlement_coverage_valid",
+        ]
+        for snippet in required_snippets:
+            self.assertIn(snippet, sql)
+
     def test_experiment_trace_is_append_only_by_trigger(self) -> None:
         sql = research_os_sql()
         self.assertIn("prevent_experiment_trace_update", sql)
@@ -150,6 +171,7 @@ class FactorResearchOsRegistryMigrationTest(unittest.TestCase):
         self.assertIn("044_candidate_replay_tapes.sql", workflow)
         self.assertIn("046_factor_registry_blockers.sql", workflow)
         self.assertIn("047_full_depth_execution_surfaces.sql", workflow)
+        self.assertIn("048_official_settlement_coverage_checks.sql", workflow)
 
 
 if __name__ == "__main__":

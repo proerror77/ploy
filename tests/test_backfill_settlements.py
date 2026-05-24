@@ -2,7 +2,9 @@ import unittest
 from datetime import datetime, timezone
 
 from scripts.backfill_settlements import (
+    coverage_blockers,
     parse_utc_ts,
+    report_sha256,
     settlement_rows_from_gamma,
     settlement_rows_with_reason_from_gamma,
 )
@@ -73,6 +75,51 @@ class BackfillSettlementsTest(unittest.TestCase):
                 )
                 self.assertEqual([], rows)
                 self.assertEqual(reason, actual_reason)
+
+    def test_coverage_blockers_require_execute_complete_binary_settlement(self) -> None:
+        valid_report = {
+            "dry_run": False,
+            "candidate_market_count": 2,
+            "settled_count": 1,
+            "unchanged_count": 3,
+            "active_reset_count": 0,
+            "open_market_count": 0,
+            "malformed_payload_count": 0,
+            "unresolved_price_count": 0,
+            "token_mismatch_count": 0,
+            "skipped_count": 0,
+            "error_count": 0,
+        }
+        self.assertEqual([], coverage_blockers(valid_report))
+
+        blocked_report = {
+            **valid_report,
+            "dry_run": True,
+            "unchanged_count": 2,
+            "token_mismatch_count": 1,
+        }
+        self.assertEqual(
+            [
+                "dry_run_not_durable_coverage",
+                "settlement_token_count:3!=4",
+                "token_mismatch_count:1",
+            ],
+            coverage_blockers(blocked_report),
+        )
+        duplicate_count_report = {
+            **valid_report,
+            "unchanged_count": 4,
+        }
+        self.assertEqual(
+            ["settlement_token_count:5!=4"],
+            coverage_blockers(duplicate_count_report),
+        )
+
+    def test_report_sha256_is_canonical(self) -> None:
+        self.assertEqual(
+            report_sha256({"b": 2, "a": 1}),
+            report_sha256({"a": 1, "b": 2}),
+        )
 
 
 if __name__ == "__main__":

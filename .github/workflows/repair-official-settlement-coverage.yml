@@ -164,7 +164,10 @@ jobs:
             "${SETTLEMENT_START_TS}" \
             "${SETTLEMENT_END_TS}" \
             "${SYMBOLS}" \
-            "${SETTLEMENT_MODE}" <<'EOF'
+            "${SETTLEMENT_MODE}" \
+            "${GITHUB_RUN_ID}" \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            "official-settlement-repair-${GITHUB_RUN_ID}" <<'EOF'
           set -euo pipefail
           deploy_root="$1"
           remote_dir="$2"
@@ -172,6 +175,9 @@ jobs:
           end_ts="$4"
           symbols="$5"
           mode="$6"
+          workflow_run_id="$7"
+          workflow_run_url="$8"
+          artifact_name="$9"
           set -a
           . "${deploy_root}/.env"
           set +a
@@ -200,6 +206,14 @@ jobs:
           )
           if [ "${mode}" = "dry_run" ]; then
             args+=(--dry-run)
+          else
+            args+=(
+              --persist-coverage
+              --run-id "${workflow_run_id}"
+              --workflow-run-id "${workflow_run_id}"
+              --workflow-run-url "${workflow_run_url}"
+              --artifact-name "${artifact_name}"
+            )
           fi
           "${python_bin}" "${args[@]}"
           python3 - <<'PY' "${remote_dir}/official-settlement-repair.json" "${remote_dir}/official-settlement-repair.md"
@@ -217,6 +231,7 @@ jobs:
               f"- Candidate markets: `{payload.get('candidate_market_count')}`",
               f"- Would settle: `{payload.get('would_settle_count')}`",
               f"- Settled: `{payload.get('settled_count')}`",
+              f"- Settlement tokens covered: `{payload.get('settlement_token_count')}`",
               f"- Already matching: `{payload.get('unchanged_count')}`",
               f"- Active reset: `{payload.get('active_reset_count')}`",
               f"- Open markets: `{payload.get('open_market_count')}`",
@@ -225,6 +240,9 @@ jobs:
               f"- Token mismatches: `{payload.get('token_mismatch_count')}`",
               f"- Skipped: `{payload.get('skipped_count')}`",
               f"- Errors: `{payload.get('error_count')}`",
+              f"- Persisted coverage: `{payload.get('settlement_coverage_id', '')}`",
+              f"- Valid coverage: `{payload.get('valid')}`",
+              f"- Blockers: `{', '.join(payload.get('blockers') or [])}`",
           ]
           Path(sys.argv[2]).write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY

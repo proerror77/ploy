@@ -97,9 +97,10 @@ Research data products are intentionally split into four layers:
    inputs used to test one candidate/event lifecycle.
 4. Durable research trace: `research_dataset_snapshots`, `factor_registry`,
    `factor_evaluations`, `candidate_replay_tapes`,
-   `full_depth_execution_surfaces`, and append-only `experiment_trace` rows
-   tying `dsl_hash`, `ast_json`, `runtime_contract`, run id, dataset window,
-   execution-surface proof, blockers, and promotion decision together.
+   `full_depth_execution_surfaces`, `official_settlement_coverage_checks`, and
+   append-only `experiment_trace` rows tying `dsl_hash`, `ast_json`,
+   `runtime_contract`, run id, dataset window, execution-surface proof,
+   settlement-coverage proof, blockers, and promotion decision together.
 
 Do not call a sampled research snapshot "full data". It can be a complete
 retained research artifact for a chosen cadence and window, but full-resolution
@@ -134,6 +135,11 @@ snapshot identity. Full-depth CLOB execution proof must use a
 `full_depth_execution_surface_id` and be queryable through
 `full_depth_execution_surfaces`; Research Manager must not infer
 execution-surface coverage only by reverse-reading promotion JSON.
+Official settlement coverage repair proof must use a valid
+`official_settlement_coverage_checks` row for the snapshot window; Research
+Manager must not keep treating `pm_token_settlements` as non-materialized when
+an executed repair/check proves all candidate market tokens are already
+settled and unchanged.
 
 As of current mainline evidence, this chain has been proven through a durable
 trace-backed plan, but not through automatic strategy discovery. Hosted

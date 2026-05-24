@@ -6,11 +6,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use ploy_research::research_os::manager::{
-    ResearchBudget, ResearchManagerInput, plan_next_research,
+    plan_next_research, ResearchBudget, ResearchManagerInput,
 };
-use serde_json::{Value, json};
-use sqlx::PgPool;
+use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2)
@@ -213,7 +213,10 @@ async fn latest_snapshot_health(pool: &PgPool) -> Result<Value> {
         Some(row) => {
             let execution_surfaces =
                 latest_full_depth_execution_surfaces(pool, row.1, row.2).await?;
-            let surface_blockers = source_surface_blockers(&row.3, &execution_surfaces);
+            let settlement_surfaces =
+                latest_official_settlement_coverage_checks(pool, row.1, row.2).await?;
+            let surface_blockers =
+                source_surface_blockers(&row.3, &execution_surfaces, &settlement_surfaces);
             let data_repair_blockers = blockers_by_type(&surface_blockers, "data_repair");
             let promotion_blockers = blockers_by_type(&surface_blockers, "promotion");
             let has_surface_blockers = !surface_blockers.is_empty();
@@ -226,6 +229,7 @@ async fn latest_snapshot_health(pool: &PgPool) -> Result<Value> {
                 "source_surfaces": row.3,
                 "row_counts": row.4,
                 "execution_surfaces": execution_surfaces,
+                "settlement_surfaces": settlement_surfaces,
                 "surface_blockers": surface_blockers,
                 "data_repair_blockers": data_repair_blockers,
                 "promotion_blockers": promotion_blockers,
@@ -307,6 +311,75 @@ async fn latest_full_depth_execution_surfaces(
     }))
 }
 
+async fn latest_official_settlement_coverage_checks(
+    pool: &PgPool,
+    dataset_start_ts: DateTime<Utc>,
+    dataset_end_ts: DateTime<Utc>,
+) -> Result<Value> {
+    let rows: Vec<(
+        String,
+        String,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        Value,
+        i32,
+        i32,
+        i32,
+        i32,
+        i32,
+        bool,
+        Value,
+    )> = sqlx::query_as(
+        r#"
+            SELECT
+                settlement_coverage_id,
+                surface,
+                window_start_ts,
+                window_end_ts,
+                symbols_json,
+                candidate_market_count,
+                settlement_token_count,
+                skipped_count,
+                error_count,
+                unchanged_count,
+                valid,
+                blockers_json
+            FROM official_settlement_coverage_checks
+            WHERE valid = true
+              AND window_start_ts <= $1
+              AND window_end_ts >= $2
+            ORDER BY created_at DESC
+            LIMIT 50
+            "#,
+    )
+    .bind(dataset_start_ts)
+    .bind(dataset_end_ts)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(json!({
+        "source": "official_settlement_coverage_checks",
+        "dataset_start_ts": dataset_start_ts,
+        "dataset_end_ts": dataset_end_ts,
+        "surfaces": rows.into_iter().map(|row| {
+            json!({
+                "settlement_coverage_id": row.0,
+                "surface": row.1,
+                "window_start_ts": row.2,
+                "window_end_ts": row.3,
+                "symbols": row.4,
+                "candidate_market_count": row.5,
+                "settlement_token_count": row.6,
+                "skipped_count": row.7,
+                "error_count": row.8,
+                "unchanged_count": row.9,
+                "valid": row.10,
+                "blockers": row.11,
+            })
+        }).collect::<Vec<_>>()
+    }))
+}
+
 fn blockers_by_type(blockers: &[Value], blocker_type: &str) -> Vec<Value> {
     blockers
         .iter()
@@ -320,7 +393,11 @@ fn blockers_by_type(blockers: &[Value], blocker_type: &str) -> Vec<Value> {
         .collect()
 }
 
-fn source_surface_blockers(source_surfaces: &Value, execution_surfaces: &Value) -> Vec<Value> {
+fn source_surface_blockers(
+    source_surfaces: &Value,
+    execution_surfaces: &Value,
+    settlement_surfaces: &Value,
+) -> Vec<Value> {
     let Some(items) = source_surfaces.as_array() else {
         return vec![json!({
             "surface": "<invalid>",
@@ -346,6 +423,7 @@ fn source_surface_blockers(source_surfaces: &Value, execution_surfaces: &Value) 
                 .unwrap_or(false);
             let requires_execution = gate_category == "required_for_execution";
             let full_depth_covered = execution_surface_covered(execution_surfaces, name);
+            let settlement_covered = official_settlement_covered(settlement_surfaces, name);
 
             let blocker = if gate_category == "missing_blocks_promotion" {
                 Some(("surface_declared_missing_blocks_promotion", "promotion"))
@@ -358,6 +436,8 @@ fn source_surface_blockers(source_surfaces: &Value, execution_surfaces: &Value) 
                     "required_execution_surface_is_sampled_snapshot",
                     "promotion",
                 ))
+            } else if requires_execution && row_count.is_none() && settlement_covered {
+                None
             } else if requires_execution && row_count.is_none() {
                 Some(("required_execution_surface_not_materialized", "promotion"))
             } else {
@@ -374,6 +454,28 @@ fn source_surface_blockers(source_surfaces: &Value, execution_surfaces: &Value) 
             })
         })
         .collect()
+}
+
+fn official_settlement_covered(settlement_surfaces: &Value, surface_name: &str) -> bool {
+    settlement_surfaces
+        .get("surfaces")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("surface").and_then(Value::as_str) == Some(surface_name)
+                    && item.get("valid").and_then(Value::as_bool).unwrap_or(false)
+                    && item
+                        .get("candidate_market_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0)
+                        > 0
+                    && item
+                        .get("settlement_token_count")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0)
+                        > 0
+            })
+        })
 }
 
 fn execution_surface_covered(execution_surfaces: &Value, surface_name: &str) -> bool {
@@ -393,4 +495,53 @@ fn execution_surface_covered(execution_surfaces: &Value, surface_name: &str) -> 
                         .unwrap_or(true)
             })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settlement_coverage_clears_non_materialized_settlement_surface_blocker() {
+        let source_surfaces = json!([
+            {
+                "name": "pm_token_settlements",
+                "gate_category": "required_for_execution",
+                "row_count": null,
+                "snapshot_sampled": false
+            }
+        ]);
+        let settlement_surfaces = json!({
+            "surfaces": [{
+                "surface": "pm_token_settlements",
+                "valid": true,
+                "candidate_market_count": 1097,
+                "settlement_token_count": 2194
+            }]
+        });
+
+        let blockers = source_surface_blockers(&source_surfaces, &json!({}), &settlement_surfaces);
+
+        assert!(blockers.is_empty());
+    }
+
+    #[test]
+    fn missing_settlement_coverage_keeps_non_materialized_surface_blocker() {
+        let source_surfaces = json!([
+            {
+                "name": "pm_token_settlements",
+                "gate_category": "required_for_execution",
+                "row_count": null,
+                "snapshot_sampled": false
+            }
+        ]);
+
+        let blockers = source_surface_blockers(&source_surfaces, &json!({}), &json!({}));
+
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(
+            blockers[0].get("reason").and_then(Value::as_str),
+            Some("required_execution_surface_not_materialized")
+        );
+    }
 }
