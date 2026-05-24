@@ -1,5 +1,36 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Runtime Replay Priority After Prior Revision (2026-05-24)
+
+Evidence stage: `walk_forward` / `runtime_parity` closed-loop routing repair.
+This is not a dry-run or live promotion decision.
+
+### Tasks
+
+- [x] Run Research Manager executor from trace-plan `26363701280` after PR
+      `#676` merged.
+- [x] Verify executor run `26364706828` emitted Rust-consumed
+      `runtime_avoid_factors` / `mutations` and dispatched hosted
+      walk-forward `26364709800`.
+- [x] Inspect hosted walk-forward `26364709800` and identify the next blocker:
+      a new runtime-mappable factor needs a fresh exact-score
+      `runtime_market_update_replay`.
+- [x] Manually dispatch runtime-candidate replay `26364996955` for
+      `autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted`.
+- [x] Fix closed-loop routing so a runtime-mappable candidate needing exact
+      replay takes priority over high rejected-candidate ratio.
+- [x] Run focused Python validation.
+- [ ] Commit, push, open PR, wait for CI, merge, then rerun the trace plan
+      after replay evidence is persisted.
+
+### Review
+
+- 2026-05-24: Validation passed:
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent` (`31`
+  tests), `python3 -m py_compile
+  scripts/alpha_search_closed_loop_agent.py
+  tests/test_alpha_search_closed_loop_agent.py`, and `rtk git diff --check`.
+
 ## Current Session - Negative Runtime Economics Prior Repair (2026-05-24)
 
 Evidence stage: `walk_forward` / `executable_replay` closed-loop search repair.

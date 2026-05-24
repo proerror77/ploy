@@ -542,6 +542,8 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
         if as_float(run["feedback"].get("best_reward")) is not None
     ]
     prior_best_reward = max(prior_rewards) if prior_rewards else None
+    runtime_requests = runtime_replay_requests(current)
+    has_runtime_replay_candidate = bool(runtime_requests)
 
     if handoff.get("status") == "ready":
         action = "ready_handoff"
@@ -552,6 +554,9 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
     elif runtime_unmapped_feedback:
         action = "revise_prior"
         reason = str(runtime_unmapped_feedback.get("reason") or "missing_runtime_strategy_mapping")
+    elif has_runtime_replay_candidate and blocker_action not in {"fix_data", "fix_workflow"}:
+        action = "fix_runtime"
+        reason = "runtime_mappable_candidate_needs_runtime_replay"
     elif blocker_action in {"fix_runtime", "fix_data", "fix_workflow", "revise_prior"}:
         action = blocker_action
         reason = f"promotion_blockers_require_{blocker_action}"
@@ -604,7 +609,7 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
         and chain.get("should_dispatch") is True
     )
     best = best_run(runs)
-    runtime_requests = runtime_replay_requests(current) if action == "fix_runtime" else []
+    runtime_requests = runtime_requests if action == "fix_runtime" else []
     runtime_request = runtime_requests[0] if runtime_requests else None
     return {
         "schema_version": 1,
