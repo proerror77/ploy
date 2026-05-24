@@ -161,7 +161,7 @@ jobs:
               raise SystemExit("research trace plan schema mismatch")
           plan = payload.get("plan") or {}
           theme = plan.get("theme", "")
-          if theme not in {"candidate_to_runtime_replay", "continue_search", "revise_prior", "fix_data", "fix_runtime", "fix_workflow"}:
+          if theme not in {"candidate_to_runtime_replay", "continue_search", "revise_prior", "fix_data", "fix_runtime", "fix_workflow", "ready_handoff"}:
               raise SystemExit(f"unsupported research plan theme: {theme}")
           actions = plan.get("actions") or []
           lines = [
@@ -216,4 +216,5 @@ jobs:
         run: |
           set -euo pipefail
           gh issue comment "${ISSUE_NUMBER}" \
+            --repo "${GITHUB_REPOSITORY}" \
             --body-file artifacts/research-trace-plan/research-trace-plan.md

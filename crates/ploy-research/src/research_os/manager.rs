@@ -90,6 +90,21 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
 
     let blocker_actions = derive_blocker_actions(input);
     let latest_decision = latest_run_decision_value(&input.latest_runs);
+    if has_ready_handoff(&latest_decision) {
+        return Ok(plan_with_blocker_actions(
+            "ready_handoff",
+            1,
+            0,
+            "high",
+            &input.evidence_stage,
+            vec![
+                "create_dry_run_handoff_issue",
+                "open_config_pr_from_ready_handoff",
+            ],
+            Vec::new(),
+        ));
+    }
+
     if blocker_actions
         .iter()
         .any(|item| item.blocker_family.starts_with("data_"))
@@ -581,6 +596,41 @@ fn has_unblocked_runtime_candidate(value: &serde_json::Value) -> bool {
     }
 }
 
+fn has_ready_handoff(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            let status = map
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let recommended_action = map
+                .get("recommended_action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if status == "ready" && recommended_action == "create_dry_run_handoff" {
+                return true;
+            }
+
+            let decision = map
+                .get("decision")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let replay_ready = map
+                .get("candidate_strategy_replay")
+                .and_then(|item| item.get("ready"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if decision == "qualified" && replay_ready {
+                return true;
+            }
+
+            map.values().any(has_ready_handoff)
+        }
+        serde_json::Value::Array(items) => items.iter().any(has_ready_handoff),
+        _ => false,
+    }
+}
+
 fn json_array_empty(value: Option<&serde_json::Value>) -> bool {
     match value {
         Some(serde_json::Value::Array(items)) => items.is_empty(),
@@ -729,6 +779,68 @@ mod tests {
             plan.actions
                 .contains(&"build_runtime_candidate_replay".to_string())
         );
+    }
+
+    #[test]
+    fn planner_routes_ready_handoff_ahead_of_stale_negative_edge_blockers() {
+        let plan = plan_next_research(&input(
+            "walk_forward",
+            serde_json::json!({
+                "source": "experiment_trace",
+                "runs": [{
+                    "run_id": "26367562792",
+                    "artifacts": [
+                        {
+                            "event_type": "autofactor_strategy_handoff",
+                            "output_json": {
+                                "status": "ready",
+                                "recommended_action": "create_dry_run_handoff",
+                                "strategies": [{
+                                    "name": "mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted",
+                                    "runtime_score": "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted"
+                                }]
+                            }
+                        },
+                        {
+                            "event_type": "autofactor_promotion",
+                            "output_json": {
+                                "decision": "qualified",
+                                "candidate_strategy_replay": {
+                                    "ready": true,
+                                    "basis": "runtime_market_update_replay",
+                                    "blockers": [],
+                                    "metrics": {
+                                        "roi": 0.11653800000105065,
+                                        "trade_count": 50,
+                                        "settlement_event_count": 50
+                                    }
+                                },
+                                "input_prior": {
+                                    "runtime_avoid_factors": [{
+                                        "reason": "negative_runtime_edge"
+                                    }]
+                                }
+                            }
+                        }
+                    ]
+                }]
+            }),
+            serde_json::json!({}),
+        ))
+        .expect("plan");
+
+        assert_eq!(plan.theme, "ready_handoff");
+        assert_eq!(plan.candidate_count, 1);
+        assert_eq!(plan.search_depth, 0);
+        assert!(
+            plan.actions
+                .contains(&"create_dry_run_handoff_issue".to_string())
+        );
+        assert!(
+            plan.actions
+                .contains(&"open_config_pr_from_ready_handoff".to_string())
+        );
+        assert!(plan.blocker_actions.is_empty());
     }
 
     #[test]
