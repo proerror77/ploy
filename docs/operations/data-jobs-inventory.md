@@ -89,7 +89,9 @@ promotion-safe evidence path instead.
   Artifact-backed research starts with `research-snapshot.yml`, routes through
   hosted factor review/walk-forward workflows, persists Research OS trace, and
   lets `research-trace-plan.yml` produce the next bounded research action.
-- Treat `--allow-direct-db-debug` and `--allow-legacy-snapshot-build` as
-  audited manual exceptions. They may reproduce old evidence or debug a data
-  incident, but they must not feed promotion, handoff issues, config PRs, or
-  Research Manager "ready" decisions.
+- Treat `--allow-direct-db-debug` as an audited manual exception. It may
+  reproduce old evidence or debug a data incident, but it must not feed
+  promotion, handoff issues, config PRs, or Research Manager "ready" decisions.
+- The old `--allow-legacy-snapshot-build` PRD-gate exception has been removed.
+  Build or select retained `research-snapshot.yml` artifacts explicitly before
+  dispatching promotion or handoff gates.
