@@ -76,34 +76,57 @@ async def load_candidate_markets(
     )
 
 
+def settlement_rows_with_reason_from_gamma(
+    data: dict[str, Any],
+    *,
+    up_token: str,
+    down_token: str,
+) -> tuple[list[tuple[str, str, float]], str]:
+    if data.get("closed") is not True:
+        return [], "not_closed"
+    try:
+        token_ids = json.loads(data.get("clobTokenIds") or "[]")
+        outcome_prices = json.loads(data.get("outcomePrices") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return [], "malformed_gamma_payload"
+    if len(token_ids) != 2 or len(outcome_prices) != 2:
+        return [], "malformed_gamma_payload"
+
+    settlements = []
+    try:
+        price_pairs = [
+            (str(token_id), float(raw_price))
+            for token_id, raw_price in zip(token_ids, outcome_prices)
+        ]
+    except (TypeError, ValueError):
+        return [], "malformed_gamma_payload"
+    for token_id, price in price_pairs:
+        if price >= 0.95:
+            settlements.append((str(token_id), "winner", 1.0))
+        elif price <= 0.05:
+            settlements.append((str(token_id), "loser", 0.0))
+        else:
+            return [], "unresolved_prices"
+
+    matched = [item for item in settlements if item[0] in {up_token, down_token}]
+    matched_token_ids = {item[0] for item in matched}
+    if len(matched) != 2 or matched_token_ids != {up_token, down_token}:
+        return [], "token_mismatch"
+    return matched, "settled_prices"
+
+
 def settlement_rows_from_gamma(
     data: dict[str, Any],
     *,
     up_token: str,
     down_token: str,
 ) -> list[tuple[str, str, float]]:
-    if data.get("closed") is not True:
-        return []
-    try:
-        token_ids = json.loads(data.get("clobTokenIds") or "[]")
-        outcome_prices = json.loads(data.get("outcomePrices") or "[]")
-    except json.JSONDecodeError:
-        return []
-    if len(token_ids) != 2 or len(outcome_prices) != 2:
-        return []
-
-    settlements = []
-    for token_id, raw_price in zip(token_ids, outcome_prices):
-        price = float(raw_price)
-        if price >= 0.95:
-            settlements.append((str(token_id), "winner", 1.0))
-        elif price <= 0.05:
-            settlements.append((str(token_id), "loser", 0.0))
-        else:
-            return []
-
-    matched = [item for item in settlements if item[0] in {up_token, down_token}]
-    return matched if len(matched) == 2 else []
+    rows, _reason = settlement_rows_with_reason_from_gamma(
+        data,
+        up_token=up_token,
+        down_token=down_token,
+    )
+    return rows
 
 
 async def upsert_settlement(
@@ -166,6 +189,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         errors = 0
         skipped = 0
         active_reset = 0
+        open_market = 0
+        malformed_payload = 0
+        unresolved_prices = 0
+        token_mismatch = 0
+        unchanged = 0
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             for i, row in enumerate(rows):
@@ -197,29 +225,42 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                                 market_slug,
                             )
                         active_reset += 1
+                        open_market += 1
                         skipped += 1
                         continue
 
-                    settlements = settlement_rows_from_gamma(
+                    settlements, reason = settlement_rows_with_reason_from_gamma(
                         data,
                         up_token=up_token,
                         down_token=down_token,
                     )
                     if not settlements:
+                        if reason == "not_closed":
+                            open_market += 1
+                        elif reason == "malformed_gamma_payload":
+                            malformed_payload += 1
+                        elif reason == "unresolved_prices":
+                            unresolved_prices += 1
+                        elif reason == "token_mismatch":
+                            token_mismatch += 1
                         skipped += 1
                         continue
 
                     for token_id, outcome, settled_price in settlements:
                         if args.dry_run:
                             would_settle += 1
-                        elif await upsert_settlement(
-                            conn,
-                            market_slug=market_slug,
-                            token_id=token_id,
-                            outcome=outcome,
-                            settled_price=settled_price,
-                        ):
-                            settled += 1
+                        else:
+                            changed = await upsert_settlement(
+                                conn,
+                                market_slug=market_slug,
+                                token_id=token_id,
+                                outcome=outcome,
+                                settled_price=settled_price,
+                            )
+                            if changed:
+                                settled += 1
+                            else:
+                                unchanged += 1
 
                 except Exception:
                     errors += 1
@@ -228,7 +269,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                     print(
                         "Progress: "
                         f"{i + 1}/{len(rows)} settled={settled} "
-                        f"would_settle={would_settle} skipped={skipped} errors={errors}"
+                        f"would_settle={would_settle} unchanged={unchanged} "
+                        f"skipped={skipped} errors={errors}"
                     )
 
                 await asyncio.sleep(0.2)
@@ -243,6 +285,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             "settled_count": settled,
             "would_settle_count": would_settle,
             "active_reset_count": active_reset,
+            "open_market_count": open_market,
+            "malformed_payload_count": malformed_payload,
+            "unresolved_price_count": unresolved_prices,
+            "token_mismatch_count": token_mismatch,
+            "unchanged_count": unchanged,
             "skipped_count": skipped,
             "error_count": errors,
         }
