@@ -395,6 +395,21 @@ def _recorded_replay_parity_dispatch(
 
 def _ready_handoff_from_plan(plan_payload: dict[str, Any]) -> dict[str, str]:
     latest_runs = ((plan_payload.get("input") or {}).get("latest_runs") or {})
+    ready_handoffs = latest_runs.get("ready_handoffs")
+    if isinstance(ready_handoffs, list):
+        for item in ready_handoffs:
+            if not isinstance(item, dict):
+                continue
+            output = item.get("output_json")
+            if not isinstance(output, dict):
+                continue
+            ready_handoff = _ready_handoff_fields(
+                run_id=str(item.get("run_id") or item.get("workflow_run_id") or ""),
+                output=output,
+            )
+            if ready_handoff:
+                return ready_handoff
+
     runs = latest_runs.get("runs")
     if not isinstance(runs, list):
         return {}
@@ -414,45 +429,53 @@ def _ready_handoff_from_plan(plan_payload: dict[str, Any]) -> dict[str, str]:
             output = artifact.get("output_json")
             if not isinstance(output, dict):
                 continue
-            if output.get("kind") != "autofactor_strategy_handoff":
-                continue
-            if output.get("status") != "ready":
-                continue
-            if output.get("recommended_action") != "create_dry_run_handoff":
-                continue
-            strategies = output.get("strategies")
-            strategy = strategies[0] if isinstance(strategies, list) and strategies else {}
-            if not isinstance(strategy, dict):
-                strategy = {}
-            replay = output.get("candidate_strategy_replay")
-            if not isinstance(replay, dict):
-                replay = {}
-            contract = replay.get("decision_contract")
-            if not isinstance(contract, dict):
-                contract = {}
-
-            return {
-                "factor_walk_forward_run_id": run_id,
-                "artifact_name": f"factor-walk-forward-v2-{run_id}",
-                "required_strategy_profile": str(
-                    strategy.get("strategy_profile")
-                    or replay.get("strategy_profile")
-                    or "settlement_probability"
-                ),
-                "allowed_target": str(
-                    strategy.get("target")
-                    or contract.get("target")
-                    or "full_depth_settlement_executable_pnl"
-                ),
-                "runtime_score": str(
-                    strategy.get("runtime_score") or replay.get("runtime_score") or ""
-                ),
-                "strategy_config": (
-                    "config/strategies/"
-                    "02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"
-                ),
-            }
+            ready_handoff = _ready_handoff_fields(run_id=run_id, output=output)
+            if ready_handoff:
+                return ready_handoff
     return {}
+
+
+def _ready_handoff_fields(*, run_id: str, output: dict[str, Any]) -> dict[str, str]:
+    if output.get("kind") != "autofactor_strategy_handoff":
+        return {}
+    if output.get("status") != "ready":
+        return {}
+    if output.get("recommended_action") != "create_dry_run_handoff":
+        return {}
+    if not run_id:
+        return {}
+    strategies = output.get("strategies")
+    strategy = strategies[0] if isinstance(strategies, list) and strategies else {}
+    if not isinstance(strategy, dict):
+        strategy = {}
+    replay = output.get("candidate_strategy_replay")
+    if not isinstance(replay, dict):
+        replay = {}
+    contract = replay.get("decision_contract")
+    if not isinstance(contract, dict):
+        contract = {}
+
+    return {
+        "factor_walk_forward_run_id": run_id,
+        "artifact_name": f"factor-walk-forward-v2-{run_id}",
+        "required_strategy_profile": str(
+            strategy.get("strategy_profile")
+            or replay.get("strategy_profile")
+            or "settlement_probability"
+        ),
+        "allowed_target": str(
+            strategy.get("target")
+            or contract.get("target")
+            or "full_depth_settlement_executable_pnl"
+        ),
+        "runtime_score": str(
+            strategy.get("runtime_score") or replay.get("runtime_score") or ""
+        ),
+        "strategy_config": (
+            "config/strategies/"
+            "02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"
+        ),
+    }
 
 
 def _autofactor_promotion_handoff_dispatch(
@@ -518,10 +541,16 @@ def _runtime_candidate_from_plan(
     """Select the newest typed, unblocked runtime contract from the trace plan."""
 
     summary = ((plan_payload.get("input") or {}).get("factor_registry_summary") or {})
+    candidates: list[Any] = []
+    runtime_ready = summary.get("runtime_ready_candidates")
+    if isinstance(runtime_ready, list):
+        candidates.extend(runtime_ready)
     recent = summary.get("recent_factors")
-    if not isinstance(recent, list):
+    if isinstance(recent, list):
+        candidates.extend(recent)
+    if not candidates:
         return None
-    for item in recent:
+    for item in candidates:
         if not isinstance(item, dict):
             continue
         status = str(item.get("status") or "")
@@ -568,6 +597,18 @@ def _latest_run(plan_payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str, Any]:
+    summary = ((plan_payload.get("input") or {}).get("factor_registry_summary") or {})
+    ready_replays = summary.get("ready_candidate_replays")
+    if isinstance(ready_replays, list):
+        for item in ready_replays:
+            if not isinstance(item, dict):
+                continue
+            artifact = item.get("artifact_json")
+            replay = artifact if isinstance(artifact, dict) else item
+            contract = _candidate_replay_contract(replay, fallback=item)
+            if contract:
+                return contract
+
     latest_run = _latest_run(plan_payload)
     artifacts = latest_run.get("artifacts")
     if not isinstance(artifacts, list):
@@ -581,56 +622,86 @@ def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str,
         replay = output.get("candidate_strategy_replay")
         if not isinstance(replay, dict):
             continue
-        if replay.get("basis") != "runtime_market_update_replay":
-            continue
-        contract = replay.get("decision_contract")
-        if not isinstance(contract, dict):
-            contract = {}
-        identity = replay.get("identity")
-        if not isinstance(identity, dict):
-            identity = {}
-        recording_path = str(replay.get("recording_path") or identity.get("recording_path") or "")
-        recording_sha256 = str(
-            replay.get("recording_sha256") or identity.get("recording_sha256") or ""
-        )
-        if _looks_like_mutable_recording_path(recording_path) and not recording_sha256:
-            continue
-        source_factor = replay.get("source_factor")
-        if not isinstance(source_factor, dict):
-            source_factor = {}
-        metrics = replay.get("metrics") if isinstance(replay.get("metrics"), dict) else {}
-        blocking_flags = replay.get("blocking_risk_flags")
-        if not isinstance(blocking_flags, list):
-            blocking_flags = replay.get("blockers")
-        if not isinstance(blocking_flags, list):
-            blocking_flags = []
-        return {
-            "target": str(contract.get("target") or source_factor.get("target") or ""),
-            "horizon": str(contract.get("horizon") or source_factor.get("horizon") or ""),
-            "runtime_score": str(replay.get("runtime_score") or ""),
-            "strategy_profile": str(replay.get("strategy_profile") or ""),
-            "workflow_run_id": str(replay.get("workflow_run_id") or ""),
-            "source_workflow": str(replay.get("source_workflow") or ""),
-            "recording_path": recording_path,
-            "recording_sha256": recording_sha256,
-            "source_factor_name": str(
-                source_factor.get("name") or source_factor.get("factor_name") or ""
-            ),
-            "metrics": {
-                key: metrics[key]
-                for key in (
-                    "trade_count",
-                    "unique_event_count",
-                    "entry_fill_rate",
-                    "roi",
-                    "total_pnl",
-                    "avg_entry_price",
-                )
-                if key in metrics
-            },
-            "blocking_risk_flags": [str(item) for item in blocking_flags if str(item)],
-        }
+        contract = _candidate_replay_contract(replay, fallback={})
+        if contract:
+            return contract
     return {}
+
+
+def _candidate_replay_contract(
+    replay: dict[str, Any], *, fallback: dict[str, Any]
+) -> dict[str, Any]:
+    if replay.get("basis") != "runtime_market_update_replay":
+        return {}
+    contract = replay.get("decision_contract")
+    if not isinstance(contract, dict):
+        contract = {}
+    identity = replay.get("identity")
+    if not isinstance(identity, dict):
+        identity = {}
+    recording_path = str(replay.get("recording_path") or identity.get("recording_path") or "")
+    recording_sha256 = str(
+        replay.get("recording_sha256") or identity.get("recording_sha256") or ""
+    )
+    if _looks_like_mutable_recording_path(recording_path) and not recording_sha256:
+        return {}
+    source_factor = replay.get("source_factor")
+    if not isinstance(source_factor, dict):
+        source_factor = {}
+    metrics = replay.get("metrics") if isinstance(replay.get("metrics"), dict) else {}
+    if not metrics and isinstance(fallback.get("metrics"), dict):
+        metrics = fallback["metrics"]
+    blocking_flags = replay.get("blocking_risk_flags")
+    if not isinstance(blocking_flags, list):
+        blocking_flags = replay.get("blockers")
+    if not isinstance(blocking_flags, list):
+        blocking_flags = fallback.get("blocking_risk_flags")
+    if not isinstance(blocking_flags, list):
+        blocking_flags = []
+    return {
+        "target": str(
+            contract.get("target")
+            or source_factor.get("target")
+            or fallback.get("target")
+            or ""
+        ),
+        "horizon": str(
+            contract.get("horizon")
+            or source_factor.get("horizon")
+            or fallback.get("horizon")
+            or ""
+        ),
+        "runtime_score": str(
+            replay.get("runtime_score") or fallback.get("runtime_score") or ""
+        ),
+        "strategy_profile": str(
+            replay.get("strategy_profile") or fallback.get("strategy_profile") or ""
+        ),
+        "workflow_run_id": str(
+            replay.get("workflow_run_id") or fallback.get("workflow_run_id") or ""
+        ),
+        "source_workflow": str(
+            replay.get("source_workflow") or fallback.get("source_workflow") or ""
+        ),
+        "recording_path": recording_path,
+        "recording_sha256": recording_sha256,
+        "source_factor_name": str(
+            source_factor.get("name") or source_factor.get("factor_name") or ""
+        ),
+        "metrics": {
+            key: metrics[key]
+            for key in (
+                "trade_count",
+                "unique_event_count",
+                "entry_fill_rate",
+                "roi",
+                "total_pnl",
+                "avg_entry_price",
+            )
+            if key in metrics
+        },
+        "blocking_risk_flags": [str(item) for item in blocking_flags if str(item)],
+    }
 
 
 def _latest_valid_full_depth_surface_artifact(plan_payload: dict[str, Any]) -> dict[str, str]:

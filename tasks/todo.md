@@ -1,5 +1,45 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Frontier Ready State (2026-05-25)
+
+Evidence stage: `factor_attribution` / `runtime_parity` planner repair. This
+fixes Research Manager frontier-state selection after a durable ready AutoFactor
+handoff or runtime-ready candidate exists; it does not claim live readiness.
+
+### Tasks
+
+- [x] Confirm current `main` is clean and latest hosted run has durable ready
+      AutoFactor evidence but Research Trace Plan still routes to
+      `runtime_contract`.
+- [x] Add durable frontier queries for runtime-ready candidates and ready
+      handoffs.
+- [x] Teach Research Manager and executor to consume the frontier summary
+      instead of only `recent_factors`.
+- [x] Run focused Rust/Python validation.
+- [ ] Land through PR and rerun Research Trace Plan from `main`.
+
+### Review
+
+- 2026-05-25: The remaining blocker is planner state selection, not missing
+  runtime contract extraction: ready handoff/replay artifacts can live under
+  `walk_forward` / `executable_replay`, while the default trace plan currently
+  asks for `factor_attribution` and the factor summary only reads newest
+  registry rows.
+- 2026-05-25: Added Research Trace Plan frontier summaries:
+  `ready_handoffs`, `runtime_ready_candidates`, and
+  `ready_candidate_replays`. Research Manager now treats a durable ready
+  handoff as the top-priority next action and ignores unselected preview
+  factor blocker noise from bulk `factors` arrays. The executor now consumes
+  the new frontier handoff/candidate fields instead of depending only on
+  `recent_factors`.
+- 2026-05-25: Focused validation passed:
+  `rtk cargo test --locked -p ploy-research research_os::manager --lib` (`17`
+  tests), `rtk cargo test --locked -p ploy-research --example
+  research_trace_plan --features db` (`2` tests), `python3 -m unittest
+  tests.test_research_manager_execute_plan
+  tests.test_persist_research_trace_contract` (`41` tests), targeted
+  `py_compile`, single-file `rustfmt --check`, and `rtk git diff --check`.
+
 ## Current Session - AutoFactor Selector Runtime Contract Repair (2026-05-25)
 
 Evidence stage: `factor_attribution` / runtime contract repair. This aligns

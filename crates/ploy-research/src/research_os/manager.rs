@@ -90,7 +90,7 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
 
     let blocker_actions = derive_blocker_actions(input);
     let latest_decision = latest_run_decision_value(&input.latest_runs);
-    if has_ready_handoff(&latest_decision) {
+    if has_ready_handoff(&input.latest_runs) {
         return Ok(plan_with_blocker_actions(
             "ready_handoff",
             1,
@@ -472,7 +472,7 @@ fn strip_non_frontier_blocker_fields(value: &serde_json::Value) -> serde_json::V
             for (key, item) in map {
                 if matches!(
                     key.as_str(),
-                    "evaluated_factors" | "entries" | "recent_factors" | "patterns"
+                    "evaluated_factors" | "entries" | "factors" | "recent_factors" | "patterns"
                 ) {
                     continue;
                 }
@@ -882,6 +882,97 @@ mod tests {
             .actions
             .contains(&"open_config_pr_from_ready_handoff".to_string()));
         assert!(plan.blocker_actions.is_empty());
+    }
+
+    #[test]
+    fn planner_uses_durable_ready_handoff_frontier_summary() {
+        let plan = plan_next_research(&input(
+            "factor_attribution",
+            serde_json::json!({
+                "source": "experiment_trace",
+                "evidence_stage": "factor_attribution",
+                "runs": [{
+                    "run_id": "newest-factor-preview",
+                    "artifacts": [{
+                        "event_type": "factor_registry_preview",
+                        "output_json": {
+                            "factors": [{
+                                "factor_name": "blocked_unselected_factor",
+                                "blockers": ["missing_runtime_contract"]
+                            }]
+                        }
+                    }]
+                }],
+                "ready_handoffs": [{
+                    "run_id": "26377165132",
+                    "event_type": "strategy_handoff",
+                    "output_json": {
+                        "kind": "autofactor_strategy_handoff",
+                        "status": "ready",
+                        "recommended_action": "create_dry_run_handoff",
+                        "strategies": [{
+                            "runtime_score": "autofactor_formula:ready_factor"
+                        }],
+                        "candidate_strategy_replay": {
+                            "ready": true,
+                            "basis": "runtime_market_update_replay"
+                        }
+                    }
+                }]
+            }),
+            serde_json::json!({}),
+        ))
+        .expect("plan");
+
+        assert_eq!(plan.theme, "ready_handoff");
+        assert_eq!(plan.candidate_count, 1);
+        assert!(plan.blocker_actions.is_empty());
+    }
+
+    #[test]
+    fn planner_does_not_route_unselected_preview_factor_blockers_to_runtime_repair() {
+        let mut input = input(
+            "factor_attribution",
+            serde_json::json!({
+                "source": "experiment_trace",
+                "runs": [{
+                    "run_id": "newest-factor-preview",
+                    "artifacts": [{
+                        "event_type": "factor_registry_preview",
+                        "output_json": {
+                            "factors": [{
+                                "factor_name": "blocked_unselected_factor",
+                                "blockers": ["missing_runtime_contract"]
+                            }]
+                        }
+                    }]
+                }]
+            }),
+            serde_json::json!({}),
+        );
+        input.factor_registry_summary = serde_json::json!({
+            "runtime_ready_candidates": [{
+                "factor_name": "ready_factor",
+                "status": "candidate",
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+                "blockers": [],
+                "runtime_contract": {
+                    "version": "autofactor_runtime_contract_v1",
+                    "runtime_score": "autofactor_formula:ready_factor",
+                    "strategy_profile": "settlement_probability",
+                    "blockers": []
+                }
+            }]
+        });
+
+        let plan = plan_next_research(&input).expect("plan");
+
+        assert_eq!(plan.theme, "candidate_to_runtime_replay");
+        assert!(!plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "runtime_contract"
+                && item.action == "repair_runtime_contract_mapping"
+        }));
     }
 
     #[test]

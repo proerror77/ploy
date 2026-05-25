@@ -259,6 +259,7 @@ class PersistResearchTraceContractTest(unittest.TestCase):
             "experiment_trace",
             "factor_registry",
             "factor_evaluations",
+            "candidate_replay_tapes",
             "research_dataset_snapshots",
             "full_depth_execution_surfaces",
             "official_settlement_coverage_checks",
@@ -270,6 +271,11 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         self.assertIn("source_surface_blockers", source)
         self.assertIn("latest_full_depth_execution_surfaces", source)
         self.assertIn("latest_official_settlement_coverage_checks", source)
+        self.assertIn("ready_strategy_handoffs", source)
+        self.assertIn("runtime_ready_factor_candidates", source)
+        self.assertIn("ready_candidate_replays", source)
+        self.assertIn("runtime_ready_candidates", source)
+        self.assertIn("ready_handoffs", source)
         self.assertIn("valid = true", source)
         self.assertIn("execution_surfaces", source)
         self.assertIn("settlement_surfaces", source)
