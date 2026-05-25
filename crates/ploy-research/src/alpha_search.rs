@@ -822,17 +822,8 @@ fn is_predictive_settlement_formula(normalized: &str) -> bool {
 }
 
 fn predictive_formula_suffix_supported(suffix: &str) -> bool {
-    let suffix = suffix
-        .replace(
-            "_runtime_pass_through_add_spread_penalty",
-            "_spread_adjusted",
-        )
-        .replace(
-            "_runtime_pass_through_add_capacity_gate",
-            "_full_depth_entry_gate",
-        )
-        .replace("_add_capacity_gate", "_full_depth_entry_gate");
-    let Some(suffix) = strip_predictive_selector_gates(&suffix) else {
+    let suffix = normalize_runtime_formula_suffix(suffix);
+    let Some(suffix) = strip_runtime_selector_gates(&suffix) else {
         return false;
     };
     if suffix.is_empty() {
@@ -860,11 +851,24 @@ fn predictive_formula_suffix_supported(suffix: &str) -> bool {
     true
 }
 
-fn strip_predictive_selector_gates(suffix: &str) -> Option<String> {
+fn normalize_runtime_formula_suffix(suffix: &str) -> String {
+    suffix
+        .replace(
+            "_runtime_pass_through_add_spread_penalty",
+            "_spread_adjusted",
+        )
+        .replace(
+            "_runtime_pass_through_add_capacity_gate",
+            "_full_depth_entry_gate",
+        )
+        .replace("_add_capacity_gate", "_full_depth_entry_gate")
+}
+
+fn strip_runtime_selector_gates(suffix: &str) -> Option<String> {
     let mut remaining_suffix = suffix.to_string();
     while let Some((remaining, selector)) = remaining_suffix.split_once("_select_") {
-        let (_feature, raw_threshold, trailing_suffix) = parse_predictive_selector_gate(selector)?;
-        if parse_predictive_selector_threshold(raw_threshold).is_none() {
+        let (_feature, raw_threshold, trailing_suffix) = parse_runtime_selector_gate(selector)?;
+        if parse_runtime_selector_threshold(raw_threshold).is_none() {
             return None;
         }
         remaining_suffix = format!("{remaining}{trailing_suffix}");
@@ -872,7 +876,7 @@ fn strip_predictive_selector_gates(suffix: &str) -> Option<String> {
     Some(remaining_suffix)
 }
 
-fn parse_predictive_selector_gate(selector: &str) -> Option<(&'static str, &str, String)> {
+fn parse_runtime_selector_gate(selector: &str) -> Option<(&'static str, &str, String)> {
     for feature in [
         "entry_price_quality",
         "full_depth_entry",
@@ -892,7 +896,7 @@ fn parse_predictive_selector_gate(selector: &str) -> Option<(&'static str, &str,
     None
 }
 
-fn parse_predictive_selector_threshold(raw: &str) -> Option<f64> {
+fn parse_runtime_selector_threshold(raw: &str) -> Option<f64> {
     let threshold = if raw.contains('.') {
         raw.parse().ok()?
     } else {
@@ -918,6 +922,10 @@ fn is_settlement_formula(normalized: &str) -> bool {
 }
 
 fn settlement_formula_suffix_supported(suffix: &str) -> bool {
+    let suffix = normalize_runtime_formula_suffix(suffix);
+    let Some(suffix) = strip_runtime_selector_gates(&suffix) else {
+        return false;
+    };
     if suffix.is_empty() {
         return true;
     }
@@ -1714,6 +1722,70 @@ mod tests {
             ])
         );
         assert_eq!(contract["blockers"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn runtime_contract_maps_settlement_selector_threshold_formulas() {
+        let report = AutoFactorReport {
+            name: "auto_settlement_model_conservative_settlement_edge_x_capacity_select_entry_price_quality_ge_025"
+                .to_string(),
+            target: Some("full_depth_settlement_executable_pnl".to_string()),
+            expr: FactorExpr::Gate {
+                expr: Box::new(FactorExpr::Mul(
+                    Box::new(FactorExpr::Input(
+                        "model_conservative_settlement_edge".to_string(),
+                    )),
+                    Box::new(FactorExpr::Input("entry_capacity_score".to_string())),
+                )),
+                gate: Box::new(FactorExpr::Input("entry_price_quality_score".to_string())),
+                min: 0.25,
+            },
+            ..sample_report(
+                "auto_settlement_model_conservative_settlement_edge_x_capacity_select_entry_price_quality_ge_025",
+            )
+        };
+        let contract =
+            runtime_contract_for_report(&report, "dsl-hash", &serde_json::json!({}), "5m");
+        assert_eq!(
+            contract["runtime_score"],
+            "autofactor_formula:auto_settlement_model_conservative_settlement_edge_x_capacity_select_entry_price_quality_ge_025"
+        );
+        assert_eq!(
+            contract["runtime_input_names"],
+            serde_json::json!(["entry_capacity_ratio", "entry_price", "settlement_edge"])
+        );
+        assert_eq!(contract["blockers"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn runtime_contract_rejects_malformed_settlement_selector_threshold() {
+        let report = AutoFactorReport {
+            name: "auto_settlement_model_conservative_settlement_edge_x_capacity_select_entry_price_quality_ge_bad"
+                .to_string(),
+            target: Some("full_depth_settlement_executable_pnl".to_string()),
+            expr: FactorExpr::Gate {
+                expr: Box::new(FactorExpr::Mul(
+                    Box::new(FactorExpr::Input(
+                        "model_conservative_settlement_edge".to_string(),
+                    )),
+                    Box::new(FactorExpr::Input("entry_capacity_score".to_string())),
+                )),
+                gate: Box::new(FactorExpr::Input("entry_price_quality_score".to_string())),
+                min: 0.25,
+            },
+            ..sample_report(
+                "auto_settlement_model_conservative_settlement_edge_x_capacity_select_entry_price_quality_ge_bad",
+            )
+        };
+        let contract =
+            runtime_contract_for_report(&report, "dsl-hash", &serde_json::json!({}), "5m");
+        assert_eq!(contract["runtime_score"], "");
+        let blockers = contract["blockers"].as_array().expect("blockers");
+        assert!(
+            blockers
+                .iter()
+                .any(|item| item.as_str() == Some("runtime_contract_unmapped_factor"))
+        );
     }
 
     #[test]
