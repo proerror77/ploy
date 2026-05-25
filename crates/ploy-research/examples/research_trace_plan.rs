@@ -112,6 +112,7 @@ async fn latest_runs(pool: &PgPool, evidence_stage: &str, limit: usize) -> Resul
     .bind(limit as i64)
     .fetch_all(pool)
     .await?;
+    let ready_handoffs = ready_strategy_handoffs(pool, limit).await?;
 
     Ok(json!({
         "source": "experiment_trace",
@@ -122,8 +123,39 @@ async fn latest_runs(pool: &PgPool, evidence_stage: &str, limit: usize) -> Resul
                 "latest_created_at": row.1,
                 "artifacts": row.2,
             })
-        }).collect::<Vec<_>>()
+        }).collect::<Vec<_>>(),
+        "ready_handoffs": ready_handoffs,
     }))
+}
+
+async fn ready_strategy_handoffs(pool: &PgPool, limit: usize) -> Result<Value> {
+    let rows: Vec<(String, DateTime<Utc>, String, Value)> = sqlx::query_as(
+        r#"
+        SELECT run_id, created_at, event_type, output_json
+        FROM experiment_trace
+        WHERE event_type IN ('strategy_handoff', 'autofactor_strategy_handoff')
+          AND output_json->>'status' = 'ready'
+          AND output_json->>'recommended_action' = 'create_dry_run_handoff'
+        ORDER BY created_at DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(Value::Array(
+        rows.into_iter()
+            .map(|row| {
+                json!({
+                    "run_id": row.0,
+                    "created_at": row.1,
+                    "event_type": row.2,
+                    "output_json": row.3,
+                })
+            })
+            .collect(),
+    ))
 }
 
 async fn factor_registry_summary(pool: &PgPool, limit: usize) -> Result<Value> {
@@ -148,6 +180,8 @@ async fn factor_registry_summary(pool: &PgPool, limit: usize) -> Result<Value> {
     .bind(limit as i64)
     .fetch_all(pool)
     .await?;
+    let runtime_ready_candidates = runtime_ready_factor_candidates(pool, limit).await?;
+    let ready_candidate_replays = ready_candidate_replays(pool, limit).await?;
 
     Ok(json!({
         "source": "factor_registry",
@@ -164,8 +198,144 @@ async fn factor_registry_summary(pool: &PgPool, limit: usize) -> Result<Value> {
                 "runtime_contract": row.5,
                 "blockers": row.6,
             })
-        }).collect::<Vec<_>>()
+        }).collect::<Vec<_>>(),
+        "runtime_ready_candidates": runtime_ready_candidates,
+        "ready_candidate_replays": ready_candidate_replays,
     }))
+}
+
+async fn runtime_ready_factor_candidates(pool: &PgPool, limit: usize) -> Result<Value> {
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        Value,
+        Value,
+        DateTime<Utc>,
+    )> = sqlx::query_as(
+        r#"
+            SELECT
+                factor_name,
+                dsl_hash,
+                target,
+                horizon,
+                status,
+                runtime_contract,
+                blockers_json,
+                created_at
+            FROM factor_registry
+            WHERE status = 'candidate'
+              AND runtime_contract->>'version' = 'autofactor_runtime_contract_v1'
+              AND COALESCE(runtime_contract->>'runtime_score', '') <> ''
+              AND COALESCE(runtime_contract->>'strategy_profile', '') <> ''
+              AND jsonb_typeof(blockers_json) = 'array'
+              AND jsonb_array_length(blockers_json) = 0
+              AND jsonb_array_length(
+                    CASE
+                      WHEN jsonb_typeof(runtime_contract->'blockers') = 'array'
+                        THEN runtime_contract->'blockers'
+                      ELSE '[]'::jsonb
+                    END
+                  ) = 0
+            ORDER BY created_at DESC
+            LIMIT $1
+            "#,
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(Value::Array(
+        rows.into_iter()
+            .map(|row| {
+                json!({
+                    "factor_name": row.0,
+                    "dsl_hash": row.1,
+                    "target": row.2,
+                    "horizon": row.3,
+                    "status": row.4,
+                    "runtime_contract": row.5,
+                    "blockers": row.6,
+                    "created_at": row.7,
+                })
+            })
+            .collect(),
+    ))
+}
+
+async fn ready_candidate_replays(pool: &PgPool, limit: usize) -> Result<Value> {
+    let rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Value,
+        Value,
+        Value,
+        DateTime<Utc>,
+    )> = sqlx::query_as(
+        r#"
+        SELECT
+            candidate_replay_id,
+            run_id,
+            workflow_run_id,
+            workflow_run_url,
+            basis,
+            promotion_decision,
+            strategy_profile,
+            runtime_score,
+            data_snapshot_id,
+            target,
+            horizon,
+            metrics_json,
+            blocking_risk_flags_json,
+            artifact_json,
+            created_at
+        FROM candidate_replay_tapes
+        WHERE promotion_ready = true
+          AND basis = 'runtime_market_update_replay'
+          AND jsonb_typeof(blocking_risk_flags_json) = 'array'
+          AND jsonb_array_length(blocking_risk_flags_json) = 0
+        ORDER BY created_at DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(Value::Array(
+        rows.into_iter()
+            .map(|row| {
+                json!({
+                    "candidate_replay_id": row.0,
+                    "run_id": row.1,
+                    "workflow_run_id": row.2,
+                    "workflow_run_url": row.3,
+                    "basis": row.4,
+                    "promotion_decision": row.5,
+                    "strategy_profile": row.6,
+                    "runtime_score": row.7,
+                    "data_snapshot_id": row.8,
+                    "target": row.9,
+                    "horizon": row.10,
+                    "metrics": row.11,
+                    "blocking_risk_flags": row.12,
+                    "artifact_json": row.13,
+                    "created_at": row.14,
+                })
+            })
+            .collect(),
+    ))
 }
 
 async fn rejected_factor_patterns(pool: &PgPool, limit: usize) -> Result<Value> {

@@ -488,6 +488,56 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             dispatch["fields"]["runtime_score"],
         )
 
+    def test_fix_runtime_prefers_frontier_runtime_ready_candidates(self) -> None:
+        payload = build_executor_payload(
+            base_args(),
+            plan_payload(
+                "candidate_to_runtime_replay",
+                ["build_runtime_candidate_replay"],
+                {
+                    "runtime_ready_candidates": [
+                        {
+                            "factor_name": "ready_factor",
+                            "status": "candidate",
+                            "target": "full_depth_settlement_executable_pnl",
+                            "horizon": "5m",
+                            "blockers": [],
+                            "runtime_contract": {
+                                "version": "autofactor_runtime_contract_v1",
+                                "runtime_score": "autofactor_formula:ready_factor",
+                                "strategy_profile": "settlement_probability",
+                                "target": "full_depth_settlement_executable_pnl",
+                                "horizon": "5m",
+                                "blockers": [],
+                            },
+                        }
+                    ],
+                    "recent_factors": [
+                        {
+                            "factor_name": "blocked_recent_factor",
+                            "status": "candidate",
+                            "blockers": ["missing_runtime_contract"],
+                            "runtime_contract": {
+                                "version": "autofactor_runtime_contract_v1",
+                                "runtime_score": "autofactor_formula:blocked_recent_factor",
+                                "strategy_profile": "settlement_probability",
+                                "blockers": ["missing_runtime_contract"],
+                            },
+                        }
+                    ],
+                },
+            ),
+        )
+
+        self.assertEqual(1, payload["executable_dispatch_count"])
+        dispatch = payload["dispatches"][0]
+        self.assertTrue(dispatch["ready"])
+        self.assertEqual("ready_factor", dispatch["selected_factor_name"])
+        self.assertEqual(
+            "autofactor_formula:ready_factor",
+            dispatch["fields"]["runtime_score"],
+        )
+
     def test_ready_handoff_maps_to_autofactor_promotion_side_effects(self) -> None:
         plan = plan_payload(
             "ready_handoff",
@@ -563,6 +613,57 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
         self.assertEqual(
             "config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
             dispatch["fields"]["strategy_config"],
+        )
+
+    def test_ready_handoff_can_come_from_frontier_summary(self) -> None:
+        plan = plan_payload(
+            "ready_handoff",
+            ["create_dry_run_handoff_issue", "open_config_pr_from_ready_handoff"],
+        )
+        plan["input"]["latest_runs"] = {
+            "runs": [],
+            "ready_handoffs": [
+                {
+                    "run_id": "26377165132",
+                    "event_type": "strategy_handoff",
+                    "output_json": {
+                        "kind": "autofactor_strategy_handoff",
+                        "status": "ready",
+                        "recommended_action": "create_dry_run_handoff",
+                        "strategies": [
+                            {
+                                "runtime_score": "autofactor_formula:ready_factor",
+                                "strategy_profile": "settlement_probability",
+                                "target": "full_depth_settlement_executable_pnl",
+                            }
+                        ],
+                        "candidate_strategy_replay": {
+                            "basis": "runtime_market_update_replay",
+                            "runtime_score": "autofactor_formula:ready_factor",
+                            "strategy_profile": "settlement_probability",
+                        },
+                    },
+                }
+            ],
+        }
+
+        payload = build_executor_payload(
+            base_args(mode="execute", execute_ack=EXECUTE_ACK),
+            plan,
+        )
+
+        self.assertEqual(1, payload["executable_dispatch_count"])
+        dispatch = payload["dispatches"][0]
+        self.assertTrue(dispatch["ready"])
+        self.assertEqual("autofactor-strategy-promotion.yml", dispatch["workflow"])
+        self.assertEqual("26377165132", dispatch["fields"]["factor_walk_forward_run_id"])
+        self.assertEqual(
+            "factor-walk-forward-v2-26377165132",
+            dispatch["fields"]["artifact_name"],
+        )
+        self.assertEqual(
+            "autofactor_formula:ready_factor",
+            dispatch["runtime_score"],
         )
 
     def test_ready_handoff_blocks_without_ready_source_artifact(self) -> None:
