@@ -1,5 +1,49 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - AutoFactor Selector Runtime Contract Repair (2026-05-25)
+
+Evidence stage: `factor_attribution` / runtime contract repair. This aligns
+settlement selector formulas between factor-search registry contracts and the
+runtime AutoFactor scorer; it does not claim strategy profitability, dry-run
+readiness, or live-promotion evidence.
+
+### Tasks
+
+- [x] Confirm current `main` is clean and only the real `runtime_contract`
+      blocker remains in the latest Research Trace Plan summary.
+- [x] Add runtime scorer support for settlement selector threshold gates.
+- [x] Teach alpha-search runtime contract mapping to accept settlement selector
+      suffixes only when their runtime inputs are canonical.
+- [x] Keep `external_pressure`, `iv_change_1m`, Bayesian formulas, and unknown
+      inputs fail-closed.
+- [x] Run focused Rust/Python validation.
+- [ ] Land through PR and rerun Research Trace Plan from `main`.
+
+### Review
+
+- 2026-05-25: Latest verified trace-plan evidence after PR `#695/#696` has
+  durable full-depth and settlement surfaces clear; `blocker_actions` only
+  reports `runtime_contract -> repair_runtime_contract_mapping`. The current
+  repair is still pre-promotion `factor_attribution` evidence.
+- 2026-05-25: Added settlement selector threshold support to the shared
+  AutoFactor runtime scorer and reused the same selector grammar in
+  alpha-search contract mapping. Supported selector suffixes are
+  `select_near_strike_ge_*`, `select_entry_price_quality_ge_*`,
+  `select_entry_capacity_ge_*`, and `select_full_depth_entry_ge_*`; malformed
+  thresholds remain unmapped. Existing catalog blockers still fail-close
+  `external_pressure`, `iv_change_1m`, Bayesian formulas, and unknown inputs.
+- 2026-05-25: Focused validation passed:
+  `rtk cargo test --locked -p ploy-research runtime_contract --lib` (`7`
+  tests), `rtk cargo test --locked -p ploy-strategy-bundles
+  settlement_formula --lib` (`3` tests), wider `rtk cargo test --locked -p
+  ploy-research alpha_search --lib` (`13` tests), `rtk cargo test --locked -p
+  ploy-strategy-bundles three_layer --lib` (`79` tests),
+  `python3 -m unittest tests.test_autofactor_strategy_promotion
+  tests.test_build_autofactor_candidate_strategy_replay
+  tests.test_factor_walk_forward_sweep
+  tests.test_persist_research_trace_contract` (`88` tests), and
+  `rtk git diff --check`.
+
 ## Current Session - Research Manager Durable Repair Evidence (2026-05-25)
 
 Evidence stage: `diagnostic` / `factor_attribution` repair-loop hardening.

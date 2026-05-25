@@ -158,9 +158,11 @@ pub fn auto_settlement_formula_score(
         return None;
     }
     let mut score = inputs.settlement_edge;
-    let suffix = normalized_name.strip_prefix(settlement_prefix)?;
+    let suffix =
+        normalize_runtime_formula_suffix(normalized_name.strip_prefix(settlement_prefix)?);
+    let suffix = apply_selector_gate(&suffix, inputs)?;
 
-    match suffix {
+    match suffix.as_str() {
         "" => {}
         "_x_near_strike" => {
             score *=
@@ -203,7 +205,7 @@ pub fn auto_settlement_formula_score(
             }
             score *= inputs.iv_change_1m;
         }
-        _ => score = composed_settlement_formula_suffix_score(score, suffix, inputs)?,
+        _ => score = composed_settlement_formula_suffix_score(score, &suffix, inputs)?,
     }
     score.is_finite().then_some(score)
 }
@@ -309,7 +311,7 @@ fn predictive_formula_score(name: &str, inputs: AutoSettlementFactorInputs) -> O
     } else {
         return None;
     };
-    let suffix = normalize_predictive_llm_suffix(name.strip_prefix(base)?);
+    let suffix = normalize_runtime_formula_suffix(name.strip_prefix(base)?);
     let mut score = match base {
         "amplitude_weighted_momentum_30s_sigma" => {
             if !inputs.drift_30s.is_finite()
@@ -344,7 +346,7 @@ fn predictive_formula_score(name: &str, inputs: AutoSettlementFactorInputs) -> O
     if suffix.is_empty() {
         return Some(score);
     }
-    let suffix = apply_predictive_selector_gate(&suffix, inputs)?;
+    let suffix = apply_selector_gate(&suffix, inputs)?;
     if suffix.is_empty() {
         return Some(score);
     }
@@ -385,7 +387,7 @@ fn predictive_formula_score(name: &str, inputs: AutoSettlementFactorInputs) -> O
     Some(score)
 }
 
-fn normalize_predictive_llm_suffix(suffix: &str) -> String {
+fn normalize_runtime_formula_suffix(suffix: &str) -> String {
     suffix
         .replace(
             "_runtime_pass_through_add_spread_penalty",
@@ -398,10 +400,7 @@ fn normalize_predictive_llm_suffix(suffix: &str) -> String {
         .replace("_add_capacity_gate", "_full_depth_entry_gate")
 }
 
-fn apply_predictive_selector_gate(
-    suffix: &str,
-    inputs: AutoSettlementFactorInputs,
-) -> Option<String> {
+fn apply_selector_gate(suffix: &str, inputs: AutoSettlementFactorInputs) -> Option<String> {
     let mut remaining_suffix = suffix.to_string();
     while let Some((remaining, selector)) = remaining_suffix.split_once("_select_") {
         let remaining = remaining.to_string();
@@ -787,5 +786,55 @@ pub fn evaluate_entry_score(config: &ThreeLayerModelConfig, inputs: EntryScoreIn
                 + 0.10 * inputs.liquidity_score
         }
         ThreeLayerProfile::Mixed => unreachable!("mixed profile returned above"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_auto_settlement_inputs() -> AutoSettlementFactorInputs {
+        AutoSettlementFactorInputs {
+            settlement_edge: 0.12,
+            entry_price: 0.40,
+            distance_over_sigma: 0.20,
+            direction_sign: 1.0,
+            drift_30s: 0.004,
+            sigma_horizon: 2.0,
+            entry_capacity_ratio: 1.20,
+            side_spread: 0.02,
+            external_pressure: 0.0,
+            pm_lag_secs: 2.0,
+            iv_change_1m: 0.0,
+        }
+    }
+
+    #[test]
+    fn settlement_formula_supports_selector_threshold_gate() {
+        let score = auto_settlement_formula_score(
+            "autofactor_formula:auto_settlement_model_conservative_settlement_edge_x_capacity_select_entry_price_quality_ge_075",
+            sample_auto_settlement_inputs(),
+        )
+        .expect("selector should pass for high-quality entry price");
+
+        assert!((score - 0.048).abs() < 1e-12);
+
+        assert!(auto_settlement_formula_score(
+            "autofactor_formula:auto_settlement_model_conservative_settlement_edge_x_capacity_select_entry_price_quality_ge_075",
+            AutoSettlementFactorInputs {
+                entry_price: 0.10,
+                ..sample_auto_settlement_inputs()
+            },
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn settlement_formula_rejects_malformed_selector_threshold_gate() {
+        assert!(auto_settlement_formula_score(
+            "autofactor_formula:auto_settlement_model_conservative_settlement_edge_x_capacity_select_entry_price_quality_ge_bad",
+            sample_auto_settlement_inputs(),
+        )
+        .is_none());
     }
 }
