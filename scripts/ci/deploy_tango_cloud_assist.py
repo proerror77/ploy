@@ -105,7 +105,7 @@ require_service_guardrails() {{
   test "$(systemctl show -P MemoryMax "${{unit}}")" != "[not set]"
 }}
 
-wait_for_recent_rows() {{
+check_recent_rows() {{
   local sql="$1"
   local message="$2"
   local attempts="${{3:-20}}"
@@ -119,7 +119,13 @@ wait_for_recent_rows() {{
     sleep "${{sleep_secs}}"
   done
   echo "${{message}}" >&2
-  exit 1
+  return 1
+}}
+
+wait_for_recent_rows() {{
+  if ! check_recent_rows "$@"; then
+    exit 1
+  fi
 }}
 
 wait_for_recent_log() {{
@@ -262,16 +268,20 @@ systemctl enable --now ploy-deribit-greeks-collector.service
 systemctl restart ploy-deribit-greeks-collector.service
 systemctl enable --now ploy-market-discovery.service
 systemctl restart ploy-market-discovery.service
-wait_for_recent_rows \\
+if ! check_recent_rows \\
   "SELECT EXISTS (SELECT 1 FROM pm_market_catalog WHERE market_family = 'crypto' AND strategy_symbol IS NOT NULL AND end_time >= NOW())" \\
   "pm_market_catalog has no active crypto markets after market-discovery restart" \\
   20 \\
-  3
-wait_for_recent_rows \\
+  3; then
+  echo "Continuing downstream service restarts; final postflight will fail if pm_market_catalog remains empty" >&2
+fi
+if ! check_recent_rows \\
   "SELECT EXISTS (SELECT 1 FROM pm_market_metadata WHERE symbol IS NOT NULL AND end_time >= NOW())" \\
   "pm_market_metadata has no active crypto markets after market-discovery restart" \\
   20 \\
-  3
+  3; then
+  echo "Continuing downstream service restarts; final postflight will fail if pm_market_metadata remains empty" >&2
+fi
 if service_exists ploy-quote-collector.service; then
   systemctl enable --now ploy-quote-collector.service
   systemctl restart ploy-quote-collector.service

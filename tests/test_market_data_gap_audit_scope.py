@@ -125,6 +125,10 @@ class MarketDataGapAuditScopeTests(unittest.TestCase):
         workflow = WORKFLOW.read_text()
         self.assertIn("REQUIRED_SOURCES: pm5d-vol", workflow)
         self.assertIn("--required-sources \"${REQUIRED_SOURCES}\"", workflow)
+        self.assertIn("SSH_ATTEMPT_TIMEOUT_SECONDS", workflow)
+        self.assertIn('timeout "${SSH_ATTEMPT_TIMEOUT_SECONDS}s" ssh tango-1-1', workflow)
+        self.assertIn('timeout "${SSH_ATTEMPT_TIMEOUT_SECONDS}s" scp', workflow)
+        self.assertIn("print(summary)", workflow)
         self.assertIn("remote ${audit_kind} audit failed after ${attempt} attempts", workflow)
         self.assertIn(
             "copying ${audit_kind} audit report failed after ${attempt} attempts",

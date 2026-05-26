@@ -93,11 +93,13 @@ jobs:
             HostName ${DEPLOY_HOST}
             User root
             IdentityFile ~/.ssh/tango_1_1_key
+            BatchMode yes
+            ConnectionAttempts 1
             StrictHostKeyChecking no
             UserKnownHostsFile /dev/null
-            ServerAliveInterval 30
-            ServerAliveCountMax 20
-            ConnectTimeout 30
+            ServerAliveInterval 10
+            ServerAliveCountMax 2
+            ConnectTimeout 10
           EOF
 
       - name: Resolve audit scope
@@ -161,6 +163,7 @@ jobs:
           BUCKET_MINUTES: ${{ steps.scope.outputs.bucket_minutes }}
           SYMBOLS: ${{ steps.scope.outputs.symbols }}
           GATE_MODE: ${{ steps.scope.outputs.gate_mode }}
+          SSH_ATTEMPT_TIMEOUT_SECONDS: "45"
         run: |
           set -euo pipefail
           mkdir -p artifacts/market-data-gap-audit
@@ -175,7 +178,7 @@ jobs:
 
             for attempt in 1 2 3; do
               # shellcheck disable=SC2029
-              if ssh tango-1-1 \
+              if timeout "${SSH_ATTEMPT_TIMEOUT_SECONDS}s" ssh tango-1-1 \
                 "DEPLOY_ROOT='${DEPLOY_ROOT}' AUDIT_KIND='${audit_kind}' LOOKBACK_HOURS='${lookback_hours}' BUCKET_MINUTES='${BUCKET_MINUTES}' SYMBOLS='${SYMBOLS}' REQUIRED_SOURCES='${REQUIRED_SOURCES}' GATE_MODE='${GATE_MODE}' REMOTE_FILE='${remote_file}' /bin/bash -s" <<'EOF'
           set -euo pipefail
           mkdir -p "$(dirname "${REMOTE_FILE}")"
@@ -205,7 +208,7 @@ jobs:
             done
 
             for attempt in 1 2 3; do
-              if scp "tango-1-1:${remote_file}" "${local_file}"; then
+              if timeout "${SSH_ATTEMPT_TIMEOUT_SECONDS}s" scp "tango-1-1:${remote_file}" "${local_file}"; then
                 break
               fi
               if [ "${attempt}" -eq 3 ]; then
@@ -341,6 +344,7 @@ jobs:
 
           lines.extend(["", f"Overall gate status: `{worst}`"])
           summary = "\n".join(lines) + "\n"
+          print(summary)
           with open("artifacts/market-data-gap-audit/summary.md", "w", encoding="utf-8") as fh:
               fh.write(summary)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
@@ -349,7 +353,6 @@ jobs:
               fh.write(f"overall_status={worst}\n")
 
           if should_fail:
-              print(summary)
               raise SystemExit(f"market data audit gate failed: {worst}")
           PY
 
