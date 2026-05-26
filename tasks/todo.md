@@ -1,5 +1,24 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Tango Dry-Run Data Plane Recovery (2026-05-26)
+
+Evidence stage: `dry_run_candidate` data-plane recovery and freshness
+verification. This keeps `pm5d.threelayer.live` paused and does not claim
+`live_candidate` readiness.
+
+### Tasks
+
+- [x] Confirm current failure shape: direct SSH can hang before fallback, and
+      deploy Cloud Assistant exits before restarting quote / PM trade / ployd
+      when market discovery has no active crypto markets.
+- [x] Make market-data gap audit fail fast on SSH banner hangs so Cloud
+      Assistant read-only fallback can run.
+- [x] Let Tango deploy/recovery restart downstream data services before final
+      market-discovery gates fail the deploy.
+- [x] Run focused workflow/script validation.
+- [ ] Merge, redeploy from `main`, and verify fresh recording / DB rows before
+      treating any new dry-run rows as usable evidence.
+
 ## Current Session - Research Manager Frontier Ready State (2026-05-25)
 
 Evidence stage: `factor_attribution` / `runtime_parity` planner repair. This

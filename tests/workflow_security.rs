@@ -829,8 +829,11 @@ fn tango_deploy_pm_trade_postflight_uses_collector_health_not_fresh_trade_rows()
         for needle in [
             "systemctl is-active --quiet ploy-pm-trade-collector.service",
             "require_service_guardrails ploy-pm-trade-collector.service",
+            "check_recent_rows",
             "pm_market_catalog has no active crypto markets after market-discovery restart",
             "pm_market_metadata has no active crypto markets after market-discovery restart",
+            "Continuing downstream service restarts; final postflight will fail if pm_market_catalog remains empty",
+            "Continuing downstream service restarts; final postflight will fail if pm_market_metadata remains empty",
             "wait_for_recent_log",
             "journalctl -u",
             "Polymarket trade collector poll complete",
@@ -854,26 +857,44 @@ fn tango_deploy_pm_trade_postflight_uses_collector_health_not_fresh_trade_rows()
         let metadata_wait = content
             .find("pm_market_metadata has no active crypto markets after market-discovery restart");
         let trade_restart = content.find("systemctl restart ploy-pm-trade-collector.service");
+        let final_catalog_wait =
+            content.rfind("pm_market_catalog has no active crypto markets after deploy");
+        let final_metadata_wait =
+            content.rfind("pm_market_metadata has no active crypto markets after deploy");
         match (
             discovery_restart,
             catalog_wait,
             metadata_wait,
             trade_restart,
+            final_catalog_wait,
+            final_metadata_wait,
         ) {
             (
                 Some(discovery_restart),
                 Some(catalog_wait),
                 Some(metadata_wait),
                 Some(trade_restart),
+                Some(final_catalog_wait),
+                Some(final_metadata_wait),
             ) => {
                 if !(discovery_restart < catalog_wait && catalog_wait < trade_restart) {
                     offenders.push(format!(
-                        "{name}: catalog readiness wait must run between market discovery and PM trade collector restart"
+                        "{name}: catalog readiness probe must run between market discovery and PM trade collector restart"
                     ));
                 }
                 if !(discovery_restart < metadata_wait && metadata_wait < trade_restart) {
                     offenders.push(format!(
-                        "{name}: metadata readiness wait must run between market discovery and PM trade collector restart"
+                        "{name}: metadata readiness probe must run between market discovery and PM trade collector restart"
+                    ));
+                }
+                if !(trade_restart < final_catalog_wait) {
+                    offenders.push(format!(
+                        "{name}: final catalog readiness gate must run after PM trade collector restart"
+                    ));
+                }
+                if !(trade_restart < final_metadata_wait) {
+                    offenders.push(format!(
+                        "{name}: final metadata readiness gate must run after PM trade collector restart"
                     ));
                 }
             }
