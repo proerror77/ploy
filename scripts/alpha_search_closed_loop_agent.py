@@ -110,6 +110,7 @@ def load_artifact(path: Path, target: str) -> dict[str, Any]:
         "state": optional_json(alpha_root / "mcts-state.json") or {},
         "handoff": optional_json(root / "autofactor-strategy-handoff.json") or {},
         "promotion": optional_json(root / "autofactor-strategy-promotion.json") or {},
+        "registry_preview": optional_json(alpha_root / "factor-registry-preview.json") or {},
         "chain": chain,
         "search_space": optional_json(alpha_root / "search-space.json") or {},
         "candidate_strategy_replay": candidate_strategy_replay or {},
@@ -763,15 +764,17 @@ def runtime_replay_candidates(
     limit: int = MAX_RUNTIME_REPLAY_REQUESTS,
 ) -> list[dict[str, Any]]:
     promotion = run.get("promotion")
-    if not isinstance(promotion, dict):
-        return []
-    evaluated = promotion.get("evaluated_factors")
-    if not isinstance(evaluated, list):
-        return []
     target = run.get("target") or DEFAULT_TARGET
-    required_profile = str(
-        promotion.get("required_strategy_profile") or "settlement_probability"
-    )
+    required_profile = "settlement_probability"
+    evaluated: list[Any] = []
+    if isinstance(promotion, dict):
+        required_profile = str(
+            promotion.get("required_strategy_profile") or required_profile
+        )
+        raw_evaluated = promotion.get("evaluated_factors")
+        if isinstance(raw_evaluated, list):
+            evaluated.extend(raw_evaluated)
+    evaluated.extend(registry_preview_runtime_candidates(run, required_profile))
     avoided_families = runtime_avoid_families(run)
     candidates: list[dict[str, Any]] = []
     for item in evaluated:
@@ -801,13 +804,14 @@ def runtime_replay_candidates(
 
     best_candidate_name = str((run.get("feedback") or {}).get("best_candidate") or "")
 
-    def score(item: dict[str, Any]) -> tuple[float, float, float, float, float, float, float, float]:
+    def score(item: dict[str, Any]) -> tuple[float, float, float, float, float, float, float, float, float]:
         factor = item.get("factor") if isinstance(item.get("factor"), dict) else {}
         return (
             1.0 if best_candidate_name and factor.get("name") == best_candidate_name else 0.0,
             1.0
             if factor.get("decision") == "candidate" and factor.get("reason") == "passed"
             else 0.0,
+            as_float(factor.get("reward")) or 0.0,
             as_float(factor.get("top_bucket_n")) or 0.0,
             as_float(factor.get("top_bucket_avg_label")) or 0.0,
             as_float(factor.get("top_bucket_full_depth_entry_fill_rate")) or 0.0,
@@ -841,6 +845,71 @@ def runtime_replay_candidates(
         if len(requests) >= limit:
             break
     return requests
+
+
+def registry_preview_runtime_candidates(
+    run: dict[str, Any],
+    required_profile: str,
+) -> list[dict[str, Any]]:
+    preview = run.get("registry_preview")
+    if not isinstance(preview, dict):
+        return []
+    rows = preview.get("factors")
+    if not isinstance(rows, list):
+        return []
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        contract = row.get("runtime_contract")
+        if not isinstance(contract, dict):
+            continue
+        metrics = row.get("metrics")
+        if not isinstance(metrics, dict):
+            metrics = {}
+        runtime_score = str(contract.get("runtime_score") or "").strip()
+        strategy_profile = str(contract.get("strategy_profile") or "").strip()
+        if not runtime_score or strategy_profile != required_profile:
+            continue
+        blockers: list[str] = []
+        for source in (row.get("blockers"), contract.get("blockers")):
+            if isinstance(source, list):
+                blockers.extend(str(item) for item in source if str(item))
+        blockers = sorted(set(blockers))
+        factor_name = str(row.get("factor_name") or "")
+        status = str(row.get("status") or "")
+        candidates.append(
+            {
+                "blockers": blockers,
+                "factor": {
+                    "name": factor_name,
+                    "target": row.get("target"),
+                    "decision": "candidate" if status == "candidate" else status,
+                    "reason": "passed" if status == "candidate" else status,
+                    "reward": as_float(metrics.get("reward")) or 0.0,
+                    "top_bucket_n": as_float(metrics.get("top_bucket_n"))
+                    or as_float(metrics.get("top_bucket_unique_event_count"))
+                    or 0.0,
+                    "top_bucket_avg_label": as_float(metrics.get("top_bucket_avg_label"))
+                    or 0.0,
+                    "top_bucket_full_depth_entry_fill_rate": as_float(
+                        metrics.get("top_bucket_full_depth_entry_fill_rate")
+                    )
+                    or 0.0,
+                    "positive_window_ratio": as_float(metrics.get("positive_window_ratio"))
+                    or 0.0,
+                    "symbol_positive_ratio": as_float(metrics.get("symbol_positive_ratio"))
+                    or 0.0,
+                    "spearman_ic": as_float(metrics.get("spearman_ic")) or 0.0,
+                },
+                "runtime_mapping": {
+                    "runtime_score": runtime_score,
+                    "strategy_profile": strategy_profile,
+                    "strategy_family": str(contract.get("strategy_family") or ""),
+                },
+            }
+        )
+    return candidates
 
 
 def runtime_avoid_families(run: dict[str, Any]) -> set[str]:

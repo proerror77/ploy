@@ -1,5 +1,47 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Registry Preview Runtime Replay Request (2026-05-28)
+
+Evidence stage: `walk_forward` / `runtime_parity` request repair. This keeps
+`pm5d.threelayer.live` untouched and only repairs the closed-loop planner so a
+blocked hosted walk-forward can dispatch runtime replay evidence for a
+runtime-ready candidate already present in the alpha-search registry preview.
+
+### Tasks
+
+- [x] Inspect hosted walk-forward run `26522896093` and issue `#707`.
+- [x] Confirm full-depth execution-surface evidence is now present and the
+      remaining next action is `fix_runtime`.
+- [x] Make closed-loop runtime replay selection fall back to
+      `factor-registry-preview.json` when promotion top-N rows miss the
+      runtime-ready alpha-search candidate.
+- [ ] Run focused validation, land through PR, and rerun the research loop from
+      `main`.
+
+### Review
+
+- 2026-05-28: Run `26522896093` completed successfully and issue `#707`
+  advanced from `fix-data` to `fix-runtime`, but
+  `alpha-search-chain/closed-loop-decision.json` still had
+  `runtime_replay_requests=[]`. The alpha-search best candidate was
+  `mut_auto_settlement_model_conservative_settlement_edge_spread_adjusted_spread_adjusted`,
+  whose registry contract remained blocked by duplicate spread adjustment. The
+  same registry preview also contained runtime-ready predictive settlement
+  candidates such as `mut_spread_adjusted_external_move_entry_price_quality`,
+  but the closed-loop selector only read promotion top-N rows and missed them.
+- 2026-05-28: Added registry-preview fallback candidate selection to
+  `scripts/alpha_search_closed_loop_agent.py`. Replaying run `26522896093` with
+  the patched script changes the next action to
+  `runtime_mappable_candidate_needs_runtime_replay` and emits three
+  runtime-candidate replay requests, led by
+  `autofactor_formula:mut_spread_adjusted_external_move_entry_price_quality`.
+  Focused validation passed:
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent
+  tests.test_factor_walk_forward_sweep`, `python3 -m py_compile
+  scripts/alpha_search_closed_loop_agent.py
+  tests/test_alpha_search_closed_loop_agent.py tests/test_factor_walk_forward_sweep.py`,
+  and `rtk git diff --check`.
+
 ## Current Session - Settlement Probability Dry-Run Runtime Feedback (2026-05-27)
 
 Evidence stage: `dry_run_candidate` / `execution_quality` runtime evidence.
