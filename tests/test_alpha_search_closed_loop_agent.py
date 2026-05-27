@@ -1195,6 +1195,12 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                 ),
                 "auto_settlement_model_full_depth_settlement_edge_x_external_pressure",
             )
+            self.assertEqual(
+                agent.factor_family(
+                    "mut_auto_settlement_model_full_depth_settlement_edge_spread_adjusted_select_near_strike_ge_025"
+                ),
+                "auto_settlement_model_full_depth_settlement_edge",
+            )
 
     def test_zero_direct_signal_collapse_wins_over_unmapped_same_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

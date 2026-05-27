@@ -1,5 +1,67 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Settlement Probability Dry-Run Runtime Feedback (2026-05-27)
+
+Evidence stage: `dry_run_candidate` / `execution_quality` runtime evidence.
+This session keeps `pm5d.threelayer.live` paused and treats the current
+settlement-probability dry-run candidate as a strategy-quality review, not as a
+live-promotion path.
+
+### Tasks
+
+- [x] Refresh the current public report, deployment state, service health,
+      recording freshness, runtime orders/fills, and event-track DB evidence.
+- [x] Decide whether the observed losses are execution/fill failures,
+      settlement/accounting failures, or signal/filter failures.
+- [x] Persist the dry-run quality decision in
+      `tasks/research_evidence/pm5d_settlement_probability_dryrun_revision_20260527.md`.
+- [x] Connect the negative runtime feedback to Research Manager / AutoFactor
+      typed priors so the next search revises the candidate instead of
+      repairing unrelated runtime-contract blockers.
+- [ ] Trigger or prepare the next research-loop action from `main` without
+      changing live deployment state.
+
+### Review
+
+- 2026-05-27 21:39-21:41 +0800: Remote verification showed live stayed
+  `paused/paused`, the target settlement-probability dry-run stayed
+  `running/running`, `ployd.service` stayed active with `Restart=always`,
+  `NRestarts=0`, `OOMPolicy=kill`, and no host Rust build was running. The
+  recording file remained fresh at
+  `/opt/ploy/data/recordings/pm5d-threelayer-settlement-probability-btc-eth.ndjson`.
+- 2026-05-27: The current dry-run is not blocked by the fill path. BUY orders
+  were `139 FILLED`, requested notional was `2085.0000`, filled notional was
+  `2070.5931` (`99.31%`), rejected BUY orders were `0`, and BUY order context
+  reported `runtime_price_basis=full_depth_sweep` with
+  `full_depth_runtime_parity=true`.
+- 2026-05-27: Strategy quality is not acceptable. The public report at
+  `2026-05-27T13:39:57.928887+00:00` showed `closed_trades=137`,
+  `realized_pnl=-207.43`, `profit_factor=0.781`, `sharpe=-1.0667`, and
+  `max_drawdown=-220.2696`. The clean post-reset window since
+  `2026-05-27 16:08:40 +0800` had `closed_trades=74`,
+  `net_pnl=-74.5452`, and `profit_factor=0.8498`.
+- 2026-05-27: The losing shape is concentrated enough to feed back into search:
+  post-reset `BTCUSDT UP` had `22` closed trades with `net_pnl=-105.6478` and
+  `profit_factor=0.5316`; `ETHUSDT DOWN` had `12` closed trades with
+  `net_pnl=-28.4443` and `profit_factor=0.3699`. `BTCUSDT DOWN` and
+  `ETHUSDT UP` were positive, but this is post-hoc bucket evidence and does not
+  make the combined runtime score promotable.
+- 2026-05-27: Added a typed prior draft at
+  `tasks/research_evidence/pm5d_settlement_probability_dryrun_feedback_prior_20260527.json`
+  with `mutate_or_reject_negative_runtime_edge`, a runtime avoid entry for the
+  current losing runtime score, and bounded mutations that can be passed through
+  `options_json.alpha_search_llm_prior_json` on the next hosted walk-forward
+  search.
+- 2026-05-27 22:24-22:29 +0800: Hosted walk-forward retry run
+  `26517302695` completed successfully from fresh snapshot run `26516561409`,
+  loaded the dry-run feedback typed prior, and generated
+  `after_negative_dryrun` candidates, but handoff stayed `blocked` with
+  `qualified_strategy_count=0`. The blocker was not a fresh runtime failure:
+  runtime-avoid family normalization did not strip selector-threshold suffixes
+  such as `_select_near_strike_ge_025`, so same-family variants of the losing
+  dry-run score could escape the intended penalty. Added focused regressions
+  and a normalization fix before retrying the hosted search again from `main`.
+
 ## Current Session - Settlement Probability Dry-Run Daily Cap (2026-05-27)
 
 Evidence stage: `dry_run_candidate` / `execution_quality` runtime evidence.

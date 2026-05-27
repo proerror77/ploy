@@ -832,6 +832,15 @@ def _normalized_factor_key(raw: str) -> str:
 def _normalized_factor_family(raw: str) -> str:
     value = _normalized_factor_key(raw)
     suffixes = (
+        "_select_entry_price_quality_ge_075",
+        "_select_entry_price_quality_ge_050",
+        "_select_entry_price_quality_ge_025",
+        "_select_full_depth_entry_ge_075",
+        "_select_full_depth_entry_ge_050",
+        "_select_full_depth_entry_ge_025",
+        "_select_near_strike_ge_075",
+        "_select_near_strike_ge_050",
+        "_select_near_strike_ge_025",
         "_runtime_pass_through_add_spread_penalty",
         "_runtime_pass_through_add_capacity_gate",
         "_add_spread_penalty",

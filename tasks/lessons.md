@@ -143,6 +143,21 @@
   - Do not move a DB/private-endpoint workflow to GitHub-hosted runners by changing only `runs-on`; first replace the data source with a portable artifact or a hosted-safe export path.
   - When a complete sampled snapshot artifact exists, do not block strategy promotion on `ploy-ci-1` availability.
 
+- Pattern: Runtime feedback priors can look consumed while still failing to
+  affect AutoFactor selection if factor-family normalization misses generated
+  selector suffixes like `_select_near_strike_ge_025` or
+  `_select_entry_price_quality_ge_075`.
+- Rule: When a dry-run feedback prior is supposed to avoid or penalize a losing
+  runtime family, verify the artifact's `search-feedback.json`,
+  `node-metrics.json`, and selected MCTS nodes show the family penalty on every
+  generated selector/gate variant before concluding the search "retried"
+  correctly.
+- Guardrail:
+  - Add normalization regressions for any new deterministic or LLM mutation
+    suffix before relying on `runtime_avoid_factors`.
+  - If a retry still selects a same-family variant of the losing dry-run score,
+    inspect normalization first, not runtime contract plumbing.
+
 ## 2026-03-06
 
 - Pattern: Managed strategy bootstrap can silently drift from the checked-in live strategy template and override production sizing without touching host config files.

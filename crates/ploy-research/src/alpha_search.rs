@@ -1481,6 +1481,15 @@ fn runtime_feedback_penalty(feedback: &AlphaSearchRuntimeFeedback) -> f64 {
 fn normalized_factor_family(raw: &str) -> String {
     let mut value = normalized_factor_key(raw);
     let suffixes = [
+        "_select_entry_price_quality_ge_075",
+        "_select_entry_price_quality_ge_050",
+        "_select_entry_price_quality_ge_025",
+        "_select_full_depth_entry_ge_075",
+        "_select_full_depth_entry_ge_050",
+        "_select_full_depth_entry_ge_025",
+        "_select_near_strike_ge_075",
+        "_select_near_strike_ge_050",
+        "_select_near_strike_ge_025",
         "_runtime_pass_through_add_spread_penalty",
         "_runtime_pass_through_add_capacity_gate",
         "_add_spread_penalty",
@@ -2157,5 +2166,33 @@ mod tests {
             "auto_settlement_model_full_depth_settlement_edge_x_external_pressure"
         );
         assert!(matching_runtime_avoidance(&dangling_interaction, &composed_avoidances).is_some());
+
+        let selected_gate_variant = sample_report(
+            "mut_auto_settlement_model_full_depth_settlement_edge_spread_adjusted_select_near_strike_ge_025",
+        );
+        assert_eq!(
+            normalized_factor_family(&selected_gate_variant.name),
+            "auto_settlement_model_full_depth_settlement_edge"
+        );
+        let selected_gate_prior = LlmPriorSpec {
+            mutations: Vec::new(),
+            runtime_avoid_factors: vec![crate::autofactor::RuntimeAvoidFactorSpec {
+                base_factor:
+                    "mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted"
+                        .to_string(),
+                factor_family: Some("auto_settlement_model_full_depth_settlement_edge".to_string()),
+                runtime_score: Some(
+                    "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted"
+                        .to_string(),
+                ),
+                reason: Some("negative_runtime_edge".to_string()),
+                metrics: serde_json::Value::Null,
+            }],
+        };
+        assert!(matching_runtime_avoidance(
+            &selected_gate_variant,
+            &runtime_avoidances(None, Some(&selected_gate_prior))
+        )
+        .is_some());
     }
 }
