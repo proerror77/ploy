@@ -220,6 +220,17 @@ def classify_blockers(blockers: list[str]) -> str | None:
     if any(
         token in text
         for token in [
+            "roi_too_low",
+            "total_pnl_nonpositive",
+            "realized_pnl_nonpositive",
+            "negative_runtime_edge",
+            "negative_runtime_replay_edge",
+        ]
+    ):
+        return "revise_prior"
+    if any(
+        token in text
+        for token in [
             "data_audit_zero_coverage",
             "snapshot_contract_blocks_execution_claim",
             "sampled_snapshot_required_for_execution_surface",
@@ -403,6 +414,10 @@ def runtime_pass_through_feedback(run: dict[str, Any]) -> dict[str, Any]:
         or as_float(metrics.get("trade_count"))
         or 0
     )
+    roi = as_float(metrics.get("roi"))
+    total_pnl = as_float(metrics.get("total_pnl"))
+    unique_event_count = int(as_float(metrics.get("unique_event_count")) or 0)
+    entry_fill_rate = as_float(metrics.get("entry_fill_rate"))
     direct_passes = configured_direct_passes(counterfactual)
     if direct_passes is None:
         direct_passes = int(
@@ -410,32 +425,50 @@ def runtime_pass_through_feedback(run: dict[str, Any]) -> dict[str, Any]:
             or 0
         )
 
-    blockers: list[str] = []
+    pass_through_blockers: list[str] = []
     if direct_passes >= 50 and entry_signals < 50:
-        blockers.append(
+        pass_through_blockers.append(
             f"runtime_entry_pass_through_too_low:{entry_signals}/{direct_passes}<50"
         )
     if formula_evaluations >= 500 and executable_edge_pass < 50:
-        blockers.append(
+        pass_through_blockers.append(
             "runtime_executable_edge_pass_min_edge_too_low:"
             f"{executable_edge_pass}/{formula_evaluations}<50"
         )
     if depth_fillable >= 500 and entry_signals < 50:
-        blockers.append(
+        pass_through_blockers.append(
             f"runtime_depth_fillable_to_entry_signal_collapse:{entry_signals}/{depth_fillable}<50"
         )
+
+    economic_blockers: list[str] = []
+    if roi is not None and roi < 0.0:
+        economic_blockers.append(f"runtime_replay_roi_too_low:{roi:.6f}<0.000000")
+    elif roi is None and total_pnl is not None and total_pnl <= 0.0:
+        economic_blockers.append(f"runtime_replay_total_pnl_nonpositive:{total_pnl:.6f}")
+
+    blockers = pass_through_blockers + economic_blockers
     if not blockers:
         return {}
+    reason = (
+        "runtime_pass_through_collapse"
+        if pass_through_blockers
+        else "negative_runtime_replay_edge"
+    )
     return {
-        "reason": "runtime_pass_through_collapse",
+        "reason": reason,
         "runtime_score": runtime_score,
         "base_factor": runtime_score_base_factor(runtime_score),
         "metrics": {
             "entry_signals": entry_signals,
+            "unique_event_count": unique_event_count,
+            "entry_fill_rate": entry_fill_rate,
+            "roi": roi,
+            "total_pnl": total_pnl,
             "direct_passes_at_configured_threshold": direct_passes,
             "formula_evaluations": formula_evaluations,
             "depth_fillable": depth_fillable,
             "executable_edge_pass_min_edge": executable_edge_pass,
+            "score_counterfactual_diagnosis": counterfactual.get("diagnosis"),
             "skip_entry_score": diagnostics.get("skip_entry_score"),
             "skip_edge_score": diagnostics.get("skip_edge_score"),
             "skip_settlement_side_score": diagnostics.get("skip_settlement_side_score"),
