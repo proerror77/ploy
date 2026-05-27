@@ -56,6 +56,16 @@ PREFERRED_FEATURES = {
     "replace_denominator": ["side_spread", "entry_capacity_score"],
 }
 
+RUNTIME_CONTRACT_GAP_TOKENS = (
+    "runtime_contract_unmapped_bayes_formula",
+    "runtime_contract_unmapped_factor",
+    "runtime_input_unsupported",
+    "unsupported_runtime_input",
+    "unsupported_runtime_inputs",
+    "incomplete_runtime_contract_mapping",
+    "missing_runtime_contract",
+)
+
 
 def load_json(path: Path) -> Any:
     with path.open(encoding="utf-8") as handle:
@@ -477,13 +487,98 @@ def runtime_pass_through_feedback(run: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def runtime_mapping_gap_feedback(run: dict[str, Any]) -> dict[str, Any]:
+def runtime_gap_reason(
+    blockers: list[str],
+    *,
+    include_contract_gaps: bool,
+) -> str:
+    lowered = [str(item).lower() for item in blockers]
+    if any("missing_runtime_strategy_mapping" in item for item in lowered):
+        return "missing_runtime_strategy_mapping"
+    if not include_contract_gaps:
+        return ""
+    if any("runtime_input_unsupported" in item for item in lowered):
+        return "unsupported_runtime_input"
+    if any("unsupported_runtime_input" in item for item in lowered):
+        return "unsupported_runtime_input"
+    for token in RUNTIME_CONTRACT_GAP_TOKENS:
+        if any(token in item for item in lowered):
+            return token
+    return ""
+
+
+def registry_preview_runtime_gap_candidates(
+    run: dict[str, Any],
+    *,
+    include_contract_gaps: bool,
+) -> list[dict[str, Any]]:
+    preview = run.get("registry_preview")
+    if not isinstance(preview, dict):
+        return []
+    rows = preview.get("factors")
+    if not isinstance(rows, list):
+        return []
+    target = run.get("target") or DEFAULT_TARGET
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("target") not in {None, target}:
+            continue
+        if row.get("status") != "candidate":
+            continue
+        contract = row.get("runtime_contract")
+        if not isinstance(contract, dict):
+            contract = {}
+        metrics = row.get("metrics")
+        if not isinstance(metrics, dict):
+            metrics = {}
+        blockers: list[str] = []
+        for source in (row.get("blockers"), contract.get("blockers")):
+            if isinstance(source, list):
+                blockers.extend(str(item) for item in source if str(item))
+        blockers = sorted(set(blockers))
+        reason = runtime_gap_reason(
+            blockers,
+            include_contract_gaps=include_contract_gaps,
+        )
+        if not reason:
+            continue
+        name = str(row.get("factor_name") or "")
+        if not name:
+            continue
+        factor = {
+            "name": name,
+            "target": row.get("target"),
+            "decision": "candidate",
+            "reason": "passed",
+            "top_bucket_avg_label": metrics.get("top_bucket_avg_label"),
+            "positive_window_ratio": metrics.get("positive_window_ratio"),
+            "symbol_positive_ratio": metrics.get("symbol_positive_ratio"),
+            "spearman_ic": metrics.get("spearman_ic"),
+            "reward": metrics.get("reward"),
+        }
+        candidates.append(
+            {
+                "item": row,
+                "factor": factor,
+                "blockers": blockers,
+                "name": name,
+                "reason": reason,
+                "factor_family": str(
+                    contract.get("factor_family") or factor_family(name)
+                ),
+            }
+        )
+    return candidates
+
+
+def runtime_mapping_gap_feedback(
+    run: dict[str, Any],
+    *,
+    include_contract_gaps: bool = False,
+) -> dict[str, Any]:
     promotion = run.get("promotion")
-    if not isinstance(promotion, dict):
-        return {}
-    evaluated = promotion.get("evaluated_factors")
-    if not isinstance(evaluated, list):
-        return {}
     target = run.get("target") or DEFAULT_TARGET
     feedback = run.get("feedback") if isinstance(run.get("feedback"), dict) else {}
     best_candidate = str(feedback.get("best_candidate") or "")
@@ -491,23 +586,45 @@ def runtime_mapping_gap_feedback(run: dict[str, Any]) -> dict[str, Any]:
     top_selected = str(plan_nodes[0].get("factor_name") or "") if plan_nodes else ""
 
     candidates: list[dict[str, Any]] = []
-    for item in evaluated:
-        if not isinstance(item, dict):
-            continue
-        factor = item.get("factor")
-        if not isinstance(factor, dict):
-            continue
-        if factor.get("target") not in {None, target}:
-            continue
-        if factor.get("decision") != "candidate" or factor.get("reason") != "passed":
-            continue
-        blockers = blocker_strings(item)
-        if "missing_runtime_strategy_mapping" not in blockers:
-            continue
-        name = str(factor.get("name") or "")
-        if not name:
-            continue
-        candidates.append({"item": item, "factor": factor, "blockers": blockers, "name": name})
+    if isinstance(promotion, dict):
+        evaluated = promotion.get("evaluated_factors")
+        if isinstance(evaluated, list):
+            for item in evaluated:
+                if not isinstance(item, dict):
+                    continue
+                factor = item.get("factor")
+                if not isinstance(factor, dict):
+                    continue
+                if factor.get("target") not in {None, target}:
+                    continue
+                if factor.get("decision") != "candidate" or factor.get("reason") != "passed":
+                    continue
+                blockers = blocker_strings(item)
+                reason = runtime_gap_reason(
+                    blockers,
+                    include_contract_gaps=include_contract_gaps,
+                )
+                if not reason:
+                    continue
+                name = str(factor.get("name") or "")
+                if not name:
+                    continue
+                candidates.append(
+                    {
+                        "item": item,
+                        "factor": factor,
+                        "blockers": blockers,
+                        "name": name,
+                        "reason": reason,
+                        "factor_family": factor_family(name),
+                    }
+                )
+    candidates.extend(
+        registry_preview_runtime_gap_candidates(
+            run,
+            include_contract_gaps=include_contract_gaps,
+        )
+    )
     if not candidates:
         return {}
 
@@ -524,18 +641,50 @@ def runtime_mapping_gap_feedback(run: dict[str, Any]) -> dict[str, Any]:
     selected = max(candidates, key=score)
     factor = selected["factor"]
     base_factor = selected["name"]
+    selected_family = str(selected.get("factor_family") or factor_family(base_factor))
+    related: list[dict[str, Any]] = []
+    seen_families: set[str] = set()
+    for candidate in sorted(candidates, key=score, reverse=True):
+        name = str(candidate.get("name") or "")
+        family = str(candidate.get("factor_family") or factor_family(name)).strip()
+        if not name or not family or family in seen_families:
+            continue
+        seen_families.add(family)
+        candidate_factor = (
+            candidate.get("factor") if isinstance(candidate.get("factor"), dict) else {}
+        )
+        related.append(
+            {
+                "reason": candidate.get("reason") or "missing_runtime_strategy_mapping",
+                "base_factor": name,
+                "factor_family": family,
+                "runtime_score": "",
+                "metrics": {
+                    "top_bucket_avg_label": candidate_factor.get("top_bucket_avg_label"),
+                    "positive_window_ratio": candidate_factor.get("positive_window_ratio"),
+                    "symbol_positive_ratio": candidate_factor.get("symbol_positive_ratio"),
+                    "spearman_ic": candidate_factor.get("spearman_ic"),
+                    "reward": candidate_factor.get("reward"),
+                },
+                "blockers": candidate.get("blockers") or [],
+            }
+        )
+        if len(related) >= 8:
+            break
     return {
-        "reason": "missing_runtime_strategy_mapping",
+        "reason": selected.get("reason") or "missing_runtime_strategy_mapping",
         "base_factor": base_factor,
-        "factor_family": factor_family(base_factor),
+        "factor_family": selected_family,
         "runtime_score": "",
         "metrics": {
             "top_bucket_avg_label": factor.get("top_bucket_avg_label"),
             "positive_window_ratio": factor.get("positive_window_ratio"),
             "symbol_positive_ratio": factor.get("symbol_positive_ratio"),
             "spearman_ic": factor.get("spearman_ic"),
+            "reward": factor.get("reward"),
         },
         "blockers": selected["blockers"],
+        "related_factors": related,
     }
 
 
@@ -564,7 +713,12 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
     handoff_blockers = blocker_strings(handoff)
     runtime_feedback = runtime_pass_through_feedback(current)
     runtime_blockers = runtime_feedback.get("blockers") if runtime_feedback else []
-    runtime_unmapped_feedback = runtime_mapping_gap_feedback(current)
+    runtime_requests = runtime_replay_requests(current)
+    has_runtime_replay_candidate = bool(runtime_requests)
+    runtime_unmapped_feedback = runtime_mapping_gap_feedback(
+        current,
+        include_contract_gaps=not has_runtime_replay_candidate,
+    )
     runtime_unmapped_blockers = (
         runtime_unmapped_feedback.get("blockers") if runtime_unmapped_feedback else []
     )
@@ -585,8 +739,6 @@ def closed_loop_decision(runs: list[dict[str, Any]]) -> dict[str, Any]:
         if as_float(run["feedback"].get("best_reward")) is not None
     ]
     prior_best_reward = max(prior_rewards) if prior_rewards else None
-    runtime_requests = runtime_replay_requests(current)
-    has_runtime_replay_candidate = bool(runtime_requests)
 
     if handoff.get("status") == "ready":
         action = "ready_handoff"
@@ -1105,6 +1257,11 @@ def collect_runtime_avoid_factors(
             }
     runtime_unmapped_feedback = decision.get("runtime_unmapped_feedback")
     if isinstance(runtime_unmapped_feedback, dict) and runtime_unmapped_feedback:
+        related = runtime_unmapped_feedback.get("related_factors")
+        if isinstance(related, list):
+            for item in related:
+                if isinstance(item, dict):
+                    add_item(item)
         base_factor = str(runtime_unmapped_feedback.get("base_factor") or "").strip()
         family = str(
             runtime_unmapped_feedback.get("factor_family") or factor_family(base_factor)
@@ -1198,10 +1355,15 @@ def build_prior(runs: list[dict[str, Any]], decision: dict[str, Any], limit: int
             item["window"] = 30
         mutations.append(item)
 
-    if not mutations and decision["action"] == "revise_prior":
+    fallback_base_factor = "auto_settlement_model_full_depth_settlement_edge"
+    if (
+        not mutations
+        and decision["action"] == "revise_prior"
+        and factor_family(fallback_base_factor) not in runtime_avoid_families
+    ):
         mutations.append(
             {
-                "base_factor": "auto_settlement_model_full_depth_settlement_edge",
+                "base_factor": fallback_base_factor,
                 "mutation_type": "add_capacity_gate",
                 "name": "llm_model_full_depth_edge_capacity_gate",
                 "feature": "entry_capacity_score",

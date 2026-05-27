@@ -933,6 +933,180 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
         )
         self.assertEqual(runtime_score, request["inputs"]["runtime_score"])
 
+    def test_unmapped_runtime_contract_without_replay_request_revises_prior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked_factor = (
+                "mcts_mcts_auto_settlement_model_conservative_settlement_edge_"
+                "spread_adjusted_spread_adjusted_spread_adjusted"
+            )
+            blocked_family = "auto_settlement_model_conservative_settlement_edge"
+            bayes_factor = "mut_bayes_model_market_reversal_select_entry_price_quality_ge_025"
+            spread_runtime_score = (
+                "autofactor_formula:mut_spread_adjusted_external_move_entry_price_quality"
+            )
+            path = artifact(
+                Path(tmp),
+                chain_reason="chain_next_run_false",
+                selected_nodes=[
+                    {
+                        "factor_name": blocked_factor,
+                        "selected_dimension": "exploit",
+                        "proposed_mutation": "add_capacity_gate",
+                    },
+                    {
+                        "factor_name": bayes_factor,
+                        "selected_dimension": "exploit",
+                        "proposed_mutation": "add_capacity_gate",
+                    },
+                ],
+                feedback={
+                    "target": agent.DEFAULT_TARGET,
+                    "candidate_count": 1289,
+                    "rejected_count": 875,
+                    "passed_count": 256,
+                    "best_candidate": blocked_factor,
+                    "best_reward": 6.3511,
+                    "runtime_avoid_factors": [
+                        {
+                            "base_factor": "mut_spread_adjusted_external_move_select_entry_price_quality_ge_075",
+                            "factor_family": "spread_adjusted_external_move",
+                            "runtime_score": (
+                                "autofactor_formula:"
+                                "mut_spread_adjusted_external_move_select_entry_price_quality_ge_075"
+                            ),
+                            "reason": "negative_runtime_replay_edge",
+                        }
+                    ],
+                },
+                promotion={
+                    "decision": "blocked",
+                    "required_strategy_profile": "settlement_probability",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "candidate_strategy_replay_not_runtime_replay:"
+                                "factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
+                                "runtime_contract_unmapped_factor",
+                                "empty_runtime_strategy_profile",
+                            ],
+                            "factor": {
+                                "name": blocked_factor,
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": "",
+                                "strategy_profile": "",
+                            },
+                        }
+                    ],
+                    "candidate_strategy_replay": {
+                        "basis": "factor_walk_forward_top_bucket_aggregate",
+                        "runtime_score": "",
+                        "strategy_profile": "settlement_probability",
+                    },
+                },
+                registry_preview={
+                    "version": "alpha_search_artifacts_v1",
+                    "target": agent.DEFAULT_TARGET,
+                    "horizon": "5m",
+                    "factors": [
+                        {
+                            "factor_name": blocked_factor,
+                            "target": agent.DEFAULT_TARGET,
+                            "status": "candidate",
+                            "runtime_contract": {
+                                "runtime_score": "",
+                                "strategy_profile": "",
+                                "strategy_family": "",
+                                "factor_family": blocked_family,
+                                "blockers": ["runtime_contract_unmapped_factor"],
+                            },
+                            "metrics": {
+                                "reward": 6.3511,
+                                "top_bucket_unique_event_count": 129,
+                                "top_bucket_avg_label": 8.8691,
+                                "top_bucket_full_depth_entry_fill_rate": 1.0,
+                                "positive_window_ratio": 0.8888,
+                                "spearman_ic": 0.2316,
+                            },
+                            "blockers": ["runtime_contract_unmapped_factor"],
+                        },
+                        {
+                            "factor_name": bayes_factor,
+                            "target": agent.DEFAULT_TARGET,
+                            "status": "candidate",
+                            "runtime_contract": {
+                                "runtime_score": "",
+                                "strategy_profile": "",
+                                "strategy_family": "",
+                                "factor_family": "bayes_model_market_reversal",
+                                "blockers": [
+                                    "runtime_contract_unmapped_factor",
+                                    "runtime_input_unsupported:bayes_model_disagreement",
+                                ],
+                            },
+                            "metrics": {
+                                "reward": 6.15,
+                                "top_bucket_unique_event_count": 126,
+                                "top_bucket_avg_label": 7.1,
+                                "top_bucket_full_depth_entry_fill_rate": 1.0,
+                                "positive_window_ratio": 0.7777,
+                                "spearman_ic": 0.18,
+                            },
+                            "blockers": [
+                                "runtime_contract_unmapped_factor",
+                                "runtime_input_unsupported:bayes_model_disagreement",
+                            ],
+                        },
+                        {
+                            "factor_name": "mut_spread_adjusted_external_move_entry_price_quality",
+                            "target": agent.DEFAULT_TARGET,
+                            "status": "candidate",
+                            "runtime_contract": {
+                                "runtime_score": spread_runtime_score,
+                                "strategy_profile": "settlement_probability",
+                                "strategy_family": "predictive_settlement_probability",
+                                "factor_family": "spread_adjusted_external_move",
+                                "blockers": [],
+                            },
+                            "metrics": {
+                                "reward": 6.02,
+                                "top_bucket_unique_event_count": 129,
+                                "top_bucket_avg_label": 8.4,
+                                "top_bucket_full_depth_entry_fill_rate": 1.0,
+                                "positive_window_ratio": 0.8888,
+                                "spearman_ic": 0.221,
+                            },
+                            "blockers": [],
+                        },
+                    ],
+                },
+            )
+
+            runs = [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            decision = agent.closed_loop_decision(runs)
+            prior = agent.build_prior(runs, decision, 5)
+
+        self.assertEqual("revise_prior", decision["decision"])
+        self.assertEqual("runtime_contract_unmapped_factor", decision["reason"])
+        self.assertEqual([], decision["runtime_replay_requests"])
+        self.assertEqual(blocked_factor, decision["runtime_unmapped_feedback"]["base_factor"])
+        self.assertEqual(
+            blocked_family,
+            decision["runtime_unmapped_feedback"]["factor_family"],
+        )
+        avoid_families = {
+            item["factor_family"] for item in prior["runtime_avoid_factors"]
+        }
+        self.assertIn(blocked_family, avoid_families)
+        self.assertIn("bayes_model_market_reversal", avoid_families)
+        self.assertIn("spread_adjusted_external_move", avoid_families)
+        mutation_bases = {item["base_factor"] for item in prior["mutations"]}
+        self.assertNotIn(blocked_factor, mutation_bases)
+        self.assertNotIn(bayes_factor, mutation_bases)
+
     def test_fix_runtime_includes_batch_runtime_replay_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             scores = [

@@ -1,5 +1,59 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Unmapped Runtime Contract Prior Feedback (2026-05-27)
+
+Evidence stage: `walk_forward` / `runtime_parity` feedback repair. This keeps
+live and dry-run deployment state untouched and fixes the closed-loop planner so
+a hosted walk-forward that has only unsupported or unmapped runtime-contract
+candidates does not stop at `fix_runtime` with no replay request.
+
+### Files / Ownership
+
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: classify unsupported runtime-contract frontier as typed prior
+    feedback when no executable replay request exists.
+- `tests/test_alpha_search_closed_loop_agent.py`
+  - Owner: regression coverage for the no-request runtime-contract gap state.
+- `tasks/todo.md`
+  - Owner: session tracking and evidence notes.
+
+### Tasks
+
+- [x] Reproduce hosted run `26526988422` locally and confirm it emits
+      `fix_runtime` with `runtime_replay_requests=[]`.
+- [x] Add regression coverage for unsupported/unmapped runtime-contract
+      candidates with no replayable runtime score.
+- [x] Route that state to `revise_prior` and emit runtime avoid feedback.
+- [x] Run focused validation and simulate against `26526988422`.
+- [ ] Land through PR and rerun the hosted research loop from `main`.
+
+### Review
+
+- 2026-05-27: Downloaded run `26526988422` artifacts from GitHub Actions and
+  reproduced the stale frontier locally. The run completed successfully from
+  `main@fe7e0dc1`, but closed-loop output remained
+  `action=fix_runtime`, `reason=promotion_blockers_require_fix_runtime`, and
+  `runtime_replay_requests=[]`. The current best and selected candidates are
+  unsupported/unmapped runtime-contract families such as
+  `auto_settlement_model_conservative_settlement_edge` and Bayes-derived
+  research-only inputs, while prior feedback already avoids the previously
+  failed runtime-ready families.
+- 2026-05-27: Added no-request runtime-contract gap feedback to
+  `scripts/alpha_search_closed_loop_agent.py`. A current-run registry preview
+  frontier with `runtime_contract_unmapped_factor` /
+  `runtime_input_unsupported:*` blockers now becomes
+  `action=revise_prior`, `reason=runtime_contract_unmapped_factor`, and emits
+  related runtime avoid families instead of an empty `fix_runtime` action.
+  Focused validation passed:
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent
+  tests.test_factor_walk_forward_sweep`, `python3 -m py_compile
+  scripts/alpha_search_closed_loop_agent.py
+  tests/test_alpha_search_closed_loop_agent.py`, and `rtk git diff --check`.
+  Replaying run `26526988422` with the patched script now produces
+  `runtime_replay_requests=[]`, no new prior mutations, and runtime avoid
+  families for the already failed replay families plus the unsupported
+  conservative-settlement and Bayes-derived runtime-contract families.
+
 ## Current Session - Runtime Replay Negative Edge Feedback (2026-05-27)
 
 Evidence stage: `runtime_parity` / `walk_forward` feedback repair. This keeps
