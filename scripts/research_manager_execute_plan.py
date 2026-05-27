@@ -8,6 +8,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,49 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _source_snapshot_run_id_from_text(raw: str) -> str:
+    for line in raw.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "source_snapshot_run_id":
+            return value.strip()
+    return ""
+
+
+def _source_snapshot_run_id_from_alpha_artifact(run_id: str, artifact_name: str) -> str:
+    if not run_id or not artifact_name:
+        return ""
+    if not (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")):
+        return ""
+    if not os.environ.get("GITHUB_REPOSITORY"):
+        return ""
+
+    downloader = Path(__file__).resolve().with_name("download_github_artifact.py")
+    with tempfile.TemporaryDirectory(prefix="ploy-alpha-provenance-") as tmp:
+        out = Path(tmp)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(downloader),
+                "--run-id",
+                run_id,
+                "--name",
+                artifact_name,
+                "--output-dir",
+                str(out),
+                "--require",
+                "snapshot-provenance/source.txt",
+            ],
+            text=True,
+            capture_output=True,
+        )
+        if completed.returncode != 0:
+            return ""
+        source = out / "snapshot-provenance" / "source.txt"
+        if not source.is_file():
+            return ""
+        return _source_snapshot_run_id_from_text(source.read_text(encoding="utf-8"))
 
 
 def _date_from_ts(raw: str | None) -> str:
@@ -257,12 +302,16 @@ def _walk_forward_dispatch(
     candidate_strategy_replay_artifact_name: str = "",
     full_depth_execution_surface_run_id: str = "",
     full_depth_execution_surface_artifact_name: str = "",
+    extra_blockers: list[str] | None = None,
+    snapshot_resolution: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     blockers: list[str] = []
     if not snapshot_run_id:
         blockers.append("missing_snapshot_run_id")
     if not _parse_symbols(symbols):
         blockers.append("missing_symbols")
+    if extra_blockers:
+        blockers.extend(extra_blockers)
     options = {
         "chain_next_run": chain_remaining > 0,
         "chain_remaining": max(chain_remaining - 1, 0),
@@ -302,13 +351,16 @@ def _walk_forward_dispatch(
         "stake_usd": stake_usd,
         "options_json": json.dumps(options, separators=(",", ":"), sort_keys=True),
     }
-    return {
+    dispatch = {
         "workflow": "factor-walk-forward-v2-hosted-artifact.yml",
         "reason": "bounded hosted walk-forward continuation from Research Manager plan",
         "ready": not blockers,
         "blockers": blockers,
         "fields": fields,
     }
+    if snapshot_resolution:
+        dispatch["snapshot_resolution"] = snapshot_resolution
+    return dispatch
 
 
 def _runtime_candidate_replay_dispatch(
@@ -980,6 +1032,47 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
     alpha_search_plan_run_id = ""
     if plan.get("theme") == "revise_prior":
         alpha_search_plan_run_id = str(latest_replay_contract.get("source_run_id") or "")
+    alpha_search_plan_artifact_name = (
+        f"factor-walk-forward-v2-{alpha_search_plan_run_id}"
+        if alpha_search_plan_run_id
+        else ""
+    )
+    walk_forward_snapshot_run_id = args.snapshot_run_id
+    walk_forward_extra_blockers: list[str] = []
+    walk_forward_snapshot_resolution: dict[str, str] = {}
+    if alpha_search_plan_run_id and getattr(args, "resolve_snapshot_provenance", False):
+        resolved_source_snapshot_run_id = _source_snapshot_run_id_from_alpha_artifact(
+            alpha_search_plan_run_id,
+            alpha_search_plan_artifact_name,
+        )
+        if resolved_source_snapshot_run_id:
+            walk_forward_snapshot_resolution = {
+                "source": "alpha_search_plan_artifact_snapshot_provenance",
+                "alpha_search_plan_run_id": alpha_search_plan_run_id,
+                "alpha_search_plan_artifact_name": alpha_search_plan_artifact_name,
+                "source_snapshot_run_id": resolved_source_snapshot_run_id,
+            }
+            if (
+                not walk_forward_snapshot_run_id
+                or walk_forward_snapshot_run_id == alpha_search_plan_run_id
+            ):
+                walk_forward_snapshot_run_id = resolved_source_snapshot_run_id
+                walk_forward_snapshot_resolution["status"] = "applied"
+            else:
+                walk_forward_snapshot_resolution["status"] = "provided_snapshot_run_id_kept"
+                walk_forward_snapshot_resolution["provided_snapshot_run_id"] = (
+                    walk_forward_snapshot_run_id
+                )
+        elif walk_forward_snapshot_run_id == alpha_search_plan_run_id:
+            walk_forward_extra_blockers.append(
+                "snapshot_run_id_points_to_alpha_search_plan_without_source_snapshot_provenance"
+            )
+            walk_forward_snapshot_resolution = {
+                "source": "alpha_search_plan_artifact_snapshot_provenance",
+                "alpha_search_plan_run_id": alpha_search_plan_run_id,
+                "alpha_search_plan_artifact_name": alpha_search_plan_artifact_name,
+                "status": "unresolved",
+            }
     negative_economics_prior = _negative_economics_prior_payload(
         blocker_actions,
         latest_replay_contract,
@@ -1045,18 +1138,14 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
         dispatches.append(
             _walk_forward_dispatch(
                 git_ref=args.git_ref,
-                snapshot_run_id=args.snapshot_run_id,
+                snapshot_run_id=walk_forward_snapshot_run_id,
                 symbols=args.symbols,
                 stake_usd=args.stake_usd,
                 chain_remaining=args.chain_remaining,
                 alpha_search_plan_target=walk_forward_target,
                 allowed_target=walk_forward_target,
                 alpha_search_plan_run_id=alpha_search_plan_run_id,
-                alpha_search_plan_artifact_name=(
-                    f"factor-walk-forward-v2-{alpha_search_plan_run_id}"
-                    if alpha_search_plan_run_id
-                    else ""
-                ),
+                alpha_search_plan_artifact_name=alpha_search_plan_artifact_name,
                 alpha_search_llm_prior=typed_prior,
                 candidate_strategy_replay_run_id=getattr(
                     args,
@@ -1088,6 +1177,8 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                     "",
                 )
                 or latest_full_depth_surface_artifact.get("artifact_name", ""),
+                extra_blockers=walk_forward_extra_blockers,
+                snapshot_resolution=walk_forward_snapshot_resolution,
             )
         )
 
@@ -1253,6 +1344,15 @@ def main() -> None:
     parser.add_argument("--runtime-min-roi", default="0")
     parser.add_argument("--runtime-source-target", default="full_depth_settlement_executable_pnl")
     parser.add_argument("--runtime-source-horizon", default="5m")
+    parser.add_argument(
+        "--resolve-snapshot-provenance",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Resolve hosted walk-forward continuations back to the source research "
+            "snapshot run id recorded in the prior alpha-search artifact."
+        ),
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

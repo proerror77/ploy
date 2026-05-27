@@ -1,5 +1,56 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Snapshot Provenance Continuation (2026-05-28)
+
+Evidence stage: `walk_forward` / `runtime_parity` feedback repair. This keeps
+dry-run/live deployment state untouched and fixes the Research Manager executor
+so a continued hosted walk-forward reuses the source research snapshot run id
+from the previous alpha-search artifact provenance instead of accidentally
+passing the previous walk-forward run id as `snapshot_run_id`.
+
+### Files / Ownership
+
+- `scripts/research_manager_execute_plan.py`
+  - Owner: resolve `snapshot-provenance/source.txt` from the prior
+    factor-walk-forward artifact and use `source_snapshot_run_id` for the next
+    hosted walk-forward.
+- `tests/test_research_manager_execute_plan.py`
+  - Owner: regression for the `snapshot_run_id == alpha_search_plan_run_id`
+    failure shape seen in run `26544076700`.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+### Tasks
+
+- [x] Reproduce failed follow-up run `26544076700`: hosted walk-forward tried
+      to download `research-snapshot-26542589633`, then failed because the
+      embedded factor artifact has only `snapshot-provenance/`, not
+      `research-snapshot/`.
+- [x] Confirm prior walk-forward artifact `26542589633` records
+      `source_snapshot_run_id=26516561409` in
+      `snapshot-provenance/source.txt`.
+- [x] Implement executor provenance resolution and fail closed when a
+      walk-forward run id is passed as `snapshot_run_id` but provenance cannot
+      be resolved.
+- [x] Run focused validation.
+- [ ] Land through PR, deploy main to tango, and rerun the Research Manager
+      executor against plan `26543982839`.
+- [ ] Verify the new follow-up walk-forward dispatch uses
+      `snapshot_run_id=26516561409` and
+      `alpha_search_plan_run_id=26542589633`.
+
+### Review
+
+- 2026-05-28: Focused validation passed:
+  `python3 -m unittest tests.test_research_manager_execute_plan`,
+  `python3 -m py_compile scripts/research_manager_execute_plan.py
+  tests/test_research_manager_execute_plan.py`, and `rtk git diff --check`.
+  A local dry-run of plan `26543982839` with the previously wrong
+  `--snapshot-run-id 26542589633` now resolves provenance from
+  `factor-walk-forward-v2-26542589633` and emits
+  `snapshot_run_id=26516561409` while keeping
+  `alpha_search_plan_run_id=26542589633`.
+
 ## Current Session - Research Manager Data Blocker Routing (2026-05-28)
 
 Evidence stage: `walk_forward` / `runtime_parity` feedback repair. This keeps
