@@ -1,5 +1,40 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Runtime Replay Negative Edge Feedback (2026-05-27)
+
+Evidence stage: `runtime_parity` / `walk_forward` feedback repair. This keeps
+live untouched and fixes the closed-loop classifier so completed runtime replay
+artifacts with real fills but negative executable ROI revise the AutoFactor
+prior instead of causing repeated runtime replay requests.
+
+### Tasks
+
+- [x] Inspect replay runs `26524390852`, `26524392527`, and `26524394212`.
+- [x] Confirm the state machine now reaches runtime replay evidence but the
+      candidate economics are not promotable.
+- [x] Teach the closed-loop agent to classify negative runtime replay ROI as
+      `revise_prior` feedback.
+- [x] Run focused validation.
+- [ ] Land through PR and rerun the hosted research
+      loop from `main`.
+
+### Review
+
+- 2026-05-27: Runtime replay evidence was generated successfully from
+  `main@9795a4a9`, but all candidates remained blocked. Two candidates had
+  enough runtime trades and `entry_fill_rate=1.0` but negative ROI; the third
+  emitted zero runtime trades. The next repair is classifier-level only: a
+  completed runtime replay with negative executable ROI should become typed
+  prior feedback, not another runtime-contract/data loop.
+- 2026-05-27: Added negative runtime replay feedback classification to
+  `scripts/alpha_search_closed_loop_agent.py`. Focused validation passed:
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent`,
+  `python3 -m py_compile scripts/alpha_search_closed_loop_agent.py
+  tests/test_alpha_search_closed_loop_agent.py`, `rtk git diff --check`, and a
+  simulation against runtime replay `26524392527`, which now produces
+  `action=revise_prior`, `reason=negative_runtime_replay_edge`, and no
+  repeated runtime replay request.
+
 ## Current Session - Registry Preview Runtime Replay Request (2026-05-28)
 
 Evidence stage: `walk_forward` / `runtime_parity` request repair. This keeps

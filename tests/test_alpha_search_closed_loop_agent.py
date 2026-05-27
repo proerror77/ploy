@@ -1320,6 +1320,121 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                 "auto_settlement_model_full_depth_settlement_edge",
             )
 
+    def test_negative_runtime_replay_roi_generates_prior_feedback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_score = (
+                "autofactor_formula:"
+                "mut_spread_adjusted_external_move_select_entry_price_quality_ge_075"
+            )
+            path = artifact(
+                Path(tmp),
+                chain_reason="continue",
+                should_dispatch=True,
+                candidate_strategy_replay={
+                    "basis": "runtime_market_update_replay",
+                    "promotion_ready": False,
+                    "runtime_score": runtime_score,
+                    "metrics": {
+                        "entry_fill_rate": 1.0,
+                        "trade_count": 53,
+                        "unique_event_count": 53,
+                        "roi": -0.07268639111313208,
+                        "total_pnl": -57.78568093494,
+                    },
+                    "score_counterfactual": {
+                        "configured_entry_threshold": "0.25",
+                        "depth_fillable": 903,
+                        "diagnosis": "reverse_direction_stronger_at_configured_threshold",
+                        "direct_pass_counts": {
+                            "0.05": 63,
+                            "0.10": 53,
+                            "0.15": 47,
+                            "0.25": 35,
+                        },
+                        "formula_evaluations": 185,
+                    },
+                },
+                promotion={
+                    "decision": "blocked",
+                    "required_strategy_profile": "settlement_probability",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "candidate_strategy_replay_not_ready",
+                                "candidate_strategy_replay_missing_contract:official_settlement",
+                                "candidate_strategy_replay_roi_too_low:-0.072686<0.000000",
+                            ],
+                            "factor": {
+                                "name": "mut_spread_adjusted_external_move_select_entry_price_quality_ge_075",
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                                "top_bucket_avg_label": 1.12,
+                                "positive_window_ratio": 1.0,
+                                "symbol_positive_ratio": 1.0,
+                                "spearman_ic": 0.13,
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": runtime_score,
+                                "strategy_profile": "settlement_probability",
+                            },
+                        }
+                    ],
+                    "candidate_strategy_replay": {
+                        "basis": "runtime_market_update_replay",
+                        "ready": False,
+                        "runtime_score": runtime_score,
+                        "metrics": {
+                            "trade_count": 53,
+                            "entry_fill_rate": 1.0,
+                            "roi": -0.07268639111313208,
+                        },
+                        "blockers": [
+                            "official_settlement_missing:52<53",
+                            "roi_too_low:-0.072686<0.000000",
+                        ],
+                    },
+                },
+            )
+
+            runs = [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            decision = agent.closed_loop_decision(runs)
+            prior = agent.build_prior(runs, decision, 3)
+
+            self.assertEqual(decision["decision"], "revise_prior")
+            self.assertEqual(decision["reason"], "negative_runtime_replay_edge")
+            self.assertIn(
+                "runtime_replay_roi_too_low:-0.072686<0.000000",
+                decision["promotion_blockers"],
+            )
+            self.assertEqual(decision["runtime_replay_requests"], [])
+            self.assertEqual(
+                decision["runtime_pass_through_feedback"]["metrics"]["entry_signals"],
+                53,
+            )
+            self.assertEqual(
+                decision["runtime_pass_through_feedback"]["metrics"][
+                    "score_counterfactual_diagnosis"
+                ],
+                "reverse_direction_stronger_at_configured_threshold",
+            )
+            self.assertEqual(
+                prior["runtime_avoid_factors"][0]["reason"],
+                "negative_runtime_replay_edge",
+            )
+            self.assertEqual(prior["mutations"][0]["mutation_type"], "add_spread_penalty")
+
+    def test_roi_blockers_are_prior_feedback_even_with_missing_settlement(self) -> None:
+        self.assertEqual(
+            agent.classify_blockers(
+                [
+                    "candidate_strategy_replay_missing_contract:official_settlement",
+                    "candidate_strategy_replay_roi_too_low:-0.072686<0.000000",
+                ]
+            ),
+            "revise_prior",
+        )
+
     def test_zero_direct_signal_collapse_wins_over_unmapped_same_family(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base_factor = (
