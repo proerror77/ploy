@@ -86,7 +86,7 @@ class StrategyConfigContractTests(unittest.TestCase):
         )
         self.assertEqual(Decimal(str(strategy["three_layer_min_entry_score"])), Decimal("0.10"))
 
-    def test_settlement_probability_dryrun_daily_cap_allows_evidence_collection(self) -> None:
+    def test_settlement_probability_dryrun_disables_daily_trade_cap(self) -> None:
         strategy = tomllib.loads(
             (
                 STRATEGY_DIR
@@ -94,7 +94,7 @@ class StrategyConfigContractTests(unittest.TestCase):
             ).read_text()
         )["strategy"]
 
-        self.assertGreaterEqual(strategy["max_daily_trades"], 1000)
+        self.assertEqual(strategy["max_daily_trades"], 0)
 
 
 if __name__ == "__main__":

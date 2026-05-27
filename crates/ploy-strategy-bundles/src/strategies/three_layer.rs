@@ -1605,7 +1605,9 @@ impl ThreeLayerStrategy {
             debug!(symbol, "Balance exhausted pause active, skipping entry");
             return None;
         }
-        if self.daily_trade_count >= self.config.max_daily_trades {
+        if self.config.max_daily_trades > 0
+            && self.daily_trade_count >= self.config.max_daily_trades
+        {
             self.bump("skip_max_daily_trades");
             return None;
         }
@@ -2940,6 +2942,58 @@ mod tests {
             .collect::<HashMap<_, _>>();
         assert_eq!(diagnostics.get("entry_evaluations"), Some(&1));
         assert_eq!(diagnostics.get("skip_no_candidate_events"), Some(&1));
+    }
+
+    #[test]
+    fn max_daily_trades_zero_disables_daily_cap() {
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let mut config = test_config();
+        config.max_daily_trades = 0;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        strategy.daily_trade_count = 10_000;
+        strategy.spot.insert(Arc::from("BTCUSDT"), dec!(100000));
+
+        let decision = strategy.try_entry(
+            "BTCUSDT",
+            now,
+            &PositionLedger::default(),
+            &OrderLedger::default(),
+        );
+
+        assert!(decision.is_none());
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("entry_evaluations"), Some(&1));
+        assert_eq!(diagnostics.get("skip_no_candidate_events"), Some(&1));
+        assert_eq!(diagnostics.get("skip_max_daily_trades"), None);
+    }
+
+    #[test]
+    fn positive_max_daily_trades_still_blocks_entries() {
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let mut config = test_config();
+        config.max_daily_trades = 1;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        strategy.daily_trade_count = 1;
+
+        let decision = strategy.try_entry(
+            "BTCUSDT",
+            now,
+            &PositionLedger::default(),
+            &OrderLedger::default(),
+        );
+
+        assert!(decision.is_none());
+        let diagnostics = strategy
+            .diagnostics()
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(diagnostics.get("entry_evaluations"), Some(&1));
+        assert_eq!(diagnostics.get("skip_max_daily_trades"), Some(&1));
     }
 
     fn test_config() -> ThreeLayerConfig {

@@ -4,8 +4,10 @@
 
 Evidence stage: `dry_run_candidate` / `execution_quality` runtime evidence.
 This keeps `pm5d.threelayer.live` paused and only adjusts the settlement
-probability dry-run candidate so it can continue accumulating clean evidence
-after the first 50 entries.
+probability dry-run candidate so it can continue accumulating clean evidence.
+The current operator requirement is no daily trade cap for this dry-run
+evidence window; `max_daily_trades = 0` must mean unlimited, not zero allowed
+entries.
 
 ### Tasks
 
@@ -15,6 +17,8 @@ after the first 50 entries.
       duplicate rows, or a runtime cap.
 - [x] Raise the settlement-probability dry-run daily cap and add a regression
       contract.
+- [x] Replace the finite cap with explicit unlimited semantics and regression
+      coverage.
 - [ ] Validate locally, land through PR, deploy from `main`, and verify new
       entries can resume without touching live.
 
@@ -35,6 +39,18 @@ after the first 50 entries.
   ploy-strategy-bundles
   settlement_probability_config_carries_autofactor_handoff_score --lib`, and
   `rtk git diff --check`.
+- 2026-05-27: Post-deploy remote evidence showed the strategy was not stuck:
+  the dry-run deployment was `running/running`, live stayed `paused/paused`,
+  the public report reached `total_trades=54`, latest open was
+  `2026-05-27T15:32:17.938+08:00`, and logs showed new entry signals after the
+  50-trade repair with no fresh `skip_max_daily_trades`. The config still used
+  finite `max_daily_trades = 1000`, so the follow-up is to make the dry-run
+  cap truly unlimited.
+- 2026-05-27: Implemented explicit unlimited semantics:
+  `max_daily_trades = 0` disables the daily cap, while positive values still
+  enforce `skip_max_daily_trades`. The regression test was red/green checked:
+  it fails under the old `daily_trade_count >= max_daily_trades` behavior and
+  passes with the new guard.
 
 ## Current Session - Tango Dry-Run Data Plane Recovery (2026-05-26)
 
