@@ -1,5 +1,41 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Settlement Probability Dry-Run Daily Cap (2026-05-27)
+
+Evidence stage: `dry_run_candidate` / `execution_quality` runtime evidence.
+This keeps `pm5d.threelayer.live` paused and only adjusts the settlement
+probability dry-run candidate so it can continue accumulating clean evidence
+after the first 50 entries.
+
+### Tasks
+
+- [x] Reconcile trade-count semantics across dry-run report, runtime fills, and
+      event track records.
+- [x] Confirm whether the apparent count issue is stale data, report grouping,
+      duplicate rows, or a runtime cap.
+- [x] Raise the settlement-probability dry-run daily cap and add a regression
+      contract.
+- [ ] Validate locally, land through PR, deploy from `main`, and verify new
+      entries can resume without touching live.
+
+### Review
+
+- 2026-05-27: The public dry-run report's `total_trades=50` is lifecycle trade
+  count from `strategy_runtime_event_track_record`, not raw fill count. DB
+  evidence showed `50` BUY fills and `50` SELL fills, all paired into `50`
+  closed event/side rows. The runner was still active and recording was still
+  growing, but ployd logs showed `entry_signals=50` and
+  `skip_max_daily_trades=29` after the target config hit
+  `max_daily_trades = 50`. This cap explains why evidence stopped accumulating
+  after the 50th entry even though the data plane was healthy.
+- 2026-05-27: Local validation passed for the cap repair:
+  `python3 -m unittest tests.test_strategy_config_contracts`, `python3 -m
+  py_compile tests/test_strategy_config_contracts.py
+  scripts/report_dryrun_summary.py`, `rtk cargo test --locked -p
+  ploy-strategy-bundles
+  settlement_probability_config_carries_autofactor_handoff_score --lib`, and
+  `rtk git diff --check`.
+
 ## Current Session - Tango Dry-Run Data Plane Recovery (2026-05-26)
 
 Evidence stage: `dry_run_candidate` data-plane recovery and freshness
