@@ -77,6 +77,18 @@ verification. This keeps `pm5d.threelayer.live` paused and does not claim
   retryable and the DB feed keeps recently expired events visible for `30`
   minutes, plus a regression proving an unresolved expiry does not burn the
   retry state.
+- 2026-05-27 post-deploy verification: PR `#702` merged as
+  `main@176798ed`; deploy run `26483463869` succeeded from CI-built artifacts.
+  `pm5d.threelayer.live` stayed `desired=paused observed=paused`, the target
+  dry-run stayed `desired=running observed=running`, `ployd.service` stayed
+  active with `Restart=always`, `OOMPolicy=kill`, `MemoryMax=1610612736`, and
+  no host `cargo`/`rustc` build process. After deploy the runner entered again:
+  new BUY fills appeared for events `2357447` and `2357442`, both later emitted
+  settlement SELL orders/fills (`tl_settle_2357447_up` at `0.0000000000` and
+  `tl_settle_2357442_up` at `1.0000000000`), and the runner subsequently opened
+  another new BUY for event `2357506`. This confirms the loop can release
+  capacity after delayed official settlement. Old pre-fix runtime evidence rows
+  still remain, so replay/parity or promotion review needs a clean reset window.
 
 ### Follow-up Tasks
 
@@ -86,7 +98,7 @@ verification. This keeps `pm5d.threelayer.live` paused and does not claim
       the next candidate.
 - [x] If a lifecycle bug is confirmed, patch it with a focused regression and
       deploy through CI-built artifacts only.
-- [ ] Land the DB-feed settlement retry fix through PR/CI and deploy from
+- [x] Land the DB-feed settlement retry fix through PR/CI and deploy from
       `main`; do not build Rust on `tango-1-1`.
 - [ ] After deploy, start a clean dry-run evidence window before replay/parity
       or promotion review.
