@@ -61,6 +61,14 @@ live-promotion path.
   such as `_select_near_strike_ge_025`, so same-family variants of the losing
   dry-run score could escape the intended penalty. Added focused regressions
   and a normalization fix before retrying the hosted search again from `main`.
+- 2026-05-27 23:23-23:28 +0800: PR `#709` merged as `main@0d92698e` and
+  retry run `26520742421` completed successfully from snapshot `26516561409`.
+  The artifact's closed-loop decision is `fix_data` with reason
+  `promotion_blockers_require_fix_data`, but the issue comment still reported
+  `fix-runtime` because the comment builder read
+  `artifacts/factor-walk-forward-v2` while the generated closed-loop artifact
+  lived under `artifacts/factor-walk-forward-v2-upload/alpha-search-chain`.
+  Added a follow-up regression for the live workflow staged-upload layout.
 
 ## Current Session - Settlement Probability Dry-Run Daily Cap (2026-05-27)
 
