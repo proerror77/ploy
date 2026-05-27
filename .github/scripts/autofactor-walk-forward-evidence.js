@@ -1,4 +1,5 @@
 const fs = require("fs");
+const path = require("path");
 
 function readJson(path) {
   if (!fs.existsSync(path)) return null;
@@ -52,7 +53,30 @@ function blockerOutcome(blockers) {
   return null;
 }
 
-function decisionFromArtifacts({ promotion, handoff }) {
+function closedLoopOutcome(closedLoop) {
+  if (!closedLoop || typeof closedLoop !== "object") return null;
+  const action = String(closedLoop.action || closedLoop.decision || "");
+  const decisionByAction = {
+    continue_search: "continue-search",
+    fix_data: "fix-data",
+    fix_runtime: "fix-runtime",
+    fix_workflow: "fix-workflow-or-artifact",
+    ready_handoff: "promote-to-dry-run",
+    revise_prior: "revise",
+  };
+  const decision = decisionByAction[action];
+  if (!decision) return null;
+  return {
+    decision,
+    reason: String(closedLoop.reason || action),
+  };
+}
+
+function readClosedLoopDecision(artifactDir) {
+  return readJson(path.join(artifactDir, "..", "alpha-search-chain", "closed-loop-decision.json"));
+}
+
+function decisionFromArtifacts({ promotion, handoff, closedLoop }) {
   if (!promotion && !handoff) {
     return {
       decision: "fix-workflow-or-artifact",
@@ -66,6 +90,9 @@ function decisionFromArtifacts({ promotion, handoff }) {
       reason: "qualified AutoFactor strategy handoff is ready",
     };
   }
+
+  const closedLoopDecision = closedLoopOutcome(closedLoop);
+  if (closedLoopDecision) return closedLoopDecision;
 
   const blockerDecision = blockerOutcome(actionableBlockers({ handoff, promotion }));
   if (blockerDecision) return blockerDecision;
@@ -159,10 +186,13 @@ function actionableBlockers({ handoff, promotion }) {
 function buildWalkForwardEvidence({ title, metadata, artifactDir, runnerLabel }) {
   const promotion = readJson(`${artifactDir}/autofactor-strategy-promotion.json`);
   const handoff = readJson(`${artifactDir}/autofactor-strategy-handoff.json`);
-  const outcome = decisionFromArtifacts({ promotion, handoff });
+  const closedLoop = readClosedLoopDecision(artifactDir);
+  const outcome = decisionFromArtifacts({ promotion, handoff, closedLoop });
   const gate = (handoff && handoff.promotion_gate) || (promotion && promotion.promotion_gate) || {};
   const strategies = topStrategies(handoff);
-  const blockers = actionableBlockers({ handoff, promotion });
+  const blockers = outcome.decision === "revise" && closedLoop && closedLoop.reason
+    ? [closedLoop.reason]
+    : actionableBlockers({ handoff, promotion });
 
   const body = [
     `${title}:`,

@@ -164,6 +164,74 @@ class AutoFactorWalkForwardEvidenceJsTest(unittest.TestCase):
         self.assertEqual(result["decision"], "fix-data")
         self.assertIn("data_quality", result["body"])
 
+    def test_closed_loop_revise_prior_overrides_runtime_mapping_noise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifact_dir = root / "factor-walk-forward-v2"
+            artifact_dir.mkdir()
+            (root / "alpha-search-chain").mkdir()
+            (root / "alpha-search-chain" / "closed-loop-decision.json").write_text(
+                json.dumps(
+                    {
+                        "action": "revise_prior",
+                        "reason": "missing_runtime_strategy_mapping",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (artifact_dir / "autofactor-strategy-handoff.json").write_text(
+                json.dumps(
+                    {
+                        "status": "blocked",
+                        "promotion_gate": {
+                            "ready": False,
+                            "blocked_gates": [
+                                "walk_forward_oos: no non-naive model passed",
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (artifact_dir / "autofactor-strategy-promotion.json").write_text(
+                json.dumps(
+                    {
+                        "decision": "blocked",
+                        "minimums": {
+                            "top_bucket_full_depth_entry_fill_rate": 0.30,
+                        },
+                        "promotion_gate": {
+                            "ready": False,
+                            "blocked_gates": [
+                                "walk_forward_oos: no non-naive model passed",
+                            ],
+                        },
+                        "evaluated_factors": [
+                            {
+                                "qualified": False,
+                                "blockers": [
+                                    "runtime_contract_unmapped_factor",
+                                    "missing_runtime_strategy_mapping",
+                                ],
+                                "factor": {
+                                    "decision": "candidate",
+                                    "reason": "passed",
+                                    "top_bucket_full_depth_entry_fill_rate": 1.0,
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_builder(artifact_dir)
+
+        self.assertEqual(result["decision"], "revise")
+        self.assertIn("- Decision: revise", result["body"])
+        self.assertIn("- Next action: missing_runtime_strategy_mapping", result["body"])
+        self.assertIn("- Actionable blockers: `missing_runtime_strategy_mapping`", result["body"])
+
 
 if __name__ == "__main__":
     unittest.main()
