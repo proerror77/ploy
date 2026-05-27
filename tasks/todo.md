@@ -1,5 +1,47 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Data Blocker Routing (2026-05-28)
+
+Evidence stage: `walk_forward` / `runtime_parity` feedback repair. This keeps
+dry-run/live deployment state untouched and fixes Research Manager data
+blocker routing after run `26542589633`: current durable market-data health
+shows full-depth CLOB coverage exists, while official settlement coverage is
+the remaining promotion data blocker.
+
+### Files / Ownership
+
+- `crates/ploy-research/src/research_os/manager.rs`
+  - Owner: classify current market-data blockers precisely and avoid stale
+    snapshot/full-depth blockers overriding repaired durable surface state.
+- `tests` / inline manager tests
+  - Owner: regression for full-depth-covered plus settlement-missing routing.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+### Tasks
+
+- [x] Reproduce current trace plan run `26542929016`: `theme=fix_data` but
+      actions are `collect_full_depth_execution_surface` and
+      `rerun_snapshot_data_audit`.
+- [x] Confirm durable health already has full-depth CLOB surface coverage:
+      `full_fidelity=true`, `existing_hours=14`, `row_count=1443746`.
+- [x] Confirm remaining promotion data blocker is `pm_token_settlements`
+      `required_execution_surface_not_materialized`.
+- [x] Add regression for stale full-depth blockers not overriding the repaired
+      durable surface state.
+- [x] Implement the planner fix.
+- [x] Run focused local validation.
+- [ ] Land through PR and rerun trace-plan/executor dry-run on `main`.
+
+### Review
+
+- 2026-05-28: Local validation passed:
+  `rtk cargo test -p ploy-research research_os::manager --lib`,
+  `rtk cargo check -p ploy-research --features db --example research_trace_plan`,
+  and `rtk git diff --check`. The expected next planner behavior is
+  `theme=revise_prior`, with `collect_full_depth_execution_surface` suppressed
+  when durable health already has full-fidelity CLOB coverage.
+
 ## Current Session - Research Manager Alpha Prior Continuation (2026-05-28)
 
 Evidence stage: `walk_forward` / `runtime_parity` feedback repair. This keeps
