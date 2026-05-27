@@ -598,9 +598,11 @@ def _latest_run(plan_payload: dict[str, Any]) -> dict[str, Any]:
 
 def _latest_candidate_replay_contract(plan_payload: dict[str, Any]) -> dict[str, Any]:
     summary = ((plan_payload.get("input") or {}).get("factor_registry_summary") or {})
-    ready_replays = summary.get("ready_candidate_replays")
-    if isinstance(ready_replays, list):
-        for item in ready_replays:
+    for replay_key in ("recent_candidate_replays", "ready_candidate_replays"):
+        replays = summary.get(replay_key)
+        if not isinstance(replays, list):
+            continue
+        for item in replays:
             if not isinstance(item, dict):
                 continue
             artifact = item.get("artifact_json")

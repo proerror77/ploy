@@ -1,5 +1,57 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Executor Negative Replay Selection (2026-05-27)
+
+Evidence stage: `runtime_parity` feedback repair. This keeps live and dry-run
+deployment state untouched and fixes the Research Manager executor so
+`revise_prior` follow-up plans use the latest negative runtime replay frontier
+instead of stale ready replay artifacts.
+
+### Files / Ownership
+
+- `scripts/research_manager_execute_plan.py`
+  - Owner: select recent runtime replay evidence before older ready replay
+    evidence when building typed prior and bounded walk-forward dispatches.
+- `tests/test_research_manager_execute_plan.py`
+  - Owner: regression for stale ready replay not overriding newer negative
+    runtime replay.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+### Tasks
+
+- [x] Confirm deployed trace-plan run `26531806982` now returns
+      `theme=revise_prior` with
+      `strategy_economics -> mutate_or_reject_negative_runtime_edge`.
+- [x] Reproduce executor dry-run issue: run `26531876702` generated no
+      executable dispatch because of missing `snapshot_run_id`, and its typed
+      prior still used stale ready replay `26367311478` instead of latest
+      negative replay `26528933436`.
+- [x] Make executor prefer `recent_candidate_replays` over
+      `ready_candidate_replays` when selecting the runtime replay contract.
+- [x] Run focused validation.
+- [x] Land through PR.
+- [x] Re-run executor dry-run against plan `26531806982` and verify the typed
+      prior points at replay `26528933436`.
+
+### Review
+
+- 2026-05-27: Trace-plan frontier handling was fixed by PR #715 and deployed
+  via tango deploy run `26531358971`, but the executor still selected the
+  stale ready replay list first. The next correction is executor-only: latest
+  `recent_candidate_replays` must be the replay evidence source for
+  `revise_prior` feedback so old handoff evidence cannot leak into the new
+  typed prior.
+- 2026-05-27: Focused validation passed:
+  `python3 -m unittest tests.test_research_manager_execute_plan`,
+  `python3 -m py_compile scripts/research_manager_execute_plan.py
+  tests/test_research_manager_execute_plan.py`, and `rtk git diff --check`.
+  A local replay of plan `26531806982` with source snapshot run `26516561409`
+  now creates one ready bounded walk-forward dispatch using candidate replay
+  `26528933436`, ROI `-0.013906620311657932`, and
+  `runtime_avoid_factors` for
+  `auto_settlement_model_full_depth_settlement_edge`.
+
 ## Current Session - Research Manager Negative Runtime Replay Frontier (2026-05-27)
 
 Evidence stage: `walk_forward` / `runtime_parity` feedback repair. This keeps

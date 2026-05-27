@@ -240,6 +240,113 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             prior["mutations"][0]["base_factor"],
         )
 
+    def test_revise_prior_prefers_recent_negative_replay_over_stale_ready_replay(self) -> None:
+        stale_ready_replay = {
+            "artifact_json": {
+                "basis": "runtime_market_update_replay",
+                "runtime_score": "autofactor_formula:stale_ready",
+                "source_workflow": "runtime-candidate-replay.yml",
+                "workflow_run_id": "26367311478",
+                "strategy_profile": "settlement_probability",
+                "metrics": {
+                    "trade_count": 50,
+                    "unique_event_count": 50,
+                    "entry_fill_rate": 1.0,
+                    "roi": 0.116538,
+                    "total_pnl": 87.4035,
+                },
+                "decision_contract": {
+                    "target": "tradeable_full_depth_settlement_pnl",
+                    "horizon": "5m",
+                },
+                "recording_path": "/opt/ploy/data/recordings/archived.20260524T155939.ndjson",
+                "recording_sha256": "abc123",
+            },
+            "metrics": {"roi": 0.116538},
+        }
+        recent_negative_replay = {
+            "artifact_json": {
+                "basis": "runtime_market_update_replay",
+                "runtime_score": "autofactor_formula:latest_negative",
+                "source_workflow": "runtime-candidate-replay.yml",
+                "workflow_run_id": "26528933436",
+                "strategy_profile": "settlement_probability",
+                "metrics": {
+                    "trade_count": 145,
+                    "unique_event_count": 145,
+                    "entry_fill_rate": 1.0,
+                    "roi": -0.013906620311657932,
+                    "total_pnl": -30.246899177856,
+                },
+                "blocking_risk_flags": [
+                    "official_settlement_missing:142<145",
+                    "roi_too_low:-0.013907<0.000000",
+                ],
+                "decision_contract": {
+                    "target": "full_depth_settlement_executable_pnl",
+                    "horizon": "5m",
+                },
+                "recording_path": "/opt/ploy/data/recordings/live.ndjson",
+                "recording_sha256": "def456",
+            },
+            "metrics": {"roi": -0.013906620311657932},
+        }
+        plan = plan_payload(
+            "revise_prior",
+            ["generate_typed_llm_prior_json", "rerun_alpha_search_with_bounded_mutations"],
+            {
+                "ready_candidate_replays": [stale_ready_replay],
+                "recent_candidate_replays": [recent_negative_replay, stale_ready_replay],
+            },
+        )
+        plan["plan"]["blocker_actions"] = [
+            {
+                "blocker_family": "strategy_economics",
+                "action": "mutate_or_reject_negative_runtime_edge",
+                "reason": "Latest replay or walk-forward evidence failed economic/OOS gates.",
+            }
+        ]
+
+        payload = build_executor_payload(
+            base_args(mode="execute", execute_ack=EXECUTE_ACK, snapshot_run_id="26516561409"),
+            plan,
+        )
+
+        dispatch = payload["dispatches"][0]
+        options = json.loads(dispatch["fields"]["options_json"])
+        self.assertEqual("26528933436", options["candidate_strategy_replay_run_id"])
+        self.assertEqual(
+            "runtime-candidate-replay-26528933436",
+            options["candidate_strategy_replay_artifact_name"],
+        )
+        self.assertEqual(
+            "full_depth_settlement_executable_pnl",
+            options["alpha_search_plan_target"],
+        )
+        prior = json.loads(options["alpha_search_llm_prior_json"])
+        self.assertEqual(
+            [
+                {
+                    "base_factor": "latest_negative",
+                    "factor_family": "latest_negative",
+                    "runtime_score": "autofactor_formula:latest_negative",
+                    "reason": "negative_runtime_edge",
+                    "metrics": {
+                        "trade_count": 145,
+                        "unique_event_count": 145,
+                        "entry_fill_rate": 1.0,
+                        "roi": -0.013906620311657932,
+                        "total_pnl": -30.246899177856,
+                        "blocking_risk_flags": [
+                            "official_settlement_missing:142<145",
+                            "roi_too_low:-0.013907<0.000000",
+                        ],
+                    },
+                }
+            ],
+            prior["runtime_avoid_factors"],
+        )
+
     def test_negative_runtime_prior_normalizes_selector_threshold_family(self) -> None:
         plan = plan_payload(
             "revise_prior",
