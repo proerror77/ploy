@@ -240,6 +240,58 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             prior["mutations"][0]["base_factor"],
         )
 
+    def test_negative_runtime_prior_normalizes_selector_threshold_family(self) -> None:
+        plan = plan_payload(
+            "revise_prior",
+            ["generate_typed_llm_prior_json", "rerun_alpha_search_with_bounded_mutations"],
+        )
+        runtime_score = (
+            "autofactor_formula:"
+            "mut_auto_settlement_model_full_depth_settlement_edge_spread_adjusted_select_near_strike_ge_025"
+        )
+        plan["input"]["latest_runs"] = {
+            "runs": [
+                {
+                    "artifacts": [
+                        {
+                            "output_json": {
+                                "candidate_strategy_replay": {
+                                    "basis": "runtime_market_update_replay",
+                                    "runtime_score": runtime_score,
+                                    "strategy_profile": "settlement_probability",
+                                    "metrics": {"roi": -0.05},
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        plan["plan"]["blocker_actions"] = [
+            {
+                "blocker_family": "strategy_economics",
+                "action": "mutate_or_reject_negative_runtime_edge",
+                "reason": "Latest runtime evidence failed economic gates.",
+            }
+        ]
+
+        payload = build_executor_payload(
+            base_args(mode="execute", execute_ack=EXECUTE_ACK, snapshot_run_id="26516561409"),
+            plan,
+        )
+
+        dispatch = payload["dispatches"][0]
+        options = json.loads(dispatch["fields"]["options_json"])
+        prior = json.loads(options["alpha_search_llm_prior_json"])
+        self.assertEqual(
+            "auto_settlement_model_full_depth_settlement_edge",
+            prior["runtime_avoid_factors"][0]["factor_family"],
+        )
+        self.assertNotIn(
+            "auto_settlement_model_full_depth_settlement_edge",
+            {item["base_factor"] for item in prior["mutations"]},
+        )
+
     def test_revise_prior_infers_latest_replay_and_full_depth_artifacts(self) -> None:
         plan = plan_payload(
             "revise_prior",
