@@ -90,7 +90,11 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
 
     let blocker_actions = derive_blocker_actions(input);
     let latest_decision = latest_run_decision_value(&input.latest_runs);
-    if has_ready_handoff(&input.latest_runs) {
+    let has_negative_runtime_economics = blocker_actions.iter().any(|item| {
+        item.blocker_family == "strategy_economics"
+            && item.action == "mutate_or_reject_negative_runtime_edge"
+    });
+    if has_ready_handoff(&input.latest_runs) && !has_negative_runtime_economics {
         return Ok(plan_with_blocker_actions(
             "ready_handoff",
             1,
@@ -290,9 +294,30 @@ fn plan_with_blocker_actions(
 fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAction> {
     let mut actions = Vec::new();
     let latest_value = latest_run_decision_value(&input.latest_runs);
+    let latest_runtime_replay = latest_recent_runtime_replay(&input.factor_registry_summary);
     let latest = latest_value.to_string().to_lowercase();
+    let runtime_replay = latest_runtime_replay
+        .as_ref()
+        .map(|value| value.to_string().to_lowercase())
+        .unwrap_or_default();
     let market_data = market_data_blocker_text(&input.market_data_health);
-    let runtime_or_promotion_blockers = latest;
+    let frontier_runtime_replay_roi = latest_runtime_replay
+        .as_ref()
+        .and_then(runtime_market_update_replay_roi)
+        .or_else(|| runtime_market_update_replay_roi(&latest_value));
+    let negative_runtime_replay = frontier_runtime_replay_roi
+        .map(|roi| roi < 0.0)
+        .unwrap_or(false);
+    let runtime_or_promotion_blockers = if runtime_replay.is_empty() {
+        latest.clone()
+    } else {
+        format!("{latest}\n{runtime_replay}")
+    };
+    let data_blocker_text = if negative_runtime_replay {
+        latest.as_str()
+    } else {
+        runtime_or_promotion_blockers.as_str()
+    };
     let frontier_proves_full_depth = has_any_key_value(
         &latest_value,
         &[
@@ -307,10 +332,9 @@ fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAc
         &["official_settlement", "official_settlement_ready"],
         &[true.into(), "true".into()],
     );
-    let frontier_runtime_replay_roi = runtime_market_update_replay_roi(&latest_value);
 
     if contains_any_text(
-        &runtime_or_promotion_blockers,
+        data_blocker_text,
         &[
             "official_settlement_missing",
             "missing_official_settlement",
@@ -325,7 +349,7 @@ fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAc
         ));
     }
     if contains_any_text(
-        &runtime_or_promotion_blockers,
+        data_blocker_text,
         &[
             "sampled_snapshot_required_for_execution_surface",
             "required_execution_surface_is_sampled_snapshot",
@@ -381,7 +405,8 @@ fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAc
             "negative_runtime_edge",
         ][..]
     };
-    if contains_any_text(&runtime_or_promotion_blockers, economics_tokens)
+    if (contains_any_text(&runtime_or_promotion_blockers, economics_tokens)
+        || negative_runtime_replay)
         && !(positive_runtime_replay && has_data_action)
     {
         actions.push(blocker_action(
@@ -580,6 +605,21 @@ fn has_any_key_value(
             .any(|item| has_any_key_value(item, keys, expected_values)),
         _ => false,
     }
+}
+
+fn latest_recent_runtime_replay(value: &serde_json::Value) -> Option<serde_json::Value> {
+    value
+        .get("recent_candidate_replays")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| {
+                    item.get("basis").and_then(serde_json::Value::as_str)
+                        == Some("runtime_market_update_replay")
+                })
+                .cloned()
+        })
 }
 
 fn runtime_market_update_replay_roi(value: &serde_json::Value) -> Option<f64> {
@@ -783,9 +823,10 @@ mod tests {
         ))
         .expect("plan");
         assert_eq!(plan.theme, "revise_prior");
-        assert!(plan
-            .actions
-            .contains(&"generate_typed_llm_prior_json".to_string()));
+        assert!(
+            plan.actions
+                .contains(&"generate_typed_llm_prior_json".to_string())
+        );
     }
 
     #[test]
@@ -819,9 +860,10 @@ mod tests {
 
         let plan = plan_next_research(&input).expect("plan");
         assert_eq!(plan.theme, "candidate_to_runtime_replay");
-        assert!(plan
-            .actions
-            .contains(&"build_runtime_candidate_replay".to_string()));
+        assert!(
+            plan.actions
+                .contains(&"build_runtime_candidate_replay".to_string())
+        );
     }
 
     #[test]
@@ -875,12 +917,14 @@ mod tests {
         assert_eq!(plan.theme, "ready_handoff");
         assert_eq!(plan.candidate_count, 1);
         assert_eq!(plan.search_depth, 0);
-        assert!(plan
-            .actions
-            .contains(&"create_dry_run_handoff_issue".to_string()));
-        assert!(plan
-            .actions
-            .contains(&"open_config_pr_from_ready_handoff".to_string()));
+        assert!(
+            plan.actions
+                .contains(&"create_dry_run_handoff_issue".to_string())
+        );
+        assert!(
+            plan.actions
+                .contains(&"open_config_pr_from_ready_handoff".to_string())
+        );
         assert!(plan.blocker_actions.is_empty());
     }
 
@@ -927,6 +971,107 @@ mod tests {
         assert_eq!(plan.theme, "ready_handoff");
         assert_eq!(plan.candidate_count, 1);
         assert!(plan.blocker_actions.is_empty());
+    }
+
+    #[test]
+    fn planner_routes_newer_negative_runtime_replay_ahead_of_stale_ready_handoff() {
+        let mut input = input(
+            "walk_forward",
+            serde_json::json!({
+                "source": "experiment_trace",
+                "evidence_stage": "walk_forward",
+                "runs": [{
+                    "run_id": "26530018058",
+                    "artifacts": [{
+                        "event_type": "strategy_handoff",
+                        "output_json": {
+                            "status": "blocked",
+                            "recommended_action": "do_not_promote"
+                        }
+                    }]
+                }],
+                "ready_handoffs": [{
+                    "run_id": "26377165132",
+                    "created_at": "2026-05-24T17:16:29Z",
+                    "event_type": "strategy_handoff",
+                    "output_json": {
+                        "kind": "autofactor_strategy_handoff",
+                        "status": "ready",
+                        "recommended_action": "create_dry_run_handoff",
+                        "strategies": [{
+                            "runtime_score": "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted"
+                        }],
+                        "candidate_strategy_replay": {
+                            "ready": true,
+                            "basis": "runtime_market_update_replay"
+                        }
+                    }
+                }]
+            }),
+            serde_json::json!({}),
+        );
+        input.factor_registry_summary = serde_json::json!({
+            "recent_candidate_replays": [{
+                "candidate_replay_id": "candidate_replay:negative",
+                "run_id": "26530018058",
+                "workflow_run_id": "26528933436",
+                "basis": "runtime_market_update_replay",
+                "promotion_ready": false,
+                "promotion_decision": "blocked",
+                "strategy_profile": "settlement_probability",
+                "runtime_score": "autofactor_formula:auto_settlement_model_full_depth_settlement_edge_spread_adjusted",
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+                "metrics": {
+                    "roi": -0.013906620311657932,
+                    "total_pnl": -30.246899177856,
+                    "trade_count": 145,
+                    "unique_event_count": 145,
+                    "entry_fill_rate": 1.0
+                },
+                "blocking_risk_flags": [
+                    "official_settlement_missing:142<145",
+                    "roi_too_low:-0.013907<0.000000"
+                ],
+                "created_at": "2026-05-27T18:17:00Z"
+            }],
+            "ready_candidate_replays": [{
+                "candidate_replay_id": "candidate_replay:old-ready",
+                "run_id": "26377165132",
+                "workflow_run_id": "26367311478",
+                "basis": "runtime_market_update_replay",
+                "promotion_ready": true,
+                "promotion_decision": "promote_to_runtime",
+                "runtime_score": "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted",
+                "metrics": {
+                    "roi": 0.11653800000105063,
+                    "trade_count": 50
+                },
+                "blocking_risk_flags": [],
+                "created_at": "2026-05-24T17:16:29Z"
+            }]
+        });
+
+        let plan = plan_next_research(&input).expect("plan");
+
+        assert_eq!(plan.theme, "revise_prior");
+        assert!(
+            plan.actions
+                .contains(&"generate_typed_llm_prior_json".to_string())
+        );
+        assert!(
+            !plan
+                .actions
+                .contains(&"create_dry_run_handoff_issue".to_string())
+        );
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "strategy_economics"
+                && item.action == "mutate_or_reject_negative_runtime_edge"
+        }));
+        assert!(!plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "data_settlement"
+                && item.action == "repair_official_settlement_coverage"
+        }));
     }
 
     #[test]
@@ -989,9 +1134,10 @@ mod tests {
         .expect("plan");
 
         assert_eq!(plan.theme, "revise_prior");
-        assert!(plan
-            .actions
-            .contains(&"generate_typed_llm_prior_json".to_string()));
+        assert!(
+            plan.actions
+                .contains(&"generate_typed_llm_prior_json".to_string())
+        );
         assert!(plan.blocker_actions.iter().any(|item| {
             item.blocker_family == "search_power"
                 && item.action == "increase_distinct_event_coverage_or_reduce_selectivity"
@@ -1033,9 +1179,10 @@ mod tests {
         let plan = plan_next_research(&input).expect("plan");
 
         assert_eq!(plan.theme, "revise_prior");
-        assert!(plan
-            .actions
-            .contains(&"generate_typed_llm_prior_json".to_string()));
+        assert!(
+            plan.actions
+                .contains(&"generate_typed_llm_prior_json".to_string())
+        );
         assert!(plan.blocker_actions.iter().any(|item| {
             item.blocker_family == "strategy_economics"
                 && item.action == "mutate_or_reject_negative_runtime_edge"
@@ -1118,9 +1265,10 @@ mod tests {
         .expect("plan");
 
         assert_eq!(plan.theme, "revise_prior");
-        assert!(plan
-            .actions
-            .contains(&"generate_typed_llm_prior_json".to_string()));
+        assert!(
+            plan.actions
+                .contains(&"generate_typed_llm_prior_json".to_string())
+        );
         assert!(plan.blocker_actions.iter().any(|item| {
             item.blocker_family == "strategy_economics"
                 && item.action == "mutate_or_reject_negative_runtime_edge"
@@ -1149,12 +1297,14 @@ mod tests {
         .expect("plan");
 
         assert_eq!(plan.theme, "fix_data");
-        assert!(plan
-            .actions
-            .contains(&"repair_official_settlement_coverage".to_string()));
-        assert!(plan
-            .actions
-            .contains(&"collect_full_depth_execution_surface".to_string()));
+        assert!(
+            plan.actions
+                .contains(&"repair_official_settlement_coverage".to_string())
+        );
+        assert!(
+            plan.actions
+                .contains(&"collect_full_depth_execution_surface".to_string())
+        );
         assert!(plan.blocker_actions.iter().any(|item| {
             item.blocker_family == "data_settlement"
                 && item.action == "repair_official_settlement_coverage"

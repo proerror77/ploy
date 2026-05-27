@@ -6,11 +6,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use ploy_research::research_os::manager::{
-    plan_next_research, ResearchBudget, ResearchManagerInput,
+    ResearchBudget, ResearchManagerInput, plan_next_research,
 };
-use serde_json::{json, Value};
-use sqlx::postgres::PgPoolOptions;
+use serde_json::{Value, json};
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2)
@@ -182,6 +182,7 @@ async fn factor_registry_summary(pool: &PgPool, limit: usize) -> Result<Value> {
     .await?;
     let runtime_ready_candidates = runtime_ready_factor_candidates(pool, limit).await?;
     let ready_candidate_replays = ready_candidate_replays(pool, limit).await?;
+    let recent_candidate_replays = recent_candidate_replays(pool, limit).await?;
 
     Ok(json!({
         "source": "factor_registry",
@@ -201,6 +202,7 @@ async fn factor_registry_summary(pool: &PgPool, limit: usize) -> Result<Value> {
         }).collect::<Vec<_>>(),
         "runtime_ready_candidates": runtime_ready_candidates,
         "ready_candidate_replays": ready_candidate_replays,
+        "recent_candidate_replays": recent_candidate_replays,
     }))
 }
 
@@ -332,6 +334,79 @@ async fn ready_candidate_replays(pool: &PgPool, limit: usize) -> Result<Value> {
                     "blocking_risk_flags": row.12,
                     "artifact_json": row.13,
                     "created_at": row.14,
+                })
+            })
+            .collect(),
+    ))
+}
+
+async fn recent_candidate_replays(pool: &PgPool, limit: usize) -> Result<Value> {
+    let rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+        bool,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Value,
+        Value,
+        Value,
+        DateTime<Utc>,
+    )> = sqlx::query_as(
+        r#"
+        SELECT
+            candidate_replay_id,
+            run_id,
+            workflow_run_id,
+            workflow_run_url,
+            basis,
+            promotion_decision,
+            promotion_ready,
+            strategy_profile,
+            runtime_score,
+            data_snapshot_id,
+            target,
+            horizon,
+            metrics_json,
+            blocking_risk_flags_json,
+            artifact_json,
+            created_at
+        FROM candidate_replay_tapes
+        WHERE basis = 'runtime_market_update_replay'
+        ORDER BY created_at DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(Value::Array(
+        rows.into_iter()
+            .map(|row| {
+                json!({
+                    "candidate_replay_id": row.0,
+                    "run_id": row.1,
+                    "workflow_run_id": row.2,
+                    "workflow_run_url": row.3,
+                    "basis": row.4,
+                    "promotion_decision": row.5,
+                    "promotion_ready": row.6,
+                    "strategy_profile": row.7,
+                    "runtime_score": row.8,
+                    "data_snapshot_id": row.9,
+                    "target": row.10,
+                    "horizon": row.11,
+                    "metrics": row.12,
+                    "blocking_risk_flags": row.13,
+                    "artifact_json": row.14,
+                    "created_at": row.15,
                 })
             })
             .collect(),

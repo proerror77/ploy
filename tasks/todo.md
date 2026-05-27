@@ -1,5 +1,53 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Negative Runtime Replay Frontier (2026-05-27)
+
+Evidence stage: `walk_forward` / `runtime_parity` feedback repair. This keeps
+live and dry-run deployment state untouched and fixes Research Trace Plan /
+Research Manager so a newer negative runtime replay blocks stale ready-handoff
+state.
+
+### Files / Ownership
+
+- `crates/ploy-research/examples/research_trace_plan.rs`
+  - Owner: expose recent runtime replay frontier evidence, including blocked
+    negative replay artifacts.
+- `crates/ploy-research/src/research_os/manager.rs`
+  - Owner: route latest negative runtime replay economics to `revise_prior`
+    before stale ready handoff.
+- `tasks/todo.md`
+  - Owner: session tracking and evidence notes.
+
+### Tasks
+
+- [x] Confirm hosted replay evidence: runs `26528932310`, `26528933436`,
+      `26528934580`, `26528935409`, and `26528936446` all completed but were
+      `promotion_ready=false`.
+- [x] Reproduce durable planner bug: direct `research-trace-plan` returned
+      `theme=ready_handoff` after negative replay run `26530018058`.
+- [x] Add recent candidate replay frontier summary to `research_trace_plan`.
+- [x] Add Research Manager regression for newer negative runtime replay
+      overriding stale ready handoff.
+- [x] Run focused local validation.
+- [ ] Rerun planner against durable trace and land through PR.
+
+### Review
+
+- 2026-05-27: Runtime replay evidence was real `runtime_market_update_replay`
+  evidence, not a top-bucket aggregate. The best replayed full-depth settlement
+  family candidate had `trade_count=145`, `entry_fill_rate=1.0`, and
+  `roi=-0.0139066`, so it is not promotable. Hosted feedback run
+  `26530018058` correctly emitted `action=revise_prior` and
+  `reason=negative_runtime_replay_edge`, but direct durable
+  `research-trace-plan` still returned `ready_handoff` because it only exposed
+  old ready candidate replays from `candidate_replay_tapes`.
+- 2026-05-27: Added `recent_candidate_replays` to the trace-plan frontier and
+  taught Research Manager to let the latest negative
+  `runtime_market_update_replay` economics override stale ready handoff state.
+  Focused validation passed:
+  `rtk cargo test -p ploy-research research_os::manager --lib` and
+  `rtk cargo check -p ploy-research --features db --example research_trace_plan`.
+
 ## Current Session - Unmapped Runtime Contract Prior Feedback (2026-05-27)
 
 Evidence stage: `walk_forward` / `runtime_parity` feedback repair. This keeps
