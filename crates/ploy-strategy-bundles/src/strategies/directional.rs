@@ -745,6 +745,14 @@ impl DirectionalStrategy {
         }
     }
 
+    fn daily_trade_cap_reached(&self) -> bool {
+        self.config.max_daily_trades > 0 && self.daily_trades >= self.config.max_daily_trades
+    }
+
+    fn daily_trade_cap_allows_entry(&self) -> bool {
+        !self.daily_trade_cap_reached()
+    }
+
     fn floor_var_per_sec(&self) -> f64 {
         let sigma_floor = self.config.vol_floor.max(1e-9);
         sigma_floor * sigma_floor / 900.0
@@ -1508,7 +1516,7 @@ impl StrategyLogic for DirectionalStrategy {
                 }
 
                 self.reset_daily_counter(*ts);
-                if self.daily_trades >= self.config.max_daily_trades {
+                if self.daily_trade_cap_reached() {
                     return vec![];
                 }
                 if let Some(loss_limit) = self.config.max_daily_loss_usd {
@@ -1552,7 +1560,7 @@ impl StrategyLogic for DirectionalStrategy {
                             self.feed_time = Some(*ts);
                         }
                         self.reset_daily_counter(*ts);
-                        if self.daily_trades < self.config.max_daily_trades
+                        if self.daily_trade_cap_allows_entry()
                             && !self.in_cooldown(&symbol, *ts)
                             && self
                                 .config
@@ -1685,7 +1693,7 @@ impl StrategyLogic for DirectionalStrategy {
                         .symbols
                         .iter()
                         .any(|s| s.as_str() == symbol.as_ref())
-                    && self.daily_trades < self.config.max_daily_trades
+                    && self.daily_trade_cap_allows_entry()
                     && !self.in_cooldown(symbol, now)
                 {
                     return self.try_entry(symbol, positions, orders, now);
@@ -1951,6 +1959,33 @@ mod tests {
         // cooldown_secs = 0 means no cooldown — always false
         assert!(!strat.in_cooldown("BTCUSDT", now + chrono::Duration::seconds(1)));
         assert!(!strat.in_cooldown("BTCUSDT", now));
+    }
+
+    #[test]
+    fn zero_max_daily_trades_disables_cap() {
+        let mut config = default_config();
+        config.max_daily_trades = 0;
+        let mut strat = DirectionalStrategy::new(config);
+
+        strat.daily_trades = 10_000;
+
+        assert!(!strat.daily_trade_cap_reached());
+        assert!(strat.daily_trade_cap_allows_entry());
+    }
+
+    #[test]
+    fn positive_max_daily_trades_caps_at_limit() {
+        let mut config = default_config();
+        config.max_daily_trades = 2;
+        let mut strat = DirectionalStrategy::new(config);
+
+        strat.daily_trades = 1;
+        assert!(!strat.daily_trade_cap_reached());
+        assert!(strat.daily_trade_cap_allows_entry());
+
+        strat.daily_trades = 2;
+        assert!(strat.daily_trade_cap_reached());
+        assert!(!strat.daily_trade_cap_allows_entry());
     }
 
     #[test]
