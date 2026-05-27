@@ -201,10 +201,14 @@ function buildWalkForwardEvidence({ title, metadata, artifactDir, runnerLabel })
   const promotion = readJson(`${artifactDir}/autofactor-strategy-promotion.json`);
   const handoff = readJson(`${artifactDir}/autofactor-strategy-handoff.json`);
   const closedLoop = readClosedLoopDecision(artifactDir);
+  const closedLoopDecision = closedLoopOutcome(closedLoop);
   const outcome = decisionFromArtifacts({ promotion, handoff, closedLoop });
   const gate = (handoff && handoff.promotion_gate) || (promotion && promotion.promotion_gate) || {};
   const strategies = topStrategies(handoff);
-  const blockers = outcome.decision === "revise" && closedLoop && closedLoop.reason
+  const blockers = closedLoopDecision
+    && closedLoopDecision.decision === outcome.decision
+    && closedLoop
+    && closedLoop.reason
     ? [closedLoop.reason]
     : actionableBlockers({ handoff, promotion });
 

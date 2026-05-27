@@ -289,6 +289,8 @@ class AutoFactorWalkForwardEvidenceJsTest(unittest.TestCase):
         self.assertEqual(result["decision"], "fix-data")
         self.assertIn("- Decision: fix-data", result["body"])
         self.assertIn("- Next action: promotion_blockers_require_fix_data", result["body"])
+        self.assertIn("- Actionable blockers: `promotion_blockers_require_fix_data`", result["body"])
+        self.assertNotIn("runtime_contract_unmapped_factor", result["body"])
 
 
 if __name__ == "__main__":
