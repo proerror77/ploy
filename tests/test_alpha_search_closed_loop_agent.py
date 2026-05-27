@@ -26,6 +26,7 @@ def artifact(
     selected_nodes: list[dict] | None = None,
     feedback: dict | None = None,
     promotion: dict | None = None,
+    registry_preview: dict | None = None,
     candidate_strategy_replay: dict | None = None,
     write_feedback: bool = True,
 ) -> Path:
@@ -84,6 +85,8 @@ def artifact(
         factor_root / "autofactor-strategy-promotion.json",
         promotion or {"decision": "blocked", "evaluated_factors": []},
     )
+    if registry_preview is not None:
+        write_json(alpha_root / "factor-registry-preview.json", registry_preview)
     write_json(
         root / "alpha-search-chain" / "chain-decision.json",
         {
@@ -814,6 +817,121 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             json.loads(request["inputs"]["options_json"])["source_target"],
             "tradeable_full_depth_settlement_pnl",
         )
+
+    def test_runtime_replay_request_can_use_registry_preview_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_score = (
+                "autofactor_formula:mut_spread_adjusted_external_move_entry_price_quality"
+            )
+            path = artifact(
+                Path(tmp),
+                feedback={
+                    "target": agent.DEFAULT_TARGET,
+                    "candidate_count": 1082,
+                    "rejected_count": 874,
+                    "passed_count": 96,
+                    "best_candidate": "mut_auto_settlement_model_conservative_settlement_edge_spread_adjusted_spread_adjusted",
+                    "best_reward": 6.2416,
+                    "runtime_avoid_factors": [
+                        {
+                            "factor_family": "auto_settlement_model_full_depth_settlement_edge",
+                            "runtime_score": "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted",
+                            "reason": "negative_dry_run_runtime_edge",
+                        }
+                    ],
+                },
+                promotion={
+                    "decision": "blocked",
+                    "required_strategy_profile": "settlement_probability",
+                    "evaluated_factors": [
+                        {
+                            "blockers": [
+                                "candidate_strategy_replay_not_runtime_replay:factor_walk_forward_top_bucket_aggregate!=runtime_market_update_replay",
+                                "incomplete_runtime_contract_mapping:mut_auto_settlement_model_conservative_settlement_edge_spread_adjusted_spread_adjusted",
+                                "runtime_contract_unmapped_factor",
+                            ],
+                            "factor": {
+                                "name": "mut_auto_settlement_model_conservative_settlement_edge_spread_adjusted_spread_adjusted",
+                                "target": agent.DEFAULT_TARGET,
+                                "decision": "candidate",
+                                "reason": "passed",
+                            },
+                            "runtime_mapping": {
+                                "runtime_score": "",
+                                "strategy_profile": "",
+                            },
+                        }
+                    ],
+                    "candidate_strategy_replay": {
+                        "basis": "factor_walk_forward_top_bucket_aggregate",
+                        "runtime_score": "",
+                        "strategy_profile": "settlement_probability",
+                    },
+                },
+                registry_preview={
+                    "version": "alpha_search_artifacts_v1",
+                    "target": agent.DEFAULT_TARGET,
+                    "horizon": "5m",
+                    "factors": [
+                        {
+                            "factor_name": "mut_auto_settlement_model_conservative_settlement_edge_spread_adjusted_spread_adjusted",
+                            "target": agent.DEFAULT_TARGET,
+                            "status": "candidate",
+                            "runtime_contract": {
+                                "runtime_score": "",
+                                "strategy_profile": "",
+                                "strategy_family": "",
+                                "blockers": ["runtime_contract_unmapped_factor"],
+                            },
+                            "metrics": {
+                                "reward": 6.2416,
+                                "top_bucket_unique_event_count": 129,
+                                "top_bucket_avg_label": 9.3898,
+                                "top_bucket_full_depth_entry_fill_rate": 1.0,
+                                "positive_window_ratio": 0.8888,
+                                "spearman_ic": 0.1823,
+                            },
+                            "blockers": ["runtime_contract_unmapped_factor"],
+                        },
+                        {
+                            "factor_name": "mut_spread_adjusted_external_move_entry_price_quality",
+                            "target": agent.DEFAULT_TARGET,
+                            "status": "candidate",
+                            "runtime_contract": {
+                                "runtime_score": runtime_score,
+                                "strategy_profile": "settlement_probability",
+                                "strategy_family": "predictive_settlement_probability",
+                                "blockers": [],
+                            },
+                            "metrics": {
+                                "reward": 6.0245,
+                                "top_bucket_unique_event_count": 129,
+                                "top_bucket_avg_label": 8.4060,
+                                "top_bucket_full_depth_entry_fill_rate": 1.0,
+                                "positive_window_ratio": 0.8888,
+                                "spearman_ic": 0.221,
+                            },
+                            "blockers": [],
+                        },
+                    ],
+                },
+            )
+
+            decision = agent.closed_loop_decision(
+                [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            )
+
+        request = decision["runtime_replay_request"]
+        self.assertEqual("fix_runtime", decision["decision"])
+        self.assertEqual(
+            "runtime_mappable_candidate_needs_runtime_replay",
+            decision["reason"],
+        )
+        self.assertEqual(
+            "mut_spread_adjusted_external_move_entry_price_quality",
+            request["source_factor"],
+        )
+        self.assertEqual(runtime_score, request["inputs"]["runtime_score"])
 
     def test_fix_runtime_includes_batch_runtime_replay_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
