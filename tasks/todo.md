@@ -89,6 +89,17 @@ verification. This keeps `pm5d.threelayer.live` paused and does not claim
   another new BUY for event `2357506`. This confirms the loop can release
   capacity after delayed official settlement. Old pre-fix runtime evidence rows
   still remain, so replay/parity or promotion review needs a clean reset window.
+- 2026-05-27 clean-window reset: Operator approved pausing dry-run and clearing
+  settlement-probability runtime evidence. Preview reset run `26484896282`
+  backed up `22` orders / `22` fills and deleted nothing. After pausing the
+  target deployment to `desired=paused observed=paused`, execute reset run
+  `26485015098` backed up `24` orders / `24` fills, deleted `24` orders, and
+  verified `after.orders=0`, `after.fills=0`, `guard.status=allowed`, and
+  `post-reset-clean-baseline-gate.status=passed`. Direct DB verification also
+  returned `orders=0`, `fills=0`; the target deployment was resumed to
+  `desired=running observed=running`, `pm5d.threelayer.live` remained paused,
+  the recording file continued growing, and the dry-run report restarted at
+  `total_trades=0`, `open_positions=0`.
 
 ### Follow-up Tasks
 
@@ -100,7 +111,7 @@ verification. This keeps `pm5d.threelayer.live` paused and does not claim
       deploy through CI-built artifacts only.
 - [x] Land the DB-feed settlement retry fix through PR/CI and deploy from
       `main`; do not build Rust on `tango-1-1`.
-- [ ] After deploy, start a clean dry-run evidence window before replay/parity
+- [x] After deploy, start a clean dry-run evidence window before replay/parity
       or promotion review.
 
 ## Current Session - Research Manager Frontier Ready State (2026-05-25)
