@@ -347,6 +347,62 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             prior["runtime_avoid_factors"],
         )
 
+    def test_revise_prior_chains_latest_alpha_search_plan_artifact_prior(self) -> None:
+        recent_negative_replay = {
+            "run_id": "26541671208",
+            "artifact_json": {
+                "basis": "runtime_market_update_replay",
+                "runtime_score": "autofactor_formula:latest_negative",
+                "source_workflow": "runtime-candidate-replay.yml",
+                "workflow_run_id": "26528933436",
+                "strategy_profile": "settlement_probability",
+                "metrics": {
+                    "trade_count": 145,
+                    "unique_event_count": 145,
+                    "entry_fill_rate": 1.0,
+                    "roi": -0.013906620311657932,
+                    "total_pnl": -30.246899177856,
+                },
+                "blocking_risk_flags": ["roi_too_low:-0.013907<0.000000"],
+                "decision_contract": {
+                    "target": "full_depth_settlement_executable_pnl",
+                    "horizon": "5m",
+                },
+                "recording_path": "/opt/ploy/data/recordings/live.ndjson",
+                "recording_sha256": "def456",
+            },
+        }
+        plan = plan_payload(
+            "revise_prior",
+            ["generate_typed_llm_prior_json", "rerun_alpha_search_with_bounded_mutations"],
+            {"recent_candidate_replays": [recent_negative_replay]},
+        )
+        plan["plan"]["blocker_actions"] = [
+            {
+                "blocker_family": "strategy_economics",
+                "action": "mutate_or_reject_negative_runtime_edge",
+                "reason": "Latest replay or walk-forward evidence failed economic/OOS gates.",
+            }
+        ]
+
+        payload = build_executor_payload(
+            base_args(mode="execute", execute_ack=EXECUTE_ACK, snapshot_run_id="26516561409"),
+            plan,
+        )
+
+        options = json.loads(payload["dispatches"][0]["fields"]["options_json"])
+        self.assertEqual("26541671208", options["alpha_search_plan_run_id"])
+        self.assertEqual(
+            "factor-walk-forward-v2-26541671208",
+            options["alpha_search_plan_artifact_name"],
+        )
+        self.assertEqual("26528933436", options["candidate_strategy_replay_run_id"])
+        self.assertNotIn("alpha_search_llm_prior_json", options)
+        self.assertEqual(
+            "research_manager_typed_prior.v1",
+            payload["typed_prior"]["schema_version"],
+        )
+
     def test_negative_runtime_prior_normalizes_selector_threshold_family(self) -> None:
         plan = plan_payload(
             "revise_prior",

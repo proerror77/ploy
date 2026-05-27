@@ -250,6 +250,8 @@ def _walk_forward_dispatch(
     chain_remaining: int,
     alpha_search_plan_target: str = "",
     allowed_target: str = "",
+    alpha_search_plan_run_id: str = "",
+    alpha_search_plan_artifact_name: str = "",
     alpha_search_llm_prior: dict[str, Any] | None = None,
     candidate_strategy_replay_run_id: str = "",
     candidate_strategy_replay_artifact_name: str = "",
@@ -273,7 +275,11 @@ def _walk_forward_dispatch(
         options["alpha_search_plan_target"] = alpha_search_plan_target
     if allowed_target:
         options["allowed_target"] = allowed_target
-    if alpha_search_llm_prior:
+    if alpha_search_plan_run_id:
+        options["alpha_search_plan_run_id"] = alpha_search_plan_run_id
+    if alpha_search_plan_artifact_name:
+        options["alpha_search_plan_artifact_name"] = alpha_search_plan_artifact_name
+    if alpha_search_llm_prior and not alpha_search_plan_run_id:
         options["alpha_search_llm_prior_json"] = json.dumps(
             alpha_search_llm_prior,
             separators=(",", ":"),
@@ -676,6 +682,9 @@ def _candidate_replay_contract(
         "runtime_score": str(
             replay.get("runtime_score") or fallback.get("runtime_score") or ""
         ),
+        "source_run_id": str(
+            replay.get("run_id") or fallback.get("run_id") or ""
+        ),
         "strategy_profile": str(
             replay.get("strategy_profile") or fallback.get("strategy_profile") or ""
         ),
@@ -968,6 +977,9 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
         "runtime_source_target",
         "full_depth_settlement_executable_pnl",
     )
+    alpha_search_plan_run_id = ""
+    if plan.get("theme") == "revise_prior":
+        alpha_search_plan_run_id = str(latest_replay_contract.get("source_run_id") or "")
     negative_economics_prior = _negative_economics_prior_payload(
         blocker_actions,
         latest_replay_contract,
@@ -1039,6 +1051,12 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
                 chain_remaining=args.chain_remaining,
                 alpha_search_plan_target=walk_forward_target,
                 allowed_target=walk_forward_target,
+                alpha_search_plan_run_id=alpha_search_plan_run_id,
+                alpha_search_plan_artifact_name=(
+                    f"factor-walk-forward-v2-{alpha_search_plan_run_id}"
+                    if alpha_search_plan_run_id
+                    else ""
+                ),
                 alpha_search_llm_prior=typed_prior,
                 candidate_strategy_replay_run_id=getattr(
                     args,
