@@ -73,7 +73,21 @@ function closedLoopOutcome(closedLoop) {
 }
 
 function readClosedLoopDecision(artifactDir) {
-  return readJson(path.join(artifactDir, "..", "alpha-search-chain", "closed-loop-decision.json"));
+  const candidates = [
+    path.join(artifactDir, "..", "alpha-search-chain", "closed-loop-decision.json"),
+    path.join(
+      artifactDir,
+      "..",
+      "factor-walk-forward-v2-upload",
+      "alpha-search-chain",
+      "closed-loop-decision.json",
+    ),
+  ];
+  for (const candidate of candidates) {
+    const payload = readJson(candidate);
+    if (payload) return payload;
+  }
+  return null;
 }
 
 function decisionFromArtifacts({ promotion, handoff, closedLoop }) {

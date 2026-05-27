@@ -232,6 +232,64 @@ class AutoFactorWalkForwardEvidenceJsTest(unittest.TestCase):
         self.assertIn("- Next action: missing_runtime_strategy_mapping", result["body"])
         self.assertIn("- Actionable blockers: `missing_runtime_strategy_mapping`", result["body"])
 
+    def test_reads_closed_loop_from_workflow_staged_upload_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            artifacts = root / "artifacts"
+            artifact_dir = artifacts / "factor-walk-forward-v2"
+            artifact_dir.mkdir(parents=True)
+            staged_alpha = (
+                artifacts
+                / "factor-walk-forward-v2-upload"
+                / "alpha-search-chain"
+            )
+            staged_alpha.mkdir(parents=True)
+            (staged_alpha / "closed-loop-decision.json").write_text(
+                json.dumps(
+                    {
+                        "action": "fix_data",
+                        "reason": "promotion_blockers_require_fix_data",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (artifact_dir / "autofactor-strategy-handoff.json").write_text(
+                json.dumps(
+                    {
+                        "status": "blocked",
+                        "promotion_gate": {
+                            "ready": False,
+                            "blocked_gates": [
+                                "incomplete_runtime_contract_mapping:factor",
+                                "runtime_contract_unmapped_factor",
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (artifact_dir / "autofactor-strategy-promotion.json").write_text(
+                json.dumps(
+                    {
+                        "decision": "blocked",
+                        "promotion_gate": {
+                            "ready": False,
+                            "blocked_gates": [
+                                "incomplete_runtime_contract_mapping:factor",
+                                "runtime_contract_unmapped_factor",
+                            ],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_builder(artifact_dir)
+
+        self.assertEqual(result["decision"], "fix-data")
+        self.assertIn("- Decision: fix-data", result["body"])
+        self.assertIn("- Next action: promotion_blockers_require_fix_data", result["body"])
+
 
 if __name__ == "__main__":
     unittest.main()
