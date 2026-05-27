@@ -16,8 +16,80 @@ verification. This keeps `pm5d.threelayer.live` paused and does not claim
 - [x] Let Tango deploy/recovery restart downstream data services before final
       market-discovery gates fail the deploy.
 - [x] Run focused workflow/script validation.
-- [ ] Merge, redeploy from `main`, and verify fresh recording / DB rows before
-      treating any new dry-run rows as usable evidence.
+- [x] Merge, redeploy from `main`, and verify whether fresh recording / DB rows
+      recover before treating any new dry-run rows as usable evidence.
+
+### Review
+
+- 2026-05-26: PR `#701` landed as `main@575cdc88` and deploy recovery reached
+  downstream service restarts, but final freshness still failed. Cloud
+  Assistant diagnostics showed DNS, route, local firewall, proxy env, services,
+  DB, and collectors were not the primary blocker: TCP handshakes to GitHub,
+  Binance, Deribit, Polymarket, and inbound HTTP succeeded, but payload packets
+  from `tango-1-1` over the public path were not ACKed. Reboot, stop/start, NIC
+  offload toggles, Aegis/CloudMonitor stop probe, and a temporary equivalent
+  security group did not restore public payload flow.
+- 2026-05-26: The decisive cloud-side blocker is account state. Attempts to
+  allocate a low-bandwidth test EIP failed with `PAY.INSUFFICIENT_BALANCE`, and
+  converting the existing NAT public IP to an EIP failed with
+  `AccountInArrears`. Until the Aliyun account is brought current or the host is
+  moved behind a working paid public egress path, collectors cannot fetch fresh
+  Binance/Deribit/Polymarket data and the current dry-run recording is not
+  usable new evidence.
+- 2026-05-27: After the Aliyun account was brought current, public payload flow
+  recovered. Cloud Assistant curl probes from `tango-1-1` returned HTTP 200 for
+  GitHub, Binance, Deribit, and Polymarket; local public `/health` returned 200.
+  The settlement-probability recording advanced to sequence `1597876` at
+  `2026-05-27 00:08:27 +0800`, and current DB/log probes showed fresh Binance,
+  CLOB quote/orderbook, Deribit, market-discovery, and PM trade activity. This
+  restores data collection but does not make the strategy `live_candidate`.
+- 2026-05-27: Target deployment
+  `pm5d.threelayer.settlement-probability-btc-eth.dryrun` had `8` orders,
+  `8` fills, `0` rejects, requested notional about `120.00`, filled notional
+  about `119.18`, and last order at `2026-05-26 18:42:10 +0800`. Treat the
+  post-recovery dry-run evidence window as newly starting after market data
+  freshness recovered; do not mix the outage window into replay/parity gates.
+- 2026-05-27 08:08 +0800: Follow-up dry-run check showed the target deployment
+  still `desired=Running observed=Running` while `pm5d.threelayer.live` remained
+  paused. The recording grew from `1267674049` to `1267827073` bytes in eight
+  seconds (`sequence` `3458686 -> 3459079`), confirming fresh market updates.
+  Closed-trade report for the target deployment showed `8` closed trades,
+  `7` wins, `1` loss, `net_pnl=108.8669`, and `notional=119.1819`; runtime
+  tables still showed `8` fills, `0` rejects, and no orders/fills since
+  `2026-05-27 00:00 +0800`. This is positive early dry-run evidence but still
+  below the minimum sample needed for promotion.
+- 2026-05-27 follow-up hypothesis: The dry-run runner may be evaluating fresh
+  updates but failing to re-enter its next trade loop after an earlier trigger.
+  Investigate the runtime lifecycle boundary before changing strategy logic:
+  compare strategy diagnostics (`skip_max_positions`, `skip_existing_position`),
+  runtime orders/fills, closed-trade report rows, and event-expiry/position
+  release behavior for the target deployment.
+- 2026-05-27 loop root cause: The target dry-run was not merely idle. Runner
+  diagnostics kept processing fresh updates while `skip_max_positions` rose, and
+  DB evidence showed all `8` target runtime fills were BUY fills with `0`
+  SELL/settlement/TP/SL exit orders. The public dry-run report counted those
+  events as closed by joining official `pm_token_settlements`, but the active
+  runtime position ledger never received settlement exits. The local DB
+  Polymarket feed emitted `EventExpired` with `resolved_up_won=None` at event
+  expiry, marked the event done, and only queried events for `120 seconds` after
+  expiry; official settlement rows for the observed events arrived around
+  `6-12` minutes later. Added a focused fix so missing settlement remains
+  retryable and the DB feed keeps recently expired events visible for `30`
+  minutes, plus a regression proving an unresolved expiry does not burn the
+  retry state.
+
+### Follow-up Tasks
+
+- [x] Prove whether the target runner is truly stuck after a trigger or simply
+      rejecting new opportunities by design.
+- [x] Trace the state boundary that should release a filled event/position for
+      the next candidate.
+- [x] If a lifecycle bug is confirmed, patch it with a focused regression and
+      deploy through CI-built artifacts only.
+- [ ] Land the DB-feed settlement retry fix through PR/CI and deploy from
+      `main`; do not build Rust on `tango-1-1`.
+- [ ] After deploy, start a clean dry-run evidence window before replay/parity
+      or promotion review.
 
 ## Current Session - Research Manager Frontier Ready State (2026-05-25)
 

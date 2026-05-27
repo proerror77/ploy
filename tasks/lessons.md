@@ -94,6 +94,47 @@
   - After boot, use Cloud Assistant if needed to run `systemctl enable --now actions.runner.proerror77-ploy.ploy-ci-1.service`.
   - Confirm queued workflow runs move to `in_progress` before assuming ploy-ci work has actually started.
 
+- Pattern: A dry-run data stall on `tango-1-1` can look like a strategy,
+  replay, collector, or fill-simulation bug when the real failure is public
+  egress. In the 2026-05-26 incident, TCP handshakes worked but public payload
+  packets from the instance were not ACKed, while Cloud Assistant/internal
+  traffic still worked; Aliyun then reported `AccountInArrears` and refused
+  public-IP/EIP recovery operations.
+- Rule: Before changing PM5D strategy code or waiting for more dry-run records,
+  verify market-data freshness and public payload flow from `tango-1-1`. If
+  Cloud Assistant works but GitHub/Binance/Deribit/Polymarket HTTPS payloads
+  time out, check Aliyun billing/account state and public IP/EIP status before
+  debugging collectors.
+- Recovery rule: After an Aliyun arrears/public-egress incident is fixed, prove
+  recovery with both public payload curl probes and fresh data-plane rows/logs.
+  Start a new clean dry-run evidence window after recovery; do not blend records
+  collected during the outage into replay parity or promotion evidence.
+- Traffic rule: Use ECS monitor counters and host logs before blaming the public
+  dashboard for bandwidth consumption. In the 2026-05-27 check, nginx served
+  only about `0.20MB` over 24h while ECS monitor showed hundreds of MB to GB per
+  day of `InternetRX`, matching market-data collector ingress rather than page
+  serving.
+- Evidence checklist:
+  - `curl` from `tango-1-1` to `https://api.github.com/zen`,
+    Binance, Deribit, and Polymarket with timing fields.
+  - `tcpdump` proving whether payload packets are ACKed, not only whether TCP
+    connect succeeds.
+  - `antiddos-public describe-instance-ip-address` for blackhole/defense state.
+  - A paid-account/public-egress check before allocating or converting EIPs.
+
+- Pattern: A PM5D dry-run can look profitable in the report while the active
+  runner is still stuck at `max_positions`. The report may close rows by joining
+  official settlement labels, but the runner's in-memory `PositionLedger` only
+  frees capacity after a SELL/settlement fill.
+- Rule: When dry-run stops entering after an initial batch, compare report
+  closure against runtime BUY/SELL fills and strategy diagnostics. If
+  `skip_max_positions` rises and runtime fills have no SELL exits, debug event
+  expiry and settlement emission before changing factor logic.
+- Feed rule: Local-DB PM event feeds must not mark an event expired-done when
+  `resolved_up_won` is still missing. Keep the event retryable until official
+  `pm_token_settlements` arrives, because observed settlement lag can exceed the
+  old 120-second DB feed lookback.
+
 - Pattern: AutoFactor / settlement-probability PRD downstream evidence does not need a live self-hosted runner once a complete sampled research snapshot artifact exists.
 - Rule: Prefer GitHub-hosted `ubuntu-latest` artifact workflows for AutoFactor mining, promotion, and dry-run handoff gates. Treat `ploy-ci-1` as a legacy DB-adjacent fallback only for fresh snapshot/export work that still requires Tango private-network database access.
 - Migration guardrail:

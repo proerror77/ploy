@@ -33,6 +33,7 @@ use crate::reference_prices::{
 const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
 const POLYMARKET_CLOB_HTTP_ENDPOINT: &str = "https://clob.polymarket.com";
 const NEAR_DEPTH_PCT_RANGE: f64 = 0.001;
+const DB_POLYMARKET_SETTLEMENT_RETRY_LOOKBACK_SECS: i64 = 30 * 60;
 
 fn rtds_market_data_ws_config() -> PolymarketWsConfig {
     let mut config = PolymarketWsConfig::default();
@@ -525,7 +526,7 @@ pub fn spawn_db_polymarket_feed(
                     price_to_beat
                 FROM pm_market_metadata
                 WHERE symbol = ANY($1)
-                  AND end_time > NOW() - INTERVAL '120 seconds'
+                  AND end_time > NOW() - ($2::BIGINT * INTERVAL '1 second')
                   AND COALESCE(start_time, end_time - INTERVAL '300 seconds')
                         < NOW() + INTERVAL '6 minutes'
                   AND raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
@@ -533,6 +534,7 @@ pub fn spawn_db_polymarket_feed(
                 "#,
             )
             .bind(&symbols_upper)
+            .bind(DB_POLYMARKET_SETTLEMENT_RETRY_LOOKBACK_SECS)
             .fetch_all(&pool)
             .await
             {
@@ -580,10 +582,21 @@ pub fn spawn_db_polymarket_feed(
                 }
 
                 if end_time <= now {
-                    if expired_events.insert(event_id.clone()) {
+                    if !expired_events.contains(&event_id) {
                         let resolved_up_won =
                             resolve_db_event_outcome(&pool, &event_id, &up_token, &down_token)
                                 .await;
+                        if !mark_db_event_expired_if_resolved(
+                            &mut expired_events,
+                            &event_id,
+                            resolved_up_won,
+                        ) {
+                            debug!(
+                                event_id = %event_id,
+                                "DB Polymarket event settlement pending; retrying until official outcome is available",
+                            );
+                            continue;
+                        }
                         let _ = tx.send(MarketUpdate::EventExpired {
                             event_id: Arc::from(event_id.as_str()),
                             end_time,
@@ -712,6 +725,17 @@ pub fn spawn_db_polymarket_feed(
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     })
+}
+
+fn mark_db_event_expired_if_resolved(
+    expired_events: &mut HashSet<String>,
+    event_id: &str,
+    resolved_up_won: Option<bool>,
+) -> bool {
+    if resolved_up_won.is_none() {
+        return false;
+    }
+    expired_events.insert(event_id.to_string())
 }
 
 async fn resolve_db_event_outcome(
@@ -1445,14 +1469,15 @@ fn parse_agg_trade_msg(v: &serde_json::Value) -> Option<AggTradeMsg> {
 #[cfg(test)]
 mod tests {
     use super::{
-        book_quote_from_rest, l2_updates_from_book, parse_agg_trade_msg,
-        rtds_market_data_ws_config, RestBook,
+        book_quote_from_rest, l2_updates_from_book, mark_db_event_expired_if_resolved,
+        parse_agg_trade_msg, rtds_market_data_ws_config, RestBook,
     };
     use chrono::Utc;
     use ploy_market_contracts::MarketUpdate;
     use rust_decimal::prelude::ToPrimitive;
     use rust_decimal_macros::dec;
     use serde_json::json;
+    use std::collections::HashSet;
     use std::time::Duration;
 
     #[test]
@@ -1538,6 +1563,33 @@ mod tests {
         assert_eq!(quote.bid_size, None);
         assert_eq!(quote.ask, None);
         assert_eq!(quote.ask_size, None);
+    }
+
+    #[test]
+    fn db_polymarket_expiry_waits_for_official_settlement_before_marking_done() {
+        let mut expired_events = HashSet::new();
+
+        assert!(!mark_db_event_expired_if_resolved(
+            &mut expired_events,
+            "event-1",
+            None
+        ));
+        assert!(
+            !expired_events.contains("event-1"),
+            "missing settlement must stay retryable"
+        );
+
+        assert!(mark_db_event_expired_if_resolved(
+            &mut expired_events,
+            "event-1",
+            Some(true)
+        ));
+        assert!(expired_events.contains("event-1"));
+        assert!(!mark_db_event_expired_if_resolved(
+            &mut expired_events,
+            "event-1",
+            Some(true)
+        ));
     }
 
     #[test]
