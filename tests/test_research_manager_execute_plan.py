@@ -817,6 +817,53 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             dispatch["fields"]["runtime_score"],
         )
 
+    def test_runtime_replay_blocker_action_dispatches_candidate_replay(self) -> None:
+        plan = plan_payload(
+            "revise_prior",
+            ["generate_typed_llm_prior_json", "rerun_alpha_search_with_bounded_mutations"],
+            {
+                "runtime_ready_candidates": [
+                    {
+                        "factor_name": "runtime_ready_factor",
+                        "status": "candidate",
+                        "target": "full_depth_settlement_executable_pnl",
+                        "horizon": "5m",
+                        "blockers": [],
+                        "runtime_contract": {
+                            "version": "autofactor_runtime_contract_v1",
+                            "runtime_score": "autofactor_formula:runtime_ready_factor",
+                            "strategy_profile": "settlement_probability",
+                            "target": "full_depth_settlement_executable_pnl",
+                            "horizon": "5m",
+                            "blockers": [],
+                        },
+                    }
+                ]
+            },
+        )
+        plan["plan"]["blocker_actions"] = [
+            {
+                "blocker_family": "runtime_replay",
+                "action": "build_runtime_market_update_replay",
+                "reason": "Top-bucket aggregate evidence must be replaced by runtime replay.",
+            }
+        ]
+
+        payload = build_executor_payload(base_args(snapshot_run_id="26516561409"), plan)
+
+        self.assertEqual(2, payload["executable_dispatch_count"])
+        replay_dispatch = next(
+            item
+            for item in payload["dispatches"]
+            if item["workflow"] == "runtime-candidate-replay.yml"
+        )
+        self.assertTrue(replay_dispatch["ready"])
+        self.assertEqual("runtime_ready_factor", replay_dispatch["selected_factor_name"])
+        self.assertEqual(
+            "autofactor_formula:runtime_ready_factor",
+            replay_dispatch["fields"]["runtime_score"],
+        )
+
     def test_fix_runtime_prefers_frontier_runtime_ready_candidates(self) -> None:
         payload = build_executor_payload(
             base_args(),

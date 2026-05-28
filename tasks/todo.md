@@ -1,5 +1,37 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Runtime Replay Blocker Action (2026-05-28)
+
+Evidence stage: `walk_forward` / `runtime_parity` feedback repair. This keeps
+dry-run/live deployment state untouched and fixes Research Manager executor
+routing so `build_runtime_market_update_replay` blocker actions dispatch
+`runtime-candidate-replay.yml` instead of only continuing alpha search.
+
+### Files / Ownership
+
+- `scripts/research_manager_execute_plan.py`
+  - Owner: route runtime replay blocker actions to candidate replay dispatch.
+- `tests/test_research_manager_execute_plan.py`
+  - Owner: regression for `build_runtime_market_update_replay` blocker action.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+### Tasks
+
+- [x] Confirm run `26546643694` stayed `blocked` and exposed
+      `build_runtime_market_update_replay` as a blocker action.
+- [x] Implement executor routing for `build_runtime_market_update_replay`.
+- [x] Add regression coverage.
+- [x] Run focused validation.
+- [ ] Land through PR and rerun executor against the latest trace plan.
+
+### Review
+
+- 2026-05-28: Focused validation passed:
+  `python3 -m unittest tests.test_research_manager_execute_plan`,
+  `python3 -m py_compile scripts/research_manager_execute_plan.py
+  tests/test_research_manager_execute_plan.py`, and `rtk git diff --check`.
+
 ## Current Session - Research Manager Snapshot Provenance Continuation (2026-05-28)
 
 Evidence stage: `walk_forward` / `runtime_parity` feedback repair. This keeps
