@@ -1,5 +1,47 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Fresh Runtime Candidate After Negative Replay (2026-05-28)
+
+Evidence stage: `walk_forward` -> `executable_replay` routing repair. This
+keeps dry-run/live deployment state untouched and fixes the planner so a failed
+runtime replay for one score does not permanently suppress fresh un-replayed
+runtime-ready candidates from later walk-forward searches.
+
+### Files / Ownership
+
+- `crates/ploy-research/src/research_os/manager.rs`
+  - Owner: route fresh un-replayed runtime-ready candidates to
+    `candidate_to_runtime_replay` ahead of old negative replay feedback.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+### Tasks
+
+- [x] Confirm trace plan run `26555356394` still returns `theme=revise_prior`
+      after walk-forward `26555236159`, even though latest
+      `runtime_ready_candidates` contains unblocked scores that have not been
+      runtime replayed.
+- [x] Add a regression for fresh runtime-ready candidates after an old negative
+      runtime replay.
+- [x] Implement planner routing fix.
+- [x] Run focused validation.
+- [ ] Land through PR, deploy main to tango, rerun Trace Plan, and verify the
+      next plan routes to `candidate_to_runtime_replay`.
+
+### Review
+
+- 2026-05-28: Added fresh-candidate routing so un-replayed unblocked
+  runtime-ready scores route to `candidate_to_runtime_replay` ahead of stale
+  negative replay feedback for another score. Focused validation passed:
+  `rtk cargo test -p ploy-research
+  planner_routes_fresh_runtime_ready_candidate_ahead_of_old_negative_replay
+  --lib`, `rtk cargo test -p ploy-research research_os::manager --lib`,
+  `rtk cargo check -p ploy-research --features db --example
+  research_trace_plan`, and `rtk git diff --check`. `rustfmt --edition 2024
+  --check crates/ploy-research/src/research_os/manager.rs` still reports
+  pre-existing assertion formatting drift in the same file; this slice left
+  unrelated formatting unchanged.
+
 ## Current Session - Research Manager Runtime Replay Prior Routing (2026-05-28)
 
 Evidence stage: `walk_forward` feedback repair. This keeps dry-run/live

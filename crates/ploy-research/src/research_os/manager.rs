@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,6 +171,21 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
             vec![
                 "run_recorded_replay_parity",
                 "compare_runtime_scorer_contract",
+            ],
+            blocker_actions,
+        ));
+    }
+
+    if has_unreplayed_unblocked_runtime_candidate(&input.factor_registry_summary) {
+        return Ok(plan_with_blocker_actions(
+            "candidate_to_runtime_replay",
+            1,
+            0,
+            "high",
+            &input.evidence_stage,
+            vec![
+                "build_runtime_candidate_replay",
+                "write_runtime_replay_trace_artifact",
             ],
             blocker_actions,
         ));
@@ -753,37 +770,130 @@ fn runtime_replay_is_blocked(value: &serde_json::Value) -> bool {
 fn has_unblocked_runtime_candidate(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => {
-            let status = map
-                .get("status")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let candidate_status = status.is_empty() || matches!(status, "candidate" | "watchlist");
-            let empty_row_blockers = json_array_empty(map.get("blockers"));
-            let contract = map.get("runtime_contract");
-            let unblocked_contract =
-                contract
-                    .and_then(serde_json::Value::as_object)
-                    .is_some_and(|contract| {
-                        let version_ok =
-                            contract.get("version").and_then(serde_json::Value::as_str)
-                                == Some("autofactor_runtime_contract_v1");
-                        version_ok
-                            && contract
-                                .get("runtime_score")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some_and(|score| !score.is_empty())
-                            && contract
-                                .get("strategy_profile")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some_and(|profile| !profile.is_empty())
-                            && json_array_empty(contract.get("blockers"))
-                    });
-            (candidate_status && empty_row_blockers && unblocked_contract)
+            unblocked_runtime_candidate_score(map).is_some()
                 || map.values().any(has_unblocked_runtime_candidate)
         }
         serde_json::Value::Array(items) => items.iter().any(has_unblocked_runtime_candidate),
         _ => false,
     }
+}
+
+fn has_unreplayed_unblocked_runtime_candidate(value: &serde_json::Value) -> bool {
+    let replayed_scores = replayed_runtime_scores(value);
+    has_unreplayed_unblocked_runtime_candidate_inner(value, &replayed_scores)
+}
+
+fn has_unreplayed_unblocked_runtime_candidate_inner(
+    value: &serde_json::Value,
+    replayed_scores: &HashSet<String>,
+) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            unblocked_runtime_candidate_score(map)
+                .is_some_and(|score| !replayed_scores.contains(score))
+                || map.values().any(|item| {
+                    has_unreplayed_unblocked_runtime_candidate_inner(item, replayed_scores)
+                })
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|item| has_unreplayed_unblocked_runtime_candidate_inner(item, replayed_scores)),
+        _ => false,
+    }
+}
+
+fn unblocked_runtime_candidate_score(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Option<&str> {
+    let status = map
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let candidate_status = status.is_empty() || matches!(status, "candidate" | "watchlist");
+    if !candidate_status || !json_array_empty(map.get("blockers")) {
+        return None;
+    }
+
+    let contract = map
+        .get("runtime_contract")
+        .and_then(serde_json::Value::as_object)?;
+    let version_ok = contract.get("version").and_then(serde_json::Value::as_str)
+        == Some("autofactor_runtime_contract_v1");
+    if !version_ok
+        || !contract
+            .get("strategy_profile")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|profile| !profile.is_empty())
+        || !json_array_empty(contract.get("blockers"))
+    {
+        return None;
+    }
+
+    contract
+        .get("runtime_score")
+        .and_then(serde_json::Value::as_str)
+        .filter(|score| !score.is_empty())
+}
+
+fn replayed_runtime_scores(value: &serde_json::Value) -> HashSet<String> {
+    let mut scores = HashSet::new();
+    extend_replayed_runtime_scores(value, "recent_candidate_replays", &mut scores);
+    extend_replayed_runtime_scores(value, "ready_candidate_replays", &mut scores);
+    scores
+}
+
+fn extend_replayed_runtime_scores(
+    value: &serde_json::Value,
+    key: &str,
+    scores: &mut HashSet<String>,
+) {
+    if let Some(items) = value.get(key).and_then(serde_json::Value::as_array) {
+        scores.extend(
+            items
+                .iter()
+                .filter(|item| runtime_replay_basis(item) == Some("runtime_market_update_replay"))
+                .filter_map(runtime_replay_score)
+                .map(str::to_string),
+        );
+    }
+}
+
+fn runtime_replay_basis(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("basis")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .get("artifact_json")
+                .and_then(|artifact| artifact.get("basis"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            value
+                .get("artifact_json")
+                .and_then(|artifact| artifact.get("identity"))
+                .and_then(|identity| identity.get("basis"))
+                .and_then(serde_json::Value::as_str)
+        })
+}
+
+fn runtime_replay_score(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("runtime_score")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .get("artifact_json")
+                .and_then(|artifact| artifact.get("runtime_score"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            value
+                .get("artifact_json")
+                .and_then(|artifact| artifact.get("identity"))
+                .and_then(|identity| identity.get("runtime_score"))
+                .and_then(serde_json::Value::as_str)
+        })
 }
 
 fn has_ready_handoff(value: &serde_json::Value) -> bool {
@@ -1408,6 +1518,75 @@ mod tests {
             item.action == "repair_official_settlement_coverage"
                 || item.action == "collect_full_depth_execution_surface"
                 || item.action == "build_runtime_market_update_replay"
+        }));
+    }
+
+    #[test]
+    fn planner_routes_fresh_runtime_ready_candidate_ahead_of_old_negative_replay() {
+        let mut input = input("walk_forward", serde_json::json!({}), serde_json::json!({}));
+        input.factor_registry_summary = serde_json::json!({
+            "recent_candidate_replays": [{
+                "basis": "runtime_market_update_replay",
+                "runtime_score": "autofactor_formula:old_negative",
+                "promotion_ready": false,
+                "promotion_decision": "blocked",
+                "metrics": {
+                    "roi": -1.0,
+                    "total_pnl": -15.0,
+                    "trade_count": 1,
+                    "unique_event_count": 1,
+                    "entry_fill_rate": 1.0
+                },
+                "blocking_risk_flags": [
+                    "trade_count_too_small:1<50",
+                    "roi_too_low:-1.000000<0.000000"
+                ]
+            }],
+            "runtime_ready_candidates": [
+                {
+                    "factor_name": "old_negative",
+                    "status": "candidate",
+                    "target": "full_depth_settlement_executable_pnl",
+                    "horizon": "5m",
+                    "blockers": [],
+                    "runtime_contract": {
+                        "version": "autofactor_runtime_contract_v1",
+                        "runtime_score": "autofactor_formula:old_negative",
+                        "strategy_profile": "settlement_probability",
+                        "blockers": []
+                    }
+                },
+                {
+                    "factor_name": "fresh_candidate",
+                    "status": "candidate",
+                    "target": "full_depth_settlement_executable_pnl",
+                    "horizon": "5m",
+                    "blockers": [],
+                    "runtime_contract": {
+                        "version": "autofactor_runtime_contract_v1",
+                        "runtime_score": "autofactor_formula:fresh_candidate",
+                        "strategy_profile": "settlement_probability",
+                        "blockers": []
+                    }
+                }
+            ]
+        });
+
+        let plan = plan_next_research(&input).expect("plan");
+
+        assert_eq!(plan.theme, "candidate_to_runtime_replay");
+        assert!(
+            plan.actions
+                .contains(&"build_runtime_candidate_replay".to_string())
+        );
+        assert!(
+            !plan
+                .actions
+                .contains(&"generate_typed_llm_prior_json".to_string())
+        );
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "strategy_economics"
+                && item.action == "mutate_or_reject_negative_runtime_edge"
         }));
     }
 
