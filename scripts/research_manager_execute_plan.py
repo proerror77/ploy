@@ -767,6 +767,16 @@ def _candidate_replay_contract(
     }
 
 
+def _alpha_search_plan_run_id_from_replay_contract(replay_contract: dict[str, Any]) -> str:
+    source_run_id = str(replay_contract.get("source_run_id") or "")
+    workflow_run_id = str(replay_contract.get("workflow_run_id") or "")
+    if not source_run_id:
+        return ""
+    if workflow_run_id and source_run_id == workflow_run_id:
+        return ""
+    return source_run_id
+
+
 def _latest_valid_full_depth_surface_artifact(plan_payload: dict[str, Any]) -> dict[str, str]:
     latest_run = _latest_run(plan_payload)
     latest_run_id = str(latest_run.get("run_id") or latest_run.get("workflow_run_id") or "")
@@ -1031,7 +1041,9 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
     )
     alpha_search_plan_run_id = ""
     if plan.get("theme") == "revise_prior":
-        alpha_search_plan_run_id = str(latest_replay_contract.get("source_run_id") or "")
+        alpha_search_plan_run_id = _alpha_search_plan_run_id_from_replay_contract(
+            latest_replay_contract
+        )
     alpha_search_plan_artifact_name = (
         f"factor-walk-forward-v2-{alpha_search_plan_run_id}"
         if alpha_search_plan_run_id

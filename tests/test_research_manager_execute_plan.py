@@ -404,6 +404,70 @@ class ResearchManagerExecutePlanTest(unittest.TestCase):
             payload["typed_prior"]["schema_version"],
         )
 
+    def test_revise_prior_embeds_typed_prior_for_standalone_runtime_replay(self) -> None:
+        recent_negative_replay = {
+            "run_id": "26554215670",
+            "workflow_run_id": "26554215670",
+            "artifact_json": {
+                "basis": "runtime_market_update_replay",
+                "runtime_score": "autofactor_formula:latest_negative",
+                "source_workflow": "runtime-candidate-replay.yml",
+                "workflow_run_id": "26554215670",
+                "strategy_profile": "settlement_probability",
+                "metrics": {
+                    "trade_count": 1,
+                    "unique_event_count": 1,
+                    "entry_fill_rate": 1.0,
+                    "roi": -1.0038087836330667,
+                    "total_pnl": -15.057131754496,
+                },
+                "blocking_risk_flags": [
+                    "trade_count_too_small:1<50",
+                    "roi_too_low:-1.003809<0.000000",
+                ],
+                "decision_contract": {
+                    "target": "full_depth_settlement_executable_pnl",
+                    "horizon": "5m",
+                },
+                "recording_path": "/opt/ploy/data/recordings/live.ndjson",
+                "recording_sha256": "replay-hash",
+            },
+        }
+        plan = plan_payload(
+            "revise_prior",
+            ["generate_typed_llm_prior_json", "rerun_alpha_search_with_bounded_mutations"],
+            {"recent_candidate_replays": [recent_negative_replay]},
+        )
+        plan["plan"]["blocker_actions"] = [
+            {
+                "blocker_family": "strategy_economics",
+                "action": "mutate_or_reject_negative_runtime_edge",
+                "reason": "Latest replay or walk-forward evidence failed economic/OOS gates.",
+            }
+        ]
+
+        payload = build_executor_payload(
+            base_args(mode="execute", execute_ack=EXECUTE_ACK, snapshot_run_id="26553958344"),
+            plan,
+        )
+
+        dispatch = payload["dispatches"][0]
+        self.assertTrue(dispatch["ready"])
+        options = json.loads(dispatch["fields"]["options_json"])
+        self.assertNotIn("alpha_search_plan_run_id", options)
+        self.assertNotIn("alpha_search_plan_artifact_name", options)
+        self.assertEqual("26554215670", options["candidate_strategy_replay_run_id"])
+        self.assertEqual(
+            "runtime-candidate-replay-26554215670",
+            options["candidate_strategy_replay_artifact_name"],
+        )
+        prior = json.loads(options["alpha_search_llm_prior_json"])
+        self.assertEqual("research_manager_typed_prior.v1", prior["schema_version"])
+        self.assertEqual(
+            "autofactor_formula:latest_negative",
+            prior["runtime_avoid_factors"][0]["runtime_score"],
+        )
+
     def test_revise_prior_resolves_source_snapshot_from_alpha_artifact_provenance(self) -> None:
         recent_negative_replay = {
             "run_id": "26542589633",
