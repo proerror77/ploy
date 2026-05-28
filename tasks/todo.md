@@ -1,5 +1,47 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Blocked Replay Frontier (2026-05-28)
+
+Evidence stage: `executable_replay` / `walk_forward` feedback repair. This keeps
+dry-run/live deployment state untouched and fixes Research Manager so a newer
+blocked runtime candidate replay, even with positive ROI, suppresses stale ready
+handoff state until replay blockers are resolved.
+
+### Files / Ownership
+
+- `crates/ploy-research/src/research_os/manager.rs`
+  - Owner: stale ready-handoff suppression when latest runtime replay frontier
+    is blocked by sample-size or settlement coverage.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+### Tasks
+
+- [x] Confirm trace plan run `26550359727` now reads replay `26550036258` in
+      `recent_candidate_replays[0]`.
+- [x] Confirm the same plan still incorrectly returns `theme=ready_handoff`
+      because old ready replay `26367311478` remains durable.
+- [x] Add failing regression for a newer positive-but-blocked runtime replay
+      overriding stale ready handoff.
+- [x] Implement Research Manager frontier gating fix.
+- [x] Run focused validation.
+- [ ] Land through PR, deploy main to tango, rerun Research Trace Plan, and
+      verify the plan no longer returns `ready_handoff` for replay `26550036258`.
+
+### Review
+
+- 2026-05-28: Added blocked runtime replay frontier gating so stale
+  `ready_handoff` state cannot override a newer `runtime_market_update_replay`
+  with `promotion_ready=false`, `promotion_decision=blocked`, or non-empty
+  replay blockers. Focused validation passed:
+  `rtk cargo test -p ploy-research planner_routes_newer_blocked_runtime_replay_ahead_of_stale_ready_handoff --lib`,
+  `rtk cargo test -p ploy-research research_os::manager --lib`,
+  `rtk cargo check -p ploy-research --features db --example research_trace_plan`,
+  and `rtk git diff --check`. `rustfmt --edition 2024 --check
+  crates/ploy-research/src/research_os/manager.rs` still reports pre-existing
+  assertion formatting drift in the same file; this slice leaves that unrelated
+  formatting unchanged.
+
 ## Current Session - Runtime Candidate Replay Frontier Persistence (2026-05-28)
 
 Evidence stage: `executable_replay` / `runtime_parity` feedback repair. This
