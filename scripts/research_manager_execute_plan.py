@@ -1182,7 +1182,14 @@ def build_executor_payload(args: argparse.Namespace, plan_payload: dict[str, Any
             )
         )
 
-    if "compare_runtime_scorer_contract" in actions or "build_runtime_candidate_replay" in actions:
+    runtime_replay_actions = {
+        "compare_runtime_scorer_contract",
+        "build_runtime_candidate_replay",
+        "build_runtime_market_update_replay",
+    }
+    if any(action in runtime_replay_actions for action in actions) or (
+        action_names & runtime_replay_actions
+    ):
         replay_args = _runtime_replay_args(args, plan_payload)
         dispatches.append(
             _runtime_candidate_replay_dispatch(
