@@ -1,5 +1,48 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Runtime Candidate Replay Frontier Persistence (2026-05-28)
+
+Evidence stage: `executable_replay` / `runtime_parity` feedback repair. This
+keeps dry-run/live deployment state untouched and fixes runtime candidate replay
+evidence so a standalone `runtime-candidate-replay.yml` run is durable Research
+OS frontier state instead of only an ephemeral GitHub artifact.
+
+### Files / Ownership
+
+- `.github/workflows/runtime-candidate-replay.yml`
+  - Owner: persist candidate replay frontier evidence to Research OS after the
+    replay artifact is built.
+- `scripts/persist_candidate_replay_tape.py`
+  - Owner: standalone candidate replay tape persistence without requiring a
+    research snapshot manifest.
+- `tests/test_persist_candidate_replay_tape.py`
+  - Owner: regression for standalone runtime replay persistence and workflow
+    default wiring.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+### Tasks
+
+- [x] Confirm Trace Plan run `26549182870` did not read standalone runtime replay
+      run `26548811702`; latest visible `recent_candidate_replays` still came
+      from walk-forward run `26548811085` and old replay `26528933436`.
+- [x] Add failing regression for standalone runtime replay persistence.
+- [x] Implement standalone candidate replay tape persistence and default
+      workflow wiring.
+- [x] Run focused validation.
+- [ ] Land through PR, deploy main to tango, rerun runtime replay, then rerun
+      Research Trace Plan and verify `26548811702`-style replay rows appear in
+      `recent_candidate_replays`.
+
+### Review
+
+- 2026-05-28: Focused validation passed:
+  `python3 -m unittest tests.test_persist_candidate_replay_tape
+  tests.test_persist_research_trace_contract`,
+  `python3 -m py_compile scripts/persist_candidate_replay_tape.py
+  tests/test_persist_candidate_replay_tape.py`, `rtk git diff --check`,
+  and a CLI dry-run of `scripts/persist_candidate_replay_tape.py`.
+
 ## Current Session - Research Manager Runtime Replay Blocker Action (2026-05-28)
 
 Evidence stage: `walk_forward` / `runtime_parity` feedback repair. This keeps

@@ -40,9 +40,9 @@ on:
         required: false
         default: "0"
       options_json:
-        description: "Advanced options JSON: full_depth_entry, skip_settlement_exits, three_layer_min_entry_score, source_target, source_horizon"
+        description: "Advanced options JSON: full_depth_entry, skip_settlement_exits, three_layer_min_entry_score, source_target, source_horizon, persist_research_trace"
         required: false
-        default: '{"full_depth_entry":true,"skip_settlement_exits":false,"source_target":"full_depth_settlement_executable_pnl","source_horizon":"5m"}'
+        default: '{"full_depth_entry":true,"skip_settlement_exits":false,"source_target":"full_depth_settlement_executable_pnl","source_horizon":"5m","persist_research_trace":true}'
 concurrency:
   group: runtime-candidate-replay-${{ github.event.inputs.deployment_id }}-${{ github.event.inputs.runtime_score }}
   cancel-in-progress: false
@@ -84,8 +84,9 @@ jobs:
               "three_layer_min_entry_score": "",
               "source_target": "full_depth_settlement_executable_pnl",
               "source_horizon": "5m",
+              "persist_research_trace": "true",
           }
-          bool_keys = {"full_depth_entry", "skip_settlement_exits"}
+          bool_keys = {"full_depth_entry", "skip_settlement_exits", "persist_research_trace"}
           threshold_keys = {"three_layer_min_entry_score"}
           string_keys = {"source_target", "source_horizon"}
           allowed_thresholds = {Decimal("0.05"), Decimal("0.10"), Decimal("0.15"), Decimal("0.25")}
@@ -126,6 +127,7 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
               handle.write(f"REPLAY_FULL_DEPTH_ENTRY={values['full_depth_entry']}\n")
               handle.write(f"REPLAY_SKIP_SETTLEMENT_EXITS={values['skip_settlement_exits']}\n")
+              handle.write(f"REPLAY_PERSIST_RESEARCH_TRACE={values['persist_research_trace']}\n")
               handle.write(f"REPLAY_SOURCE_TARGET={values['source_target']}\n")
               handle.write(f"REPLAY_SOURCE_HORIZON={values['source_horizon']}\n")
               handle.write(
@@ -482,6 +484,95 @@ jobs:
             args+=(--full-depth-entry)
           fi
           python3 scripts/build_runtime_candidate_strategy_replay.py "${args[@]}"
+
+      - name: Persist runtime replay frontier to Research OS
+        env:
+          REMOTE_DIR: /opt/ploy/tmp/runtime-candidate-replay-${{ github.run_id }}
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ARTIFACT_NAME: runtime-candidate-replay-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          test -f artifacts/runtime-replay/candidate-strategy-replay.json
+          persist_research_trace="${REPLAY_PERSIST_RESEARCH_TRACE:-true}"
+          case "${persist_research_trace}" in
+            true|false) ;;
+            *) echo "REPLAY_PERSIST_RESEARCH_TRACE must be true or false" >&2; exit 2 ;;
+          esac
+
+          scp scripts/persist_candidate_replay_tape.py \
+            tango-1-1:"${REMOTE_DIR}/persist_candidate_replay_tape.py"
+          scp artifacts/runtime-replay/candidate-strategy-replay.json \
+            tango-1-1:"${REMOTE_DIR}/candidate-strategy-replay.json"
+
+          # shellcheck disable=SC2029
+          ssh tango-1-1 /bin/bash -s -- \
+            "${REMOTE_DIR}" \
+            "${GITHUB_RUN_ID}" \
+            "${WORKFLOW_RUN_URL}" \
+            "${ARTIFACT_NAME}" \
+            "${persist_research_trace}" <<'EOF'
+          set -euo pipefail
+          remote_dir="$1"
+          workflow_run_id="$2"
+          workflow_run_url="$3"
+          artifact_name="$4"
+          persist_research_trace="$5"
+          case "${persist_research_trace}" in
+            true|false) ;;
+            *) echo "persist_research_trace must be true or false" >&2; exit 2 ;;
+          esac
+
+          set -a
+          . /opt/ploy/.env
+          set +a
+          python_bin="python3"
+          if [ -x /opt/ploy/.venv/bin/python ]; then
+            python_bin="/opt/ploy/.venv/bin/python"
+          elif [ -x /opt/ploy/venv/bin/python ]; then
+            python_bin="/opt/ploy/venv/bin/python"
+          fi
+          persist_args=(
+            "${remote_dir}/persist_candidate_replay_tape.py"
+            --candidate-replay-json "${remote_dir}/candidate-strategy-replay.json"
+            --run-id "${workflow_run_id}"
+            --source-workflow "runtime-candidate-replay.yml"
+            --workflow-run-id "${workflow_run_id}"
+            --workflow-run-url "${workflow_run_url}"
+            --artifact-name "${artifact_name}"
+            --report-json "${remote_dir}/candidate-replay-persist.json"
+          )
+          if [ "${persist_research_trace}" = "true" ]; then
+            test -n "${PLOY_DATABASE__URL:-}"
+            "${python_bin}" - <<'PY'
+          import asyncpg
+          PY
+            "${python_bin}" "${persist_args[@]}" --db-url "${PLOY_DATABASE__URL}"
+          else
+            "${python_bin}" "${persist_args[@]}" --dry-run
+          fi
+          EOF
+
+          scp tango-1-1:"${REMOTE_DIR}/candidate-replay-persist.json" \
+            artifacts/runtime-replay/candidate-replay-persist.json
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          payload = json.loads(
+              Path("artifacts/runtime-replay/candidate-replay-persist.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          print("")
+          print("## Durable Research OS replay frontier")
+          print("")
+          print(f"- Dry run: `{payload.get('dry_run')}`")
+          print(f"- Candidate replay id: `{payload.get('candidate_replay_id')}`")
+          print(f"- Runtime score: `{payload.get('runtime_score')}`")
+          print(f"- Promotion decision: `{payload.get('promotion_decision')}`")
+          blockers = payload.get("blocking_risk_flags") or []
+          print(f"- Blocking flags: `{', '.join(blockers) if blockers else '<none>'}`")
+          PY
 
       - name: Publish summary
         if: always()
