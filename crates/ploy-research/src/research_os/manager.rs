@@ -94,7 +94,12 @@ pub fn plan_next_research(input: &ResearchManagerInput) -> Result<ResearchManage
         item.blocker_family == "strategy_economics"
             && item.action == "mutate_or_reject_negative_runtime_edge"
     });
-    if has_ready_handoff(&input.latest_runs) && !has_negative_runtime_economics {
+    let has_blocked_runtime_replay_frontier =
+        latest_runtime_replay_frontier_is_blocked(&input.factor_registry_summary);
+    if has_ready_handoff(&input.latest_runs)
+        && !has_negative_runtime_economics
+        && !has_blocked_runtime_replay_frontier
+    {
         return Ok(plan_with_blocker_actions(
             "ready_handoff",
             1,
@@ -700,6 +705,51 @@ fn runtime_market_update_replay_roi(value: &serde_json::Value) -> Option<f64> {
     }
 }
 
+fn latest_runtime_replay_frontier_is_blocked(value: &serde_json::Value) -> bool {
+    latest_recent_runtime_replay(value)
+        .as_ref()
+        .is_some_and(runtime_replay_is_blocked)
+}
+
+fn runtime_replay_is_blocked(value: &serde_json::Value) -> bool {
+    let Some(map) = value.as_object() else {
+        return false;
+    };
+
+    let basis = map
+        .get("basis")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if basis != "runtime_market_update_replay" {
+        return false;
+    }
+
+    if map
+        .get("promotion_ready")
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
+        return true;
+    }
+
+    if map
+        .get("promotion_decision")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|decision| {
+            matches!(
+                decision,
+                "blocked" | "reject" | "rejected" | "revise" | "do_not_promote"
+            )
+        })
+    {
+        return true;
+    }
+
+    map.get("blocking_risk_flags")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+}
+
 fn has_unblocked_runtime_candidate(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(map) => {
@@ -1119,6 +1169,108 @@ mod tests {
         assert!(!plan.blocker_actions.iter().any(|item| {
             item.blocker_family == "data_settlement"
                 && item.action == "repair_official_settlement_coverage"
+        }));
+    }
+
+    #[test]
+    fn planner_routes_newer_blocked_runtime_replay_ahead_of_stale_ready_handoff() {
+        let mut input = input(
+            "walk_forward",
+            serde_json::json!({
+                "source": "experiment_trace",
+                "evidence_stage": "walk_forward",
+                "runs": [{
+                    "run_id": "26548811085",
+                    "artifacts": [{
+                        "event_type": "autofactor_promotion",
+                        "output_json": {
+                            "decision": "blocked"
+                        }
+                    }]
+                }],
+                "ready_handoffs": [{
+                    "run_id": "26377165132",
+                    "created_at": "2026-05-24T17:16:29Z",
+                    "event_type": "strategy_handoff",
+                    "output_json": {
+                        "kind": "autofactor_strategy_handoff",
+                        "status": "ready",
+                        "recommended_action": "create_dry_run_handoff",
+                        "strategies": [{
+                            "runtime_score": "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted"
+                        }],
+                        "candidate_strategy_replay": {
+                            "ready": true,
+                            "basis": "runtime_market_update_replay"
+                        }
+                    }
+                }]
+            }),
+            serde_json::json!({}),
+        );
+        input.factor_registry_summary = serde_json::json!({
+            "recent_candidate_replays": [{
+                "candidate_replay_id": "candidate_replay:blocked-positive",
+                "run_id": "26550036258",
+                "workflow_run_id": "26550036258",
+                "basis": "runtime_market_update_replay",
+                "promotion_ready": false,
+                "promotion_decision": "blocked",
+                "strategy_profile": "settlement_probability",
+                "runtime_score": "autofactor_formula:llm_mut_spread_adjusted_external_move_select_entry_price_quality_ge_075_runtime_pass_through_add_capacity_gate",
+                "target": "full_depth_settlement_executable_pnl",
+                "horizon": "5m",
+                "metrics": {
+                    "roi": 0.23777533981084,
+                    "total_pnl": 71.332601943252,
+                    "trade_count": 20,
+                    "unique_event_count": 20,
+                    "entry_fill_rate": 1.0,
+                    "settlement_event_count": 19
+                },
+                "blocking_risk_flags": [
+                    "trade_count_too_small:20<50",
+                    "official_settlement_missing:19<20"
+                ],
+                "created_at": "2026-05-28T02:05:53Z"
+            }],
+            "ready_candidate_replays": [{
+                "candidate_replay_id": "candidate_replay:old-ready",
+                "run_id": "26377165132",
+                "workflow_run_id": "26367311478",
+                "basis": "runtime_market_update_replay",
+                "promotion_ready": true,
+                "promotion_decision": "promote_to_runtime",
+                "runtime_score": "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted",
+                "metrics": {
+                    "roi": 0.11653800000105063,
+                    "trade_count": 50
+                },
+                "blocking_risk_flags": [],
+                "created_at": "2026-05-24T17:16:29Z"
+            }]
+        });
+
+        let plan = plan_next_research(&input).expect("plan");
+
+        assert_eq!(plan.theme, "fix_data");
+        assert!(!plan
+            .actions
+            .contains(&"create_dry_run_handoff_issue".to_string()));
+        assert!(!plan
+            .actions
+            .contains(&"open_config_pr_from_ready_handoff".to_string()));
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "data_settlement"
+                && item.action == "repair_official_settlement_coverage"
+        }));
+        assert!(plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "search_power"
+                && item.action == "increase_distinct_event_coverage_or_reduce_selectivity"
+        }));
+        assert!(!plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "strategy_economics"
+                || item.action == "mutate_or_reject_negative_runtime_edge"
         }));
     }
 
