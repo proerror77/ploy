@@ -1,5 +1,46 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Runtime Replay Prior Routing (2026-05-28)
+
+Evidence stage: `walk_forward` feedback repair. This keeps dry-run/live
+deployment state untouched and fixes the Research Manager executor so a
+standalone runtime replay run is not mistaken for a
+`factor-walk-forward-v2-*` alpha-search prior artifact.
+
+### Files / Ownership
+
+- `scripts/research_manager_execute_plan.py`
+  - Owner: distinguish runtime replay workflow run ids from source alpha-search
+    plan run ids when building `revise_prior` follow-up dispatches.
+- `tests/test_research_manager_execute_plan.py`
+  - Owner: regression for standalone runtime replay feedback with embedded
+    typed prior JSON.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+### Tasks
+
+- [x] Confirm Trace Plan run `26554391164` correctly returns
+      `theme=revise_prior` after replay `26554215670`.
+- [x] Reproduce executor dry-run blocker: it incorrectly emits
+      `alpha_search_plan_run_id=26554215670` /
+      `factor-walk-forward-v2-26554215670`.
+- [x] Add regression for standalone runtime replay feedback.
+- [x] Implement executor routing fix.
+- [x] Run focused validation.
+- [ ] Land through PR, then rerun executor against plan `26554391164` with
+      snapshot `26553958344`.
+
+### Review
+
+- 2026-05-28: Updated executor prior routing so standalone runtime replay
+  feedback embeds `research_manager_typed_prior.v1` directly instead of
+  pretending the replay run id is a `factor-walk-forward-v2` artifact. Focused
+  validation passed: `python3 -m unittest tests.test_research_manager_execute_plan`,
+  `python3 -m py_compile scripts/research_manager_execute_plan.py
+  tests/test_research_manager_execute_plan.py`, `rtk git diff --check`, and a
+  local dry-run of plan `26554391164` with `snapshot_run_id=26553958344`.
+
 ## Current Session - Research Manager Runtime Contract Frontier Cleanup (2026-05-28)
 
 Evidence stage: `executable_replay` / `walk_forward` feedback repair. This keeps
@@ -28,7 +69,7 @@ runtime-contract or top-bucket replay blockers from unselected factors.
       polluting a newer blocked runtime replay frontier.
 - [x] Implement Research Manager blocker derivation fix.
 - [x] Run focused validation.
-- [ ] Land through PR, deploy main to tango, rerun Research Trace Plan, and
+- [x] Land through PR, deploy main to tango, rerun Research Trace Plan, and
       verify the plan no longer includes stale runtime-contract blocker actions.
 
 ### Review
@@ -41,6 +82,10 @@ runtime-contract or top-bucket replay blockers from unselected factors.
   `rtk cargo test -p ploy-research research_os::manager --lib`,
   `rtk cargo check -p ploy-research --features db --example research_trace_plan`,
   and `rtk git diff --check`.
+- 2026-05-28: PR #724 merged as `cc2c937ce51fbd2cd3e1f41201584988f3e7c051`;
+  deploy run `26553428379` succeeded. Trace Plan run `26553835347` returned
+  `theme=fix_data` with only `data_settlement` and `search_power` blockers,
+  confirming stale `runtime_contract` blocker actions were removed.
 
 ## Current Session - Research Manager Blocked Replay Frontier (2026-05-28)
 
