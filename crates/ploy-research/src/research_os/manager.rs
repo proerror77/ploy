@@ -318,7 +318,7 @@ fn derive_blocker_actions(input: &ResearchManagerInput) -> Vec<ResearchBlockerAc
     let runtime_or_promotion_blockers = if runtime_replay.is_empty() {
         latest.clone()
     } else {
-        format!("{latest}\n{runtime_replay}")
+        runtime_replay.clone()
     };
     let data_blocker_text = if negative_runtime_replay {
         latest.as_str()
@@ -1184,7 +1184,18 @@ mod tests {
                     "artifacts": [{
                         "event_type": "autofactor_promotion",
                         "output_json": {
-                            "decision": "blocked"
+                            "decision": "blocked",
+                            "blockers": [
+                                "missing_runtime_contract",
+                                "runtime_contract_unmapped_factor"
+                            ],
+                            "candidate_strategy_replay": {
+                                "basis": "factor_walk_forward_top_bucket_aggregate",
+                                "blockers": [
+                                    "candidate_strategy_replay_not_runtime_replay",
+                                    "candidate_strategy_replay_identity_basis_mismatch"
+                                ]
+                            }
                         }
                     }]
                 }],
@@ -1271,6 +1282,14 @@ mod tests {
         assert!(!plan.blocker_actions.iter().any(|item| {
             item.blocker_family == "strategy_economics"
                 || item.action == "mutate_or_reject_negative_runtime_edge"
+        }));
+        assert!(!plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "runtime_contract"
+                && item.action == "repair_runtime_contract_mapping"
+        }));
+        assert!(!plan.blocker_actions.iter().any(|item| {
+            item.blocker_family == "runtime_replay"
+                && item.action == "build_runtime_market_update_replay"
         }));
     }
 

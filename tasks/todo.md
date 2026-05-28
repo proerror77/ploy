@@ -1,5 +1,47 @@
 # Research Trace Plan Manager Workflow (2026-05-23)
 
+## Current Session - Research Manager Runtime Contract Frontier Cleanup (2026-05-28)
+
+Evidence stage: `executable_replay` / `walk_forward` feedback repair. This keeps
+dry-run/live deployment state untouched and fixes Research Manager so a latest
+runtime MarketUpdate replay frontier is not polluted by stale walk-forward
+runtime-contract or top-bucket replay blockers from unselected factors.
+
+### Files / Ownership
+
+- `crates/ploy-research/src/research_os/manager.rs`
+  - Owner: derive blocker actions from the latest runtime replay frontier when
+    it exists, preserving replay data/search blockers while suppressing stale
+    runtime-contract repair actions.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+### Tasks
+
+- [x] Confirm deployed Trace Plan run `26552975041` now routes away from stale
+      `ready_handoff` but still carries stale
+      `runtime_contract -> repair_runtime_contract_mapping`.
+- [x] Confirm latest runtime replay frontier is run `26550036258`, with
+      blockers `trade_count_too_small:20<50` and
+      `official_settlement_missing:19<20`.
+- [x] Add regression for stale runtime-contract/top-bucket blockers not
+      polluting a newer blocked runtime replay frontier.
+- [x] Implement Research Manager blocker derivation fix.
+- [x] Run focused validation.
+- [ ] Land through PR, deploy main to tango, rerun Research Trace Plan, and
+      verify the plan no longer includes stale runtime-contract blocker actions.
+
+### Review
+
+- 2026-05-28: Updated blocker derivation so, once a latest
+  `runtime_market_update_replay` frontier exists, stale walk-forward
+  runtime-contract and top-bucket replay blockers no longer pollute the active
+  blocker actions. Focused validation passed:
+  `rtk cargo test -p ploy-research planner_routes_newer_blocked_runtime_replay_ahead_of_stale_ready_handoff --lib`,
+  `rtk cargo test -p ploy-research research_os::manager --lib`,
+  `rtk cargo check -p ploy-research --features db --example research_trace_plan`,
+  and `rtk git diff --check`.
+
 ## Current Session - Research Manager Blocked Replay Frontier (2026-05-28)
 
 Evidence stage: `executable_replay` / `walk_forward` feedback repair. This keeps
@@ -25,7 +67,7 @@ handoff state until replay blockers are resolved.
       overriding stale ready handoff.
 - [x] Implement Research Manager frontier gating fix.
 - [x] Run focused validation.
-- [ ] Land through PR, deploy main to tango, rerun Research Trace Plan, and
+- [x] Land through PR, deploy main to tango, rerun Research Trace Plan, and
       verify the plan no longer returns `ready_handoff` for replay `26550036258`.
 
 ### Review
@@ -41,6 +83,9 @@ handoff state until replay blockers are resolved.
   crates/ploy-research/src/research_os/manager.rs` still reports pre-existing
   assertion formatting drift in the same file; this slice leaves that unrelated
   formatting unchanged.
+- 2026-05-28: PR #723 merged as `ba0fadaa660f4bff0bb78db918ed056387ed675b`,
+  deploy run `26552637547` succeeded, and Trace Plan run `26552975041` returned
+  `theme=fix_data` instead of stale `ready_handoff`.
 
 ## Current Session - Runtime Candidate Replay Frontier Persistence (2026-05-28)
 
