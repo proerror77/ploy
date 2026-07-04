@@ -175,6 +175,7 @@ struct CandidateExpression {
     source: &'static str,
     complexity: usize,
     root_gene: String,
+    structural_signature: String,
     expr: FactorExpr,
 }
 
@@ -183,6 +184,7 @@ struct RejectedExpression {
     name: String,
     target: Option<String>,
     root_gene: String,
+    structural_signature: String,
     reason: String,
     complexity: usize,
 }
@@ -245,6 +247,8 @@ struct NodeMetric {
 #[derive(Debug, Serialize)]
 struct AvoidedSubtree {
     root_gene: String,
+    structural_signature: String,
+    depth: usize,
     count: usize,
     action: &'static str,
     reason: &'static str,
@@ -490,6 +494,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
             source: candidate_source(&report.name),
             complexity: report.complexity,
             root_gene: root_gene(&report.expr),
+            structural_signature: structural_signature(&report.expr),
             expr: report.expr.clone(),
         })
         .collect::<Vec<_>>();
@@ -502,6 +507,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
             name: report.name.clone(),
             target: report.target.clone(),
             root_gene: root_gene(&report.expr),
+            structural_signature: structural_signature(&report.expr),
             reason: report.reason.clone(),
             complexity: report.complexity,
         })
@@ -1430,20 +1436,159 @@ fn selected_dimension(
 }
 
 fn avoided_subtrees(reports: &[AutoFactorReport]) -> Vec<AvoidedSubtree> {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut counts: BTreeMap<String, StructuralSubtreeCount> = BTreeMap::new();
     for report in reports {
-        *counts.entry(root_gene(&report.expr)).or_default() += 1;
+        record_subtree_count(&mut counts, &report.expr);
+        for subtree in inner_structural_subtrees(&report.expr) {
+            record_subtree_count(&mut counts, subtree);
+        }
     }
     counts
         .into_iter()
-        .filter(|(_, count)| *count > 2)
-        .map(|(root_gene, count)| AvoidedSubtree {
-            root_gene,
-            count,
+        .filter(|(_, item)| item.count > 2)
+        .map(|(structural_signature, item)| AvoidedSubtree {
+            root_gene: item.root_gene,
+            structural_signature,
+            depth: item.depth,
+            count: item.count,
             action: "penalize",
-            reason: "root_gene_crowding",
+            reason: "structural_signature_crowding",
         })
         .collect()
+}
+
+#[derive(Debug, Default)]
+struct StructuralSubtreeCount {
+    root_gene: String,
+    depth: usize,
+    count: usize,
+}
+
+fn record_subtree_count(counts: &mut BTreeMap<String, StructuralSubtreeCount>, expr: &FactorExpr) {
+    let signature = structural_signature(expr);
+    let entry = counts
+        .entry(signature)
+        .or_insert_with(|| StructuralSubtreeCount {
+            root_gene: root_gene(expr),
+            depth: structural_depth(expr),
+            count: 0,
+        });
+    entry.count = entry.count.saturating_add(1);
+}
+
+fn structural_signature(expr: &FactorExpr) -> String {
+    match expr {
+        FactorExpr::Input(name) => format!("Input({name})"),
+        FactorExpr::Const(_) => "Const(_)".to_string(),
+        FactorExpr::Add(lhs, rhs) => commutative_signature("Add", lhs, rhs),
+        FactorExpr::Sub(lhs, rhs) => {
+            format!(
+                "Sub({},{})",
+                structural_signature(lhs),
+                structural_signature(rhs)
+            )
+        }
+        FactorExpr::Mul(lhs, rhs) => commutative_signature("Mul", lhs, rhs),
+        FactorExpr::SafeDiv(lhs, rhs) => {
+            format!(
+                "SafeDiv({},{})",
+                structural_signature(lhs),
+                structural_signature(rhs)
+            )
+        }
+        FactorExpr::Max(lhs, rhs) => commutative_signature("Max", lhs, rhs),
+        FactorExpr::Min(lhs, rhs) => commutative_signature("Min", lhs, rhs),
+        FactorExpr::Tanh(inner) => format!("Tanh({})", structural_signature(inner)),
+        FactorExpr::Log1pAbs(inner) => format!("Log1pAbs({})", structural_signature(inner)),
+        FactorExpr::SqrtAbs(inner) => format!("SqrtAbs({})", structural_signature(inner)),
+        FactorExpr::Clip { expr, .. } => format!("Clip(_,_,{})", structural_signature(expr)),
+        FactorExpr::Delta { expr, .. } => format!("Delta(_,{})", structural_signature(expr)),
+        FactorExpr::RollingMean { expr, .. } => {
+            format!("RollingMean(_,{})", structural_signature(expr))
+        }
+        FactorExpr::RollingStd { expr, .. } => {
+            format!("RollingStd(_,{})", structural_signature(expr))
+        }
+        FactorExpr::ZScore { expr, .. } => format!("ZScore(_,{})", structural_signature(expr)),
+        FactorExpr::Gate { expr, gate, .. } => {
+            format!(
+                "Gate(_,{},{})",
+                structural_signature(expr),
+                structural_signature(gate)
+            )
+        }
+    }
+}
+
+fn commutative_signature(op: &str, lhs: &FactorExpr, rhs: &FactorExpr) -> String {
+    let mut children = [structural_signature(lhs), structural_signature(rhs)];
+    children.sort();
+    format!("{op}({},{})", children[0], children[1])
+}
+
+fn inner_structural_subtrees(expr: &FactorExpr) -> Vec<&FactorExpr> {
+    let mut out = Vec::new();
+    collect_inner_structural_subtrees(expr, false, &mut out);
+    out
+}
+
+fn collect_inner_structural_subtrees<'a>(
+    expr: &'a FactorExpr,
+    include_current: bool,
+    out: &mut Vec<&'a FactorExpr>,
+) {
+    if include_current && structural_depth(expr) >= 2 {
+        out.push(expr);
+    }
+    match expr {
+        FactorExpr::Input(_) | FactorExpr::Const(_) => {}
+        FactorExpr::Add(lhs, rhs)
+        | FactorExpr::Sub(lhs, rhs)
+        | FactorExpr::Mul(lhs, rhs)
+        | FactorExpr::SafeDiv(lhs, rhs)
+        | FactorExpr::Max(lhs, rhs)
+        | FactorExpr::Min(lhs, rhs) => {
+            collect_inner_structural_subtrees(lhs, true, out);
+            collect_inner_structural_subtrees(rhs, true, out);
+        }
+        FactorExpr::Tanh(inner)
+        | FactorExpr::Log1pAbs(inner)
+        | FactorExpr::SqrtAbs(inner)
+        | FactorExpr::Clip { expr: inner, .. }
+        | FactorExpr::Delta { expr: inner, .. }
+        | FactorExpr::RollingMean { expr: inner, .. }
+        | FactorExpr::RollingStd { expr: inner, .. }
+        | FactorExpr::ZScore { expr: inner, .. } => {
+            collect_inner_structural_subtrees(inner, true, out);
+        }
+        FactorExpr::Gate { expr, gate, .. } => {
+            collect_inner_structural_subtrees(expr, true, out);
+            collect_inner_structural_subtrees(gate, true, out);
+        }
+    }
+}
+
+fn structural_depth(expr: &FactorExpr) -> usize {
+    match expr {
+        FactorExpr::Input(_) | FactorExpr::Const(_) => 1,
+        FactorExpr::Add(lhs, rhs)
+        | FactorExpr::Sub(lhs, rhs)
+        | FactorExpr::Mul(lhs, rhs)
+        | FactorExpr::SafeDiv(lhs, rhs)
+        | FactorExpr::Max(lhs, rhs)
+        | FactorExpr::Min(lhs, rhs) => 1 + structural_depth(lhs).max(structural_depth(rhs)),
+        FactorExpr::Tanh(inner)
+        | FactorExpr::Log1pAbs(inner)
+        | FactorExpr::SqrtAbs(inner)
+        | FactorExpr::Clip { expr: inner, .. }
+        | FactorExpr::Delta { expr: inner, .. }
+        | FactorExpr::RollingMean { expr: inner, .. }
+        | FactorExpr::RollingStd { expr: inner, .. }
+        | FactorExpr::ZScore { expr: inner, .. } => 1 + structural_depth(inner),
+        FactorExpr::Gate { expr, gate, .. } => {
+            1 + structural_depth(expr).max(structural_depth(gate))
+        }
+    }
 }
 
 /// Coarse root-operator-only structural fingerprint, shared by both the
@@ -1770,6 +1915,88 @@ mod tests {
             reason: "passed".to_string(),
             parent_name: None,
         }
+    }
+
+    #[test]
+    fn structural_signature_normalizes_commutative_operands() {
+        let lhs = FactorExpr::Add(
+            Box::new(FactorExpr::Input("near_strike_score".to_string())),
+            Box::new(FactorExpr::Mul(
+                Box::new(FactorExpr::Input("entry_capacity_score".to_string())),
+                Box::new(FactorExpr::Const(0.25)),
+            )),
+        );
+        let rhs = FactorExpr::Add(
+            Box::new(FactorExpr::Mul(
+                Box::new(FactorExpr::Const(0.25)),
+                Box::new(FactorExpr::Input("entry_capacity_score".to_string())),
+            )),
+            Box::new(FactorExpr::Input("near_strike_score".to_string())),
+        );
+
+        assert_eq!(structural_signature(&lhs), structural_signature(&rhs));
+    }
+
+    #[test]
+    fn structural_signature_abstracts_numeric_constants() {
+        let first = FactorExpr::SafeDiv(
+            Box::new(FactorExpr::Input(
+                "external_move_since_poly_update".to_string(),
+            )),
+            Box::new(FactorExpr::Const(0.01)),
+        );
+        let second = FactorExpr::SafeDiv(
+            Box::new(FactorExpr::Input(
+                "external_move_since_poly_update".to_string(),
+            )),
+            Box::new(FactorExpr::Const(0.05)),
+        );
+
+        assert_eq!(structural_signature(&first), structural_signature(&second));
+    }
+
+    #[test]
+    fn avoided_subtrees_counts_repeated_inner_structures() {
+        let inner = FactorExpr::SafeDiv(
+            Box::new(FactorExpr::Input(
+                "external_move_since_poly_update".to_string(),
+            )),
+            Box::new(FactorExpr::Add(
+                Box::new(FactorExpr::Input("pm_spread".to_string())),
+                Box::new(FactorExpr::Const(0.01)),
+            )),
+        );
+        let reports = vec![
+            AutoFactorReport {
+                name: "wrapped_tanh".to_string(),
+                expr: FactorExpr::Tanh(Box::new(inner.clone())),
+                complexity: 5,
+                ..sample_report("wrapped_tanh")
+            },
+            AutoFactorReport {
+                name: "wrapped_log".to_string(),
+                expr: FactorExpr::Log1pAbs(Box::new(inner.clone())),
+                complexity: 5,
+                ..sample_report("wrapped_log")
+            },
+            AutoFactorReport {
+                name: "wrapped_sqrt".to_string(),
+                expr: FactorExpr::SqrtAbs(Box::new(inner.clone())),
+                complexity: 5,
+                ..sample_report("wrapped_sqrt")
+            },
+        ];
+
+        let avoided = avoided_subtrees(&reports);
+        let inner_signature = structural_signature(&inner);
+        let subtree = avoided
+            .iter()
+            .find(|item| item.structural_signature == inner_signature)
+            .expect("shared inner subtree is crowded");
+
+        assert_eq!(subtree.root_gene, "SafeDiv");
+        assert_eq!(subtree.count, 3);
+        assert_eq!(subtree.reason, "structural_signature_crowding");
     }
 
     #[test]
