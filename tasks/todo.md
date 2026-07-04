@@ -21664,3 +21664,96 @@ Evidence stage: `factor_attribution` with `runtime_parity` gates.
   `python3 -m py_compile scripts/autofactor_runtime_contract.py tests/test_autofactor_strategy_promotion.py tests/test_build_autofactor_candidate_strategy_replay.py tests/test_persist_research_trace_contract.py`,
   `rustfmt --edition 2024 --check crates/ploy-research/src/alpha_search.rs`,
   and `rtk git diff --check`.
+
+# Alpha Jungle Framework Gap Audit: Alpha Zoo, Tree Search, LLM Expansion (2026-07-04)
+
+## Goal
+
+`crates/ploy-research/src/alpha_search.rs` implements a deterministic
+seed-search loop loosely modeled on "Navigating the Alpha Jungle", but three
+pieces of that paper's design are still missing or only partially wired:
+
+- Alpha Zoo: a durable, cross-run repository of previously-accepted factors
+  that new candidates should be compared against for novelty (currently
+  missing; the existing `avoided_subtrees` / Frequent-Subtree Avoidance path
+  is batch-local only and does not persist across independent runs).
+- Full tree search (MCTS selection/expansion/backpropagation beyond the
+  current single-depth UCB ranking).
+- Deeper LLM-guided expansion beyond the current bounded typed-mutation prior.
+
+This audit tracks the gap by priority so each can be picked up as an
+independent, reviewable slice.
+
+Evidence stage: `factor_attribution` only. No promotion, dry-run, or live
+gates are touched by any of these priorities.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: Alpha Zoo types, novelty penalty/score, reward and node-metric
+    wiring.
+- `crates/ploy-research/examples/persist_research_trace.rs`
+  - Owner: durable `factor_registry` export of the Alpha Zoo snapshot.
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: `--alpha-zoo-snapshot-json` CLI flag.
+- `crates/ploy-research/src/lib.rs`
+  - Owner: public exports for the new Alpha Zoo types.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: Alpha Zoo section and implementation-status bullet.
+- `tasks/todo.md`
+  - Owner: current session tracking.
+
+## Tasks
+
+### Priority 1 — Alpha Zoo wiring
+
+- [x] Add `AlphaZooSnapshot` / `AlphaZooEntry` types and thread an optional
+      `alpha_zoo: Option<&AlphaZooSnapshot>` through
+      `write_alpha_search_artifacts_with_state_and_runtime_feedback`,
+      `node_metric()`, and `reward()`, so a crowded root gene across ALL
+      historical runs (not just the current batch) lowers reward, with no
+      effect when no snapshot is supplied.
+- [x] Add a DB-independent `group_factor_registry_rows_into_alpha_zoo_snapshot`
+      function in `persist_research_trace.rs`, plus a thin sqlx wrapper and an
+      `--export-alpha-zoo-snapshot` / `--alpha-zoo-snapshot-json` flag pair so
+      the snapshot flows from the durable `factor_registry` table into the
+      search loop.
+
+### Priority 2 — Full tree search (not started)
+
+- [ ] Extend the current single-depth UCB ranking (`mcts_expansion_plan`) into
+      an actual multi-step selection/expansion/backpropagation loop instead of
+      a per-run ranking over cumulative state.
+
+### Priority 3 — Deeper LLM-guided expansion (not started)
+
+- [ ] Explore LLM-proposed mutations beyond the current bounded typed-mutation
+      schema, still constrained to compile into existing `FactorExpr` nodes.
+
+## Review
+
+- 2026-07-04: Priority 1 (Alpha Zoo wiring) implemented. `alpha_search.rs`
+  gained `AlphaZooSnapshot`/`AlphaZooEntry`, `alpha_zoo_novelty_penalty`
+  (threshold `5`, higher than Frequent-Subtree Avoidance's batch-local
+  threshold of `2`, since the zoo spans all historical runs), and
+  `alpha_zoo_novelty_score`, reusing the existing coarse `root_gene()`
+  fingerprint rather than the still-unmerged `structural_signature()` from PR
+  #728. `reward()` now subtracts the penalty at its real (non-test) call
+  sites in `write_alpha_search_artifacts_with_state_and_runtime_feedback` and
+  `node_metric()`; `write_alpha_search_artifacts_with_state` stays a thin
+  wrapper that passes `None`. `persist_research_trace.rs` gained a pure
+  `group_factor_registry_rows_into_alpha_zoo_snapshot` function (unit tested
+  with a synthetic `Vec<FactorRegistryRow>`, no sqlx/PgPool involved) plus a
+  thin `fetch_factor_registry_rows` sqlx wrapper and
+  `--export-alpha-zoo-snapshot` / `--export-alpha-zoo-target` flags.
+  `factor_walk_forward_v2.rs` gained `--alpha-zoo-snapshot-json`, following the
+  existing `--alpha-search-llm-prior-json` load-and-pass-`Some(&...)` pattern.
+  `root_gene` was made `pub` and re-exported from `lib.rs` so the export path
+  reuses the same fingerprint instead of duplicating it. Priorities 2 and 3
+  are out of scope for this slice and remain unchecked above.
+- 2026-07-04: Validation passed: `cargo test -p ploy-research alpha_search
+  --lib` (15 passed), `cargo test -p ploy-research --features db --example
+  persist_research_trace` (11 passed, including the new grouping test),
+  `cargo check -p ploy-research --features db --example factor_walk_forward_v2`,
+  `rustfmt --edition 2024 --check` on every touched Rust file, and `git diff
+  --check`.
