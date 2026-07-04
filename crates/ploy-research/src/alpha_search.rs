@@ -59,6 +59,8 @@ pub struct MctsSearchStateArtifact {
     #[serde(default)]
     pub backpropagation_truncated_count: usize,
     pub nodes: Vec<MctsSearchStateNode>,
+    #[serde(default)]
+    pub subtree_frequencies: Vec<SubtreeFrequencyState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +96,14 @@ pub struct AlphaZooSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlphaZooEntry {
     pub root_gene: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtreeFrequencyState {
+    pub root_gene: String,
+    pub structural_signature: String,
+    pub depth: usize,
     pub count: usize,
 }
 
@@ -222,6 +232,9 @@ struct NodeMetric {
     stability: f64,
     diversity: f64,
     alpha_zoo_novelty: f64,
+    simplicity: f64,
+    structural_novelty: f64,
+    diversity_penalty: f64,
     execution_cost: f64,
     event_uniqueness: f64,
     overfit_risk: f64,
@@ -515,17 +528,26 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
     write_json(&output_dir.join("rejected-expressions.json"), &rejected)?;
 
     let runtime_avoidances = runtime_avoidances(runtime_feedback, llm_prior);
+    let subtree_frequencies = subtree_frequency_state(target, reports, prior_state, llm_prior);
     let node_metrics = reports
         .iter()
         .enumerate()
-        .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, alpha_zoo))
+        .map(|(idx, report)| {
+            node_metric(
+                idx,
+                report,
+                &runtime_avoidances,
+                alpha_zoo,
+                &subtree_frequencies,
+            )
+        })
         .collect::<Vec<_>>();
     write_json(&output_dir.join("node-metrics.json"), &node_metrics)?;
     write_json(
         &output_dir.join("factor-registry-preview.json"),
         &factor_registry_preview_artifact(target, reports, &node_metrics)?,
     )?;
-    let mcts_state = mcts_search_state(target, &node_metrics, prior_state);
+    let mcts_state = mcts_search_state(target, &node_metrics, prior_state, subtree_frequencies);
     let prior_truncated_count = prior_state
         .filter(|state| state.target == target)
         .map(|state| state.backpropagation_truncated_count)
@@ -560,7 +582,12 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
                     factor_name: report.name.clone(),
                     mutation: "seed",
                     selected_dimension: selected_dimension(report, &runtime_avoidances),
-                    reward: reward(report, &runtime_avoidances, alpha_zoo),
+                    reward: reward(
+                        report,
+                        &runtime_avoidances,
+                        alpha_zoo,
+                        &mcts_state.subtree_frequencies,
+                    ),
                     visits: 1,
                     decision: report.decision.as_str().to_string(),
                 })
@@ -570,7 +597,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
 
     write_json(
         &output_dir.join("avoided-subtrees.json"),
-        &avoided_subtrees(reports),
+        &avoided_subtrees(&mcts_state.subtree_frequencies),
     )?;
 
     let best = node_metrics
@@ -1096,8 +1123,12 @@ fn node_metric(
     report: &AutoFactorReport,
     runtime_avoidances: &[RuntimeAvoidance],
     alpha_zoo: Option<&AlphaZooSnapshot>,
+    subtree_frequencies: &[SubtreeFrequencyState],
 ) -> NodeMetric {
     let matching_avoidance = matching_runtime_avoidance(report, runtime_avoidances);
+    let simplicity = 1.0 / report.complexity.max(1) as f64;
+    let structural_novelty = structural_novelty_score(&report.expr, subtree_frequencies);
+    let diversity_penalty = structural_diversity_penalty(&report.expr, subtree_frequencies);
     NodeMetric {
         id: format!("node-{idx}"),
         factor_name: report.name.clone(),
@@ -1108,15 +1139,18 @@ fn node_metric(
         selected_dimension: selected_dimension(report, runtime_avoidances),
         effectiveness: normalized_positive(report.top_bucket_avg_label),
         stability: report.positive_window_ratio.clamp(0.0, 1.0),
-        diversity: 1.0 / report.complexity.max(1) as f64,
+        diversity: structural_novelty,
         alpha_zoo_novelty: alpha_zoo_novelty_score(
             &report.expr,
             report.target.as_deref(),
             alpha_zoo,
         ),
+        simplicity,
+        structural_novelty,
+        diversity_penalty,
         execution_cost: execution_score(report),
         event_uniqueness: event_uniqueness_score(report),
-        overfit_risk: 1.0 / report.complexity.max(1) as f64,
+        overfit_risk: simplicity,
         runtime_readiness: if report.name.starts_with("auto_settlement_")
             || report.name == "amplitude_weighted_momentum_30s_sigma"
         {
@@ -1124,7 +1158,7 @@ fn node_metric(
         } else {
             0.5
         },
-        reward: reward(report, runtime_avoidances, alpha_zoo),
+        reward: reward(report, runtime_avoidances, alpha_zoo, subtree_frequencies),
         spearman_ic: finite_or_zero(report.spearman_ic),
         icir: finite_or_zero(report.icir),
         positive_window_ratio: finite_or_zero(report.positive_window_ratio),
@@ -1157,6 +1191,7 @@ fn mcts_search_state(
     target: &str,
     metrics: &[NodeMetric],
     prior_state: Option<&MctsSearchStateArtifact>,
+    subtree_frequencies: Vec<SubtreeFrequencyState>,
 ) -> MctsSearchStateArtifact {
     let mut nodes = prior_state
         .filter(|state| state.target == target)
@@ -1215,6 +1250,7 @@ fn mcts_search_state(
         total_visits,
         backpropagation_truncated_count,
         nodes,
+        subtree_frequencies,
     }
 }
 
@@ -1313,6 +1349,7 @@ fn reward(
     report: &AutoFactorReport,
     runtime_avoidances: &[RuntimeAvoidance],
     alpha_zoo: Option<&AlphaZooSnapshot>,
+    subtree_frequencies: &[SubtreeFrequencyState],
 ) -> f64 {
     let decision_bonus = match report.decision {
         AutoFactorDecision::Candidate => 1.0,
@@ -1331,6 +1368,7 @@ fn reward(
         - execution_penalty(report)
         - runtime_pass_through_penalty(report, runtime_avoidances)
         - alpha_zoo_novelty_penalty(&report.expr, report.target.as_deref(), alpha_zoo)
+        - structural_diversity_penalty(&report.expr, subtree_frequencies)
         - (report.complexity as f64 / 32.0)
 }
 
@@ -1435,20 +1473,78 @@ fn selected_dimension(
     .to_string()
 }
 
-fn avoided_subtrees(reports: &[AutoFactorReport]) -> Vec<AvoidedSubtree> {
-    let mut counts: BTreeMap<String, StructuralSubtreeCount> = BTreeMap::new();
+fn subtree_frequency_state(
+    target: &str,
+    reports: &[AutoFactorReport],
+    prior_state: Option<&MctsSearchStateArtifact>,
+    llm_prior: Option<&LlmPriorSpec>,
+) -> Vec<SubtreeFrequencyState> {
+    let mut counts: BTreeMap<String, StructuralSubtreeCount> = prior_state
+        .filter(|state| state.target == target)
+        .map(|state| {
+            state
+                .subtree_frequencies
+                .iter()
+                .map(|item| {
+                    (
+                        item.structural_signature.clone(),
+                        StructuralSubtreeCount {
+                            root_gene: item.root_gene.clone(),
+                            depth: item.depth,
+                            count: item.count,
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     for report in reports {
         record_subtree_count(&mut counts, &report.expr);
         for subtree in inner_structural_subtrees(&report.expr) {
             record_subtree_count(&mut counts, subtree);
         }
     }
+
+    if let Some(prior) = llm_prior {
+        for item in &prior.structural_avoid_signatures {
+            let signature = item.structural_signature.trim();
+            if signature.is_empty() {
+                continue;
+            }
+            let entry =
+                counts
+                    .entry(signature.to_string())
+                    .or_insert_with(|| StructuralSubtreeCount {
+                        root_gene: item.root_gene.clone().unwrap_or_default(),
+                        depth: 0,
+                        count: 0,
+                    });
+            if entry.root_gene.is_empty() {
+                entry.root_gene = item.root_gene.clone().unwrap_or_default();
+            }
+            entry.count = entry.count.max(item.count.max(3));
+        }
+    }
+
     counts
         .into_iter()
-        .filter(|(_, item)| item.count > 2)
-        .map(|(structural_signature, item)| AvoidedSubtree {
+        .map(|(structural_signature, item)| SubtreeFrequencyState {
             root_gene: item.root_gene,
             structural_signature,
+            depth: item.depth,
+            count: item.count,
+        })
+        .collect()
+}
+
+fn avoided_subtrees(frequencies: &[SubtreeFrequencyState]) -> Vec<AvoidedSubtree> {
+    frequencies
+        .iter()
+        .filter(|item| item.count > 2)
+        .map(|item| AvoidedSubtree {
+            root_gene: item.root_gene.clone(),
+            structural_signature: item.structural_signature.clone(),
             depth: item.depth,
             count: item.count,
             action: "penalize",
@@ -1474,6 +1570,38 @@ fn record_subtree_count(counts: &mut BTreeMap<String, StructuralSubtreeCount>, e
             count: 0,
         });
     entry.count = entry.count.saturating_add(1);
+}
+
+fn structural_diversity_penalty(expr: &FactorExpr, frequencies: &[SubtreeFrequencyState]) -> f64 {
+    let max_count = max_structural_frequency(expr, frequencies);
+    if max_count <= 2 {
+        0.0
+    } else {
+        ((max_count - 2) as f64 * 0.35).min(2.0)
+    }
+}
+
+fn structural_novelty_score(expr: &FactorExpr, frequencies: &[SubtreeFrequencyState]) -> f64 {
+    1.0 / max_structural_frequency(expr, frequencies).max(1) as f64
+}
+
+fn max_structural_frequency(expr: &FactorExpr, frequencies: &[SubtreeFrequencyState]) -> usize {
+    let signatures = structural_signatures(expr);
+    frequencies
+        .iter()
+        .filter(|item| signatures.contains(&item.structural_signature))
+        .map(|item| item.count)
+        .max()
+        .unwrap_or(1)
+}
+
+fn structural_signatures(expr: &FactorExpr) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    out.insert(structural_signature(expr));
+    for subtree in inner_structural_subtrees(expr) {
+        out.insert(structural_signature(subtree));
+    }
+    out
 }
 
 fn structural_signature(expr: &FactorExpr) -> String {
@@ -1987,7 +2115,9 @@ mod tests {
             },
         ];
 
-        let avoided = avoided_subtrees(&reports);
+        let frequencies =
+            subtree_frequency_state("full_depth_settlement_executable_pnl", &reports, None, None);
+        let avoided = avoided_subtrees(&frequencies);
         let inner_signature = structural_signature(&inner);
         let subtree = avoided
             .iter()
@@ -1997,6 +2127,82 @@ mod tests {
         assert_eq!(subtree.root_gene, "SafeDiv");
         assert_eq!(subtree.count, 3);
         assert_eq!(subtree.reason, "structural_signature_crowding");
+    }
+
+    #[test]
+    fn subtree_frequencies_merge_prior_state_counts() {
+        let expr = FactorExpr::SafeDiv(
+            Box::new(FactorExpr::Input(
+                "external_move_since_poly_update".to_string(),
+            )),
+            Box::new(FactorExpr::Const(0.01)),
+        );
+        let report = AutoFactorReport {
+            name: "current_safe_div".to_string(),
+            expr: expr.clone(),
+            complexity: 3,
+            ..sample_report("current_safe_div")
+        };
+        let signature = structural_signature(&expr);
+        let prior = MctsSearchStateArtifact {
+            version: ALPHA_SEARCH_ARTIFACT_VERSION.to_string(),
+            mode: "cumulative_ucb_state".to_string(),
+            target: "full_depth_settlement_executable_pnl".to_string(),
+            total_visits: 0,
+            nodes: Vec::new(),
+            subtree_frequencies: vec![SubtreeFrequencyState {
+                root_gene: "SafeDiv".to_string(),
+                structural_signature: signature.clone(),
+                depth: structural_depth(&expr),
+                count: 2,
+            }],
+        };
+
+        let frequencies = subtree_frequency_state(
+            "full_depth_settlement_executable_pnl",
+            &[report],
+            Some(&prior),
+            None,
+        );
+        let item = frequencies
+            .iter()
+            .find(|item| item.structural_signature == signature)
+            .expect("merged signature");
+
+        assert_eq!(item.count, 3);
+    }
+
+    #[test]
+    fn crowded_signature_receives_reward_penalty() {
+        let expr = FactorExpr::SafeDiv(
+            Box::new(FactorExpr::Input(
+                "external_move_since_poly_update".to_string(),
+            )),
+            Box::new(FactorExpr::Const(0.01)),
+        );
+        let mut crowded = sample_report("crowded_safe_div");
+        crowded.expr = expr.clone();
+        crowded.complexity = 3;
+        let mut novel = sample_report("novel_tanh");
+        novel.expr = FactorExpr::Tanh(Box::new(FactorExpr::Input("near_strike_score".to_string())));
+        novel.complexity = 3;
+        let frequencies = vec![SubtreeFrequencyState {
+            root_gene: "SafeDiv".to_string(),
+            structural_signature: structural_signature(&expr),
+            depth: structural_depth(&expr),
+            count: 5,
+        }];
+        let runtime_avoidances = Vec::new();
+
+        assert!(
+            structural_diversity_penalty(&crowded.expr, &frequencies) > 0.0,
+            "crowded expression should be penalized"
+        );
+        assert!(
+            reward(&crowded, &runtime_avoidances, &frequencies)
+                < reward(&novel, &runtime_avoidances, &frequencies),
+            "same-quality crowded expression should rank below novel expression"
+        );
     }
 
     #[test]
@@ -2332,6 +2538,7 @@ mod tests {
                 selected_dimension: "exploit".to_string(),
                 last_decision: "candidate".to_string(),
             }],
+            subtree_frequencies: Vec::new(),
         };
 
         write_alpha_search_artifacts_with_state(
@@ -2497,12 +2704,20 @@ mod tests {
 
         let reports = vec![repeated, one_event];
         let runtime_avoidances = Vec::new();
+        let subtree_frequencies = Vec::new();
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, None))
+            .map(|(idx, report)| {
+                node_metric(idx, report, &runtime_avoidances, None, &subtree_frequencies)
+            })
             .collect::<Vec<_>>();
-        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let state = mcts_search_state(
+            "full_depth_settlement_executable_pnl",
+            &metrics,
+            None,
+            subtree_frequencies.clone(),
+        );
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
         assert_eq!(
@@ -2512,8 +2727,8 @@ mod tests {
             Some("auto_settlement_lower_raw_score_one_event")
         );
         assert!(
-            reward(&reports[0], &runtime_avoidances, None)
-                < reward(&reports[1], &runtime_avoidances, None),
+            reward(&reports[0], &runtime_avoidances, None, &subtree_frequencies)
+                < reward(&reports[1], &runtime_avoidances, None, &subtree_frequencies),
             "repeated-event penalty should dominate raw IC/top-bucket strength"
         );
     }
@@ -2575,14 +2790,15 @@ mod tests {
             executable_edge_pass_min_edge: 5,
         };
         let runtime_avoidances = runtime_avoidances(Some(&feedback), None);
+        let subtree_frequencies = Vec::new();
 
         assert_eq!(
             selected_dimension(&collapsed, &runtime_avoidances),
             "runtime_executable_entry"
         );
         assert!(
-            reward(&collapsed, &runtime_avoidances, None)
-                < reward(&alternative, &runtime_avoidances, None),
+            reward(&collapsed, &runtime_avoidances, None, &subtree_frequencies)
+                < reward(&alternative, &runtime_avoidances, None, &subtree_frequencies),
             "runtime pass-through collapse should dominate top-bucket reward"
         );
     }
@@ -2607,12 +2823,20 @@ mod tests {
         };
         let runtime_avoidances = runtime_avoidances(Some(&feedback), None);
         let reports = vec![collapsed, alternative];
+        let subtree_frequencies = Vec::new();
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, None))
+            .map(|(idx, report)| {
+                node_metric(idx, report, &runtime_avoidances, None, &subtree_frequencies)
+            })
             .collect::<Vec<_>>();
-        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let state = mcts_search_state(
+            "full_depth_settlement_executable_pnl",
+            &metrics,
+            None,
+            subtree_frequencies,
+        );
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
         assert!(
@@ -2646,6 +2870,7 @@ mod tests {
         let alternative = sample_report("auto_settlement_full_depth_settlement_edge_x_capacity");
         let prior = LlmPriorSpec {
             mutations: Vec::new(),
+            structural_avoid_signatures: Vec::new(),
             runtime_avoid_factors: vec![crate::autofactor::RuntimeAvoidFactorSpec {
                 base_factor: "mut_spread_adjusted_external_move_squashed".to_string(),
                 factor_family: Some("spread_adjusted_external_move".to_string()),
@@ -2658,12 +2883,20 @@ mod tests {
         };
         let prior_avoidances = runtime_avoidances(None, Some(&prior));
         let reports = vec![squashed, spread_adjusted, alternative];
+        let subtree_frequencies = Vec::new();
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, &prior_avoidances, None))
+            .map(|(idx, report)| {
+                node_metric(idx, report, &prior_avoidances, None, &subtree_frequencies)
+            })
             .collect::<Vec<_>>();
-        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let state = mcts_search_state(
+            "full_depth_settlement_executable_pnl",
+            &metrics,
+            None,
+            subtree_frequencies,
+        );
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
         assert!(
@@ -2683,6 +2916,7 @@ mod tests {
         );
         let composed_prior = LlmPriorSpec {
             mutations: Vec::new(),
+            structural_avoid_signatures: Vec::new(),
             runtime_avoid_factors: vec![crate::autofactor::RuntimeAvoidFactorSpec {
                 base_factor:
                     "mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted"
@@ -2715,6 +2949,7 @@ mod tests {
         );
         let selected_gate_prior = LlmPriorSpec {
             mutations: Vec::new(),
+            structural_avoid_signatures: Vec::new(),
             runtime_avoid_factors: vec![crate::autofactor::RuntimeAvoidFactorSpec {
                 base_factor:
                     "mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted"

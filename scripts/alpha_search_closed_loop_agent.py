@@ -124,6 +124,7 @@ def load_artifact(path: Path, target: str) -> dict[str, Any]:
         "feedback": optional_json(alpha_root / "search-feedback.json") or {},
         "plan": optional_json(alpha_root / "mcts-expansion-plan.json") or {},
         "state": optional_json(alpha_root / "mcts-state.json") or {},
+        "avoided_subtrees": optional_json(alpha_root / "avoided-subtrees.json") or [],
         "handoff": optional_json(root / "autofactor-strategy-handoff.json") or {},
         "promotion": optional_json(root / "autofactor-strategy-promotion.json") or {},
         "registry_preview": optional_json(alpha_root / "factor-registry-preview.json") or {},
@@ -1284,6 +1285,47 @@ def collect_runtime_avoid_factors(
     return [by_family[key] for key in sorted(by_family)]
 
 
+def collect_structural_avoid_signatures(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_signature: dict[str, dict[str, Any]] = {}
+
+    def add_item(item: dict[str, Any]) -> None:
+        signature = str(item.get("structural_signature") or "").strip()
+        if not signature:
+            return
+        count = item.get("count")
+        try:
+            count_value = int(count)
+        except (TypeError, ValueError):
+            count_value = 0
+        payload = {
+            "structural_signature": signature,
+            "root_gene": str(item.get("root_gene") or ""),
+            "count": max(count_value, 3),
+            "reason": str(item.get("reason") or "structural_signature_crowding"),
+        }
+        existing = by_signature.get(signature)
+        if existing is None or int(existing.get("count") or 0) < payload["count"]:
+            by_signature[signature] = payload
+
+    for run in runs:
+        prior = run.get("input_prior") if isinstance(run, dict) else {}
+        prior_existing = (
+            prior.get("structural_avoid_signatures") if isinstance(prior, dict) else None
+        )
+        if isinstance(prior_existing, list):
+            for item in prior_existing:
+                if isinstance(item, dict):
+                    add_item(item)
+
+        avoided = run.get("avoided_subtrees") if isinstance(run, dict) else None
+        if isinstance(avoided, list):
+            for item in avoided:
+                if isinstance(item, dict) and str(item.get("action") or "") == "penalize":
+                    add_item(item)
+
+    return [by_signature[key] for key in sorted(by_signature)]
+
+
 def runtime_feedback_has_direct_signal(runtime_feedback: dict[str, Any]) -> bool:
     metrics = runtime_feedback.get("metrics")
     if not isinstance(metrics, dict):
@@ -1301,6 +1343,7 @@ def build_prior(runs: list[dict[str, Any]], decision: dict[str, Any], limit: int
     current = latest_run(runs)
     mutations = []
     runtime_avoid_factors = collect_runtime_avoid_factors(runs, decision)
+    structural_avoid_signatures = collect_structural_avoid_signatures(runs)
     runtime_avoid_families = {
         str(item.get("factor_family") or "").strip()
         for item in runtime_avoid_factors
@@ -1383,6 +1426,7 @@ def build_prior(runs: list[dict[str, Any]], decision: dict[str, Any], limit: int
         "target": current["target"],
         "decision_reason": decision["reason"],
         "runtime_avoid_factors": runtime_avoid_factors,
+        "structural_avoid_signatures": structural_avoid_signatures,
         "mutations": mutations,
     }
 

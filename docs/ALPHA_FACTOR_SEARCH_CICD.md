@@ -153,6 +153,7 @@ select node
   -> expand with allowed mutation
   -> evaluate candidate
   -> backpropagate multi-dimensional reward
+  -> persist structural subtree frequencies
   -> penalize crowded or invalid subtrees
 ```
 
@@ -328,9 +329,19 @@ advice until it is parsed into typed mutations.
 
 ## Frequent-Subtree Avoidance
 
-The search layer must track repeated expression structures. A subtree can be
-penalized or blocked when it repeats a crowded root gene without improving the
-selected weak dimension.
+The search layer tracks repeated expression structures with canonical structural
+signatures, not only top-level operator names. The signature normalizes
+commutative `Add`/`Mul` operands and abstracts numeric constants, so formulas
+that only reorder operands or tune an epsilon are treated as the same shape.
+The search records both whole-expression signatures and repeated inner subtrees
+with structural depth >= 2.
+
+Crowded signatures are persisted in `mcts-state.json` under
+`subtree_frequencies`, then surfaced in `avoided-subtrees.json` when their
+count crosses the penalty threshold. Node metrics split the old overloaded
+`diversity` meaning into `simplicity`, `structural_novelty`, and
+`diversity_penalty`; reward subtracts the diversity penalty so repeated
+structures affect MCTS ranking instead of remaining write-only diagnostics.
 
 Examples:
 
@@ -340,7 +351,10 @@ Examples:
 
 Avoidance is not a hard ban forever. It is a diversity control: a crowded
 subtree can be revisited only when the candidate improves a declared weak
-dimension such as capacity, stability, or overfit risk.
+dimension such as capacity, stability, or overfit risk. The closed-loop agent
+also carries crowded `structural_avoid_signatures` into the next
+`llm-priors.json` draft, so the next prior-generation step can avoid repeating
+known-crowded formula shapes before Rust scoring penalizes them.
 
 ## Alpha Zoo
 
@@ -642,8 +656,9 @@ Current implementation status:
 - Implemented: MCTS control artifacts, `mcts-state.json` and
   `mcts-expansion-plan.json`. The state artifact stores explicit factor
   parent lineage, accumulates leaf visits, backpropagates leaf rewards through
-  ancestor nodes across runs, and the expansion plan ranks non-rejected
-  current-run nodes with a UCB-style priority using that cumulative state.
+  ancestor nodes across runs, and persists structural subtree frequencies
+  across runs. The expansion plan ranks non-rejected current-run nodes with a
+  UCB-style priority using that cumulative state.
   `mcts-state.json.backpropagation_truncated_count > 0` means reward
   propagation hit a defensive stop before reaching a root node. Inspect
   `parent_name` lineage for cycles first; if there is no cycle, check whether
@@ -657,7 +672,8 @@ Current implementation status:
 - Implemented: `factor_walk_forward_v2 --alpha-search-state-json <path>` can
   consume a prior `mcts-state.json`; when a prior alpha-search artifact is
   downloaded via `options_json.alpha_search_plan_run_id`, the workflows pass
-  its `mcts-state.json` automatically when present.
+  its `mcts-state.json` automatically when present. This carries both MCTS node
+  rewards and structural subtree frequency counts into the next run.
 - Implemented: `factor_walk_forward_v2 --alpha-search-llm-prior-json <path>`
   accepts a typed LLM-prior JSON file with bounded mutation requests. The Rust
   layer compiles those requests into existing `FactorExpr` candidates only when
@@ -694,6 +710,10 @@ Current implementation status:
 - Implemented: alpha-search node metrics and MCTS reward now include
   event-level uniqueness and execution-capacity penalties, so repeated-event or
   high-slippage candidates are de-prioritized before the promotion gate.
+- Implemented: alpha-search node metrics and MCTS reward now include
+  structural novelty and diversity penalties from persisted subtree crowding, so
+  `avoided-subtrees.json` reflects a reward input rather than a write-only
+  diagnostic.
 - Implemented: settlement AutoFactor targets score one candidate decision per
   event before bucket and promotion metrics, while repricing targets preserve
   row-level diagnostics.
@@ -704,6 +724,9 @@ Current implementation status:
   boundary. `remove_component` can now ablate a named existing input from a
   candidate AST, or unwrap a top-level robustness/gate component, while still
   compiling only into existing `FactorExpr` nodes.
+- Implemented: closed-loop prior drafts carry `structural_avoid_signatures`
+  from crowded subtree artifacts, giving the next prior-generation step an
+  explicit list of formula shapes to avoid.
 - Implemented: a durable, cross-run Alpha Zoo novelty penalty. `reward()` and
   `node_metric()` accept an optional `AlphaZooSnapshot` grouped from historical
   `factor_registry` rows by root gene; `persist_research_trace
