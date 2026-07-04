@@ -2066,6 +2066,26 @@ mod tests {
     }
 
     #[test]
+    fn structural_signature_normalizes_commutative_comparators() {
+        let lhs = FactorExpr::Max(
+            Box::new(FactorExpr::Input("near_strike_score".to_string())),
+            Box::new(FactorExpr::Min(
+                Box::new(FactorExpr::Input("entry_capacity_score".to_string())),
+                Box::new(FactorExpr::Const(0.25)),
+            )),
+        );
+        let rhs = FactorExpr::Max(
+            Box::new(FactorExpr::Min(
+                Box::new(FactorExpr::Const(0.25)),
+                Box::new(FactorExpr::Input("entry_capacity_score".to_string())),
+            )),
+            Box::new(FactorExpr::Input("near_strike_score".to_string())),
+        );
+
+        assert_eq!(structural_signature(&lhs), structural_signature(&rhs));
+    }
+
+    #[test]
     fn structural_signature_abstracts_numeric_constants() {
         let first = FactorExpr::SafeDiv(
             Box::new(FactorExpr::Input(
