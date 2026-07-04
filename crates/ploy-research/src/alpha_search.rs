@@ -70,6 +70,29 @@ pub struct MctsSearchStateNode {
     pub last_decision: String,
 }
 
+/// A durable, cross-run snapshot of previously-accepted factors grouped by
+/// root gene, sourced from the `factor_registry` table across all historical
+/// runs. This is the "Alpha Zoo" from the "Navigating the Alpha Jungle" paper:
+/// unlike Frequent-Subtree Avoidance (batch-local, current run only), this
+/// snapshot represents the full historical population a new candidate should
+/// be checked against for novelty.
+///
+/// Absence of a snapshot (`None`) must always mean "no penalty, no effect",
+/// mirroring how `AlphaSearchRuntimeFeedback` and `LlmPriorSpec` behave when
+/// not supplied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlphaZooSnapshot {
+    pub version: String,
+    pub target: String,
+    pub entries: Vec<AlphaZooEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlphaZooEntry {
+    pub root_gene: String,
+    pub count: usize,
+}
+
 #[derive(Debug)]
 pub enum AlphaSearchArtifactError {
     Io(std::io::Error),
@@ -191,6 +214,7 @@ struct NodeMetric {
     effectiveness: f64,
     stability: f64,
     diversity: f64,
+    alpha_zoo_novelty: f64,
     execution_cost: f64,
     event_uniqueness: f64,
     overfit_risk: f64,
@@ -208,6 +232,7 @@ struct NodeMetric {
     runtime_entry_signal_rate: Option<f64>,
     runtime_executable_edge_pass_rate: Option<f64>,
     runtime_pass_through_penalty: f64,
+    alpha_zoo_penalty: f64,
     monotonicity_score: f64,
     complexity: usize,
 }
@@ -364,6 +389,7 @@ pub fn write_alpha_search_artifacts_with_state(
         prior_state,
         None,
         None,
+        None,
     )
 }
 
@@ -376,6 +402,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
     prior_state: Option<&MctsSearchStateArtifact>,
     runtime_feedback: Option<&AlphaSearchRuntimeFeedback>,
     llm_prior: Option<&LlmPriorSpec>,
+    alpha_zoo: Option<&AlphaZooSnapshot>,
 ) -> Result<AlphaSearchArtifactSummary, AlphaSearchArtifactError> {
     let output_dir = output_root.as_ref().join(target);
     std::fs::create_dir_all(&output_dir)?;
@@ -480,7 +507,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
     let node_metrics = reports
         .iter()
         .enumerate()
-        .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances))
+        .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, alpha_zoo))
         .collect::<Vec<_>>();
     write_json(&output_dir.join("node-metrics.json"), &node_metrics)?;
     write_json(
@@ -509,7 +536,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
                     factor_name: report.name.clone(),
                     mutation: "seed",
                     selected_dimension: selected_dimension(report, &runtime_avoidances),
-                    reward: reward(report, &runtime_avoidances),
+                    reward: reward(report, &runtime_avoidances, alpha_zoo),
                     visits: 1,
                     decision: report.decision.as_str().to_string(),
                 })
@@ -1044,6 +1071,7 @@ fn node_metric(
     idx: usize,
     report: &AutoFactorReport,
     runtime_avoidances: &[RuntimeAvoidance],
+    alpha_zoo: Option<&AlphaZooSnapshot>,
 ) -> NodeMetric {
     let matching_avoidance = matching_runtime_avoidance(report, runtime_avoidances);
     NodeMetric {
@@ -1056,6 +1084,7 @@ fn node_metric(
         effectiveness: normalized_positive(report.top_bucket_avg_label),
         stability: report.positive_window_ratio.clamp(0.0, 1.0),
         diversity: 1.0 / report.complexity.max(1) as f64,
+        alpha_zoo_novelty: alpha_zoo_novelty_score(&report.expr, alpha_zoo),
         execution_cost: execution_score(report),
         event_uniqueness: event_uniqueness_score(report),
         overfit_risk: 1.0 / report.complexity.max(1) as f64,
@@ -1066,7 +1095,7 @@ fn node_metric(
         } else {
             0.5
         },
-        reward: reward(report, runtime_avoidances),
+        reward: reward(report, runtime_avoidances, alpha_zoo),
         spearman_ic: finite_or_zero(report.spearman_ic),
         icir: finite_or_zero(report.icir),
         positive_window_ratio: finite_or_zero(report.positive_window_ratio),
@@ -1085,6 +1114,7 @@ fn node_metric(
         runtime_executable_edge_pass_rate: matching_avoidance
             .and_then(|avoidance| avoidance.executable_edge_pass_rate),
         runtime_pass_through_penalty: runtime_pass_through_penalty(report, runtime_avoidances),
+        alpha_zoo_penalty: alpha_zoo_novelty_penalty(&report.expr, alpha_zoo),
         monotonicity_score: finite_or_zero(report.monotonicity_score),
         complexity: report.complexity,
     }
@@ -1201,7 +1231,11 @@ fn proposed_mutation(selected_dimension: &str) -> &'static str {
     }
 }
 
-fn reward(report: &AutoFactorReport, runtime_avoidances: &[RuntimeAvoidance]) -> f64 {
+fn reward(
+    report: &AutoFactorReport,
+    runtime_avoidances: &[RuntimeAvoidance],
+    alpha_zoo: Option<&AlphaZooSnapshot>,
+) -> f64 {
     let decision_bonus = match report.decision {
         AutoFactorDecision::Candidate => 1.0,
         AutoFactorDecision::Watchlist => 0.25,
@@ -1218,6 +1252,7 @@ fn reward(report: &AutoFactorReport, runtime_avoidances: &[RuntimeAvoidance]) ->
         - event_decision_penalty(report)
         - execution_penalty(report)
         - runtime_pass_through_penalty(report, runtime_avoidances)
+        - alpha_zoo_novelty_penalty(&report.expr, alpha_zoo)
         - (report.complexity as f64 / 32.0)
 }
 
@@ -1339,7 +1374,13 @@ fn avoided_subtrees(reports: &[AutoFactorReport]) -> Vec<AvoidedSubtree> {
         .collect()
 }
 
-fn root_gene(expr: &FactorExpr) -> String {
+/// Coarse root-operator-only structural fingerprint, shared by both the
+/// batch-local Frequent-Subtree Avoidance path (`avoided_subtrees`) and the
+/// cross-run Alpha Zoo grouping in `examples/persist_research_trace.rs`, so
+/// both diversity controls agree on what counts as "the same shape". Exported
+/// so callers outside this module (e.g. the `factor_registry` export path)
+/// can group historical rows the same way without duplicating this logic.
+pub fn root_gene(expr: &FactorExpr) -> String {
     match expr {
         FactorExpr::Input(_) => "Input",
         FactorExpr::Const(_) => "Const",
@@ -1362,6 +1403,54 @@ fn root_gene(expr: &FactorExpr) -> String {
     .to_string()
 }
 
+/// Look up how many historically-accepted factors (across all runs, sourced
+/// from the durable `factor_registry` table) share this candidate's root
+/// gene. Returns `None` when there is no Alpha Zoo snapshot or no matching
+/// entry.
+///
+/// NOTE: this reuses the coarse root-operator-only `root_gene()` fingerprint
+/// on purpose. A finer-grained `structural_signature()` exists only in the
+/// still-unmerged Frequent-Subtree Avoidance PR; this can be upgraded to that
+/// signature once it lands on `main`.
+fn alpha_zoo_matching_count(expr: &FactorExpr, zoo: Option<&AlphaZooSnapshot>) -> Option<usize> {
+    let gene = root_gene(expr);
+    zoo?.entries
+        .iter()
+        .find(|entry| entry.root_gene == gene)
+        .map(|entry| entry.count)
+}
+
+/// Alpha Zoo novelty penalty: `0.0` (no-op) when there is no zoo snapshot,
+/// mirroring how `AlphaSearchRuntimeFeedback` and `LlmPriorSpec` behave when
+/// absent. Otherwise, penalize candidates whose root gene is over-represented
+/// across ALL historical accepted factors.
+///
+/// The threshold is `5`, higher than the batch-local Frequent-Subtree
+/// Avoidance threshold of `2` (see `avoided_subtrees` above), because the
+/// Alpha Zoo aggregates every historical run rather than just the current
+/// batch, so a much larger population of a single root gene is expected and
+/// tolerable before it counts as crowding.
+fn alpha_zoo_novelty_penalty(expr: &FactorExpr, zoo: Option<&AlphaZooSnapshot>) -> f64 {
+    const ALPHA_ZOO_CROWDING_THRESHOLD: usize = 5;
+    match alpha_zoo_matching_count(expr, zoo) {
+        Some(count) if count > ALPHA_ZOO_CROWDING_THRESHOLD => {
+            ((count - ALPHA_ZOO_CROWDING_THRESHOLD) as f64 * 0.5).min(6.0)
+        }
+        _ => 0.0,
+    }
+}
+
+/// Normalized Alpha Zoo novelty score in `(0.0, 1.0]`: `1.0` when there is no
+/// zoo snapshot or no matching root gene (maximally novel), otherwise
+/// `1.0 / count`, mirroring the shape of other normalized score helpers in
+/// this file (e.g. `diversity`, `overfit_risk`).
+fn alpha_zoo_novelty_score(expr: &FactorExpr, zoo: Option<&AlphaZooSnapshot>) -> f64 {
+    match alpha_zoo_matching_count(expr, zoo) {
+        Some(count) => 1.0 / count.max(1) as f64,
+        None => 1.0,
+    }
+}
+
 fn normalized_positive(value: f64) -> f64 {
     if value.is_finite() && value > 0.0 {
         value.tanh()
@@ -1371,7 +1460,11 @@ fn normalized_positive(value: f64) -> f64 {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 fn ratio_usize(numerator: usize, denominator: usize) -> f64 {
@@ -1963,7 +2056,7 @@ mod tests {
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances))
+            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, None))
             .collect::<Vec<_>>();
         let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
@@ -1975,7 +2068,8 @@ mod tests {
             Some("auto_settlement_lower_raw_score_one_event")
         );
         assert!(
-            reward(&reports[0], &runtime_avoidances) < reward(&reports[1], &runtime_avoidances),
+            reward(&reports[0], &runtime_avoidances, None)
+                < reward(&reports[1], &runtime_avoidances, None),
             "repeated-event penalty should dominate raw IC/top-bucket strength"
         );
     }
@@ -2043,7 +2137,8 @@ mod tests {
             "runtime_executable_entry"
         );
         assert!(
-            reward(&collapsed, &runtime_avoidances) < reward(&alternative, &runtime_avoidances),
+            reward(&collapsed, &runtime_avoidances, None)
+                < reward(&alternative, &runtime_avoidances, None),
             "runtime pass-through collapse should dominate top-bucket reward"
         );
     }
@@ -2071,7 +2166,7 @@ mod tests {
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances))
+            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, None))
             .collect::<Vec<_>>();
         let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
@@ -2122,7 +2217,7 @@ mod tests {
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, &prior_avoidances))
+            .map(|(idx, report)| node_metric(idx, report, &prior_avoidances, None))
             .collect::<Vec<_>>();
         let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
@@ -2194,5 +2289,53 @@ mod tests {
             &runtime_avoidances(None, Some(&selected_gate_prior))
         )
         .is_some());
+    }
+
+    #[test]
+    fn alpha_zoo_crowded_root_gene_lowers_reward() {
+        let report = sample_report("auto_settlement_alpha_zoo_crowded_candidate");
+        let runtime_avoidances = Vec::new();
+        let baseline_reward = reward(&report, &runtime_avoidances, None);
+
+        let zoo = AlphaZooSnapshot {
+            version: "alpha_zoo_v1".to_string(),
+            target: "full_depth_settlement_executable_pnl".to_string(),
+            entries: vec![AlphaZooEntry {
+                root_gene: root_gene(&report.expr),
+                count: 50,
+            }],
+        };
+        let penalized_reward = reward(&report, &runtime_avoidances, Some(&zoo));
+
+        assert!(
+            penalized_reward < baseline_reward,
+            "a root gene crowded across all historical accepted factors should lower reward \
+             relative to the same report scored with no Alpha Zoo snapshot"
+        );
+        assert!(alpha_zoo_novelty_penalty(&report.expr, Some(&zoo)) > 0.0);
+    }
+
+    #[test]
+    fn alpha_zoo_absent_is_a_no_op_for_reward() {
+        let report = sample_report("auto_settlement_alpha_zoo_no_op_candidate");
+        let runtime_avoidances = Vec::new();
+
+        let reward_without_zoo = reward(&report, &runtime_avoidances, None);
+
+        // An empty snapshot, and no snapshot at all, must be equivalent: absence
+        // of Alpha Zoo evidence should never change search behavior.
+        let empty_zoo = AlphaZooSnapshot {
+            version: "alpha_zoo_v1".to_string(),
+            target: "full_depth_settlement_executable_pnl".to_string(),
+            entries: Vec::new(),
+        };
+        let reward_with_empty_zoo = reward(&report, &runtime_avoidances, Some(&empty_zoo));
+
+        assert_eq!(
+            reward_without_zoo, reward_with_empty_zoo,
+            "omitting the Alpha Zoo snapshot must match an empty snapshot with no matching entries"
+        );
+        assert_eq!(alpha_zoo_novelty_penalty(&report.expr, None), 0.0);
+        assert_eq!(alpha_zoo_novelty_score(&report.expr, None), 1.0);
     }
 }

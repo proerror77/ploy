@@ -85,10 +85,11 @@ pub fn crate_marker() -> &'static str {
 // factor registry uses the same type internally, but does not re-export its own
 // `factors_new::Regime` alias.
 pub use alpha_search::{
-    read_mcts_search_state, write_alpha_search_artifacts, write_alpha_search_artifacts_with_state,
+    read_mcts_search_state, root_gene, write_alpha_search_artifacts,
+    write_alpha_search_artifacts_with_state,
     write_alpha_search_artifacts_with_state_and_runtime_feedback, AlphaSearchArtifactError,
-    AlphaSearchArtifactSummary, AlphaSearchRuntimeFeedback, MctsSearchStateArtifact,
-    MctsSearchStateNode,
+    AlphaSearchArtifactSummary, AlphaSearchRuntimeFeedback, AlphaZooEntry, AlphaZooSnapshot,
+    MctsSearchStateArtifact, MctsSearchStateNode,
 };
 pub use attribution::{factor_pnl, regime_pnl, AttributionReport, RegimePnl};
 pub use autofactor::{
