@@ -2405,11 +2405,13 @@ mod tests {
                 metrics: serde_json::Value::Null,
             }],
         };
-        assert!(matching_runtime_avoidance(
-            &selected_gate_variant,
-            &runtime_avoidances(None, Some(&selected_gate_prior))
-        )
-        .is_some());
+        assert!(
+            matching_runtime_avoidance(
+                &selected_gate_variant,
+                &runtime_avoidances(None, Some(&selected_gate_prior))
+            )
+            .is_some()
+        );
     }
 
     #[test]
