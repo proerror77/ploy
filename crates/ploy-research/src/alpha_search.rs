@@ -1084,7 +1084,11 @@ fn node_metric(
         effectiveness: normalized_positive(report.top_bucket_avg_label),
         stability: report.positive_window_ratio.clamp(0.0, 1.0),
         diversity: 1.0 / report.complexity.max(1) as f64,
-        alpha_zoo_novelty: alpha_zoo_novelty_score(&report.expr, alpha_zoo),
+        alpha_zoo_novelty: alpha_zoo_novelty_score(
+            &report.expr,
+            report.target.as_deref(),
+            alpha_zoo,
+        ),
         execution_cost: execution_score(report),
         event_uniqueness: event_uniqueness_score(report),
         overfit_risk: 1.0 / report.complexity.max(1) as f64,
@@ -1114,7 +1118,11 @@ fn node_metric(
         runtime_executable_edge_pass_rate: matching_avoidance
             .and_then(|avoidance| avoidance.executable_edge_pass_rate),
         runtime_pass_through_penalty: runtime_pass_through_penalty(report, runtime_avoidances),
-        alpha_zoo_penalty: alpha_zoo_novelty_penalty(&report.expr, alpha_zoo),
+        alpha_zoo_penalty: alpha_zoo_novelty_penalty(
+            &report.expr,
+            report.target.as_deref(),
+            alpha_zoo,
+        ),
         monotonicity_score: finite_or_zero(report.monotonicity_score),
         complexity: report.complexity,
     }
@@ -1252,7 +1260,7 @@ fn reward(
         - event_decision_penalty(report)
         - execution_penalty(report)
         - runtime_pass_through_penalty(report, runtime_avoidances)
-        - alpha_zoo_novelty_penalty(&report.expr, alpha_zoo)
+        - alpha_zoo_novelty_penalty(&report.expr, report.target.as_deref(), alpha_zoo)
         - (report.complexity as f64 / 32.0)
 }
 
@@ -1405,34 +1413,52 @@ pub fn root_gene(expr: &FactorExpr) -> String {
 
 /// Look up how many historically-accepted factors (across all runs, sourced
 /// from the durable `factor_registry` table) share this candidate's root
-/// gene. Returns `None` when there is no Alpha Zoo snapshot or no matching
-/// entry.
+/// gene. Returns `None` when there is no Alpha Zoo snapshot, the snapshot was
+/// exported for a different search target, or there is no matching entry.
+///
+/// The `target` check matters because reprice and settlement targets have
+/// unrelated factor populations: a snapshot exported for
+/// `full_depth_settlement_executable_pnl` must not penalize
+/// `full_depth_reprice_pnl_10s` candidates just because they share a root
+/// operator. Without this check, a caller that scores multiple targets with
+/// the same snapshot (see `factor_walk_forward_v2.rs`) would cross-contaminate
+/// unrelated target populations.
 ///
 /// NOTE: this reuses the coarse root-operator-only `root_gene()` fingerprint
 /// on purpose. A finer-grained `structural_signature()` exists only in the
 /// still-unmerged Frequent-Subtree Avoidance PR; this can be upgraded to that
 /// signature once it lands on `main`.
-fn alpha_zoo_matching_count(expr: &FactorExpr, zoo: Option<&AlphaZooSnapshot>) -> Option<usize> {
+fn alpha_zoo_matching_count(
+    expr: &FactorExpr,
+    target: &str,
+    zoo: Option<&AlphaZooSnapshot>,
+) -> Option<usize> {
+    let zoo = zoo.filter(|zoo| zoo.target == target)?;
     let gene = root_gene(expr);
-    zoo?.entries
+    zoo.entries
         .iter()
         .find(|entry| entry.root_gene == gene)
         .map(|entry| entry.count)
 }
 
-/// Alpha Zoo novelty penalty: `0.0` (no-op) when there is no zoo snapshot,
-/// mirroring how `AlphaSearchRuntimeFeedback` and `LlmPriorSpec` behave when
-/// absent. Otherwise, penalize candidates whose root gene is over-represented
-/// across ALL historical accepted factors.
+/// Alpha Zoo novelty penalty: `0.0` (no-op) when there is no zoo snapshot, the
+/// snapshot targets a different search target, or the candidate has no
+/// target, mirroring how `AlphaSearchRuntimeFeedback` and `LlmPriorSpec`
+/// behave when absent. Otherwise, penalize candidates whose root gene is
+/// over-represented across ALL historical accepted factors for this target.
 ///
 /// The threshold is `5`, higher than the batch-local Frequent-Subtree
 /// Avoidance threshold of `2` (see `avoided_subtrees` above), because the
 /// Alpha Zoo aggregates every historical run rather than just the current
 /// batch, so a much larger population of a single root gene is expected and
 /// tolerable before it counts as crowding.
-fn alpha_zoo_novelty_penalty(expr: &FactorExpr, zoo: Option<&AlphaZooSnapshot>) -> f64 {
+fn alpha_zoo_novelty_penalty(
+    expr: &FactorExpr,
+    target: Option<&str>,
+    zoo: Option<&AlphaZooSnapshot>,
+) -> f64 {
     const ALPHA_ZOO_CROWDING_THRESHOLD: usize = 5;
-    match alpha_zoo_matching_count(expr, zoo) {
+    match target.and_then(|target| alpha_zoo_matching_count(expr, target, zoo)) {
         Some(count) if count > ALPHA_ZOO_CROWDING_THRESHOLD => {
             ((count - ALPHA_ZOO_CROWDING_THRESHOLD) as f64 * 0.5).min(6.0)
         }
@@ -1441,11 +1467,16 @@ fn alpha_zoo_novelty_penalty(expr: &FactorExpr, zoo: Option<&AlphaZooSnapshot>) 
 }
 
 /// Normalized Alpha Zoo novelty score in `(0.0, 1.0]`: `1.0` when there is no
-/// zoo snapshot or no matching root gene (maximally novel), otherwise
-/// `1.0 / count`, mirroring the shape of other normalized score helpers in
-/// this file (e.g. `diversity`, `overfit_risk`).
-fn alpha_zoo_novelty_score(expr: &FactorExpr, zoo: Option<&AlphaZooSnapshot>) -> f64 {
-    match alpha_zoo_matching_count(expr, zoo) {
+/// zoo snapshot, the snapshot targets a different search target, the
+/// candidate has no target, or there is no matching root gene (maximally
+/// novel), otherwise `1.0 / count`, mirroring the shape of other normalized
+/// score helpers in this file (e.g. `diversity`, `overfit_risk`).
+fn alpha_zoo_novelty_score(
+    expr: &FactorExpr,
+    target: Option<&str>,
+    zoo: Option<&AlphaZooSnapshot>,
+) -> f64 {
+    match target.and_then(|target| alpha_zoo_matching_count(expr, target, zoo)) {
         Some(count) => 1.0 / count.max(1) as f64,
         None => 1.0,
     }
@@ -1460,11 +1491,7 @@ fn normalized_positive(value: f64) -> f64 {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() {
-        value
-    } else {
-        0.0
-    }
+    if value.is_finite() { value } else { 0.0 }
 }
 
 fn ratio_usize(numerator: usize, denominator: usize) -> f64 {
@@ -2312,7 +2339,43 @@ mod tests {
             "a root gene crowded across all historical accepted factors should lower reward \
              relative to the same report scored with no Alpha Zoo snapshot"
         );
-        assert!(alpha_zoo_novelty_penalty(&report.expr, Some(&zoo)) > 0.0);
+        assert!(
+            alpha_zoo_novelty_penalty(&report.expr, report.target.as_deref(), Some(&zoo)) > 0.0
+        );
+    }
+
+    #[test]
+    fn alpha_zoo_snapshot_for_a_different_target_is_a_no_op() {
+        let report = sample_report("auto_settlement_alpha_zoo_cross_target_candidate");
+        let runtime_avoidances = Vec::new();
+        let baseline_reward = reward(&report, &runtime_avoidances, None);
+
+        // The snapshot's root gene matches, but its `target` does not match
+        // this report's target. A snapshot exported for one search target
+        // (e.g. settlement) must never penalize candidates from an unrelated
+        // target (e.g. reprice) just because they share a root operator.
+        let zoo = AlphaZooSnapshot {
+            version: "alpha_zoo_v1".to_string(),
+            target: "full_depth_reprice_pnl_10s".to_string(),
+            entries: vec![AlphaZooEntry {
+                root_gene: root_gene(&report.expr),
+                count: 50,
+            }],
+        };
+        let reward_with_mismatched_zoo = reward(&report, &runtime_avoidances, Some(&zoo));
+
+        assert_eq!(
+            baseline_reward, reward_with_mismatched_zoo,
+            "a snapshot exported for a different target must not affect reward"
+        );
+        assert_eq!(
+            alpha_zoo_novelty_penalty(&report.expr, report.target.as_deref(), Some(&zoo)),
+            0.0
+        );
+        assert_eq!(
+            alpha_zoo_novelty_score(&report.expr, report.target.as_deref(), Some(&zoo)),
+            1.0
+        );
     }
 
     #[test]
@@ -2335,7 +2398,13 @@ mod tests {
             reward_without_zoo, reward_with_empty_zoo,
             "omitting the Alpha Zoo snapshot must match an empty snapshot with no matching entries"
         );
-        assert_eq!(alpha_zoo_novelty_penalty(&report.expr, None), 0.0);
-        assert_eq!(alpha_zoo_novelty_score(&report.expr, None), 1.0);
+        assert_eq!(
+            alpha_zoo_novelty_penalty(&report.expr, report.target.as_deref(), None),
+            0.0
+        );
+        assert_eq!(
+            alpha_zoo_novelty_score(&report.expr, report.target.as_deref(), None),
+            1.0
+        );
     }
 }
