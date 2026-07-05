@@ -21724,7 +21724,7 @@ gates are touched by any of these priorities.
 - [x] Stage A: thread explicit factor lineage through `NamedFactorExpr`,
       `AutoFactorReport`, and `tree-trace.json` without changing reward or
       ranking behavior.
-- [ ] Stage B: extend cumulative MCTS state with `parent_name` and
+- [x] Stage B: extend cumulative MCTS state with `parent_name` and
       backpropagate leaf rewards through ancestor nodes.
 - [ ] Add focused lineage/backpropagation tests and run local validation.
 

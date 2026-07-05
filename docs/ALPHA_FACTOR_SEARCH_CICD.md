@@ -612,9 +612,10 @@ Current implementation status:
   a candidate cap to keep CI runs bounded.
 - Implemented: workflow upload path for the artifact bundle through both
   Factor Walk-Forward V2 workflows.
-- Implemented: first MCTS control artifacts, `mcts-state.json` and
-  `mcts-expansion-plan.json`. The state artifact accumulates visits and
-  rewards per factor across runs, and the expansion plan ranks non-rejected
+- Implemented: MCTS control artifacts, `mcts-state.json` and
+  `mcts-expansion-plan.json`. The state artifact stores explicit factor
+  parent lineage, accumulates leaf visits, backpropagates leaf rewards through
+  ancestor nodes across runs, and the expansion plan ranks non-rejected
   current-run nodes with a UCB-style priority using that cumulative state.
 - Implemented: `factor_walk_forward_v2 --alpha-search-plan-json <path>` can
   consume a prior `mcts-expansion-plan.json` and generate extra `mcts_*`
