@@ -12,11 +12,14 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use ploy_research::autofactor_target_horizon;
 use ploy_research::research_os::trace::trace_hash;
-use ploy_research::ResearchSnapshotManifest;
+use ploy_research::{
+    root_gene, AlphaZooEntry, AlphaZooSnapshot, FactorExpr, ResearchSnapshotManifest,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 const WRITER_AGENT: &str = "persist_research_trace";
@@ -36,6 +39,8 @@ struct TracePlan {
     candidate_replay_jsons: Vec<PathBuf>,
     full_depth_execution_surface_jsons: Vec<PathBuf>,
     dry_run: bool,
+    export_alpha_zoo_snapshot: Option<PathBuf>,
+    export_alpha_zoo_target: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -188,7 +193,7 @@ fn flag_present(args: &[String], flag: &str) -> bool {
 }
 
 fn usage() -> &'static str {
-    "usage: persist_research_trace --run-id <id> --snapshot-dir <dir> [--db-url <url>|DATABASE_URL] [--alpha-search-dir <dir>] [--registry-json <path>] [--promotion-json <path>] [--handoff-json <path>] [--candidate-replay-json <path>...] [--full-depth-execution-surface-json <path>...] [--dry-run]"
+    "usage: persist_research_trace --run-id <id> --snapshot-dir <dir> [--db-url <url>|DATABASE_URL] [--alpha-search-dir <dir>] [--registry-json <path>] [--promotion-json <path>] [--handoff-json <path>] [--candidate-replay-json <path>...] [--full-depth-execution-surface-json <path>...] [--dry-run] [--export-alpha-zoo-snapshot <path> --export-alpha-zoo-target <target>]"
 }
 
 fn parse_args(args: &[String]) -> Result<TracePlan> {
@@ -214,6 +219,9 @@ fn parse_args(args: &[String]) -> Result<TracePlan> {
         .map(PathBuf::from)
         .collect(),
         dry_run: flag_present(args, "--dry-run"),
+        export_alpha_zoo_snapshot: flag_value(args, "--export-alpha-zoo-snapshot")
+            .map(PathBuf::from),
+        export_alpha_zoo_target: flag_value(args, "--export-alpha-zoo-target"),
     })
 }
 
@@ -334,6 +342,19 @@ async fn main() -> Result<()> {
             &surface.artifact_json,
         )
         .await?;
+    }
+
+    if let Some(output_path) = plan.export_alpha_zoo_snapshot.as_ref() {
+        let target = plan
+            .export_alpha_zoo_target
+            .as_deref()
+            .context("--export-alpha-zoo-target required with --export-alpha-zoo-snapshot")?;
+        export_alpha_zoo_snapshot(&pool, target, output_path).await?;
+        eprintln!(
+            "persist_research_trace: alpha zoo snapshot exported target={} path={}",
+            target,
+            output_path.display()
+        );
     }
 
     eprintln!("persist_research_trace: persisted");
@@ -1016,6 +1037,88 @@ async fn upsert_factor_registry(pool: &PgPool, row: &FactorPreviewRow) -> Result
     Ok(stored_id)
 }
 
+const ALPHA_ZOO_SNAPSHOT_VERSION: &str = "alpha_zoo_snapshot_v1";
+// Alpha Zoo counts only durably-accepted factors. Draft/compiled/evaluated
+// rows are exploratory and would inflate the historical population with
+// candidates that were never actually promoted past initial review.
+const ALPHA_ZOO_ACCEPTED_STATUSES: &[&str] = &["candidate", "dry_run", "approved", "production"];
+
+/// A minimal, DB-independent view of a `factor_registry` row. Deliberately
+/// carries only what `group_factor_registry_rows_into_alpha_zoo_snapshot`
+/// needs (target, status, and the AST JSON to derive `root_gene` from), so
+/// that function can be unit tested with a hand-built `Vec` and zero sqlx or
+/// `PgPool` involvement.
+#[derive(Debug, Clone)]
+struct FactorRegistryRow {
+    target: String,
+    status: String,
+    ast_json: Value,
+}
+
+/// Pure grouping/aggregation step: counts previously-accepted
+/// `factor_registry` rows for `target` by their `root_gene` structural
+/// fingerprint. No I/O, no sqlx — this is the part that must stay unit
+/// testable without a database.
+fn group_factor_registry_rows_into_alpha_zoo_snapshot(
+    target: &str,
+    rows: &[FactorRegistryRow],
+) -> AlphaZooSnapshot {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for row in rows {
+        if row.target != target {
+            continue;
+        }
+        if !ALPHA_ZOO_ACCEPTED_STATUSES.contains(&row.status.as_str()) {
+            continue;
+        }
+        let Ok(expr) = serde_json::from_value::<FactorExpr>(row.ast_json.clone()) else {
+            continue;
+        };
+        *counts.entry(root_gene(&expr)).or_default() += 1;
+    }
+    let entries = counts
+        .into_iter()
+        .map(|(root_gene, count)| AlphaZooEntry { root_gene, count })
+        .collect();
+    AlphaZooSnapshot {
+        version: ALPHA_ZOO_SNAPSHOT_VERSION.to_string(),
+        target: target.to_string(),
+        entries,
+    }
+}
+
+/// Thin sqlx-querying wrapper: fetches every `factor_registry` row's target,
+/// status, and AST JSON, then delegates to the pure grouping function above.
+/// This is the only function in the Alpha Zoo export path that touches a
+/// `PgPool`.
+async fn fetch_factor_registry_rows(pool: &PgPool) -> Result<Vec<FactorRegistryRow>> {
+    let rows: Vec<(String, String, Value)> = sqlx::query_as(
+        r#"
+        SELECT target, status, ast_json
+        FROM factor_registry
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(target, status, ast_json)| FactorRegistryRow {
+            target,
+            status,
+            ast_json,
+        })
+        .collect())
+}
+
+async fn export_alpha_zoo_snapshot(pool: &PgPool, target: &str, output_path: &Path) -> Result<()> {
+    let rows = fetch_factor_registry_rows(pool).await?;
+    let snapshot = group_factor_registry_rows_into_alpha_zoo_snapshot(target, &rows);
+    let rendered = serde_json::to_string_pretty(&snapshot)?;
+    fs::write(output_path, rendered)
+        .with_context(|| format!("write alpha zoo snapshot to {}", output_path.display()))?;
+    Ok(())
+}
+
 async fn upsert_factor_evaluation(
     pool: &PgPool,
     factor_id: &str,
@@ -1656,6 +1759,52 @@ mod tests {
         assert_eq!(blockers, json!(["a", "b", "c"]));
     }
 
+    fn input_expr_json(name: &str) -> Value {
+        serde_json::to_value(FactorExpr::Input(name.to_string())).expect("serialize FactorExpr")
+    }
+
+    #[test]
+    fn groups_factor_registry_rows_by_root_gene_for_matching_target_and_accepted_status() {
+        let target = "full_depth_settlement_executable_pnl";
+        let rows = vec![
+            FactorRegistryRow {
+                target: target.to_string(),
+                status: "candidate".to_string(),
+                ast_json: input_expr_json("conservative_settlement_edge"),
+            },
+            FactorRegistryRow {
+                target: target.to_string(),
+                status: "dry_run".to_string(),
+                ast_json: input_expr_json("model_full_depth_settlement_edge"),
+            },
+            // A different target's rows must not be grouped into this snapshot.
+            FactorRegistryRow {
+                target: "full_depth_reprice_pnl_10s".to_string(),
+                status: "candidate".to_string(),
+                ast_json: input_expr_json("some_other_input"),
+            },
+            // A draft/never-accepted row must not inflate the historical count.
+            FactorRegistryRow {
+                target: target.to_string(),
+                status: "draft".to_string(),
+                ast_json: input_expr_json("unaccepted_draft_input"),
+            },
+            // A rejected row must not count either.
+            FactorRegistryRow {
+                target: target.to_string(),
+                status: "deprecated".to_string(),
+                ast_json: input_expr_json("deprecated_input"),
+            },
+        ];
+
+        let snapshot = group_factor_registry_rows_into_alpha_zoo_snapshot(target, &rows);
+
+        assert_eq!(snapshot.target, target);
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].root_gene, "Input");
+        assert_eq!(snapshot.entries[0].count, 2);
+    }
+
     #[test]
     fn candidate_replay_stage_is_derived_from_basis() {
         assert_eq!(
@@ -1697,6 +1846,8 @@ mod tests {
             candidate_replay_jsons: Vec::new(),
             full_depth_execution_surface_jsons: Vec::new(),
             dry_run: true,
+            export_alpha_zoo_snapshot: None,
+            export_alpha_zoo_target: None,
         }
     }
 

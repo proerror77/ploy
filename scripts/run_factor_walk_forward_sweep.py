@@ -158,6 +158,8 @@ def factor_args(
         command.extend(["--alpha-search-state-json", args.alpha_search_state_json])
     if args.alpha_search_llm_prior_json:
         command.extend(["--alpha-search-llm-prior-json", args.alpha_search_llm_prior_json])
+    if args.alpha_zoo_snapshot_json:
+        command.extend(["--alpha-zoo-snapshot-json", args.alpha_zoo_snapshot_json])
     return command
 
 
@@ -682,6 +684,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha-search-plan-json", default="")
     parser.add_argument("--alpha-search-state-json", default="")
     parser.add_argument("--alpha-search-llm-prior-json", default="")
+    parser.add_argument("--alpha-zoo-snapshot-json", default="")
     parser.add_argument("--required-strategy-profile", default="settlement_probability")
     parser.add_argument("--require-deribit", action="store_true")
     parser.add_argument("--allowed-target", action="append", default=[])

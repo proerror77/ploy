@@ -342,6 +342,44 @@ Avoidance is not a hard ban forever. It is a diversity control: a crowded
 subtree can be revisited only when the candidate improves a declared weak
 dimension such as capacity, stability, or overfit risk.
 
+## Alpha Zoo
+
+Frequent-Subtree Avoidance is batch-local: it only compares candidates within
+the current search run. The Alpha Zoo is the paper's ("Navigating the Alpha
+Jungle") complementary cross-run diversity control: a durable, persistent
+population of previously-accepted factors that new candidates are also
+checked against, regardless of which run produced them.
+
+The Alpha Zoo snapshot is sourced from the `factor_registry` table, which
+`persist_research_trace` writes to across every historical run. Unlike
+`avoided-subtrees.json`, which only ever sees the reports passed into a single
+`write_alpha_search_artifacts_with_state_and_runtime_feedback` call, the Alpha
+Zoo snapshot reflects every `candidate`, `dry_run`, `approved`, or `production`
+row ever recorded for a target.
+
+Flow:
+
+1. `persist_research_trace --export-alpha-zoo-snapshot <path> --export-alpha-zoo-target <target>`
+   queries every `factor_registry` row, groups the accepted ones by root gene
+   with `group_factor_registry_rows_into_alpha_zoo_snapshot`, and writes an
+   `AlphaZooSnapshot` JSON file.
+2. `factor_walk_forward_v2 --alpha-zoo-snapshot-json <path>` loads that file and
+   passes it as `Some(&snapshot)` into
+   `write_alpha_search_artifacts_with_state_and_runtime_feedback`. Omitting the
+   flag passes `None`, which is a strict no-op: reward and node metrics are
+   identical to a run with no Alpha Zoo evidence at all.
+3. `reward()` subtracts `alpha_zoo_novelty_penalty(&report.expr, alpha_zoo)`
+   from the same sum where `execution_penalty` and `runtime_pass_through_penalty`
+   are subtracted, and `node_metric()` records `alpha_zoo_novelty` and
+   `alpha_zoo_penalty` alongside the other per-candidate score fields.
+
+The Alpha Zoo currently reuses the coarse root-operator-only `root_gene()`
+fingerprint (the same one `avoided_subtrees` uses), with a higher crowding
+threshold (`5`) than Frequent-Subtree Avoidance's batch-local threshold (`2`),
+because the Alpha Zoo aggregates every historical run rather than a single
+batch. This can be upgraded to the finer-grained `structural_signature()` once
+that lands on `main`.
+
 ## Workflow Roles
 
 - `factor-walk-forward-v2-hosted-artifact.yml` should be the default efficient
@@ -628,6 +666,11 @@ Current implementation status:
 - Implemented as artifact and input contract: `llm-priors.json` records the
   typed prior schema, and an operator- or LLM-produced prior file can now enter
   CI through `--alpha-search-llm-prior-json` / `options_json.alpha_search_llm_prior_json`.
+- Implemented: a durable, cross-run Alpha Zoo novelty penalty. `reward()` and
+  `node_metric()` accept an optional `AlphaZooSnapshot` grouped from historical
+  `factor_registry` rows by root gene; `persist_research_trace
+  --export-alpha-zoo-snapshot` produces it, and `factor_walk_forward_v2
+  --alpha-zoo-snapshot-json <path>` consumes it. Omitting the flag is a no-op.
 - Not yet implemented: direct live LLM API invocation inside CI. The intended
   boundary is still external LLM proposal -> reviewed typed JSON -> Rust DSL
   compiler -> CI evaluation.

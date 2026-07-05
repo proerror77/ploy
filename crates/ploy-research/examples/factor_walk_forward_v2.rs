@@ -6,13 +6,6 @@
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use ploy_research::{
-    AlphaSearchRuntimeFeedback, AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options,
-    FactorObservation, FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
-    FillabilityReviewOptions, FullDepthExecutionMatrixOptions, LiquidityGateV1Options,
-    LiquidityGatedAlphaV1Options, LlmPriorSpec, MetaLabelWalkForwardOptions, RepricingIcOptions,
-    ResearchSnapshotRequest, SettlementProbabilityDataQualityMode,
-    SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
-    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
     autofactor_matrix_from_v2, build_factor_observations_v2_with_deribit_and_pm_books,
     build_factor_stability_report, build_full_depth_execution_matrix,
     build_settlement_probability_promotion_gate_report, format_autofactor_reports,
@@ -30,7 +23,14 @@ use ploy_research::{
     walk_forward_factor_combo_v1_with_deribit_and_pm_books,
     walk_forward_factors_v2_with_deribit_and_pm_books,
     walk_forward_meta_label_v1_with_deribit_and_pm_books,
-    write_alpha_search_artifacts_with_state_and_runtime_feedback,
+    write_alpha_search_artifacts_with_state_and_runtime_feedback, AlphaSearchRuntimeFeedback,
+    AlphaZooSnapshot, AutoFactorOptions, AutoFactorV2Target, FactorComboV1Options,
+    FactorObservation, FactorReviewOptions, FactorStabilityOptions, FactorWalkForwardOptions,
+    FillabilityReviewOptions, FullDepthExecutionMatrixOptions, LiquidityGateV1Options,
+    LiquidityGatedAlphaV1Options, LlmPriorSpec, MetaLabelWalkForwardOptions, RepricingIcOptions,
+    ResearchSnapshotRequest, SettlementProbabilityDataQualityMode,
+    SettlementProbabilityPromotionGateOptions, SettlementProbabilityReportOptions,
+    SettlementProbabilityWalkForwardOptions, TradeFormationReviewOptions,
 };
 use std::collections::HashSet;
 
@@ -261,6 +261,13 @@ fn read_llm_prior(path: &str) -> LlmPriorSpec {
         .unwrap_or_else(|err| panic!("parse alpha search LLM prior JSON {path} failed: {err}"))
 }
 
+fn read_alpha_zoo_snapshot(path: &str) -> AlphaZooSnapshot {
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("read alpha zoo snapshot JSON {path} failed: {err}"));
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|err| panic!("parse alpha zoo snapshot JSON {path} failed: {err}"))
+}
+
 fn runtime_feedback_from_candidate_replay(path: &str) -> Option<AlphaSearchRuntimeFeedback> {
     let raw = std::fs::read_to_string(path)
         .unwrap_or_else(|err| panic!("read candidate strategy replay JSON {path} failed: {err}"));
@@ -443,6 +450,7 @@ async fn main() {
     let alpha_search_plan_json = flag_value(&args, "--alpha-search-plan-json");
     let alpha_search_llm_prior_json = flag_value(&args, "--alpha-search-llm-prior-json");
     let alpha_search_state_json = flag_value(&args, "--alpha-search-state-json");
+    let alpha_zoo_snapshot_json = flag_value(&args, "--alpha-zoo-snapshot-json");
     let data_quality_mode = parse_data_quality_mode(flag_value(&args, "--data-quality-mode"));
     let require_deribit = flag_present(&args, "--require-deribit");
     let min_event_complete_events = flag_value(&args, "--min-event-complete-events")
@@ -750,6 +758,12 @@ async fn main() {
     if let Some(path) = alpha_search_state_json.as_deref() {
         eprintln!("alpha search cumulative MCTS state loaded from {path}");
     }
+    let alpha_zoo = alpha_zoo_snapshot_json
+        .as_deref()
+        .map(read_alpha_zoo_snapshot);
+    if let Some(path) = alpha_zoo_snapshot_json.as_deref() {
+        eprintln!("alpha zoo snapshot loaded from {path}");
+    }
     let runtime_feedback = candidate_strategy_replay_json
         .as_deref()
         .and_then(runtime_feedback_from_candidate_replay);
@@ -801,6 +815,7 @@ async fn main() {
                         mcts_state.as_ref(),
                         runtime_feedback.as_ref(),
                         llm_prior.as_ref(),
+                        alpha_zoo.as_ref(),
                     ) {
                         Ok(summary) => eprintln!(
                             "alpha search artifacts written target={} candidates={} rejected={} best={} dir={}",
