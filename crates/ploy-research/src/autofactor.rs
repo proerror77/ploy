@@ -211,6 +211,13 @@ pub struct NamedFactorExpr {
     pub expr: FactorExpr,
     pub target: Option<String>,
     pub notes: Vec<String>,
+    /// The `name` of the candidate this one was derived from, or `None` for
+    /// a root candidate (a domain seed or a settlement-native generated
+    /// formula). This is lineage plumbing only in this stage: it powers
+    /// `TreeTraceNode.parent` and Stage B's `backpropagate()`, but does not
+    /// itself change any reward/scoring behavior.
+    #[serde(default)]
+    pub parent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +268,7 @@ impl NamedFactorExpr {
             expr,
             target: None,
             notes: Vec::new(),
+            parent_name: None,
         }
     }
 }
@@ -393,6 +401,10 @@ pub struct AutoFactorReport {
     pub complexity: usize,
     pub decision: AutoFactorDecision,
     pub reason: String,
+    /// Carried over from `NamedFactorExpr.parent_name`: the candidate this
+    /// report's factor was derived from, or `None` for a root candidate.
+    #[serde(default)]
+    pub parent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -645,6 +657,7 @@ pub fn evaluate_named_factor(
         complexity,
         decision,
         reason,
+        parent_name: factor.parent_name.clone(),
     })
 }
 
@@ -1408,6 +1421,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             expr: input("repricing_gap_side_10s"),
             target: Some("reprice_pnl_10s".to_string()),
             notes: vec!["Side-aligned fair-minus-entry gap proxy.".to_string()],
+            parent_name: None,
         });
     }
     if input_names.contains("side_fair_edge") {
@@ -1416,6 +1430,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             expr: input("side_fair_edge"),
             target: Some("settlement_executable_pnl".to_string()),
             notes: vec!["Settlement fair probability minus executable ask and fee.".to_string()],
+            parent_name: None,
         });
     }
     if input_names.contains("bayes_edge") {
@@ -1427,6 +1442,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                 "Row-local Bayesian posterior probability minus executable ask and fee."
                     .to_string(),
             ],
+            parent_name: None,
         });
         out.push(NamedFactorExpr {
             name: "bayes_contrarian_settlement_edge".to_string(),
@@ -1436,6 +1452,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                 "Contrarian Bayesian settlement edge for windows where raw posterior ranks backwards."
                     .to_string(),
             ],
+            parent_name: None,
         });
     }
     if input_names.contains("bayes_confidence_weighted_edge") {
@@ -1447,6 +1464,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                 "Bayesian settlement edge weighted by quote, capacity, agreement, and probability quality."
                     .to_string(),
             ],
+            parent_name: None,
         });
         out.push(NamedFactorExpr {
             name: "bayes_contrarian_confidence_weighted_edge".to_string(),
@@ -1456,6 +1474,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                 "Contrarian confidence-weighted Bayesian edge for explicitly testing reversed calibration."
                     .to_string(),
             ],
+            parent_name: None,
         });
     }
     if input_names.contains("bayes_model_calibrated_edge") {
@@ -1466,6 +1485,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             notes: vec![
                 "Bayesian settlement edge calibrated by decision-time side_model_prob.".to_string(),
             ],
+            parent_name: None,
         });
         out.push(NamedFactorExpr {
             name: "bayes_model_contrarian_calibrated_edge".to_string(),
@@ -1475,6 +1495,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                 "Contrarian model-calibrated Bayesian edge for testing reversed posterior ranking."
                     .to_string(),
             ],
+            parent_name: None,
         });
     }
     if input_names.contains("bayes_model_confidence_weighted_edge") {
@@ -1486,6 +1507,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                 "Model-calibrated Bayesian settlement edge weighted by row-local quote and execution confidence."
                     .to_string(),
             ],
+            parent_name: None,
         });
         out.push(NamedFactorExpr {
             name: "bayes_model_contrarian_confidence_weighted_edge".to_string(),
@@ -1495,6 +1517,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                 "Contrarian model-calibrated confidence-weighted edge for reversed-calibration diagnostics."
                     .to_string(),
             ],
+            parent_name: None,
         });
     }
     if input_names.contains("bayes_disagreement") {
@@ -1505,6 +1528,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             notes: vec![
                 "Posterior settlement probability minus Polymarket midpoint prior.".to_string(),
             ],
+            parent_name: None,
         });
         out.push(NamedFactorExpr {
             name: "bayes_market_external_reversal".to_string(),
@@ -1514,6 +1538,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                 "Contrarian posterior-minus-market disagreement for testing mean-reverting probability residuals."
                     .to_string(),
             ],
+            parent_name: None,
         });
     }
     if input_names.contains("bayes_model_disagreement") {
@@ -1524,6 +1549,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             notes: vec![
                 "Model-calibrated Bayesian posterior minus Polymarket midpoint prior.".to_string(),
             ],
+            parent_name: None,
         });
         out.push(NamedFactorExpr {
             name: "bayes_model_market_reversal".to_string(),
@@ -1532,6 +1558,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             notes: vec![
                 "Contrarian model-calibrated posterior-minus-market disagreement.".to_string(),
             ],
+            parent_name: None,
         });
     }
     if has_all(input_names, &["ofi_l5", "depth_top5"]) {
@@ -1540,6 +1567,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             expr: safe_div_expr(input("ofi_l5"), input("depth_top5")),
             target: Some("reprice_pnl_10s".to_string()),
             notes: vec!["External OFI scaled by local depth.".to_string()],
+            parent_name: None,
         });
     }
     if has_all(
@@ -1566,6 +1594,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             notes: vec![
                 "External move is more actionable when Polymarket quote is stale.".to_string(),
             ],
+            parent_name: None,
         });
     }
     if has_all(
@@ -1580,6 +1609,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             ),
             target: Some("tradable_move_10s".to_string()),
             notes: vec!["Vol shock matters most near strike and in thin LOB regimes.".to_string()],
+            parent_name: None,
         });
     }
     if has_all(
@@ -1611,6 +1641,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                 "Depth-normalized OFI should matter more when the contract is near strike and PM is stale."
                     .to_string(),
             ],
+            parent_name: None,
         });
     }
     if has_all(
@@ -1628,6 +1659,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
             ),
             target: Some("reprice_pnl_10s".to_string()),
             notes: vec!["External move must clear the side spread to be tradable.".to_string()],
+            parent_name: None,
         });
     }
     if has_all(input_names, &["cex_return_30s_side", "sigma_horizon_pos"]) {
@@ -1642,6 +1674,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                 "Side-aligned 30s CEX return weighted by current event volatility amplitude."
                     .to_string(),
             ],
+            parent_name: None,
         });
     }
     if has_all(input_names, &["cex_return_30s_side", "vol_gap_pos"]) {
@@ -1656,6 +1689,7 @@ pub fn domain_seed_candidates(input_names: &BTreeSet<String>) -> Vec<NamedFactor
                 "Side-aligned 30s CEX return weighted by positive volatility shock versus implied baseline."
                     .to_string(),
             ],
+            parent_name: None,
         });
     }
     out
@@ -1741,6 +1775,7 @@ fn llm_prior_mutation_candidates(
                 "Typed LLM-prior mutation `{}` compiled from base factor `{}`.",
                 mutation.mutation_type, base.name
             )],
+            parent_name: Some(base.name.clone()),
         });
     }
     out
@@ -2069,6 +2104,7 @@ fn push_mutation(
             seed.name,
             note.into()
         )],
+        parent_name: Some(seed.name.clone()),
     });
 }
 
@@ -2315,6 +2351,7 @@ fn push_generated(
             "Auto-generated settlement-native formula. {}",
             note.into()
         )],
+        parent_name: None,
     });
 }
 
@@ -3461,6 +3498,7 @@ mod tests {
                 target: Some("tradeable_full_depth_settlement_pnl".to_string()),
                 expr: input("score"),
                 notes: vec![],
+                parent_name: None,
             }],
             &matrix,
             &labels,
@@ -3484,6 +3522,7 @@ mod tests {
             target: Some("tradeable_full_depth_settlement_pnl".to_string()),
             expr: input("external_move_since_poly_update"),
             notes: vec![],
+            parent_name: None,
         }];
 
         let mutations = deterministic_mutation_layer(
@@ -3513,6 +3552,7 @@ mod tests {
             target: Some("full_depth_settlement_executable_pnl".to_string()),
             expr: input("external_move_since_poly_update"),
             notes: vec![],
+            parent_name: None,
         }];
 
         let mutations = deterministic_mutation_layer(
@@ -3537,6 +3577,32 @@ mod tests {
             assert!(matches!(candidate.expr, FactorExpr::Gate { .. }));
             assert!(candidate.notes[0].contains("discovery-only selector"));
         }
+    }
+
+    #[test]
+    fn deterministic_mutations_record_parent_name() {
+        let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
+        let matrix = autofactor_matrix_from_v2(&rows).expect("matrix");
+        let seeds = vec![NamedFactorExpr {
+            name: "predictive_seed".to_string(),
+            target: Some("full_depth_settlement_executable_pnl".to_string()),
+            expr: input("external_move_since_poly_update"),
+            notes: vec![],
+            parent_name: None,
+        }];
+
+        let mutations = deterministic_mutation_layer(
+            &matrix.input_names(),
+            &seeds,
+            AutoFactorV2Target::FullDepthSettlementExecutablePnl,
+            1,
+        );
+        let mutation = mutations
+            .iter()
+            .find(|candidate| candidate.name.starts_with("mut_predictive_seed_"))
+            .expect("deterministic mutation");
+
+        assert_eq!(mutation.parent_name.as_deref(), Some("predictive_seed"));
     }
 
     #[test]
@@ -3581,6 +3647,43 @@ mod tests {
             Some("full_depth_settlement_executable_pnl")
         );
         assert!(matches!(report.expr, FactorExpr::Mul(_, _)));
+        assert_eq!(
+            report.parent_name.as_deref(),
+            Some("auto_settlement_model_full_depth_settlement_edge")
+        );
+    }
+
+    #[test]
+    fn mcts_guided_mutations_record_selected_parent_name() {
+        let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
+        let options = AutoFactorOptions {
+            min_observations: 40,
+            min_window_observations: 10,
+            min_icir: 0.1,
+            ..Default::default()
+        };
+
+        let reports = mine_domain_autofactors_from_v2_with_guidance(
+            &rows,
+            AutoFactorV2Target::FullDepthSettlementExecutablePnl,
+            &options,
+            &["auto_settlement_model_full_depth_settlement_edge".to_string()],
+            None,
+        )
+        .expect("reports");
+        let report = reports
+            .iter()
+            .find(|report| {
+                report
+                    .name
+                    .starts_with("mcts_auto_settlement_model_full_depth_settlement_edge_")
+            })
+            .expect("MCTS-guided mutation");
+
+        assert_eq!(
+            report.parent_name.as_deref(),
+            Some("auto_settlement_model_full_depth_settlement_edge")
+        );
     }
 
     #[test]

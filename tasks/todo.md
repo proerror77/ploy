@@ -21719,11 +21719,14 @@ gates are touched by any of these priorities.
       the snapshot flows from the durable `factor_registry` table into the
       search loop.
 
-### Priority 2 — Full tree search (not started)
+### Priority 2 — Full tree search (in progress)
 
-- [ ] Extend the current single-depth UCB ranking (`mcts_expansion_plan`) into
-      an actual multi-step selection/expansion/backpropagation loop instead of
-      a per-run ranking over cumulative state.
+- [x] Stage A: thread explicit factor lineage through `NamedFactorExpr`,
+      `AutoFactorReport`, and `tree-trace.json` without changing reward or
+      ranking behavior.
+- [ ] Stage B: extend cumulative MCTS state with `parent_name` and
+      backpropagate leaf rewards through ancestor nodes.
+- [ ] Add focused lineage/backpropagation tests and run local validation.
 
 ### Priority 3 — Deeper LLM-guided expansion (not started)
 

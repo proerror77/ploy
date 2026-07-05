@@ -532,7 +532,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
                 .enumerate()
                 .map(|(idx, report)| TreeTraceNode {
                     id: format!("node-{idx}"),
-                    parent: None,
+                    parent: report.parent_name.clone(),
                     factor_name: report.name.clone(),
                     mutation: "seed",
                     selected_dimension: selected_dimension(report, &runtime_avoidances),
@@ -1704,6 +1704,7 @@ mod tests {
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
             reason: "passed".to_string(),
+            parent_name: None,
         }
     }
 
@@ -1742,6 +1743,7 @@ mod tests {
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
             reason: "passed".to_string(),
+            parent_name: None,
         };
         let summary = write_alpha_search_artifacts(
             &tmp,
@@ -2021,6 +2023,7 @@ mod tests {
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
             reason: "passed".to_string(),
+            parent_name: None,
         };
         let prior = MctsSearchStateArtifact {
             version: ALPHA_SEARCH_ARTIFACT_VERSION.to_string(),
