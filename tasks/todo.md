@@ -21719,15 +21719,18 @@ gates are touched by any of these priorities.
       the snapshot flows from the durable `factor_registry` table into the
       search loop.
 
-### Priority 2 — Full tree search (not started)
+### Priority 2 — Full tree search (implemented)
 
-- [ ] Extend the current single-depth UCB ranking (`mcts_expansion_plan`) into
-      an actual multi-step selection/expansion/backpropagation loop instead of
-      a per-run ranking over cumulative state.
+- [x] Stage A: thread explicit factor lineage through `NamedFactorExpr`,
+      `AutoFactorReport`, and `tree-trace.json` without changing reward or
+      ranking behavior.
+- [x] Stage B: extend cumulative MCTS state with `parent_name` and
+      backpropagate leaf rewards through ancestor nodes.
+- [x] Add focused lineage/backpropagation tests and run local validation.
 
-### Priority 3 — Deeper LLM-guided expansion (not started)
+### Priority 3 — Deeper LLM-guided expansion (implemented)
 
-- [ ] Explore LLM-proposed mutations beyond the current bounded typed-mutation
+- [x] Explore LLM-proposed mutations beyond the current bounded typed-mutation
       schema, still constrained to compile into existing `FactorExpr` nodes.
 
 ## Review
@@ -21757,3 +21760,21 @@ gates are touched by any of these priorities.
   `cargo check -p ploy-research --features db --example factor_walk_forward_v2`,
   `rustfmt --edition 2024 --check` on every touched Rust file, and `git diff
   --check`.
+- 2026-07-05: Priority 2 Stage A/B implemented. AutoFactor candidates and
+  reports now carry explicit `parent_name` lineage, `tree-trace.json` records
+  that parent, and `mcts-state.json` persists `parent_name` with
+  `serde(default)` for old artifacts. `mcts_search_state()` now seeds the
+  current batch into the cumulative node map before updating leaves, then
+  backpropagates each leaf reward through ancestor nodes with cycle/depth
+  guards. Validation passed: `rtk cargo check -p ploy-research --lib --tests`,
+  `rtk cargo test -p ploy-research alpha_search --lib`, `rtk cargo test -p
+  ploy-research autofactor --lib`, `rustfmt --edition 2024 --check
+  crates/ploy-research/src/alpha_search.rs crates/ploy-research/src/autofactor.rs`,
+  and `rtk git diff --check`.
+- 2026-07-05: Priority 3 implemented at the existing typed-prior boundary.
+  `remove_component` now compiles into a bounded `FactorExpr` ablation when a
+  prior names an existing feature, or unwraps a top-level robustness/gate
+  component when no feature is supplied. The closed-loop agent now emits an
+  existing feature for `overfit_risk -> remove_component` drafts, so generated
+  prior JSON stays compileable instead of becoming inert advice. This still
+  intentionally excludes direct live LLM API invocation inside CI.

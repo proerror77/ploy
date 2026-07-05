@@ -62,6 +62,8 @@ pub struct MctsSearchStateArtifact {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MctsSearchStateNode {
     pub factor_name: String,
+    #[serde(default)]
+    pub parent_name: Option<String>,
     pub visits: usize,
     pub total_reward: f64,
     pub best_reward: f64,
@@ -207,6 +209,7 @@ struct TreeTraceNode {
 struct NodeMetric {
     id: String,
     factor_name: String,
+    parent_name: Option<String>,
     target: Option<String>,
     decision: String,
     reason: String,
@@ -532,7 +535,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
                 .enumerate()
                 .map(|(idx, report)| TreeTraceNode {
                     id: format!("node-{idx}"),
-                    parent: None,
+                    parent: report.parent_name.clone(),
                     factor_name: report.name.clone(),
                     mutation: "seed",
                     selected_dimension: selected_dimension(report, &runtime_avoidances),
@@ -1077,6 +1080,7 @@ fn node_metric(
     NodeMetric {
         id: format!("node-{idx}"),
         factor_name: report.name.clone(),
+        parent_name: report.parent_name.clone(),
         target: report.target.clone(),
         decision: report.decision.as_str().to_string(),
         reason: report.reason.clone(),
@@ -1145,10 +1149,11 @@ fn mcts_search_state(
         .unwrap_or_default();
 
     for metric in metrics {
-        let mut node = nodes
-            .remove(&metric.factor_name)
-            .unwrap_or_else(|| MctsSearchStateNode {
+        let node = nodes
+            .entry(metric.factor_name.clone())
+            .or_insert_with(|| MctsSearchStateNode {
                 factor_name: metric.factor_name.clone(),
+                parent_name: metric.parent_name.clone(),
                 visits: 0,
                 total_reward: 0.0,
                 best_reward: f64::NEG_INFINITY,
@@ -1156,13 +1161,20 @@ fn mcts_search_state(
                 selected_dimension: metric.selected_dimension.clone(),
                 last_decision: metric.decision.clone(),
             });
+        node.parent_name = metric.parent_name.clone();
+    }
+
+    for metric in metrics {
+        let Some(node) = nodes.get_mut(&metric.factor_name) else {
+            continue;
+        };
         node.visits = node.visits.saturating_add(1);
         node.total_reward += metric.reward;
         node.best_reward = node.best_reward.max(metric.reward);
         node.last_reward = metric.reward;
         node.selected_dimension = metric.selected_dimension.clone();
         node.last_decision = metric.decision.clone();
-        nodes.insert(node.factor_name.clone(), node);
+        backpropagate(&mut nodes, &metric.factor_name, metric.reward);
     }
 
     let mut nodes = nodes.into_values().collect::<Vec<_>>();
@@ -1174,6 +1186,29 @@ fn mcts_search_state(
         target: target.to_string(),
         total_visits,
         nodes,
+    }
+}
+
+fn backpropagate(nodes: &mut BTreeMap<String, MctsSearchStateNode>, leaf_name: &str, reward: f64) {
+    let mut current = leaf_name.to_string();
+    let mut visited = BTreeSet::new();
+    for _ in 0..64 {
+        if !visited.insert(current.clone()) {
+            break;
+        }
+        let Some(parent_name) = nodes
+            .get(&current)
+            .and_then(|node| node.parent_name.clone())
+        else {
+            break;
+        };
+        let Some(parent) = nodes.get_mut(&parent_name) else {
+            break;
+        };
+        parent.visits = parent.visits.saturating_add(1);
+        parent.total_reward += reward;
+        parent.best_reward = parent.best_reward.max(reward);
+        current = parent_name;
     }
 }
 
@@ -1220,7 +1255,7 @@ fn mcts_expansion_plan(
         target: target.to_string(),
         exploration_weight,
         selected_nodes: selected,
-        note: "This is the first MCTS control artifact. It selects branches for the next search run from node metrics, but does not yet execute multi-run backpropagation.",
+        note: "MCTS state accumulates leaf visits and backpropagates leaf rewards through recorded parent lineage; this plan selects branches for the next bounded search run with UCB priority.",
     }
 }
 
@@ -1704,6 +1739,7 @@ mod tests {
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
             reason: "passed".to_string(),
+            parent_name: None,
         }
     }
 
@@ -1742,6 +1778,7 @@ mod tests {
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
             reason: "passed".to_string(),
+            parent_name: None,
         };
         let summary = write_alpha_search_artifacts(
             &tmp,
@@ -2021,6 +2058,7 @@ mod tests {
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
             reason: "passed".to_string(),
+            parent_name: None,
         };
         let prior = MctsSearchStateArtifact {
             version: ALPHA_SEARCH_ARTIFACT_VERSION.to_string(),
@@ -2029,6 +2067,7 @@ mod tests {
             total_visits: 3,
             nodes: vec![MctsSearchStateNode {
                 factor_name: "auto_settlement_conservative_settlement_edge".to_string(),
+                parent_name: None,
                 visits: 3,
                 total_reward: 6.0,
                 best_reward: 2.0,
@@ -2060,6 +2099,61 @@ mod tests {
         assert_eq!(node.visits, 4);
         assert!(node.total_reward > 6.0);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn mcts_state_backpropagates_leaf_reward_to_ancestors() {
+        let runtime_avoidances = Vec::new();
+        let root = sample_report("root_factor");
+        let mut sibling = sample_report("sibling_factor");
+        sibling.top_bucket_avg_label = 0.15;
+        let mut child = sample_report("mut_root_factor_capacity");
+        child.parent_name = Some(root.name.clone());
+        child.top_bucket_avg_label = 0.30;
+        let mut grandchild = sample_report("mut2_root_factor_capacity_squashed");
+        grandchild.parent_name = Some(child.name.clone());
+        grandchild.top_bucket_avg_label = 0.40;
+
+        let reports = vec![root, sibling, child, grandchild];
+        let metrics = reports
+            .iter()
+            .enumerate()
+            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, None))
+            .collect::<Vec<_>>();
+        let reward_by_name = metrics
+            .iter()
+            .map(|metric| (metric.factor_name.as_str(), metric.reward))
+            .collect::<BTreeMap<_, _>>();
+        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let nodes = state
+            .nodes
+            .iter()
+            .map(|node| (node.factor_name.as_str(), node))
+            .collect::<BTreeMap<_, _>>();
+
+        let root_node = nodes.get("root_factor").expect("root node");
+        let child_node = nodes.get("mut_root_factor_capacity").expect("child node");
+        let grandchild_node = nodes
+            .get("mut2_root_factor_capacity_squashed")
+            .expect("grandchild node");
+        let sibling_node = nodes.get("sibling_factor").expect("sibling node");
+
+        assert_eq!(root_node.visits, 3);
+        assert_eq!(child_node.visits, 2);
+        assert_eq!(grandchild_node.visits, 1);
+        assert_eq!(sibling_node.visits, 1);
+        assert_eq!(
+            root_node.total_reward,
+            reward_by_name["root_factor"]
+                + reward_by_name["mut_root_factor_capacity"]
+                + reward_by_name["mut2_root_factor_capacity_squashed"]
+        );
+        assert_eq!(
+            child_node.total_reward,
+            reward_by_name["mut_root_factor_capacity"]
+                + reward_by_name["mut2_root_factor_capacity_squashed"]
+        );
+        assert_eq!(sibling_node.total_reward, reward_by_name["sibling_factor"]);
     }
 
     #[test]
@@ -2311,11 +2405,13 @@ mod tests {
                 metrics: serde_json::Value::Null,
             }],
         };
-        assert!(matching_runtime_avoidance(
-            &selected_gate_variant,
-            &runtime_avoidances(None, Some(&selected_gate_prior))
-        )
-        .is_some());
+        assert!(
+            matching_runtime_avoidance(
+                &selected_gate_variant,
+                &runtime_avoidances(None, Some(&selected_gate_prior))
+            )
+            .is_some()
+        );
     }
 
     #[test]
