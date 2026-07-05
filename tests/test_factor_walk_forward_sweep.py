@@ -919,6 +919,66 @@ class FactorWalkForwardSweepTests(unittest.TestCase):
         self.assertIn("--alpha-search-state-json", captured)
         self.assertIn("--alpha-search-llm-prior-json", captured)
 
+    def test_alpha_zoo_snapshot_arg_passes_through_to_factor_binary(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = tmp / "capture_factor_args.py"
+            capture = tmp / "captured_args.json"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                f"open({str(capture)!r}, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+                f"{FAKE_REPORT}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+
+            subprocess.run(
+                [
+                    *self.base_args(tmp, binary),
+                    "--alpha-zoo-snapshot-json",
+                    "artifacts/alpha-zoo/alpha-zoo-snapshot.json",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            captured = json.loads(capture.read_text(encoding="utf-8"))
+
+        self.assertIn("--alpha-zoo-snapshot-json", captured)
+        zoo_index = captured.index("--alpha-zoo-snapshot-json")
+        self.assertEqual(
+            captured[zoo_index + 1], "artifacts/alpha-zoo/alpha-zoo-snapshot.json"
+        )
+
+    def test_alpha_zoo_snapshot_arg_omitted_when_not_provided(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            (tmp / "snapshot").mkdir()
+            binary = tmp / "capture_factor_args.py"
+            capture = tmp / "captured_args.json"
+            binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                f"open({str(capture)!r}, 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
+                f"{FAKE_REPORT}\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+
+            subprocess.run(
+                self.base_args(tmp, binary),
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            captured = json.loads(capture.read_text(encoding="utf-8"))
+
+        self.assertNotIn("--alpha-zoo-snapshot-json", captured)
+
     def test_require_deribit_arg_passes_through_to_factor_binary(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
