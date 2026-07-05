@@ -148,6 +148,26 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             self.assertFalse(decision["allow_dispatch"])
             self.assertTrue(decision["prior_revision_required"])
 
+    def test_overfit_prior_remove_component_names_existing_feature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = artifact(
+                Path(tmp),
+                chain_reason="reward_stagnation",
+                selected_nodes=[
+                    {
+                        "factor_name": "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity",
+                        "selected_dimension": "overfit_risk",
+                        "proposed_mutation": "remove_component",
+                    }
+                ],
+            )
+            runs = [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            decision = agent.closed_loop_decision(runs)
+            prior = agent.build_prior(runs, decision, 1)
+
+            self.assertEqual(prior["mutations"][0]["mutation_type"], "remove_component")
+            self.assertEqual(prior["mutations"][0]["feature"], "near_strike_score")
+
     def test_high_rejection_generates_prior_from_selected_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = artifact(

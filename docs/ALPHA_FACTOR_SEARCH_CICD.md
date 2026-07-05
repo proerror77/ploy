@@ -667,6 +667,10 @@ Current implementation status:
 - Implemented as artifact and input contract: `llm-priors.json` records the
   typed prior schema, and an operator- or LLM-produced prior file can now enter
   CI through `--alpha-search-llm-prior-json` / `options_json.alpha_search_llm_prior_json`.
+- Implemented: deeper typed LLM-prior expansion at the existing safe compiler
+  boundary. `remove_component` can now ablate a named existing input from a
+  candidate AST, or unwrap a top-level robustness/gate component, while still
+  compiling only into existing `FactorExpr` nodes.
 - Implemented: a durable, cross-run Alpha Zoo novelty penalty. `reward()` and
   `node_metric()` accept an optional `AlphaZooSnapshot` grouped from historical
   `factor_registry` rows by root gene; `persist_research_trace

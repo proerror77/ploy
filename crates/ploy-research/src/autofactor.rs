@@ -1890,9 +1890,141 @@ fn compile_llm_mutation(
             "contrarian",
             mul(FactorExpr::Const(-1.0), base.expr.clone()),
         )),
-        "remove_component" => None,
+        "remove_component" => {
+            if let Some(feature) = mutation.feature.as_deref() {
+                let feature = existing_feature(input_names, Some(feature))?;
+                remove_feature_component(&base.expr, feature).map(|expr| ("remove_component", expr))
+            } else {
+                remove_top_level_component(&base.expr).map(|expr| ("remove_component", expr))
+            }
+        }
         _ => None,
     }
+}
+
+fn remove_top_level_component(expr: &FactorExpr) -> Option<FactorExpr> {
+    match expr {
+        FactorExpr::Tanh(expr)
+        | FactorExpr::Log1pAbs(expr)
+        | FactorExpr::SqrtAbs(expr)
+        | FactorExpr::Delta { expr, .. }
+        | FactorExpr::RollingMean { expr, .. }
+        | FactorExpr::RollingStd { expr, .. }
+        | FactorExpr::ZScore { expr, .. }
+        | FactorExpr::Clip { expr, .. } => Some((**expr).clone()),
+        FactorExpr::Gate { expr, .. } => Some((**expr).clone()),
+        _ => None,
+    }
+}
+
+fn remove_feature_component(expr: &FactorExpr, feature: &str) -> Option<FactorExpr> {
+    match expr {
+        FactorExpr::Input(_) | FactorExpr::Const(_) => None,
+        FactorExpr::Add(lhs, rhs) => {
+            remove_from_commutative_pair(lhs, rhs, feature, FactorExpr::Add)
+        }
+        FactorExpr::Mul(lhs, rhs) => {
+            remove_from_commutative_pair(lhs, rhs, feature, FactorExpr::Mul)
+        }
+        FactorExpr::Max(lhs, rhs) => {
+            remove_from_commutative_pair(lhs, rhs, feature, FactorExpr::Max)
+        }
+        FactorExpr::Min(lhs, rhs) => {
+            remove_from_commutative_pair(lhs, rhs, feature, FactorExpr::Min)
+        }
+        FactorExpr::Sub(lhs, rhs) => {
+            if is_input(lhs, feature) {
+                Some(negate((**rhs).clone()))
+            } else if is_input(rhs, feature) {
+                Some((**lhs).clone())
+            } else if let Some(new_lhs) = remove_feature_component(lhs, feature) {
+                Some(FactorExpr::Sub(Box::new(new_lhs), rhs.clone()))
+            } else {
+                remove_feature_component(rhs, feature)
+                    .map(|new_rhs| FactorExpr::Sub(lhs.clone(), Box::new(new_rhs)))
+            }
+        }
+        FactorExpr::SafeDiv(lhs, rhs) => remove_feature_component(lhs, feature)
+            .map(|new_lhs| FactorExpr::SafeDiv(Box::new(new_lhs), rhs.clone())),
+        FactorExpr::Tanh(inner) => {
+            remove_feature_component(inner, feature).map(|expr| FactorExpr::Tanh(Box::new(expr)))
+        }
+        FactorExpr::Log1pAbs(inner) => remove_feature_component(inner, feature)
+            .map(|expr| FactorExpr::Log1pAbs(Box::new(expr))),
+        FactorExpr::SqrtAbs(inner) => {
+            remove_feature_component(inner, feature).map(|expr| FactorExpr::SqrtAbs(Box::new(expr)))
+        }
+        FactorExpr::Clip { expr, lo, hi } => {
+            remove_feature_component(expr, feature).map(|expr| FactorExpr::Clip {
+                expr: Box::new(expr),
+                lo: *lo,
+                hi: *hi,
+            })
+        }
+        FactorExpr::Delta { expr, lag } => {
+            remove_feature_component(expr, feature).map(|expr| FactorExpr::Delta {
+                expr: Box::new(expr),
+                lag: *lag,
+            })
+        }
+        FactorExpr::RollingMean { expr, window } => {
+            remove_feature_component(expr, feature).map(|expr| FactorExpr::RollingMean {
+                expr: Box::new(expr),
+                window: *window,
+            })
+        }
+        FactorExpr::RollingStd { expr, window } => {
+            remove_feature_component(expr, feature).map(|expr| FactorExpr::RollingStd {
+                expr: Box::new(expr),
+                window: *window,
+            })
+        }
+        FactorExpr::ZScore { expr, window } => {
+            remove_feature_component(expr, feature).map(|expr| FactorExpr::ZScore {
+                expr: Box::new(expr),
+                window: *window,
+            })
+        }
+        FactorExpr::Gate { expr, gate, min } => {
+            if is_input(gate, feature) {
+                Some((**expr).clone())
+            } else if let Some(new_expr) = remove_feature_component(expr, feature) {
+                Some(FactorExpr::Gate {
+                    expr: Box::new(new_expr),
+                    gate: gate.clone(),
+                    min: *min,
+                })
+            } else {
+                remove_feature_component(gate, feature).map(|new_gate| FactorExpr::Gate {
+                    expr: expr.clone(),
+                    gate: Box::new(new_gate),
+                    min: *min,
+                })
+            }
+        }
+    }
+}
+
+fn remove_from_commutative_pair(
+    lhs: &FactorExpr,
+    rhs: &FactorExpr,
+    feature: &str,
+    rebuild: fn(Box<FactorExpr>, Box<FactorExpr>) -> FactorExpr,
+) -> Option<FactorExpr> {
+    if is_input(lhs, feature) {
+        Some(rhs.clone())
+    } else if is_input(rhs, feature) {
+        Some(lhs.clone())
+    } else if let Some(new_lhs) = remove_feature_component(lhs, feature) {
+        Some(rebuild(Box::new(new_lhs), Box::new(rhs.clone())))
+    } else {
+        remove_feature_component(rhs, feature)
+            .map(|new_rhs| rebuild(Box::new(lhs.clone()), Box::new(new_rhs)))
+    }
+}
+
+fn is_input(expr: &FactorExpr, feature: &str) -> bool {
+    matches!(expr, FactorExpr::Input(name) if name == feature)
 }
 
 fn existing_feature<'a>(
@@ -3679,6 +3811,58 @@ mod tests {
         assert_eq!(
             report.parent_name.as_deref(),
             Some("auto_settlement_model_full_depth_settlement_edge")
+        );
+    }
+
+    #[test]
+    fn typed_llm_prior_remove_component_ablates_named_feature() {
+        let rows = (0..80).map(synthetic_v2_row).collect::<Vec<_>>();
+        let options = AutoFactorOptions {
+            min_observations: 40,
+            min_window_observations: 10,
+            min_icir: 0.1,
+            ..Default::default()
+        };
+        let prior = LlmPriorSpec {
+            runtime_avoid_factors: Vec::new(),
+            mutations: vec![LlmMutationSpec {
+                base_factor:
+                    "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity"
+                        .to_string(),
+                mutation_type: "remove_component".to_string(),
+                name: Some("llm_full_depth_edge_without_near_strike".to_string()),
+                feature: Some("near_strike_score".to_string()),
+                denominator_feature: None,
+                constant: None,
+                lo: None,
+                hi: None,
+                window: None,
+            }],
+        };
+
+        let reports = mine_domain_autofactors_from_v2_with_guidance(
+            &rows,
+            AutoFactorV2Target::FullDepthSettlementExecutablePnl,
+            &options,
+            &[],
+            Some(&prior),
+        )
+        .expect("reports");
+
+        let report = reports
+            .iter()
+            .find(|report| report.name == "llm_full_depth_edge_without_near_strike")
+            .expect("remove_component prior mutation should compile");
+        assert_eq!(
+            report.expr,
+            mul(
+                input("model_full_depth_settlement_edge"),
+                input("entry_capacity_score")
+            )
+        );
+        assert_eq!(
+            report.parent_name.as_deref(),
+            Some("auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity")
         );
     }
 

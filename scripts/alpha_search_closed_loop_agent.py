@@ -54,6 +54,12 @@ PREFERRED_FEATURES = {
     "add_near_strike_interaction": ["near_strike_score"],
     "add_spread_penalty": ["side_spread"],
     "replace_denominator": ["side_spread", "entry_capacity_score"],
+    "remove_component": [
+        "near_strike_score",
+        "quote_freshness_score",
+        "pm_lag_score",
+        "side_spread",
+    ],
 }
 
 RUNTIME_CONTRACT_GAP_TOKENS = (

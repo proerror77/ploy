@@ -21728,9 +21728,9 @@ gates are touched by any of these priorities.
       backpropagate leaf rewards through ancestor nodes.
 - [x] Add focused lineage/backpropagation tests and run local validation.
 
-### Priority 3 — Deeper LLM-guided expansion (not started)
+### Priority 3 — Deeper LLM-guided expansion (implemented)
 
-- [ ] Explore LLM-proposed mutations beyond the current bounded typed-mutation
+- [x] Explore LLM-proposed mutations beyond the current bounded typed-mutation
       schema, still constrained to compile into existing `FactorExpr` nodes.
 
 ## Review
@@ -21771,3 +21771,10 @@ gates are touched by any of these priorities.
   ploy-research autofactor --lib`, `rustfmt --edition 2024 --check
   crates/ploy-research/src/alpha_search.rs crates/ploy-research/src/autofactor.rs`,
   and `rtk git diff --check`.
+- 2026-07-05: Priority 3 implemented at the existing typed-prior boundary.
+  `remove_component` now compiles into a bounded `FactorExpr` ablation when a
+  prior names an existing feature, or unwraps a top-level robustness/gate
+  component when no feature is supplied. The closed-loop agent now emits an
+  existing feature for `overfit_risk -> remove_component` drafts, so generated
+  prior JSON stays compileable instead of becoming inert advice. This still
+  intentionally excludes direct live LLM API invocation inside CI.
