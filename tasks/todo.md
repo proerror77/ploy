@@ -21778,3 +21778,40 @@ gates are touched by any of these priorities.
   existing feature for `overfit_risk -> remove_component` drafts, so generated
   prior JSON stays compileable instead of becoming inert advice. This still
   intentionally excludes direct live LLM API invocation inside CI.
+
+# MCTS Backpropagation Guardrails (2026-07-06)
+
+## Goal
+
+Remove the artificial fixed-depth cutoff from alpha-search MCTS reward
+backpropagation and make defensive truncation observable in `mcts-state.json`.
+
+Evidence stage: `factor_attribution` only. No promotion, dry-run, or live
+gates are touched.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: parent-chain backpropagation depth guard, truncation diagnostics, and
+    focused unit tests.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document the `backpropagation_truncated_count` artifact field.
+- `tasks/todo.md`
+  - Owner: current session tracking.
+
+## Tasks
+
+- [x] Replace the fixed `64` hop guard with a graph-size-bound guard using
+      `nodes.len().max(1)` while keeping cycle detection.
+- [x] Add `backpropagation_truncated_count` to `MctsSearchStateArtifact` with
+      `serde(default)` compatibility for old state artifacts.
+- [x] Warn in artifact generation when truncation count is non-zero.
+- [x] Add Rust coverage for a 100-node lineage and a synthetic cycle.
+- [x] Update docs and run focused validation.
+
+## Review
+
+- 2026-07-06: Implemented. Long acyclic lineage now backpropagates all the way
+  to the root instead of silently stopping at 64 hops. Cycle/max-hop defensive
+  stops increment `backpropagation_truncated_count`, and artifact generation
+  emits a warning when the count is non-zero.
