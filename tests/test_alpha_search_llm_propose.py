@@ -351,7 +351,12 @@ class AnthropicLlmClientTests(unittest.TestCase):
             ]
         }
         fake_response = _fake_response(
-            {"content": [{"type": "tool_use", "name": "propose_mutations", "input": tool_input}]}
+            {
+                "content": [
+                    {"type": "tool_use", "name": "propose_mutations", "input": tool_input}
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
         )
         with mock.patch("requests.post", return_value=fake_response) as post:
             result = client.propose("a prompt")
@@ -361,6 +366,7 @@ class AnthropicLlmClientTests(unittest.TestCase):
         _, kwargs = post.call_args
         self.assertEqual(kwargs["json"]["tool_choice"], {"type": "tool", "name": "propose_mutations"})
         self.assertEqual(kwargs["headers"]["x-api-key"], "test-key")
+        self.assertEqual(client.last_usage, {"input_tokens": 10, "output_tokens": 5})
 
     def test_propose_raises_when_no_tool_use_block(self) -> None:
         client = propose.AnthropicLlmClient("test-key")
@@ -393,7 +399,8 @@ class OpenAiLlmClientTests(unittest.TestCase):
                             {"type": "output_text", "text": json.dumps(mutations_payload)}
                         ]
                     }
-                ]
+                ],
+                "usage": {"input_tokens": 12, "output_tokens": 6},
             }
         )
         with mock.patch("requests.post", return_value=fake_response) as post:
@@ -403,6 +410,7 @@ class OpenAiLlmClientTests(unittest.TestCase):
         _, kwargs = post.call_args
         self.assertEqual(kwargs["json"]["text"]["format"]["type"], "json_schema")
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer test-key")
+        self.assertEqual(client.last_usage, {"input_tokens": 12, "output_tokens": 6})
 
     def test_propose_raises_when_output_text_missing(self) -> None:
         client = propose.OpenAiLlmClient("test-key")
@@ -475,10 +483,106 @@ class BuildPriorFromMutationsTests(unittest.TestCase):
 
 
 class MainIntegrationTests(unittest.TestCase):
+    def test_main_writes_prior_on_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = artifact(Path(tmp))
+            output_path = Path(tmp) / "next-llm-prior.json"
+            client = FakeClient(
+                [
+                    {
+                        "mutations": [
+                            {
+                                "base_factor": "auto_settlement_full_depth_settlement_edge",
+                                "mutation_type": "add_capacity_gate",
+                                "feature": "entry_capacity_score",
+                            }
+                        ]
+                    }
+                ]
+            )
+            client.last_usage = {"input_tokens": 20, "output_tokens": 8}
+            import sys
+
+            argv = sys.argv
+            sys.argv = [
+                "alpha_search_llm_propose.py",
+                str(path),
+                "--output-prior-json",
+                str(output_path),
+            ]
+            try:
+                with mock.patch.object(
+                    propose, "client_from_env", return_value=client
+                ), mock.patch.object(
+                    propose, "propose_mutations", wraps=propose.propose_mutations
+                ) as propose_mutations:
+                    propose.main()
+            finally:
+                sys.argv = argv
+
+            self.assertTrue(output_path.exists())
+            prior = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(prior["source"], "alpha_search_llm_propose")
+            self.assertEqual(len(prior["mutations"]), 1)
+            self.assertEqual(propose_mutations.call_count, 1)
+            usage_path = output_path.with_name("llm-expansion-usage.json")
+            usage = json.loads(usage_path.read_text(encoding="utf-8"))
+            self.assertEqual(usage["source"], "alpha_search_llm_propose")
+            self.assertEqual(usage["mutation_count"], 1)
+            self.assertEqual(usage["usage"], {"input_tokens": 20, "output_tokens": 8})
+
+    def test_main_does_not_overwrite_prior_for_empty_mutations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = artifact(Path(tmp))
+            output_path = Path(tmp) / "next-llm-prior.json"
+            output_path.write_text("existing deterministic prior", encoding="utf-8")
+            client = FakeClient([{"mutations": []}])
+            import sys
+
+            argv = sys.argv
+            sys.argv = [
+                "alpha_search_llm_propose.py",
+                str(path),
+                "--output-prior-json",
+                str(output_path),
+            ]
+            try:
+                with mock.patch.object(propose, "client_from_env", return_value=client):
+                    propose.main()
+            finally:
+                sys.argv = argv
+
+            self.assertEqual(
+                output_path.read_text(encoding="utf-8"), "existing deterministic prior"
+            )
+
+    def test_main_fails_soft_on_corrupt_optional_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = artifact(Path(tmp))
+            output_path = Path(tmp) / "next-llm-prior.json"
+            zoo_path = Path(tmp) / "alpha-zoo-snapshot.json"
+            zoo_path.write_text("{not json", encoding="utf-8")
+            import sys
+
+            argv = sys.argv
+            sys.argv = [
+                "alpha_search_llm_propose.py",
+                str(path),
+                "--output-prior-json",
+                str(output_path),
+                "--alpha-zoo-snapshot-json",
+                str(zoo_path),
+            ]
+            try:
+                propose.main(env={"PLOY_RESEARCH_LLM_API_KEY": ""})
+            finally:
+                sys.argv = argv
+
+            self.assertFalse(output_path.exists())
+
     def test_main_fails_soft_when_no_client_is_configured(self) -> None:
-        # main() uses UnconfiguredLlmClient by default (Stage B has no real
-        # provider wired in yet), so it must print a message and exit
-        # cleanly rather than raising or writing a partial prior file.
+        # main() uses UnconfiguredLlmClient when no API key is set, so it must
+        # exit cleanly rather than raising or writing a partial prior file.
         with tempfile.TemporaryDirectory() as tmp:
             path = artifact(Path(tmp))
             output_path = Path(tmp) / "next-llm-prior.json"

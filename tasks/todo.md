@@ -22152,7 +22152,10 @@ further action is needed beyond noting the decision in
       `PLOY_RESEARCH_LLM_API_KEY` requires manual action by a repo admin, and
       a real dispatch has real model-API cost; both are deferred to an
       explicit follow-up decision rather than done silently here.
-- [ ] Stage D: docs + cost-accounting artifact.
+- [x] Stage D: docs + cost-accounting artifact. Documented opt-in hosted CI
+      usage in `docs/ALPHA_FACTOR_SEARCH_CICD.md` and writes
+      `llm-expansion-usage.json` next to `next-llm-prior.json` when the real
+      provider returns token usage.
 
 ## Review
 
@@ -22232,6 +22235,14 @@ further action is needed beyond noting the decision in
   check via `python3 -c "import yaml; yaml.safe_load(...)"`, `actionlint`
   (clean, zero findings) against the full workflow file, and `git diff
   --check`.
+- 2026-07-06: Closed the remaining PR review gaps after rebasing onto
+  `origin/main` post-#732. `alpha_search_llm_propose.py` now keeps artifact
+  loading inside the fail-soft boundary, leaves any deterministic prior
+  untouched when the model returns an empty mutation set, and records provider
+  usage in `llm-expansion-usage.json` when available. Added CLI happy-path,
+  empty-mutation, corrupt optional snapshot, and provider-usage tests.
+  Updated `docs/ALPHA_FACTOR_SEARCH_CICD.md` with the opt-in workflow usage
+  and current implemented status.
 - 2026-07-05: Priority 2 Stage A/B implemented. AutoFactor candidates and
   reports now carry explicit `parent_name` lineage, `tree-trace.json` records
   that parent, and `mcts-state.json` persists `parent_name` with

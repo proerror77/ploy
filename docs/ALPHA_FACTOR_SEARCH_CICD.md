@@ -506,8 +506,35 @@ top-bucket diagnostics but cannot survive the executable runtime decision path.
 This is the current closed-loop boundary: a failed or stagnant search now
 produces a machine-readable next action and, when appropriate, a bounded typed
 prior draft using only the existing allowed mutation types. It still cannot
-guarantee profitability, does not call an external LLM, and cannot bypass
-walk-forward, promotion, replay parity, dry-run, or live approval gates.
+guarantee profitability and cannot bypass walk-forward, promotion, replay
+parity, dry-run, or live approval gates.
+
+## Real LLM Expansion
+
+The hosted artifact workflow can optionally replace the deterministic
+closed-loop prior with a real model-proposed typed prior. This is off by
+default. Enable it only on an explicit `workflow_dispatch` run by setting:
+
+```json
+{
+  "enable_llm_expansion": true,
+  "llm_expansion_provider": "anthropic",
+  "llm_expansion_model": ""
+}
+```
+
+The workflow also requires the repository secret
+`PLOY_RESEARCH_LLM_API_KEY`. If the flag is false, the secret is missing, the
+model call fails, optional artifact JSON is corrupt, or the model returns no
+mutations, the step exits successfully and leaves the deterministic
+`next-llm-prior.json` unchanged. A successful model response is still only a
+typed prior draft: Rust must compile it through the existing allowed
+`LlmMutationSpec` mutation types before any candidate is evaluated.
+
+When the provider returns usage data, the script writes
+`llm-expansion-usage.json` next to `next-llm-prior.json` in the alpha-search
+artifact directory. Treat that as per-run token accounting, not promotion
+evidence.
 
 ## FactorEvolve Research Manager V0
 
@@ -682,9 +709,10 @@ Current implementation status:
   `factor_registry` rows by root gene; `persist_research_trace
   --export-alpha-zoo-snapshot` produces it, and `factor_walk_forward_v2
   --alpha-zoo-snapshot-json <path>` consumes it. Omitting the flag is a no-op.
-- Not yet implemented: direct live LLM API invocation inside CI. The intended
-  boundary is still external LLM proposal -> reviewed typed JSON -> Rust DSL
-  compiler -> CI evaluation.
+- Implemented but opt-in: direct LLM API proposal inside hosted CI through
+  `scripts/alpha_search_llm_propose.py` and
+  `options_json.enable_llm_expansion=true`. It writes only a typed prior draft
+  and fails soft back to the deterministic closed-loop prior.
 
 The current system is enough to start systematizing alpha discovery in CI: every
 walk-forward run can now expand interpretable bounded multi-depth mutations,

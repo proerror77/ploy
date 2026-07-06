@@ -169,6 +169,7 @@ class AnthropicLlmClient:
         self._api_key = api_key
         self._model = model
         self._timeout_secs = timeout_secs
+        self.last_usage: Any = None
 
     def propose(self, prompt: str) -> dict[str, Any]:
         import requests
@@ -200,6 +201,7 @@ class AnthropicLlmClient:
         )
         response.raise_for_status()
         payload = response.json()
+        self.last_usage = payload.get("usage")
         for block in payload.get("content", []):
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 tool_input = block.get("input")
@@ -230,6 +232,7 @@ class OpenAiLlmClient:
         self._api_key = api_key
         self._model = model
         self._timeout_secs = timeout_secs
+        self.last_usage: Any = None
 
     def propose(self, prompt: str) -> dict[str, Any]:
         import requests
@@ -256,6 +259,7 @@ class OpenAiLlmClient:
         )
         response.raise_for_status()
         payload = response.json()
+        self.last_usage = payload.get("usage")
         output_text = _extract_openai_output_text(payload)
         if output_text is None:
             raise RuntimeError(
@@ -545,6 +549,26 @@ def build_prior_from_mutations(
     }
 
 
+def write_usage_artifact(
+    client: LlmClient, output_prior_path: Path, mutation_count: int
+) -> None:
+    usage = getattr(client, "last_usage", None)
+    if usage is None:
+        return
+    payload = {
+        "source": "alpha_search_llm_propose",
+        "client": client.__class__.__name__,
+        "model": getattr(client, "_model", None),
+        "mutation_count": mutation_count,
+        "usage": usage,
+    }
+    usage_path = output_prior_path.with_name("llm-expansion-usage.json")
+    usage_path.parent.mkdir(parents=True, exist_ok=True)
+    usage_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
 def main(env: dict[str, str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("artifact_dir", help="Downloaded alpha-search artifact directory")
@@ -554,22 +578,24 @@ def main(env: dict[str, str] | None = None) -> None:
     parser.add_argument("--alpha-zoo-snapshot-json")
     args = parser.parse_args()
 
-    run = load_artifact(Path(args.artifact_dir), args.target)
-    alpha_zoo_snapshot = None
-    if args.alpha_zoo_snapshot_json:
-        zoo_path = Path(args.alpha_zoo_snapshot_json)
-        if zoo_path.exists():
-            alpha_zoo_snapshot = json.loads(zoo_path.read_text(encoding="utf-8"))
-
-    alpha_root = run["root"] / "alpha-search" / args.target
-    avoided_subtrees_path = alpha_root / "avoided-subtrees.json"
-    avoided_subtrees = None
-    if avoided_subtrees_path.exists():
-        avoided_subtrees = json.loads(avoided_subtrees_path.read_text(encoding="utf-8"))
-
     output_path = Path(args.output_prior_json)
-    client = client_from_env(env if env is not None else dict(os.environ))
     try:
+        run = load_artifact(Path(args.artifact_dir), args.target)
+        alpha_zoo_snapshot = None
+        if args.alpha_zoo_snapshot_json:
+            zoo_path = Path(args.alpha_zoo_snapshot_json)
+            if zoo_path.exists():
+                alpha_zoo_snapshot = json.loads(zoo_path.read_text(encoding="utf-8"))
+
+        alpha_root = run["root"] / "alpha-search" / args.target
+        avoided_subtrees_path = alpha_root / "avoided-subtrees.json"
+        avoided_subtrees = None
+        if avoided_subtrees_path.exists():
+            avoided_subtrees = json.loads(
+                avoided_subtrees_path.read_text(encoding="utf-8")
+            )
+
+        client = client_from_env(env if env is not None else dict(os.environ))
         mutations = propose_mutations(
             client,
             run,
@@ -579,6 +605,12 @@ def main(env: dict[str, str] | None = None) -> None:
         )
     except Exception as err:  # noqa: BLE001 - fail soft, never block the search path
         print(f"alpha_search_llm_propose: no LLM prior produced ({err})")
+        return
+
+    write_usage_artifact(client, output_path, len(mutations))
+
+    if not mutations:
+        print("alpha_search_llm_propose: no LLM prior produced (empty mutation set)")
         return
 
     prior = build_prior_from_mutations(args.target, mutations)
