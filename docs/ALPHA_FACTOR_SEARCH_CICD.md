@@ -617,6 +617,12 @@ Current implementation status:
   parent lineage, accumulates leaf visits, backpropagates leaf rewards through
   ancestor nodes across runs, and the expansion plan ranks non-rejected
   current-run nodes with a UCB-style priority using that cumulative state.
+  `mcts-state.json.backpropagation_truncated_count > 0` means reward
+  propagation hit a defensive stop before reaching a root node. Inspect
+  `parent_name` lineage for cycles first; if there is no cycle, check whether
+  the search state graph has grown beyond the expected bounded chain size. CI
+  warnings report only newly observed truncations while including the
+  cumulative artifact count.
 - Implemented: `factor_walk_forward_v2 --alpha-search-plan-json <path>` can
   consume a prior `mcts-expansion-plan.json` and generate extra `mcts_*`
   guided mutations for selected branches. The Factor Walk-Forward workflows

@@ -56,6 +56,8 @@ pub struct MctsSearchStateArtifact {
     pub mode: String,
     pub target: String,
     pub total_visits: usize,
+    #[serde(default)]
+    pub backpropagation_truncated_count: usize,
     pub nodes: Vec<MctsSearchStateNode>,
 }
 
@@ -518,6 +520,19 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
         &factor_registry_preview_artifact(target, reports, &node_metrics)?,
     )?;
     let mcts_state = mcts_search_state(target, &node_metrics, prior_state);
+    let prior_truncated_count = prior_state
+        .filter(|state| state.target == target)
+        .map(|state| state.backpropagation_truncated_count)
+        .unwrap_or_default();
+    let new_truncated_count = mcts_state
+        .backpropagation_truncated_count
+        .saturating_sub(prior_truncated_count);
+    if new_truncated_count > 0 {
+        eprintln!(
+            "alpha-search warning: MCTS backpropagation truncated {} new time(s) for target `{}` ({} cumulative); inspect parent_name lineage for cycles or impossible depth.",
+            new_truncated_count, target, mcts_state.backpropagation_truncated_count
+        );
+    }
     write_json(&output_dir.join("mcts-state.json"), &mcts_state)?;
     write_json(
         &output_dir.join("mcts-expansion-plan.json"),
@@ -1164,6 +1179,11 @@ fn mcts_search_state(
         node.parent_name = metric.parent_name.clone();
     }
 
+    let mut backpropagation_truncated_count = prior_state
+        .filter(|state| state.target == target)
+        .map(|state| state.backpropagation_truncated_count)
+        .unwrap_or_default();
+
     for metric in metrics {
         let Some(node) = nodes.get_mut(&metric.factor_name) else {
             continue;
@@ -1174,7 +1194,9 @@ fn mcts_search_state(
         node.last_reward = metric.reward;
         node.selected_dimension = metric.selected_dimension.clone();
         node.last_decision = metric.decision.clone();
-        backpropagate(&mut nodes, &metric.factor_name, metric.reward);
+        if backpropagate(&mut nodes, &metric.factor_name, metric.reward) {
+            backpropagation_truncated_count = backpropagation_truncated_count.saturating_add(1);
+        }
     }
 
     let mut nodes = nodes.into_values().collect::<Vec<_>>();
@@ -1185,31 +1207,38 @@ fn mcts_search_state(
         mode: "cumulative_ucb_state".to_string(),
         target: target.to_string(),
         total_visits,
+        backpropagation_truncated_count,
         nodes,
     }
 }
 
-fn backpropagate(nodes: &mut BTreeMap<String, MctsSearchStateNode>, leaf_name: &str, reward: f64) {
+fn backpropagate(
+    nodes: &mut BTreeMap<String, MctsSearchStateNode>,
+    leaf_name: &str,
+    reward: f64,
+) -> bool {
     let mut current = leaf_name.to_string();
     let mut visited = BTreeSet::new();
-    for _ in 0..64 {
+    let max_hops = nodes.len().max(1);
+    for _ in 0..max_hops {
         if !visited.insert(current.clone()) {
-            break;
+            return true;
         }
         let Some(parent_name) = nodes
             .get(&current)
             .and_then(|node| node.parent_name.clone())
         else {
-            break;
+            return false;
         };
         let Some(parent) = nodes.get_mut(&parent_name) else {
-            break;
+            return false;
         };
         parent.visits = parent.visits.saturating_add(1);
         parent.total_reward += reward;
         parent.best_reward = parent.best_reward.max(reward);
         current = parent_name;
     }
+    true
 }
 
 fn mcts_expansion_plan(
@@ -2065,6 +2094,7 @@ mod tests {
             mode: "cumulative_ucb_state".to_string(),
             target: "full_depth_settlement_executable_pnl".to_string(),
             total_visits: 3,
+            backpropagation_truncated_count: 0,
             nodes: vec![MctsSearchStateNode {
                 factor_name: "auto_settlement_conservative_settlement_edge".to_string(),
                 parent_name: None,
@@ -2154,6 +2184,72 @@ mod tests {
                 + reward_by_name["mut2_root_factor_capacity_squashed"]
         );
         assert_eq!(sibling_node.total_reward, reward_by_name["sibling_factor"]);
+    }
+
+    #[test]
+    fn mcts_state_backpropagates_through_long_lineage() {
+        let runtime_avoidances = Vec::new();
+        let mut reports = Vec::new();
+        for idx in 0..100 {
+            let mut report = sample_report(&format!("factor_{idx:03}"));
+            if idx > 0 {
+                report.parent_name = Some(format!("factor_{:03}", idx - 1));
+            }
+            report.top_bucket_avg_label = 0.20 + (idx as f64 * 0.001);
+            reports.push(report);
+        }
+
+        let metrics = reports
+            .iter()
+            .enumerate()
+            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, None))
+            .collect::<Vec<_>>();
+        let expected_root_total = metrics.iter().map(|metric| metric.reward).sum::<f64>();
+        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let root = state
+            .nodes
+            .iter()
+            .find(|node| node.factor_name == "factor_000")
+            .expect("root node");
+
+        assert_eq!(state.backpropagation_truncated_count, 0);
+        assert_eq!(root.visits, 100);
+        assert!((root.total_reward - expected_root_total).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mcts_state_counts_cycle_truncated_backpropagation() {
+        let runtime_avoidances = Vec::new();
+        let mut report = sample_report("cycle_a");
+        report.parent_name = Some("cycle_b".to_string());
+        let metrics = [node_metric(0, &report, &runtime_avoidances, None)];
+        let prior = MctsSearchStateArtifact {
+            version: ALPHA_SEARCH_ARTIFACT_VERSION.to_string(),
+            mode: "cumulative_ucb_state".to_string(),
+            target: "full_depth_settlement_executable_pnl".to_string(),
+            total_visits: 0,
+            backpropagation_truncated_count: 0,
+            nodes: vec![MctsSearchStateNode {
+                factor_name: "cycle_b".to_string(),
+                parent_name: Some("cycle_a".to_string()),
+                visits: 0,
+                total_reward: 0.0,
+                best_reward: f64::NEG_INFINITY,
+                last_reward: 0.0,
+                selected_dimension: "exploit".to_string(),
+                last_decision: "candidate".to_string(),
+            }],
+        };
+
+        let state = mcts_search_state(
+            "full_depth_settlement_executable_pnl",
+            &metrics,
+            Some(&prior),
+        );
+
+        assert_eq!(state.backpropagation_truncated_count, 1);
+        assert!(state.nodes.iter().any(|node| node.factor_name == "cycle_a"));
+        assert!(state.nodes.iter().any(|node| node.factor_name == "cycle_b"));
     }
 
     #[test]
