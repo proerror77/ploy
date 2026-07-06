@@ -3839,6 +3839,7 @@ mod tests {
         };
         let prior = LlmPriorSpec {
             runtime_avoid_factors: Vec::new(),
+            structural_avoid_signatures: Vec::new(),
             mutations: vec![LlmMutationSpec {
                 base_factor:
                     "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity"

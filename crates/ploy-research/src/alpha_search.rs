@@ -2169,6 +2169,7 @@ mod tests {
             mode: "cumulative_ucb_state".to_string(),
             target: "full_depth_settlement_executable_pnl".to_string(),
             total_visits: 0,
+            backpropagation_truncated_count: 0,
             nodes: Vec::new(),
             subtree_frequencies: vec![SubtreeFrequencyState {
                 root_gene: "SafeDiv".to_string(),
@@ -2219,8 +2220,8 @@ mod tests {
             "crowded expression should be penalized"
         );
         assert!(
-            reward(&crowded, &runtime_avoidances, &frequencies)
-                < reward(&novel, &runtime_avoidances, &frequencies),
+            reward(&crowded, &runtime_avoidances, None, &frequencies)
+                < reward(&novel, &runtime_avoidances, None, &frequencies),
             "same-quality crowded expression should rank below novel expression"
         );
     }
@@ -2602,13 +2603,18 @@ mod tests {
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, None))
+            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, None, &Vec::new()))
             .collect::<Vec<_>>();
         let reward_by_name = metrics
             .iter()
             .map(|metric| (metric.factor_name.as_str(), metric.reward))
             .collect::<BTreeMap<_, _>>();
-        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let state = mcts_search_state(
+            "full_depth_settlement_executable_pnl",
+            &metrics,
+            None,
+            Vec::new(),
+        );
         let nodes = state
             .nodes
             .iter()
@@ -2656,10 +2662,15 @@ mod tests {
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, None))
+            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, None, &Vec::new()))
             .collect::<Vec<_>>();
         let expected_root_total = metrics.iter().map(|metric| metric.reward).sum::<f64>();
-        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let state = mcts_search_state(
+            "full_depth_settlement_executable_pnl",
+            &metrics,
+            None,
+            Vec::new(),
+        );
         let root = state
             .nodes
             .iter()
@@ -2676,7 +2687,13 @@ mod tests {
         let runtime_avoidances = Vec::new();
         let mut report = sample_report("cycle_a");
         report.parent_name = Some("cycle_b".to_string());
-        let metrics = [node_metric(0, &report, &runtime_avoidances, None)];
+        let metrics = [node_metric(
+            0,
+            &report,
+            &runtime_avoidances,
+            None,
+            &Vec::new(),
+        )];
         let prior = MctsSearchStateArtifact {
             version: ALPHA_SEARCH_ARTIFACT_VERSION.to_string(),
             mode: "cumulative_ucb_state".to_string(),
@@ -2693,12 +2710,14 @@ mod tests {
                 selected_dimension: "exploit".to_string(),
                 last_decision: "candidate".to_string(),
             }],
+            subtree_frequencies: Vec::new(),
         };
 
         let state = mcts_search_state(
             "full_depth_settlement_executable_pnl",
             &metrics,
             Some(&prior),
+            Vec::new(),
         );
 
         assert_eq!(state.backpropagation_truncated_count, 1);
@@ -2818,7 +2837,12 @@ mod tests {
         );
         assert!(
             reward(&collapsed, &runtime_avoidances, None, &subtree_frequencies)
-                < reward(&alternative, &runtime_avoidances, None, &subtree_frequencies),
+                < reward(
+                    &alternative,
+                    &runtime_avoidances,
+                    None,
+                    &subtree_frequencies
+                ),
             "runtime pass-through collapse should dominate top-bucket reward"
         );
     }
@@ -2996,7 +3020,7 @@ mod tests {
     fn alpha_zoo_crowded_root_gene_lowers_reward() {
         let report = sample_report("auto_settlement_alpha_zoo_crowded_candidate");
         let runtime_avoidances = Vec::new();
-        let baseline_reward = reward(&report, &runtime_avoidances, None);
+        let baseline_reward = reward(&report, &runtime_avoidances, None, &Vec::new());
 
         let zoo = AlphaZooSnapshot {
             version: "alpha_zoo_v1".to_string(),
@@ -3006,7 +3030,7 @@ mod tests {
                 count: 50,
             }],
         };
-        let penalized_reward = reward(&report, &runtime_avoidances, Some(&zoo));
+        let penalized_reward = reward(&report, &runtime_avoidances, Some(&zoo), &Vec::new());
 
         assert!(
             penalized_reward < baseline_reward,
@@ -3022,7 +3046,7 @@ mod tests {
     fn alpha_zoo_snapshot_for_a_different_target_is_a_no_op() {
         let report = sample_report("auto_settlement_alpha_zoo_cross_target_candidate");
         let runtime_avoidances = Vec::new();
-        let baseline_reward = reward(&report, &runtime_avoidances, None);
+        let baseline_reward = reward(&report, &runtime_avoidances, None, &Vec::new());
 
         // The snapshot's root gene matches, but its `target` does not match
         // this report's target. A snapshot exported for one search target
@@ -3036,7 +3060,8 @@ mod tests {
                 count: 50,
             }],
         };
-        let reward_with_mismatched_zoo = reward(&report, &runtime_avoidances, Some(&zoo));
+        let reward_with_mismatched_zoo =
+            reward(&report, &runtime_avoidances, Some(&zoo), &Vec::new());
 
         assert_eq!(
             baseline_reward, reward_with_mismatched_zoo,
@@ -3057,7 +3082,7 @@ mod tests {
         let report = sample_report("auto_settlement_alpha_zoo_no_op_candidate");
         let runtime_avoidances = Vec::new();
 
-        let reward_without_zoo = reward(&report, &runtime_avoidances, None);
+        let reward_without_zoo = reward(&report, &runtime_avoidances, None, &Vec::new());
 
         // An empty snapshot, and no snapshot at all, must be equivalent: absence
         // of Alpha Zoo evidence should never change search behavior.
@@ -3066,7 +3091,8 @@ mod tests {
             target: "full_depth_settlement_executable_pnl".to_string(),
             entries: Vec::new(),
         };
-        let reward_with_empty_zoo = reward(&report, &runtime_avoidances, Some(&empty_zoo));
+        let reward_with_empty_zoo =
+            reward(&report, &runtime_avoidances, Some(&empty_zoo), &Vec::new());
 
         assert_eq!(
             reward_without_zoo, reward_with_empty_zoo,
