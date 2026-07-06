@@ -226,6 +226,8 @@ pub struct LlmPriorSpec {
     pub mutations: Vec<LlmMutationSpec>,
     #[serde(default)]
     pub runtime_avoid_factors: Vec<RuntimeAvoidFactorSpec>,
+    #[serde(default)]
+    pub structural_avoid_signatures: Vec<StructuralAvoidSignatureSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +241,17 @@ pub struct RuntimeAvoidFactorSpec {
     pub reason: Option<String>,
     #[serde(default)]
     pub metrics: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructuralAvoidSignatureSpec {
+    pub structural_signature: String,
+    #[serde(default)]
+    pub root_gene: Option<String>,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3777,6 +3790,7 @@ mod tests {
         };
         let prior = LlmPriorSpec {
             runtime_avoid_factors: Vec::new(),
+            structural_avoid_signatures: Vec::new(),
             mutations: vec![LlmMutationSpec {
                 base_factor: "auto_settlement_model_full_depth_settlement_edge".to_string(),
                 mutation_type: "add_feature_gate".to_string(),
@@ -3825,6 +3839,7 @@ mod tests {
         };
         let prior = LlmPriorSpec {
             runtime_avoid_factors: Vec::new(),
+            structural_avoid_signatures: Vec::new(),
             mutations: vec![LlmMutationSpec {
                 base_factor:
                     "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity"
