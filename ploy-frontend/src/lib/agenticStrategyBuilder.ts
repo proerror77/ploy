@@ -1,6 +1,11 @@
 import type { AgentRunCreateRequest } from '@/types';
 
-export type StrategyFamily = 'pm5d' | 'sports' | 'market-making' | 'copy-trading';
+export type StrategyFamily =
+  | 'pm5d'
+  | 'sports'
+  | 'grok-builder'
+  | 'market-making'
+  | 'copy-trading';
 export type EvidenceTarget = 'diagnostic' | 'factor_attribution' | 'executable_replay' | 'dry_run_candidate';
 export type AutonomyMode = 'research_until_blocked' | 'paper_candidate' | 'monitor_only';
 export type ArtifactKey = 'packet' | 'issue' | 'contract';
@@ -37,6 +42,7 @@ export const defaultObjective =
 export const familyLabels: Record<StrategyFamily, string> = {
   pm5d: 'PM5D / binary options',
   sports: 'Sports markets',
+  'grok-builder': 'Grok Builder / NBA comeback',
   'market-making': 'Market making',
   'copy-trading': 'Copy trading',
 };
@@ -57,6 +63,7 @@ export const autonomyLabels: Record<AutonomyMode, string> = {
 export const strategyProfiles: Record<StrategyFamily, string> = {
   pm5d: 'pm5d.settlement_probability.agent',
   sports: 'sports.event_edge.agent',
+  'grok-builder': 'sports.nba_comeback.grok_builder.agent',
   'market-making': 'prediction_market_maker.agent',
   'copy-trading': 'copy_signal_replay.agent',
 };
@@ -76,6 +83,13 @@ export const dataSurfaces: Record<StrategyFamily, string[]> = {
     'Market depth and stale quote checks',
     'Official settlement labels',
   ],
+  'grok-builder': [
+    'ESPN live scoreboard and game details',
+    'Polymarket sports market search and snapshots',
+    'X.com / Grok-style injury, momentum, and sentiment checks',
+    'Reward-to-risk and EV calculations',
+    'Paper-only operator action review',
+  ],
   'market-making': [
     'Polymarket full CLOB depth',
     'Quote freshness',
@@ -94,7 +108,9 @@ export const dataSurfaces: Record<StrategyFamily, string[]> = {
 
 export const capabilityMap: ToolCapability[] = [
   { action: '读取平台状态', tool: 'get_system_status / get_trading_state / list_deployments', status: 'wired' },
-  { action: '发现市场', tool: 'search_markets', status: 'wired' },
+  { action: '读取赛事状态', tool: 'scoreboard / game_details', status: 'wired' },
+  { action: '发现市场', tool: 'search_markets / market_snapshot', status: 'wired' },
+  { action: 'Grok/X 证据检查', tool: 'WebSearch / WebFetch', status: 'wired' },
   { action: '运行研究回放', tool: 'replay_deployment / run_backtest / compare_configs', status: 'wired' },
   { action: '风险与治理检查', tool: 'check_oversight', status: 'wired' },
   { action: '提交 paper intent', tool: 'submit_paper_intent', status: 'approval' },
@@ -133,10 +149,24 @@ export function targetGateIndex(target: EvidenceTarget) {
   return 5;
 }
 
+function grokBuilderSection(form: BuilderForm) {
+  if (form.family !== 'grok-builder') return '';
+
+  return `
+Grok Builder rules:
+- Treat Grok/X evidence as decision support, not execution authority
+- Use ESPN live state before any market or sentiment step
+- Search X.com/web for injury, rotation, momentum, and betting sentiment context
+- Emit an explicit grok_decision value: trade, pass, or not_queried
+- Default to PASS or MONITOR when Grok/X evidence is stale, unavailable, or contradictory
+- Paper intent remains approval-gated; live orders remain blocked`;
+}
+
 export function buildAgentSteps(form: BuilderForm): AgentStep[] {
   const executableRequested =
     form.target === 'executable_replay' || form.target === 'dry_run_candidate';
   const dryRunRequested = form.target === 'dry_run_candidate';
+  const grokRequested = form.family === 'grok-builder';
 
   return [
     {
@@ -149,11 +179,11 @@ export function buildAgentSteps(form: BuilderForm): AgentStep[] {
     },
     {
       id: 'data',
-      title: 'Data scout',
-      owner: 'Research agent',
-      detail: '数据面与缺口识别',
+      title: grokRequested ? 'Grok evidence scout' : 'Data scout',
+      owner: grokRequested ? 'Grok Builder agent' : 'Research agent',
+      detail: grokRequested ? 'ESPN、Polymarket、X/Grok 证据' : '数据面与缺口识别',
       state: 'active',
-      tools: ['search_markets'],
+      tools: grokRequested ? ['scoreboard', 'search_markets', 'WebSearch'] : ['search_markets'],
     },
     {
       id: 'factor',
@@ -221,6 +251,7 @@ ${surfaces.map((surface) => `- ${surface}`).join('\n')}
 
 Tool/action parity:
 ${capabilityMap.map((item) => `- ${item.action}: ${item.tool} (${item.status})`).join('\n')}
+${grokBuilderSection(form)}
 
 Promotion policy:
 - diagnostic and factor_attribution never deploy
@@ -248,6 +279,7 @@ Scope:
 
 Required proof:
 - Data coverage is explicit
+- Grok/X evidence is cited as support only when queried
 - Factor attribution or diagnostic result is attached
 - Replay/dry-run parity is ready before live consideration
 - Operator approval remains required for paper intent and deployment changes
@@ -284,11 +316,16 @@ run_backtest = true
 replay_deployment = true
 compare_configs = true
 check_oversight = true
+scoreboard = true
+game_details = true
+market_snapshot = true
+web_search = true
 submit_paper_intent = "approval_required"
 apply_deployment = "approval_required"
 
 [agentic_strategy_run.gates]
 requires_data_audit = true
+requires_grok_decision = ${form.family === 'grok-builder'}
 requires_executable_replay = true
 requires_full_depth_clob = true
 requires_runtime_parity = true

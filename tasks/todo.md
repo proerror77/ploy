@@ -32,6 +32,14 @@ contracts, visible run creation, and sidecar-compatible run monitoring.
 
 ## Review
 
+- 2026-07-07: Integrated the trading-strategy Builder with a Grok Builder
+  profile. The frontend Strategy Builder now exposes `Grok Builder / NBA
+  comeback`, generates Grok/X evidence requirements in the run packet and
+  contract, and marks `grok_decision` as a required gate for that profile. The
+  sidecar queued-run path now enables ESPN scoreboard/game details, Polymarket
+  market snapshots, and WebSearch/WebFetch evidence collection for Grok Builder
+  runs while keeping paper intents and deployment changes approval-gated.
+
 - 2026-07-07: Closed follow-up code review findings on the agent-run surface:
   sidecar queue draining now claims the queue atomically and skips malformed
   lines, backend agent-run reads skip malformed JSONL rows, run creation writes

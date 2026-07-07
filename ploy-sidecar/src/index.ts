@@ -364,7 +364,7 @@ ${queued.request.run_packet}
 Run contract:
 ${queued.request.run_contract}
 
-Use automatic tools for platform reads, market search, research replay/backtest, config comparison, and oversight checks. Do not submit paper intents or apply deployments unless the request explicitly includes operator approval. Finish by calling complete_task.`,
+Use automatic tools for platform reads, live game checks, market search, Grok/X-style web evidence, research replay/backtest, config comparison, and oversight checks. For Grok Builder profiles, inspect ESPN state first, search web/X context for injury or momentum evidence, and report grok_decision as trade, pass, or not_queried. Do not submit paper intents or apply deployments unless the request explicitly includes operator approval. Finish by calling complete_task.`,
       options: {
         model: MODEL,
         systemPrompt: `${SYSTEM_PROMPT}
@@ -372,13 +372,17 @@ Use automatic tools for platform reads, market search, research replay/backtest,
 ## Runtime Context (fresh snapshot for this queued strategy run)
 ${JSON.stringify(runtimeContext, null, 2)}`,
         mcpServers: {
+          espn: espnServer,
           polymarket: polymarketServer,
           "ploy-backend": ployBackendServer,
           research: researchServer,
           "agent-runtime": agentRuntimeServer,
         },
         allowedTools: [
+          "mcp__espn__scoreboard",
+          "mcp__espn__game_details",
           "mcp__polymarket__search_markets",
+          "mcp__polymarket__market_snapshot",
           "mcp__ploy-backend__get_system_status",
           "mcp__ploy-backend__get_trading_state",
           "mcp__ploy-backend__list_deployments",
