@@ -1,3 +1,177 @@
+# Current Session - Agentic Strategy Run Closure (2026-06-20)
+
+Evidence stage: `diagnostic` frontend + control-plane + sidecar execution
+surface. Close the review findings by turning the Strategy Builder from a
+packet-only preview into a gated agent-run request surface with shared
+contracts, visible run creation, and sidecar-compatible run monitoring.
+
+## Files / Ownership
+
+- `crates/ploy-operator-contracts/`
+  - Owner: canonical agent-run request/record schemas for Rust, frontend, and
+    sidecar.
+- `crates/ploy-daemon-host/src/http.rs`
+  - Owner: robust agent-run JSONL reads plus operator-gated run request queue.
+- `ploy-sidecar/src/`
+  - Owner: sidecar run recorder/request processing bridge.
+- `ploy-frontend/src/`
+  - Owner: fully wired Agentic Strategy Builder UI and generated contract usage.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Make `AgentRunRecord` nullable where sidecar records are nullable.
+- [x] Add generated contracts for agent run records and create requests.
+- [x] Replace silent run-record parse drops with visible read errors.
+- [x] Add operator-gated `POST /api/agent/runs` request creation.
+- [x] Wire Strategy Builder to create real queued agent runs.
+- [x] Align UI capability labels with actual sidecar tools and approval gates.
+- [x] Split builder model/artifact logic out of the page component.
+- [x] Run contract, frontend, sidecar, and focused Rust validation.
+
+## Review
+
+- 2026-07-07: Closed follow-up code review findings on the agent-run surface:
+  sidecar queue draining now claims the queue atomically and skips malformed
+  lines, backend agent-run reads skip malformed JSONL rows, run creation writes
+  the visible requested record before the sidecar queue entry, `request_path`
+  was removed from the create response contract, `202 Accepted` is named
+  correctly, sidecar scan tools no longer wildcard all backend mutation tools,
+  `complete_task` status/summary is persisted into run records, frontend auth
+  headers can no longer be overwritten by `options.headers`, and LLM proposal
+  validation rejects bools for numeric/window fields.
+
+- 2026-06-20: Closed the review blockers around `/builder`: `AgentRunRecord`
+  now matches nullable sidecar records, agent-run schemas generate shared
+  frontend/sidecar types, malformed run JSONL lines fail visibly instead of
+  disappearing, and `POST /api/agent/runs` queues an operator-gated strategy
+  run request while writing a monitor record. The sidecar now records normal
+  cycles, consumes queued Strategy Builder requests every cycle, exposes a
+  `complete_task` MCP tool, and keeps paper/live changes approval-gated. The
+  Builder page now calls the real create endpoint, uses generated contracts,
+  maps action parity to actual sidecar tools, deduplicates latest run monitor
+  rows through the backend, and moves model/artifact generation into
+  `agenticStrategyBuilder.ts`. Layout is responsive so mobile no longer gets
+  squeezed by the fixed sidebar. Validation passed: frontend build/lint,
+  frontend and sidecar contract checks, sidecar build, Rust schema snapshot
+  test, focused daemon-host agent-run tests, `rustfmt --check`, `rtk git diff
+  --check`, HTTP 200 readback for `/builder`, and desktop/mobile browser
+  screenshot review. Frontend build still reports existing Browserslist and
+  bundle-size warnings.
+
+# Current Session - Strategy Builder Agentic Automation Redesign (2026-06-20)
+
+Evidence stage: `diagnostic` frontend + control-plane product surface. Replace
+the manual strategy-builder feel with an agentic automation desk that shows the
+outcome request, agent loop, tool parity, completion signal, evidence gates,
+sidecar run visibility, and high-stakes approval boundary.
+
+## Files / Ownership
+
+- `ploy-frontend/src/pages/StrategyBuilder.tsx`
+  - Owner: agentic automation UI and deterministic automation packet preview.
+- `ploy-frontend/src/services/api.ts`
+  - Owner: expose existing control-plane agent-run read endpoints.
+- `ploy-frontend/src/types/index.ts`
+  - Owner: frontend type for control-plane agent run records.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Redesign the page around an autonomous agent loop instead of a manual form.
+- [x] Surface tool/action parity and completion/approval gates explicitly.
+- [x] Read existing sidecar agent runs from `/api/agent/runs`.
+- [x] Preserve dry-run/live promotion safety semantics.
+- [x] Run frontend build, lint, browser verification, and record outcome.
+
+## Review
+
+- 2026-06-20: Reworked `/builder` from a manual strategy form into an
+  Agentic Strategy OS surface. The page now centers on one outcome prompt,
+  autonomy boundary, target evidence stage, agent loop, tool/action parity,
+  evidence gates, explicit `complete_task` completion semantics, artifact
+  previews, live sidecar agent-run visibility through `/api/agent/runs`, and
+  high-stakes approval boundaries for paper/dry-run/live actions. Live trading
+  remains locked; dry-run and paper-intent paths are represented as approval
+  gates, not automatic execution. Validation passed: `npm run build`,
+  `npm run lint`, `rtk git diff --check`, HTTP 200 readback for `/builder`,
+  Chrome render, accessibility snapshot, and screenshot review. Browser console
+  still shows expected React Router v7 future warnings and Vite-only backend
+  500s for auth/EventStream/agent-runs when `new-ployd` is not running behind
+  the dev server.
+
+# Current Session - Strategy Builder Visual Redesign (2026-06-20)
+
+Evidence stage: `diagnostic` frontend product surface. Redesign the builder
+screen after visual review feedback while keeping it as a gated draft surface,
+not a live execution path.
+
+## Files / Ownership
+
+- `ploy-frontend/src/pages/StrategyBuilder.tsx`
+  - Owner: visual redesign and interaction polish for the builder workspace.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Replace the hero/card-heavy layout with an operator workbench layout.
+- [x] Preserve research issue / config preview generation and gate semantics.
+- [x] Run frontend build, lint, and browser verification.
+- [x] Record outcome.
+
+## Review
+
+- 2026-06-20: Reworked `/builder` into a light operator workbench with a
+  concise header, left-side strategy/data inputs, right-side evidence gate rail,
+  dark artifact previews, and a gated handoff section. The generated research
+  issue and TOML preview still stay draft-only: dry-run/live remain blocked by
+  replay, full-depth CLOB, parity, and manual approval gates. Validation passed:
+  `npm run build`, `npm run lint`, `rtk git diff --check`, Chrome render of
+  `http://127.0.0.1:5175/builder`, screenshot review, and HTTP 200 readback for
+  `/builder`. Browser console still shows expected React Router v7 future
+  warnings and Vite-only `/api/auth/session` / EventStream 500s because the
+  control-plane backend is not running behind the dev server.
+
+# Current Session - Strategy Builder Product Entry (2026-06-20)
+
+Evidence stage: `diagnostic` product surface. This adds the Horizon-style
+strategy-idea entrypoint while keeping promotion gated by the existing Ploy
+research, replay, dry-run, and live rules.
+
+## Files / Ownership
+
+- `ploy-frontend/src/pages/StrategyBuilder.tsx`
+  - Owner: natural-language strategy draft workspace and gated handoff previews.
+- `ploy-frontend/src/App.tsx`
+  - Owner: route registration for the builder page.
+- `ploy-frontend/src/components/Layout.tsx`
+  - Owner: sidebar navigation entry.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Add the Strategy Builder frontend workspace.
+- [x] Wire the route and navigation entry.
+- [x] Run frontend type/build validation.
+- [x] Review diffs and record outcome.
+
+## Review
+
+- 2026-06-20: Added the frontend Strategy Builder entrypoint at `/builder`.
+  The page converts a natural-language strategy idea into a structured research
+  issue draft, config patch preview, required data surfaces, and a visible
+  idea -> contract -> evidence -> dry-run -> live gate track. The UI keeps
+  dry-run/live blocked until replay, parity, and operator approval gates pass.
+  Validation passed: `npm run build`, `npm run lint`, `rtk git diff --check`,
+  Chrome render of `http://127.0.0.1:5175/builder`, and HTTP 200 readback for
+  `/builder`. Browser console still shows expected control-plane/EventStream
+  500 errors because `new-ployd` is not running behind the Vite-only frontend
+  dev server.
+
 # Research Trace Plan Manager Workflow (2026-05-23)
 
 ## Current Session - Research Manager Fresh Runtime Candidate After Negative Replay (2026-05-28)
@@ -21664,3 +21838,518 @@ Evidence stage: `factor_attribution` with `runtime_parity` gates.
   `python3 -m py_compile scripts/autofactor_runtime_contract.py tests/test_autofactor_strategy_promotion.py tests/test_build_autofactor_candidate_strategy_replay.py tests/test_persist_research_trace_contract.py`,
   `rustfmt --edition 2024 --check crates/ploy-research/src/alpha_search.rs`,
   and `rtk git diff --check`.
+
+# Formula-Factor Diversity: Structural Frequent-Subtree Avoidance (2026-07-04)
+
+## Goal
+
+Upgrade the alpha-search diversity mechanism from a coarse, disconnected
+diagnostic into a real Frequent-Subtree-Avoidance (FSA) control that actually
+influences search behavior, matching the pattern in `Navigating the Alpha
+Jungle`. Current gap confirmed by reading `reward()`
+(`crates/ploy-research/src/alpha_search.rs:1204-1222`): it never references
+`avoided_subtrees()` or `root_gene` crowding, so `avoided-subtrees.json`'s
+`action: "penalize"` is currently write-only and has no effect on MCTS
+selection. `NodeMetric.diversity` (`alpha_search.rs:1058`) is also mislabeled:
+it is `1.0 / complexity` (simplicity), not structural novelty.
+
+Evidence stage: `factor_attribution` (search-layer change only; does not touch
+promotion gates, settlement, or runtime-parity contracts).
+
+## Files / Ownership
+
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: canonical structural fingerprint, persisted crowding state, real
+    reward wiring, renamed/split diversity vs simplicity metrics.
+- `crates/ploy-research/src/autofactor.rs`
+  - Owner: `FactorExpr` traversal helpers if canonicalization needs shared DSL
+    utilities.
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: surfacing persisted crowded/forbidden structural signatures into
+    the next `llm-priors.json` generation.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: correct the "penalize crowded or invalid subtrees" search-loop
+    description to match actually-wired behavior.
+- `tests/test_alpha_search_closed_loop_agent.py`
+  - Owner: Python-side coverage for forbidden-structure prior injection.
+- `tasks/todo.md`
+  - Owner: current session tracking.
+
+## Tasks
+
+- [ ] Stage 1: Add a canonical structural fingerprint
+      (`structural_signature(expr) -> String`) that normalizes commutative
+      operand order for `Add`/`Mul`, abstracts `Const` values to a placeholder
+      token, and produces both a whole-expression signature and depth>=2
+      inner sub-signatures. Keep `root_gene` for backward compatibility with
+      existing artifact readers.
+- [ ] Stage 1: Extend `AvoidedSubtree`/`avoided_subtrees()` to key crowding
+      counts by the new structural signature (multi-depth), not just the
+      top-level `root_gene`.
+- [ ] Stage 2: Persist crowding counts across chained hosted search runs
+      (reuse the existing `mcts-state.json` cross-run persistence pattern, or
+      add a sibling `subtree-frequency-state.json`) instead of recomputing
+      from a single run's batch only.
+- [ ] Stage 3: Wire a real `diversity_penalty` term into `reward()` driven by
+      persisted crowding counts. Split the currently-conflated `diversity`
+      field into clearly named `simplicity` (existing `1/complexity`) and
+      `structural_novelty` (new) fields on `NodeMetric`.
+- [ ] Stage 4: Feed the persisted crowded/forbidden signatures into
+      `llm-priors.json` generation in `scripts/alpha_search_closed_loop_agent.py`
+      so the next round's LLM prior actively avoids known-crowded shapes
+      instead of only being scored down after generation.
+- [ ] Update `docs/ALPHA_FACTOR_SEARCH_CICD.md` so the search-loop pseudocode
+      matches the implemented behavior.
+- [ ] Add Rust unit tests: commutative-reorder equivalence, constant
+      abstraction equivalence, reward delta between crowded vs novel
+      signatures.
+- [ ] Add Python test coverage for forbidden-structure prior injection.
+- [ ] Run focused validation: `cargo test -p ploy-research alpha_search --lib`,
+      `python3 -m unittest tests.test_alpha_search_closed_loop_agent`,
+      `rustfmt --edition 2024 --check crates/ploy-research/src/alpha_search.rs`,
+      `rtk git diff --check`.
+- [ ] Land as separate atomic PRs per stage (fingerprint+tests; reward
+      wiring+tests; closed-loop prior feedback+tests; docs), not one combined
+      commit.
+
+## Review
+
+(pending execution)
+
+# Alpha Jungle Framework Gap Audit: Alpha Zoo, Tree Search, LLM Expansion (2026-07-04)
+
+## Goal
+
+Audited the current alpha-search implementation against the five components
+of the `Navigating the Alpha Jungle` paper framework (Selection, Expansion,
+Multi-Dimensional Evaluation, Backpropagation, Alpha Zoo). FSA (this session's
+other tracked work, PR #728, still `OPEN`/unmerged at audit time) covers
+diversity scoring within a batch, but does not address these four remaining
+gaps. Evidence stage: `factor_attribution` design/architecture only; no code
+changed in this audit.
+
+Audit findings (see full detail in chat history 2026-07-04):
+
+- **Selection**: partial. `mcts_expansion_plan()`
+  (`crates/ploy-research/src/alpha_search.rs:1142-1187`) computes a
+  mathematically correct UCB1 score, but ranks a flat batch of candidates from
+  one run, not nodes in an explored tree. No `parent_id` exists on
+  `NodeMetric` or `MctsSelectedNode`.
+- **Expansion**: missing. No real LLM API call exists anywhere in the repo
+  (`crates/`, `scripts/`). All "mutation" generation, including the
+  `llm_prior` path, resolves to the same nine hardcoded transform types in
+  `deterministic_mutation_layer()` (`crates/ploy-research/src/autofactor.rs:1909`
+  onward). `docs/ALPHA_FACTOR_SEARCH_CICD.md:631-633` self-documents this as
+  "Not yet implemented: direct live LLM API invocation inside CI."
+- **Multi-Dimensional Evaluation**: mostly solid (`reward()`,
+  `crates/ploy-research/src/alpha_search.rs:1204-1222`, combines
+  effectiveness/stability/execution-cost/event-uniqueness/overfit-risk). Only
+  defect: pre-#728 `NodeMetric.diversity` duplicates `overfit_risk`
+  (`1.0/complexity`) instead of measuring structural novelty; resolved by
+  PR #728 Stage 3.
+- **Backpropagation**: missing. No parent/child edges are ever populated;
+  `TreeTraceNode.parent` is hardcoded `None` at its only write site
+  (`alpha_search.rs:506-515`). `mcts_search_state()`
+  (`alpha_search.rs:1093-1140`) only accumulates visits/reward per
+  `factor_name` string across CI runs — a multi-armed-bandit-style counter,
+  not tree backpropagation.
+- **Alpha Zoo**: missing entirely, the largest gap. The `factor_registry`
+  Postgres table (`crates/ploy-research/examples/persist_research_trace.rs:949-1017`)
+  is the closest analog — durably deduplicated by `(dsl_hash, target,
+  horizon)` — but no code path reads it back to score new candidates'
+  novelty against historical accepted factors. It is a record/audit mirror,
+  not a component the search loop queries. The closest active novelty signal,
+  `avoided_subtrees()`, only compares within a single run's batch and (pre-
+  #728) is not even wired into `reward()`.
+
+## Files / Ownership (future implementation, not yet started)
+
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: tree-structured node state (parent/child edges), real
+    backpropagation, Alpha Zoo novelty scoring hook.
+- `crates/ploy-research/examples/persist_research_trace.rs`
+  - Owner: expose a read path from `factor_registry` for cross-run novelty
+    lookups (structural signature comparison against all historically
+    accepted factors, not just the current batch).
+- `crates/ploy-research/examples/factor_walk_forward_v2.rs`
+  - Owner: main search loop changes if expansion becomes tree-driven instead
+    of single-depth batch generation.
+- `scripts/alpha_search_closed_loop_agent.py`
+  - Owner: closed-loop decision/prior generation changes if a real LLM
+    expansion call is introduced.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: keep the "Implemented" / "Not yet implemented" status list honest
+    as each gap is closed; currently missing an explicit Alpha Zoo section.
+- `tasks/todo.md`
+  - Owner: current session tracking.
+
+## Tasks (priority order; each should land as its own atomic PR)
+
+- [x] Priority 1 — Alpha Zoo wiring: landed and merged in PR #729
+      (`feat/alpha-zoo-wiring`, merge commit `067dd916`). Added
+      `AlphaZooSnapshot`/`AlphaZooEntry`, `alpha_zoo_novelty_penalty()`/
+      `alpha_zoo_novelty_score()` wired into `reward()`/`node_metric()`, a
+      DB-independent `group_factor_registry_rows_into_alpha_zoo_snapshot()`
+      export in `persist_research_trace.rs`, and `--alpha-zoo-snapshot-json`
+      threaded through both `factor_walk_forward_v2.rs` and the hosted sweep
+      path (`scripts/run_factor_walk_forward_sweep.py` +
+      `factor-walk-forward-v2-hosted-artifact.yml`). Two Codex-review-caught
+      defects were fixed before merge: cross-target contamination (a
+      snapshot exported for one target penalized unrelated targets sharing a
+      root gene) and the missing hosted-sweep forwarding path. Still uses
+      the coarse `root_gene()` fingerprint pending PR #728's
+      `structural_signature()`.
+- [ ] Priority 2 — Tree-structured search state with real backpropagation.
+      Full design below.
+- [ ] Priority 3 — Genuine LLM-driven Expansion. Full design below;
+      requires an explicit architecture decision before implementation
+      starts (see "Architecture decision required").
+- [ ] Update `docs/ALPHA_FACTOR_SEARCH_CICD.md`: add an explicit Alpha Zoo
+      section (done in #729); correct the Selection/Backpropagation
+      completion-criteria language once Priority 2 lands so it doesn't
+      overstate what exists before that.
+- [ ] Re-run this gap audit against PR #728 once merged, to confirm the
+      Multi-Dimensional Evaluation `diversity` field fix and the FSA reward
+      wiring hold up together with the merged Alpha Zoo change.
+
+## Review
+
+- 2026-07-05: Priority 1 (Alpha Zoo) implemented via a background workflow
+  (implementer agent + independent adversarial reviewer agent), further
+  reviewed with `codex exec review --base origin/main`, which caught two real
+  defects (cross-target contamination, missing hosted-sweep flag forwarding)
+  before merge. Both fixed in follow-up commits, CI green (including
+  `Dependency audit`, which separately needed a `quinn-proto` bump to clear
+  RUSTSEC-2026-0185 — main's `Cargo.lock` doesn't yet have the fix from the
+  still-unmerged PR #728). Merged as PR #729. Priority 2 and 3 are
+  implementation plans only in this entry; no code written yet for either.
+
+---
+
+# Priority 2 Implementation Plan: Tree-Structured MCTS Backpropagation (2026-07-05)
+
+## Goal
+
+Replace the current flat, name-keyed candidate pool with genuine
+parent/child tree identity and real backpropagation, so `reward()` from
+evaluating a child candidate actually updates the cumulative statistics of
+its ancestors — not just its own counter. Today `mcts_search_state()`
+(`alpha_search.rs:1093-1140`) accumulates `visits`/`total_reward` per
+`factor_name` string across CI runs, which behaves like a multi-armed
+bandit over a fixed, flat set of arms — not a tree. `TreeTraceNode.parent`
+(`alpha_search.rs:163-181`) exists as a field but is hardcoded to `None` at
+its only write site. Evidence stage: `factor_attribution` only; no
+promotion/dry-run/live gates touched.
+
+## Key finding that simplifies this plan
+
+Candidate identity is *already* effectively stable and deterministic:
+`factor_name` is built deterministically from a base seed name plus a
+mutation suffix (`push_mutation` in `autofactor.rs:2054-2072` uses
+`mut_{seed.name}_{suffix}` / `mut2_{seed.name}_{suffix}`; the MCTS-guided
+branch in `domain_candidates_for_target_with_guidance`,
+`autofactor.rs:1686-1705`, renames to `mcts_`; `llm_prior_mutation_candidates`,
+`autofactor.rs:1713-1747`, uses `llm_{base.name}_{suffix}`). So this plan
+does **not** need to invent a new node-id scheme — `factor_name` already is
+one. What's missing is simply: nothing records *which* factor_name a given
+candidate was derived from. That's a much smaller gap than "build a tree
+identity system from scratch."
+
+## Design
+
+### Stage A — Capture parent lineage (plumbing only, no behavior change)
+
+- Add `parent_name: Option<String>` to `NamedFactorExpr`
+  (`crates/ploy-research/src/autofactor.rs:209-214`).
+- Set it at every site that derives a candidate from a `seed`/`base`:
+  `push_mutation` (`autofactor.rs:2054`), `compile_llm_mutation` call sites
+  inside `llm_prior_mutation_candidates` (`autofactor.rs:1713-1747`), and the
+  MCTS-guided expansion branch (`autofactor.rs:1686-1705`, which already has
+  `selected` candidates in scope to rename — thread the pre-rename name
+  through as `parent_name` before the `mcts_`/`mut_`/`mut2_` rename).
+  `domain_seed_candidates()` roots keep `parent_name: None`.
+- Thread `parent_name` through into `AutoFactorReport` (add the field; it
+  currently carries no lineage) so `alpha_search.rs`'s scoring code has
+  access to it by the time it builds `NodeMetric`.
+- Wire `TreeTraceNode.parent` (`alpha_search.rs:506-515`) to the new field
+  instead of hardcoding `None`.
+- Tests: for each derivation site (`push_mutation`, LLM-prior mutation,
+  MCTS-guided branch), assert the produced `NamedFactorExpr.parent_name`
+  matches the expected seed name. No reward/scoring behavior changes in this
+  stage — pure plumbing, safe to land alone.
+
+### Stage B — Real backpropagation
+
+- Add `parent_name: Option<String>` to `MctsSearchStateNode`
+  (`alpha_search.rs:63-71`) with `#[serde(default)]` so old `mcts-state.json`
+  artifacts without the field deserialize cleanly (missing parent = treated
+  as a root, which is the safe default — no silent backprop into an unknown
+  ancestor).
+- New function `fn backpropagate(nodes: &mut BTreeMap<String, MctsSearchStateNode>, leaf_name: &str, reward: f64)`:
+  walk `leaf_name`'s `parent_name` chain through the *already-merged* map
+  (which spans `prior_state` nodes + current batch, per the existing merge
+  logic at `alpha_search.rs:1128-1137`), adding `reward` to each ancestor's
+  `total_reward` and incrementing `visits`. Bound the walk (e.g. max depth
+  32, or track visited node names and stop on a repeat) as a defensive
+  measure against any future cycle, even though the derivation functions
+  should never produce one.
+- Call `backpropagate` for every leaf's evaluated `reward` inside
+  `mcts_search_state()`'s existing per-metric loop
+  (`alpha_search.rs:1139-1158`), after the leaf's own node is updated.
+- Tests: build a 3-generation synthetic chain (root -> `mut_root_x` ->
+  `mut2_root_x_y`), evaluate only the leaf with a known reward, assert the
+  root's `total_reward` increased by that amount and the middle node's did
+  too, while an unrelated sibling root's `total_reward` is unchanged.
+
+### Reconciling with `chain_next_run`/`chain_remaining`
+
+This is simpler than originally scoped: `chain_next_run`/`chain_remaining`
+operate purely at the CI-dispatch level (deciding whether to trigger another
+`workflow_dispatch`, tracked in `factor-walk-forward-v2-hosted-artifact.yml:960-1067`)
+and never inspect `mcts-state.json`'s internal node shape — they only check
+`search-feedback.json`'s `best_reward` field for stagnation. Since
+backpropagation is computed purely as a function of (current batch reports +
+the `prior_state` map already threaded through `--alpha-search-state-json`),
+it fits inside the existing single-artifact cross-run transport with no
+changes needed to the chain-decision logic itself. No redesign of the
+chaining mechanism is required — confirmed lower risk than originally
+flagged.
+
+### Stage C (optional refinement, separate PR)
+
+- Feed ancestor average reward into `mcts_expansion_plan()`'s UCB ranking
+  (`alpha_search.rs:1172-1187`) as a tie-breaker or eligibility filter — e.g.
+  don't select a node for expansion if its parent chain's average reward is
+  deeply negative, to avoid sinking search budget into a provably bad
+  lineage. This is additive and can be deferred without blocking Stage A/B.
+
+### Risks to verify during implementation
+
+- Depth-prefix parsing (`mut`/`mut2`) is currently used to label mutation
+  depth in `push_mutation` (`autofactor.rs:2062`), but the MCTS-guided branch
+  calls `deterministic_mutation_layer(..., depth=3)`
+  (`autofactor.rs:1693`) while still only distinguishing `mut`/`mut2` by
+  prefix — once `parent_name` exists as the source of truth for lineage,
+  confirm depth-based naming logic doesn't need to change in lockstep, or
+  decide to keep name-prefix depth labeling as purely cosmetic/legacy since
+  the real depth is now derivable by walking `parent_name`.
+- Name collisions across independent seeds producing the same mutated name
+  are an existing risk (since `factor_name` was already the sole dedup key
+  pre-this-change) — not newly introduced, but worth a regression test once
+  parent-chain walking exists, since a collision would now also corrupt
+  backpropagation (reward flowing to the wrong ancestor).
+
+## Files / Ownership
+
+- `crates/ploy-research/src/autofactor.rs` — `NamedFactorExpr.parent_name`,
+  lineage capture at all derivation sites, `AutoFactorReport.parent_name`.
+- `crates/ploy-research/src/alpha_search.rs` — `MctsSearchStateNode.parent_name`,
+  `backpropagate()`, wiring `TreeTraceNode.parent`, tests.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md` — update the MCTS search-loop pseudocode
+  and completion-criteria language once Stage B lands.
+- `tasks/todo.md` — current session tracking.
+
+## Tasks
+
+- [ ] Stage A: add `parent_name` plumbing (`NamedFactorExpr`,
+      `AutoFactorReport`, wire `TreeTraceNode.parent`), with derivation-site
+      tests. No behavior change; land as its own PR.
+- [ ] Stage B: add `MctsSearchStateNode.parent_name` (`#[serde(default)]`),
+      implement and wire `backpropagate()`, add 3-generation chain test plus
+      a name-collision regression test. Land as its own PR.
+- [ ] Stage C (optional, separate PR): ancestor-average-reward-aware UCB
+      eligibility filter in `mcts_expansion_plan()`.
+- [ ] Update `docs/ALPHA_FACTOR_SEARCH_CICD.md` MCTS section to match.
+- [ ] Run focused validation per stage: `cargo test -p ploy-research
+      alpha_search --lib`, `cargo test -p ploy-research autofactor --lib`,
+      `rustfmt --edition 2024 --check`, `git diff --check`.
+
+## Review
+
+(pending implementation — plan only, no code written)
+
+---
+
+# Priority 3 Implementation Plan: Genuine LLM-Driven Expansion (2026-07-05)
+
+## Goal
+
+Replace the current stand-in — where `LlmMutationSpec` JSON is either
+hand-written or produced by a local, model-free Python script
+(`scripts/alpha_search_closed_loop_agent.py`, which its own file header
+states "does not call an LLM") — with a real model API call that proposes
+bounded mutations, validated through the exact same fail-closed Rust
+compiler (`compile_llm_mutation`, `autofactor.rs:1749-1861`) as today. No
+code in this plan should be written until the architecture decision below
+is confirmed with the user.
+
+Evidence stage: `factor_attribution` only. Does not touch promotion,
+dry-run, or live trading gates — the LLM only ever *proposes* which bounded
+transform to try; the existing allowlisted `mutation_type` match arms in
+`compile_llm_mutation` remain the sole source of truth for what can actually
+be compiled into a `FactorExpr`.
+
+## Architecture decision required (stop-and-ask point)
+
+Two options, not a false choice — either is defensible:
+
+1. **Real API call from CI**, direct HTTP to the model provider (Anthropic
+   or OpenAI Responses API), *not* the Codex/Claude Code CLI. The CLIs are
+   built for interactive, locally-authenticated sessions; wiring their auth
+   into unattended CI is fragile and opaque compared to a plain API key in
+   a GitHub secret. This preserves the existing safety boundary
+   (`docs/ALPHA_FACTOR_SEARCH_CICD.md`'s stated principle: "no free-form
+   code generation in the search loop") because the model still only ever
+   emits typed JSON matching `LlmMutationSpec`, validated by the same
+   allowlist as a hand-written prior file today — nothing about the trust
+   boundary changes, only who/what authors the JSON.
+2. **Keep the current bounded-template architecture permanently** and treat
+   this as explicitly out of scope. This is a legitimate outcome, not a
+   failure to implement — the team already chose determinism/auditability
+   over generative breadth once; re-confirming that choice is cheaper than
+   building and then not using this.
+
+This plan assumes option 1 is chosen; if option 2 is chosen instead, no
+further action is needed beyond noting the decision in
+`docs/ALPHA_FACTOR_SEARCH_CICD.md`.
+
+## Design (if option 1 is approved)
+
+### Secrets and CI plumbing
+
+- New repository secret (e.g. `PLOY_RESEARCH_LLM_API_KEY`), scoped to
+  `factor-walk-forward-v2-hosted-artifact.yml` only — confirmed via grep
+  that no workflow in this repo currently references any LLM provider
+  secret, so this is a new secret category, not an extension of an
+  existing one.
+- New workflow input `enable_llm_expansion` (default `false`), so existing
+  and in-flight chained runs are entirely unaffected unless explicitly
+  opted into on a given `workflow_dispatch`.
+- New script `scripts/alpha_search_llm_propose.py` (kept separate from
+  `alpha_search_closed_loop_agent.py`, which stays model-free and handles
+  chain/promotion decisions — single responsibility per script):
+  - Reads the current run's `search-feedback.json`, `avoided-subtrees.json`
+    (once PR #728 merges), and/or the Alpha Zoo snapshot, plus the weak
+    dimension signal already computed by `selected_dimension()`
+    (`alpha_search.rs:1293-1323`).
+  - Builds a prompt describing weak dimensions and known-crowded structural
+    shapes to avoid.
+  - Calls the model with a JSON-schema-constrained response (tool-calling /
+    structured output, matching `LlmMutationSpec`'s exact fields) so the
+    model cannot return free text that needs fragile parsing.
+  - Bounded retries (e.g. 2) on schema-validation failure.
+  - Writes to the same `next-llm-prior.json` location the existing
+    `--alpha-search-llm-prior-json` flag already reads
+    (`factor_walk_forward_v2.rs`), so no downstream Rust code changes are
+    needed — `compile_llm_mutation` already validates and compiles whatever
+    lands there today.
+
+### Cost / failure handling
+
+- Fail soft: if the API call errors (timeout, rate limit, invalid key), log
+  a warning and proceed without a fresh LLM prior — identical to today's
+  behavior when `--alpha-search-llm-prior-json` is simply omitted. This
+  must never become a `fail_if_blocked`-style hard gate; LLM availability
+  should not be able to stall the deterministic search path.
+- Add a small `llm-expansion-usage.json` artifact recording token
+  count/cost per run — this is the first place in the alpha-search pipeline
+  with a real per-run dollar cost (mutation templates are free), so it
+  should be visible, not implicit.
+
+### Keeping the prompt's allowed-mutation list in sync
+
+- Generate the "allowed mutation types" description in the prompt
+  programmatically from the same source list already used for validation
+  (`ALLOWED_MUTATIONS` in `scripts/alpha_search_closed_loop_agent.py:29-39`,
+  which already mirrors `compile_llm_mutation`'s match arms) rather than
+  hand-duplicating the list a third time. If a new `mutation_type` is ever
+  added to `compile_llm_mutation`, the prompt should not silently drift out
+  of sync with what the Rust compiler actually accepts.
+
+### Stages
+
+- Stage A: confirm option 1 vs 2 with the user (this document is the input
+  to that conversation, not a decision already made).
+- Stage B: build `scripts/alpha_search_llm_propose.py` against a mocked API
+  client; unit-test prompt construction, schema validation, and retry logic
+  entirely offline — no real API call in CI or in tests at this stage.
+- Stage C: wire the real API call behind `enable_llm_expansion` + the new
+  secret; validate on one manual `workflow_dispatch` run with the flag on;
+  confirm the produced `next-llm-prior.json` compiles cleanly through the
+  existing, unchanged Rust pipeline.
+- Stage D: docs update (`docs/ALPHA_FACTOR_SEARCH_CICD.md`'s "Not yet
+  implemented: direct live LLM API invocation inside CI" line moves to
+  "Implemented"), cost-accounting artifact.
+
+## Risks
+
+- Prompt injection: inputs are the run's own historical artifacts (not
+  external user data), so risk is low but not zero — factor names and
+  human-written `notes` strings do flow into the prompt; sanitize/escape
+  before inclusion.
+- Schema drift between the Python prompt description and the Rust
+  compiler's actual accepted `mutation_type` values — mitigated by
+  generating the prompt's allowed-list from the same source list used for
+  validation (see above), not by hand-copying.
+- Recurring real cost: default `enable_llm_expansion` to `false` and only
+  enable it on manually dispatched runs — confirmed the workflow's only
+  trigger is `workflow_dispatch` (no scheduled/cron trigger exists in this
+  repo), so there is no risk of this silently running unattended on a
+  schedule once enabled.
+
+## Files / Ownership
+
+- `scripts/alpha_search_llm_propose.py` (new) — prompt construction, API
+  call, schema validation, retry logic.
+- `.github/workflows/factor-walk-forward-v2-hosted-artifact.yml` —
+  `enable_llm_expansion` input, secret wiring, invocation step.
+- `scripts/alpha_search_closed_loop_agent.py` — no logic changes expected;
+  stays model-free per its existing stated design.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md` — status list update once Stage C
+  lands.
+- `tasks/todo.md` — current session tracking.
+
+## Tasks
+
+- [x] Stage A: user confirmed option 1 (build genuine LLM-driven Expansion)
+      over option 2 (keep bounded-template architecture permanently).
+- [x] Stage B: built and unit-tested `scripts/alpha_search_llm_propose.py`
+      against a mocked `LlmClient`. No real network call exists yet — the
+      default `UnconfiguredLlmClient` raises, and `main()` catches that and
+      fails soft (prints a message, writes no output file), matching how
+      the search path already degrades when
+      `--alpha-search-llm-prior-json` is simply omitted.
+- [ ] Stage C: wire the real API call behind an opt-in flag + secret;
+      validate on one manual dispatch.
+- [ ] Stage D: docs + cost-accounting artifact.
+
+## Review
+
+- 2026-07-05: Stage B implemented. `scripts/alpha_search_llm_propose.py`
+  reuses `load_artifact()`, `ALLOWED_MUTATIONS`, and `DIMENSION_TO_MUTATION`
+  from `alpha_search_closed_loop_agent.py` rather than duplicating artifact-
+  loading or mutation-type logic. Prompt construction embeds only
+  structured, already-validated JSON fields (weak dimensions from
+  `mcts-expansion-plan.json`, batch-local crowding from
+  `avoided-subtrees.json` when present, cross-run crowding from an Alpha
+  Zoo snapshot when present) — never raw free-text `notes` strings, to keep
+  the prompt-injection surface small. `validate_response()` fail-closes on
+  unknown fields, missing required fields, non-allowlisted
+  `mutation_type`, and wrong value types; `propose_mutations()` retries up
+  to `MAX_SCHEMA_RETRIES` (2) with the rejection reason appended to the
+  prompt before giving up. `build_prior_from_mutations()` emits the same
+  `schema_version`/`kind`/`source`/`target`/`mutations` shape
+  `build_prior()` already produces, so `factor_walk_forward_v2.rs`'s
+  `read_llm_prior()` and the hosted workflow's existing prior-forwarding
+  path need no changes to accept LLM-sourced mutations. Added
+  `tests/test_alpha_search_llm_propose.py` (20 tests: prompt construction,
+  schema validation edge cases, retry/exhaustion behavior, mutation-limit
+  truncation, and a `main()` integration test proving the unconfigured
+  default fails soft without writing a partial file). Validation passed:
+  `python3 -m py_compile scripts/alpha_search_llm_propose.py
+  tests/test_alpha_search_llm_propose.py`,
+  `python3 -m unittest tests.test_alpha_search_closed_loop_agent
+  tests.test_factor_walk_forward_sweep tests.test_alpha_search_llm_propose`
+  (72 tests, all pass), and `git diff --check`. No CI workflow, secret, or
+  `docs/ALPHA_FACTOR_SEARCH_CICD.md` changes in this stage — Stage C is the
+  first stage that touches CI plumbing.

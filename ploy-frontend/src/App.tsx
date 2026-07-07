@@ -8,6 +8,7 @@ import { LiveMonitor } from '@/pages/LiveMonitor';
 import { LiveParity } from '@/pages/LiveParity';
 import { OperatorCockpit } from '@/pages/OperatorCockpit';
 import { DryRunReport } from '@/pages/DryRunReport';
+import { StrategyBuilder } from '@/pages/StrategyBuilder';
 import { StrategyMonitor } from '@/pages/StrategyMonitor';
 import { SystemControl } from '@/pages/SystemControl';
 import { SecurityAudit } from '@/pages/SecurityAudit';
@@ -106,6 +107,7 @@ function App() {
             <Route path="dry-run/:deploymentId" element={<DryRunReport />} />
             <Route path="reports/strategies" element={<DryRunReport />} />
             <Route path="reports/strategy" element={<DryRunReport />} />
+            <Route path="builder" element={<StrategyBuilder />} />
             <Route path="deployments" element={<StrategyMonitor />} />
             <Route path="monitor-strategy" element={<StrategyMonitor />} />
             <Route path="nba-swing" element={<NBASwingMonitor />} />

@@ -11,6 +11,10 @@ export interface TodayStats {
 
 export type {
   ActiveAlert,
+  AgentRunCreateRequest,
+  AgentRunCreateResponse,
+  AgentRunRecord,
+  AgentToolCallRecord,
   AlertKind,
   AlertSeverity,
   AuditLogEntry,

@@ -149,27 +149,53 @@ pub struct ProposalSnapshotEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentToolCallRecord {
+    pub name: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AgentRunRecord {
     pub run_id: String,
     pub cycle_kind: String,
     pub status: String,
     pub started_at: chrono::DateTime<chrono::Utc>,
-    pub finished_at: chrono::DateTime<chrono::Utc>,
-    pub session_id: String,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub session_id: Option<String>,
     pub model: String,
-    pub platform_status: String,
+    pub platform_status: Option<String>,
     pub deployment_count: usize,
     pub oversight_signal_count: usize,
     pub oversight_playbook_count: usize,
-    pub total_cost_usd: f64,
-    pub tool_calls: serde_json::Value,
+    pub total_cost_usd: Option<f64>,
+    pub tool_calls: Vec<AgentToolCallRecord>,
     pub research_reports: usize,
     pub oversight_alerts: usize,
     pub operator_recommendations: usize,
     pub failure_reason: Option<String>,
-    pub runtime_context: serde_json::Value,
-    pub output_summary: serde_json::Value,
-    pub evaluation: serde_json::Value,
+    pub runtime_context: Option<serde_json::Value>,
+    pub output_summary: Option<serde_json::Value>,
+    pub evaluation: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentRunCreateRequest {
+    pub objective: String,
+    pub strategy_profile: String,
+    pub autonomy_mode: String,
+    pub target_evidence: String,
+    pub symbols: Vec<String>,
+    pub max_turns: u32,
+    pub budget_usd: f64,
+    pub run_packet: String,
+    pub run_contract: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentRunCreateResponse {
+    pub run_id: String,
+    pub status: String,
+    pub message: String,
 }
 
 pub fn compute_oversight_report(

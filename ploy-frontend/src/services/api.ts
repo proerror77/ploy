@@ -17,6 +17,9 @@ import type {
   TradingStateSnapshot,
   MarketDataHealth,
   DryRunPerformanceReport,
+  AgentRunCreateRequest,
+  AgentRunCreateResponse,
+  AgentRunRecord,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -91,8 +94,8 @@ class ApiService {
 
     const response = await fetch(`${API_BASE}${endpoint}`, {
       credentials: 'same-origin',
-      headers,
       ...options,
+      headers,
     });
 
     if (!response.ok) {
@@ -225,6 +228,21 @@ class ApiService {
 
   async getDryRunPerformance(): Promise<DryRunPerformanceReport> {
     return this.fetch<DryRunPerformanceReport>('/reports/dry-run');
+  }
+
+  async getAgentRuns(): Promise<AgentRunRecord[]> {
+    return this.fetch<AgentRunRecord[]>('/agent/runs');
+  }
+
+  async getAgentRun(runId: string): Promise<AgentRunRecord> {
+    return this.fetch<AgentRunRecord>(`/agent/runs/${encodeURIComponent(runId)}`);
+  }
+
+  async createAgentRun(request: AgentRunCreateRequest): Promise<AgentRunCreateResponse> {
+    return this.fetch<AgentRunCreateResponse>('/agent/runs', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    });
   }
 
   async updateDeploymentState(

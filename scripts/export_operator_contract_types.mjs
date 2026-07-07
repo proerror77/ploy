@@ -22,6 +22,9 @@ const schemaFiles = [
   "audit-log-entry.schema.json",
   "control-plane-error-response.schema.json",
   "operator-event.schema.json",
+  "agent-run-record.schema.json",
+  "agent-run-create-request.schema.json",
+  "agent-run-create-response.schema.json",
 ];
 
 const check = process.argv.includes("--check");

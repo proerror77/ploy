@@ -18,12 +18,23 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { espnServer } from "./tools/espn.js";
 import { polymarketServer } from "./tools/polymarket.js";
 import { ployBackendServer } from "./tools/ploy-backend.js";
+import { researchServer } from "./tools/research.js";
+import { agentRuntimeServer } from "./tools/agent-runtime.js";
 import { tradingOutputSchema } from "./schemas/output.js";
 import type {
+  AgentToolCallRecord,
   DeploymentSummary,
+  JsonValue,
   SystemStatus,
   TradingStateSnapshot,
 } from "./contracts/operator-contracts.js";
+import {
+  buildRunRecord,
+  newRunId,
+  recordAgentRun,
+  type AgentTaskCompletion,
+} from "./runtime/run-recorder.js";
+import { takeQueuedAgentRunRequests, type QueuedAgentRunRequest } from "./runtime/run-requests.js";
 
 // ── Config ──────────────────────────────────────────
 
@@ -115,6 +126,8 @@ You are an operator-facing research client, not a direct execution path.
 - Never start or create a non-paper deployment unless explicitly instructed
 - Always default to PASS or MONITOR when uncertain
 - Parse failures → PASS (never trade on garbage)
+- For Strategy Builder requests, complete with agent-runtime.complete_task using status success, partial, or blocked
+- Treat paper intent and deployment changes as approval-gated; research, replay, diagnostics, and comparisons are automatic
 
 ## Scoring Comeback Probability
 Historical NBA comeback rates by deficit at end of Q3:
@@ -257,14 +270,202 @@ async function buildRuntimeContext(): Promise<RuntimeContext> {
 
 // ── Main Loop ───────────────────────────────────────
 
+function isStructuredOutput(value: unknown): value is {
+  research_reports?: Array<unknown>;
+  oversight_alerts?: Array<unknown>;
+  operator_recommendations?: Array<unknown>;
+} {
+  return value !== null && typeof value === "object";
+}
+
+function parseCompletion(value: unknown): AgentTaskCompletion | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const parsed = parseCompletion(item);
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+  if (typeof value === "string") {
+    try {
+      return parseCompletion(JSON.parse(value));
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== "object") return null;
+
+  const candidate = value as {
+    status?: unknown;
+    summary?: unknown;
+    text?: unknown;
+    content?: unknown;
+  };
+  if (candidate.text && typeof candidate.text === "string") {
+    return parseCompletion(candidate.text);
+  }
+  if (
+    (candidate.status === "success" ||
+      candidate.status === "partial" ||
+      candidate.status === "blocked") &&
+    typeof candidate.summary === "string"
+  ) {
+    return { status: candidate.status, summary: candidate.summary };
+  }
+  return parseCompletion(candidate.content);
+}
+
+function completionFromMessage(message: unknown): AgentTaskCompletion | null {
+  const candidate = message as {
+    type?: string;
+    tool_use_result?: unknown;
+    message?: { content?: Array<{ type?: string; content?: unknown }> };
+  };
+  if (candidate.type !== "user") return null;
+
+  const direct = parseCompletion(candidate.tool_use_result);
+  if (direct) return direct;
+
+  for (const block of candidate.message?.content ?? []) {
+    if (block.type === "tool_result") {
+      const parsed = parseCompletion(block.content);
+      if (parsed) return parsed;
+    }
+  }
+  return null;
+}
+
+async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<void> {
+  const startedAt = new Date().toISOString();
+  const runtimeContext = await buildRuntimeContext();
+  const toolCalls: AgentToolCallRecord[] = [];
+  let sessionId: string | null = null;
+  let totalCostUsd: number | null = null;
+  let failureReason: string | null = null;
+  let completion: AgentTaskCompletion | null = null;
+
+  console.log(`\n[${startedAt}] Starting queued strategy run ${queued.run_id}`);
+
+  try {
+    for await (const message of query({
+      prompt: `Strategy Builder request created at ${queued.created_at}
+
+Runtime context snapshot:
+${JSON.stringify(runtimeContext, null, 2)}
+
+Run this agentic strategy request until it reaches success, partial completion, or a blocker.
+
+Objective:
+${queued.request.objective}
+
+Run packet:
+${queued.request.run_packet}
+
+Run contract:
+${queued.request.run_contract}
+
+Use automatic tools for platform reads, market search, research replay/backtest, config comparison, and oversight checks. Do not submit paper intents or apply deployments unless the request explicitly includes operator approval. Finish by calling complete_task.`,
+      options: {
+        model: MODEL,
+        systemPrompt: `${SYSTEM_PROMPT}
+
+## Runtime Context (fresh snapshot for this queued strategy run)
+${JSON.stringify(runtimeContext, null, 2)}`,
+        mcpServers: {
+          polymarket: polymarketServer,
+          "ploy-backend": ployBackendServer,
+          research: researchServer,
+          "agent-runtime": agentRuntimeServer,
+        },
+        allowedTools: [
+          "mcp__polymarket__search_markets",
+          "mcp__ploy-backend__get_system_status",
+          "mcp__ploy-backend__get_trading_state",
+          "mcp__ploy-backend__list_deployments",
+          "mcp__research__replay_deployment",
+          "mcp__research__run_backtest",
+          "mcp__research__compare_configs",
+          "mcp__research__check_oversight",
+          "mcp__agent-runtime__complete_task",
+          "WebSearch",
+          "WebFetch",
+        ],
+        maxTurns: Math.max(1, queued.request.max_turns),
+        maxBudgetUsd: Math.max(0.1, queued.request.budget_usd),
+        permissionMode: "bypassPermissions",
+      },
+    })) {
+      switch (message.type) {
+        case "system":
+          if (message.subtype === "init") {
+            sessionId = message.session_id ?? null;
+            console.log(`  Session: ${message.session_id}`);
+          }
+          break;
+        case "assistant":
+          for (const block of message.message.content) {
+            if ("name" in block) {
+              toolCalls.push({ name: String(block.name), status: "called" });
+              console.log(`  Tool: ${block.name}`);
+            }
+          }
+          break;
+        case "user": {
+          const reportedCompletion = completionFromMessage(message);
+          if (reportedCompletion) {
+            completion = reportedCompletion;
+            console.log(`  Task completion: ${completion.status}`);
+          }
+          break;
+        }
+        case "result":
+          if (message.subtype === "success") {
+            totalCostUsd = (message as any).total_cost_usd ?? null;
+            console.log(`  Completed queued run. Cost: $${(totalCostUsd ?? 0).toFixed(4)}`);
+          } else {
+            failureReason = message.subtype;
+            console.error(`  Queued run failed: ${message.subtype}`);
+          }
+          break;
+      }
+    }
+  } catch (error) {
+    failureReason = error instanceof Error ? error.message : String(error);
+    console.error(`  Error in queued strategy run:`, error);
+  } finally {
+    await recordAgentRun(
+      buildRunRecord({
+        runId: queued.run_id,
+        cycleKind: "agentic_strategy",
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        sessionId,
+        model: MODEL,
+        runtimeContext,
+        toolCalls,
+        structuredOutput: null,
+        totalCostUsd,
+        failureReason,
+        completion,
+        request: JSON.parse(JSON.stringify(queued.request)) as JsonValue,
+      })
+    );
+  }
+}
+
 async function runScanCycle(): Promise<void> {
+  const runId = newRunId();
   const timestamp = new Date().toISOString();
+  const toolCalls: AgentToolCallRecord[] = [];
+  let sessionId: string | null = null;
+  let totalCostUsd: number | null = null;
+  let failureReason: string | null = null;
+  let resultOutput: unknown = null;
+  let completion: AgentTaskCompletion | null = null;
+  const runtimeContext = await buildRuntimeContext();
   console.log(`\n[${timestamp}] Starting scan cycle (model=${MODEL}, dry_run=${DRY_RUN})`);
 
   try {
-    const runtimeContext = await buildRuntimeContext();
-    let resultOutput: unknown = null;
-
     for await (const message of query({
       prompt: `Current time: ${timestamp}
 
@@ -291,11 +492,18 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
           espn: espnServer,
           polymarket: polymarketServer,
           "ploy-backend": ployBackendServer,
+          research: researchServer,
+          "agent-runtime": agentRuntimeServer,
         },
         allowedTools: [
           "mcp__espn__*",
           "mcp__polymarket__*",
-          "mcp__ploy-backend__*",
+          "mcp__ploy-backend__get_system_status",
+          "mcp__ploy-backend__get_trading_state",
+          "mcp__ploy-backend__list_deployments",
+          "mcp__ploy-backend__get_deployment",
+          "mcp__research__*",
+          "mcp__agent-runtime__complete_task",
           "WebSearch",
           "WebFetch",
         ],
@@ -311,6 +519,7 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
       switch (message.type) {
         case "system":
           if (message.subtype === "init") {
+            sessionId = message.session_id ?? null;
             console.log(`  Session: ${message.session_id}`);
             const mcpStatus = (message as any).mcp_servers;
             if (mcpStatus) {
@@ -325,17 +534,29 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
           // Log tool calls for observability
           for (const block of message.message.content) {
             if ("name" in block) {
+              toolCalls.push({ name: String(block.name), status: "called" });
               console.log(`  Tool: ${block.name}`);
             }
           }
           break;
 
+        case "user": {
+          const reportedCompletion = completionFromMessage(message);
+          if (reportedCompletion) {
+            completion = reportedCompletion;
+            console.log(`  Task completion: ${completion.status}`);
+          }
+          break;
+        }
+
         case "result":
           if (message.subtype === "success") {
             resultOutput = (message as any).structured_output;
-            const cost = (message as any).total_cost_usd || 0;
+            totalCostUsd = (message as any).total_cost_usd ?? null;
+            const cost = totalCostUsd ?? 0;
             console.log(`  Completed. Cost: $${cost.toFixed(4)}`);
           } else {
+            failureReason = message.subtype;
             console.error(`  Scan failed: ${message.subtype}`);
           }
           break;
@@ -369,8 +590,33 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
       }
     }
   } catch (err) {
+    failureReason = err instanceof Error ? err.message : String(err);
     console.error(`  Error in scan cycle:`, err);
+  } finally {
+    await recordAgentRun(
+      buildRunRecord({
+        runId,
+        cycleKind: "research_oversight",
+        startedAt: timestamp,
+        finishedAt: new Date().toISOString(),
+        sessionId,
+        model: MODEL,
+        runtimeContext,
+        toolCalls,
+        structuredOutput: isStructuredOutput(resultOutput) ? resultOutput : null,
+        totalCostUsd,
+        failureReason,
+        completion,
+      })
+    );
   }
+}
+
+async function runSidecarCycle(): Promise<void> {
+  for (const request of await takeQueuedAgentRunRequests()) {
+    await runQueuedStrategyRequest(request);
+  }
+  await runScanCycle();
 }
 
 // ── Entry Point ─────────────────────────────────────
@@ -390,10 +636,10 @@ async function main() {
   console.log("");
 
   // Run first cycle immediately
-  await runScanCycle();
+  await runSidecarCycle();
 
   // Then run on interval
-  setInterval(runScanCycle, POLL_INTERVAL);
+  setInterval(runSidecarCycle, POLL_INTERVAL);
 }
 
 main().catch((err) => {
