@@ -6,7 +6,7 @@ import type {
   JsonValue,
 } from "../contracts/operator-contracts.js";
 import { agentRunsLogPath } from "./session-store.js";
-import { evaluateRun } from "./evaluator.js";
+import { evaluateAgentRunContract, evaluateRun, type ContractEvaluation } from "./evaluator.js";
 
 type RuntimeContext = {
   system: { status: string } | null;
@@ -54,11 +54,18 @@ export function buildRunRecord(params: {
   completion: AgentTaskCompletion | null;
   request?: JsonValue;
 }): AgentRunRecord {
-  const evaluation = params.structuredOutput ? evaluateRun(params.structuredOutput) : null;
+  const contractEvaluation = evaluateAgentRunContract({
+    request: params.request,
+    toolCalls: params.toolCalls,
+    completion: params.completion,
+    failureReason: params.failureReason,
+  });
+  const structuredEvaluation = params.structuredOutput ? evaluateRun(params.structuredOutput) : null;
+  const evaluation = contractEvaluation ?? structuredEvaluation;
   return {
     run_id: params.runId,
     cycle_kind: params.cycleKind,
-    status: runStatus(params),
+    status: runStatus(params, contractEvaluation),
     started_at: params.startedAt,
     finished_at: params.finishedAt,
     session_id: params.sessionId,
@@ -69,9 +76,9 @@ export function buildRunRecord(params: {
     oversight_playbook_count: params.runtimeContext.oversight_playbook?.length ?? 0,
     total_cost_usd: params.totalCostUsd,
     tool_calls: params.toolCalls,
-    research_reports: evaluation?.research_reports ?? 0,
-    oversight_alerts: evaluation?.oversight_alerts ?? 0,
-    operator_recommendations: evaluation?.operator_recommendations ?? 0,
+    research_reports: structuredEvaluation?.research_reports ?? 0,
+    oversight_alerts: structuredEvaluation?.oversight_alerts ?? 0,
+    operator_recommendations: structuredEvaluation?.operator_recommendations ?? 0,
     failure_reason: params.failureReason,
     runtime_context: {
       deployment_sample: summarizeDeploymentSample(params.runtimeContext),
@@ -80,8 +87,9 @@ export function buildRunRecord(params: {
       diagnostic_candidates: summarizeDiagnosticCandidates(params.runtimeContext),
       request: params.request ?? null,
     },
-    output_summary: params.structuredOutput || params.completion
+    output_summary: params.structuredOutput || params.completion || contractEvaluation
       ? {
+          contract_evaluation: contractEvaluation,
           task_completion: params.completion,
           research_report_summaries: params.structuredOutput
             ? summarizeResearchReports(params.structuredOutput)
@@ -102,8 +110,11 @@ function runStatus(params: {
   failureReason: string | null;
   completion: AgentTaskCompletion | null;
   finishedAt: string | null;
-}) {
+}, contractEvaluation?: ContractEvaluation | null) {
   if (params.failureReason) return "failed";
+  if (contractEvaluation?.status === "blocked") return "blocked";
+  if (contractEvaluation?.status === "needs_retry") return "needs_retry";
+  if (contractEvaluation?.status === "passed") return "succeeded";
   if (params.completion?.status === "blocked") return "blocked";
   if (params.completion?.status === "partial") return "partial";
   return params.finishedAt ? "succeeded" : "started";

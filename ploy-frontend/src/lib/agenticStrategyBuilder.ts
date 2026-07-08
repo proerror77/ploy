@@ -296,6 +296,13 @@ continue`;
 
 export function buildRunContract(form: BuilderForm) {
   const symbols = compactSymbols(form.symbols);
+  const sportsLike = form.family === 'sports' || form.family === 'grok-builder';
+  const requiresExecutableReplay =
+    form.target === 'executable_replay' || form.target === 'dry_run_candidate';
+  const requiresRuntimeParity = form.target === 'dry_run_candidate';
+  const requiresFullDepthClob =
+    requiresExecutableReplay &&
+    (form.family === 'pm5d' || form.family === 'market-making' || form.family === 'copy-trading');
   return `[agentic_strategy_run]
 profile = "${strategyProfiles[form.family]}"
 autonomy_mode = "${form.autonomy}"
@@ -316,19 +323,19 @@ run_backtest = true
 replay_deployment = true
 compare_configs = true
 check_oversight = true
-scoreboard = true
-game_details = true
-market_snapshot = true
-web_search = true
+scoreboard = ${sportsLike}
+game_details = ${sportsLike}
+market_snapshot = ${sportsLike || form.family === 'market-making'}
+web_search = ${sportsLike}
 submit_paper_intent = "approval_required"
 apply_deployment = "approval_required"
 
 [agentic_strategy_run.gates]
 requires_data_audit = true
 requires_grok_decision = ${form.family === 'grok-builder'}
-requires_executable_replay = true
-requires_full_depth_clob = true
-requires_runtime_parity = true
+requires_executable_replay = ${requiresExecutableReplay}
+requires_full_depth_clob = ${requiresFullDepthClob}
+requires_runtime_parity = ${requiresRuntimeParity}
 requires_operator_approval = true`;
 }
 

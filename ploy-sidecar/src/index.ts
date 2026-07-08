@@ -364,7 +364,7 @@ ${queued.request.run_packet}
 Run contract:
 ${queued.request.run_contract}
 
-Use automatic tools for platform reads, live game checks, market search, Grok/X-style web evidence, research replay/backtest, config comparison, and oversight checks. For Grok Builder profiles, inspect ESPN state first, search web/X context for injury or momentum evidence, and report grok_decision as trade, pass, or not_queried. Do not submit paper intents or apply deployments unless the request explicitly includes operator approval. Finish by calling complete_task.`,
+Use automatic tools for platform reads, live game checks, market search, Grok/X-style web evidence, research replay/backtest, config comparison, and oversight checks. For Grok Builder profiles, inspect ESPN state first, search web/X context for injury or momentum evidence, and report grok_decision as trade, pass, or not_queried. If the run contract requires grok_decision, the complete_task summary must include exactly one "grok_decision: trade", "grok_decision: pass", or "grok_decision: not_queried" line. Do not submit paper intents or apply deployments unless the request explicitly includes operator approval. Finish by calling complete_task.`,
       options: {
         model: MODEL,
         systemPrompt: `${SYSTEM_PROMPT}

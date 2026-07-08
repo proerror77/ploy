@@ -32,6 +32,16 @@ contracts, visible run creation, and sidecar-compatible run monitoring.
 
 ## Review
 
+- 2026-07-08: Tightened the Strategy Builder loop semantics with a deterministic
+  sidecar contract evaluator. Queued agent runs now evaluate `run_contract`
+  requirements against `complete_task`, tool calls, failure state, Grok decision
+  requirements, replay/runtime-parity gates, and approval-gated mutation calls.
+  The run record stores `contract_evaluation`, and unresolved contract checks
+  now surface as `needs_retry` / `blocked` instead of a generic successful
+  transcript. Builder-generated contracts now only require sports/Grok tools,
+  executable replay, full-depth CLOB, and runtime parity when the selected
+  strategy family and evidence target actually need them.
+
 - 2026-07-07: Integrated the trading-strategy Builder with a Grok Builder
   profile. The frontend Strategy Builder now exposes `Grok Builder / NBA
   comeback`, generates Grok/X evidence requirements in the run packet and
