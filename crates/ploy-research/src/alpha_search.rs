@@ -56,18 +56,55 @@ pub struct MctsSearchStateArtifact {
     pub mode: String,
     pub target: String,
     pub total_visits: usize,
+    #[serde(default)]
+    pub backpropagation_truncated_count: usize,
     pub nodes: Vec<MctsSearchStateNode>,
+    #[serde(default)]
+    pub subtree_frequencies: Vec<SubtreeFrequencyState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MctsSearchStateNode {
     pub factor_name: String,
+    #[serde(default)]
+    pub parent_name: Option<String>,
     pub visits: usize,
     pub total_reward: f64,
     pub best_reward: f64,
     pub last_reward: f64,
     pub selected_dimension: String,
     pub last_decision: String,
+}
+
+/// A durable, cross-run snapshot of previously-accepted factors grouped by
+/// root gene, sourced from the `factor_registry` table across all historical
+/// runs. This is the "Alpha Zoo" from the "Navigating the Alpha Jungle" paper:
+/// unlike Frequent-Subtree Avoidance (batch-local, current run only), this
+/// snapshot represents the full historical population a new candidate should
+/// be checked against for novelty.
+///
+/// Absence of a snapshot (`None`) must always mean "no penalty, no effect",
+/// mirroring how `AlphaSearchRuntimeFeedback` and `LlmPriorSpec` behave when
+/// not supplied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlphaZooSnapshot {
+    pub version: String,
+    pub target: String,
+    pub entries: Vec<AlphaZooEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlphaZooEntry {
+    pub root_gene: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtreeFrequencyState {
+    pub root_gene: String,
+    pub structural_signature: String,
+    pub depth: usize,
+    pub count: usize,
 }
 
 #[derive(Debug)]
@@ -148,6 +185,7 @@ struct CandidateExpression {
     source: &'static str,
     complexity: usize,
     root_gene: String,
+    structural_signature: String,
     expr: FactorExpr,
 }
 
@@ -156,6 +194,7 @@ struct RejectedExpression {
     name: String,
     target: Option<String>,
     root_gene: String,
+    structural_signature: String,
     reason: String,
     complexity: usize,
 }
@@ -184,6 +223,7 @@ struct TreeTraceNode {
 struct NodeMetric {
     id: String,
     factor_name: String,
+    parent_name: Option<String>,
     target: Option<String>,
     decision: String,
     reason: String,
@@ -191,6 +231,10 @@ struct NodeMetric {
     effectiveness: f64,
     stability: f64,
     diversity: f64,
+    alpha_zoo_novelty: f64,
+    simplicity: f64,
+    structural_novelty: f64,
+    diversity_penalty: f64,
     execution_cost: f64,
     event_uniqueness: f64,
     overfit_risk: f64,
@@ -208,6 +252,7 @@ struct NodeMetric {
     runtime_entry_signal_rate: Option<f64>,
     runtime_executable_edge_pass_rate: Option<f64>,
     runtime_pass_through_penalty: f64,
+    alpha_zoo_penalty: f64,
     monotonicity_score: f64,
     complexity: usize,
 }
@@ -215,6 +260,8 @@ struct NodeMetric {
 #[derive(Debug, Serialize)]
 struct AvoidedSubtree {
     root_gene: String,
+    structural_signature: String,
+    depth: usize,
     count: usize,
     action: &'static str,
     reason: &'static str,
@@ -364,6 +411,7 @@ pub fn write_alpha_search_artifacts_with_state(
         prior_state,
         None,
         None,
+        None,
     )
 }
 
@@ -376,6 +424,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
     prior_state: Option<&MctsSearchStateArtifact>,
     runtime_feedback: Option<&AlphaSearchRuntimeFeedback>,
     llm_prior: Option<&LlmPriorSpec>,
+    alpha_zoo: Option<&AlphaZooSnapshot>,
 ) -> Result<AlphaSearchArtifactSummary, AlphaSearchArtifactError> {
     let output_dir = output_root.as_ref().join(target);
     std::fs::create_dir_all(&output_dir)?;
@@ -458,6 +507,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
             source: candidate_source(&report.name),
             complexity: report.complexity,
             root_gene: root_gene(&report.expr),
+            structural_signature: structural_signature(&report.expr),
             expr: report.expr.clone(),
         })
         .collect::<Vec<_>>();
@@ -470,6 +520,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
             name: report.name.clone(),
             target: report.target.clone(),
             root_gene: root_gene(&report.expr),
+            structural_signature: structural_signature(&report.expr),
             reason: report.reason.clone(),
             complexity: report.complexity,
         })
@@ -477,17 +528,39 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
     write_json(&output_dir.join("rejected-expressions.json"), &rejected)?;
 
     let runtime_avoidances = runtime_avoidances(runtime_feedback, llm_prior);
+    let subtree_frequencies = subtree_frequency_state(target, reports, prior_state, llm_prior);
     let node_metrics = reports
         .iter()
         .enumerate()
-        .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances))
+        .map(|(idx, report)| {
+            node_metric(
+                idx,
+                report,
+                &runtime_avoidances,
+                alpha_zoo,
+                &subtree_frequencies,
+            )
+        })
         .collect::<Vec<_>>();
     write_json(&output_dir.join("node-metrics.json"), &node_metrics)?;
     write_json(
         &output_dir.join("factor-registry-preview.json"),
         &factor_registry_preview_artifact(target, reports, &node_metrics)?,
     )?;
-    let mcts_state = mcts_search_state(target, &node_metrics, prior_state);
+    let mcts_state = mcts_search_state(target, &node_metrics, prior_state, subtree_frequencies);
+    let prior_truncated_count = prior_state
+        .filter(|state| state.target == target)
+        .map(|state| state.backpropagation_truncated_count)
+        .unwrap_or_default();
+    let new_truncated_count = mcts_state
+        .backpropagation_truncated_count
+        .saturating_sub(prior_truncated_count);
+    if new_truncated_count > 0 {
+        eprintln!(
+            "alpha-search warning: MCTS backpropagation truncated {} new time(s) for target `{}` ({} cumulative); inspect parent_name lineage for cycles or impossible depth.",
+            new_truncated_count, target, mcts_state.backpropagation_truncated_count
+        );
+    }
     write_json(&output_dir.join("mcts-state.json"), &mcts_state)?;
     write_json(
         &output_dir.join("mcts-expansion-plan.json"),
@@ -505,11 +578,16 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
                 .enumerate()
                 .map(|(idx, report)| TreeTraceNode {
                     id: format!("node-{idx}"),
-                    parent: None,
+                    parent: report.parent_name.clone(),
                     factor_name: report.name.clone(),
                     mutation: "seed",
                     selected_dimension: selected_dimension(report, &runtime_avoidances),
-                    reward: reward(report, &runtime_avoidances),
+                    reward: reward(
+                        report,
+                        &runtime_avoidances,
+                        alpha_zoo,
+                        &mcts_state.subtree_frequencies,
+                    ),
                     visits: 1,
                     decision: report.decision.as_str().to_string(),
                 })
@@ -519,7 +597,7 @@ pub fn write_alpha_search_artifacts_with_state_and_runtime_feedback(
 
     write_json(
         &output_dir.join("avoided-subtrees.json"),
-        &avoided_subtrees(reports),
+        &avoided_subtrees(&mcts_state.subtree_frequencies),
     )?;
 
     let best = node_metrics
@@ -1044,21 +1122,35 @@ fn node_metric(
     idx: usize,
     report: &AutoFactorReport,
     runtime_avoidances: &[RuntimeAvoidance],
+    alpha_zoo: Option<&AlphaZooSnapshot>,
+    subtree_frequencies: &[SubtreeFrequencyState],
 ) -> NodeMetric {
     let matching_avoidance = matching_runtime_avoidance(report, runtime_avoidances);
+    let simplicity = 1.0 / report.complexity.max(1) as f64;
+    let structural_novelty = structural_novelty_score(&report.expr, subtree_frequencies);
+    let diversity_penalty = structural_diversity_penalty(&report.expr, subtree_frequencies);
     NodeMetric {
         id: format!("node-{idx}"),
         factor_name: report.name.clone(),
+        parent_name: report.parent_name.clone(),
         target: report.target.clone(),
         decision: report.decision.as_str().to_string(),
         reason: report.reason.clone(),
         selected_dimension: selected_dimension(report, runtime_avoidances),
         effectiveness: normalized_positive(report.top_bucket_avg_label),
         stability: report.positive_window_ratio.clamp(0.0, 1.0),
-        diversity: 1.0 / report.complexity.max(1) as f64,
+        diversity: structural_novelty,
+        alpha_zoo_novelty: alpha_zoo_novelty_score(
+            &report.expr,
+            report.target.as_deref(),
+            alpha_zoo,
+        ),
+        simplicity,
+        structural_novelty,
+        diversity_penalty,
         execution_cost: execution_score(report),
         event_uniqueness: event_uniqueness_score(report),
-        overfit_risk: 1.0 / report.complexity.max(1) as f64,
+        overfit_risk: simplicity,
         runtime_readiness: if report.name.starts_with("auto_settlement_")
             || report.name == "amplitude_weighted_momentum_30s_sigma"
         {
@@ -1066,7 +1158,7 @@ fn node_metric(
         } else {
             0.5
         },
-        reward: reward(report, runtime_avoidances),
+        reward: reward(report, runtime_avoidances, alpha_zoo, subtree_frequencies),
         spearman_ic: finite_or_zero(report.spearman_ic),
         icir: finite_or_zero(report.icir),
         positive_window_ratio: finite_or_zero(report.positive_window_ratio),
@@ -1085,6 +1177,11 @@ fn node_metric(
         runtime_executable_edge_pass_rate: matching_avoidance
             .and_then(|avoidance| avoidance.executable_edge_pass_rate),
         runtime_pass_through_penalty: runtime_pass_through_penalty(report, runtime_avoidances),
+        alpha_zoo_penalty: alpha_zoo_novelty_penalty(
+            &report.expr,
+            report.target.as_deref(),
+            alpha_zoo,
+        ),
         monotonicity_score: finite_or_zero(report.monotonicity_score),
         complexity: report.complexity,
     }
@@ -1094,6 +1191,7 @@ fn mcts_search_state(
     target: &str,
     metrics: &[NodeMetric],
     prior_state: Option<&MctsSearchStateArtifact>,
+    subtree_frequencies: Vec<SubtreeFrequencyState>,
 ) -> MctsSearchStateArtifact {
     let mut nodes = prior_state
         .filter(|state| state.target == target)
@@ -1107,10 +1205,11 @@ fn mcts_search_state(
         .unwrap_or_default();
 
     for metric in metrics {
-        let mut node = nodes
-            .remove(&metric.factor_name)
-            .unwrap_or_else(|| MctsSearchStateNode {
+        let node = nodes
+            .entry(metric.factor_name.clone())
+            .or_insert_with(|| MctsSearchStateNode {
                 factor_name: metric.factor_name.clone(),
+                parent_name: metric.parent_name.clone(),
                 visits: 0,
                 total_reward: 0.0,
                 best_reward: f64::NEG_INFINITY,
@@ -1118,13 +1217,27 @@ fn mcts_search_state(
                 selected_dimension: metric.selected_dimension.clone(),
                 last_decision: metric.decision.clone(),
             });
+        node.parent_name = metric.parent_name.clone();
+    }
+
+    let mut backpropagation_truncated_count = prior_state
+        .filter(|state| state.target == target)
+        .map(|state| state.backpropagation_truncated_count)
+        .unwrap_or_default();
+
+    for metric in metrics {
+        let Some(node) = nodes.get_mut(&metric.factor_name) else {
+            continue;
+        };
         node.visits = node.visits.saturating_add(1);
         node.total_reward += metric.reward;
         node.best_reward = node.best_reward.max(metric.reward);
         node.last_reward = metric.reward;
         node.selected_dimension = metric.selected_dimension.clone();
         node.last_decision = metric.decision.clone();
-        nodes.insert(node.factor_name.clone(), node);
+        if backpropagate(&mut nodes, &metric.factor_name, metric.reward) {
+            backpropagation_truncated_count = backpropagation_truncated_count.saturating_add(1);
+        }
     }
 
     let mut nodes = nodes.into_values().collect::<Vec<_>>();
@@ -1135,8 +1248,39 @@ fn mcts_search_state(
         mode: "cumulative_ucb_state".to_string(),
         target: target.to_string(),
         total_visits,
+        backpropagation_truncated_count,
         nodes,
+        subtree_frequencies,
     }
+}
+
+fn backpropagate(
+    nodes: &mut BTreeMap<String, MctsSearchStateNode>,
+    leaf_name: &str,
+    reward: f64,
+) -> bool {
+    let mut current = leaf_name.to_string();
+    let mut visited = BTreeSet::new();
+    let max_hops = nodes.len().max(1);
+    for _ in 0..max_hops {
+        if !visited.insert(current.clone()) {
+            return true;
+        }
+        let Some(parent_name) = nodes
+            .get(&current)
+            .and_then(|node| node.parent_name.clone())
+        else {
+            return false;
+        };
+        let Some(parent) = nodes.get_mut(&parent_name) else {
+            return false;
+        };
+        parent.visits = parent.visits.saturating_add(1);
+        parent.total_reward += reward;
+        parent.best_reward = parent.best_reward.max(reward);
+        current = parent_name;
+    }
+    true
 }
 
 fn mcts_expansion_plan(
@@ -1182,7 +1326,7 @@ fn mcts_expansion_plan(
         target: target.to_string(),
         exploration_weight,
         selected_nodes: selected,
-        note: "This is the first MCTS control artifact. It selects branches for the next search run from node metrics, but does not yet execute multi-run backpropagation.",
+        note: "MCTS state accumulates leaf visits and backpropagates leaf rewards through recorded parent lineage; this plan selects branches for the next bounded search run with UCB priority.",
     }
 }
 
@@ -1201,7 +1345,12 @@ fn proposed_mutation(selected_dimension: &str) -> &'static str {
     }
 }
 
-fn reward(report: &AutoFactorReport, runtime_avoidances: &[RuntimeAvoidance]) -> f64 {
+fn reward(
+    report: &AutoFactorReport,
+    runtime_avoidances: &[RuntimeAvoidance],
+    alpha_zoo: Option<&AlphaZooSnapshot>,
+    subtree_frequencies: &[SubtreeFrequencyState],
+) -> f64 {
     let decision_bonus = match report.decision {
         AutoFactorDecision::Candidate => 1.0,
         AutoFactorDecision::Watchlist => 0.25,
@@ -1218,6 +1367,8 @@ fn reward(report: &AutoFactorReport, runtime_avoidances: &[RuntimeAvoidance]) ->
         - event_decision_penalty(report)
         - execution_penalty(report)
         - runtime_pass_through_penalty(report, runtime_avoidances)
+        - alpha_zoo_novelty_penalty(&report.expr, report.target.as_deref(), alpha_zoo)
+        - structural_diversity_penalty(&report.expr, subtree_frequencies)
         - (report.complexity as f64 / 32.0)
 }
 
@@ -1322,24 +1473,259 @@ fn selected_dimension(
     .to_string()
 }
 
-fn avoided_subtrees(reports: &[AutoFactorReport]) -> Vec<AvoidedSubtree> {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+fn subtree_frequency_state(
+    target: &str,
+    reports: &[AutoFactorReport],
+    prior_state: Option<&MctsSearchStateArtifact>,
+    llm_prior: Option<&LlmPriorSpec>,
+) -> Vec<SubtreeFrequencyState> {
+    let mut counts: BTreeMap<String, StructuralSubtreeCount> = prior_state
+        .filter(|state| state.target == target)
+        .map(|state| {
+            state
+                .subtree_frequencies
+                .iter()
+                .map(|item| {
+                    (
+                        item.structural_signature.clone(),
+                        StructuralSubtreeCount {
+                            root_gene: item.root_gene.clone(),
+                            depth: item.depth,
+                            count: item.count,
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     for report in reports {
-        *counts.entry(root_gene(&report.expr)).or_default() += 1;
+        record_subtree_count(&mut counts, &report.expr);
+        for subtree in inner_structural_subtrees(&report.expr) {
+            record_subtree_count(&mut counts, subtree);
+        }
     }
+
+    if let Some(prior) = llm_prior {
+        for item in &prior.structural_avoid_signatures {
+            let signature = item.structural_signature.trim();
+            if signature.is_empty() {
+                continue;
+            }
+            let entry =
+                counts
+                    .entry(signature.to_string())
+                    .or_insert_with(|| StructuralSubtreeCount {
+                        root_gene: item.root_gene.clone().unwrap_or_default(),
+                        depth: 0,
+                        count: 0,
+                    });
+            if entry.root_gene.is_empty() {
+                entry.root_gene = item.root_gene.clone().unwrap_or_default();
+            }
+            entry.count = entry.count.max(item.count.max(3));
+        }
+    }
+
     counts
         .into_iter()
-        .filter(|(_, count)| *count > 2)
-        .map(|(root_gene, count)| AvoidedSubtree {
-            root_gene,
-            count,
-            action: "penalize",
-            reason: "root_gene_crowding",
+        .map(|(structural_signature, item)| SubtreeFrequencyState {
+            root_gene: item.root_gene,
+            structural_signature,
+            depth: item.depth,
+            count: item.count,
         })
         .collect()
 }
 
-fn root_gene(expr: &FactorExpr) -> String {
+fn avoided_subtrees(frequencies: &[SubtreeFrequencyState]) -> Vec<AvoidedSubtree> {
+    frequencies
+        .iter()
+        .filter(|item| item.count > 2)
+        .map(|item| AvoidedSubtree {
+            root_gene: item.root_gene.clone(),
+            structural_signature: item.structural_signature.clone(),
+            depth: item.depth,
+            count: item.count,
+            action: "penalize",
+            reason: "structural_signature_crowding",
+        })
+        .collect()
+}
+
+#[derive(Debug, Default)]
+struct StructuralSubtreeCount {
+    root_gene: String,
+    depth: usize,
+    count: usize,
+}
+
+fn record_subtree_count(counts: &mut BTreeMap<String, StructuralSubtreeCount>, expr: &FactorExpr) {
+    let signature = structural_signature(expr);
+    let entry = counts
+        .entry(signature)
+        .or_insert_with(|| StructuralSubtreeCount {
+            root_gene: root_gene(expr),
+            depth: structural_depth(expr),
+            count: 0,
+        });
+    entry.count = entry.count.saturating_add(1);
+}
+
+fn structural_diversity_penalty(expr: &FactorExpr, frequencies: &[SubtreeFrequencyState]) -> f64 {
+    let max_count = max_structural_frequency(expr, frequencies);
+    if max_count <= 2 {
+        0.0
+    } else {
+        ((max_count - 2) as f64 * 0.35).min(2.0)
+    }
+}
+
+fn structural_novelty_score(expr: &FactorExpr, frequencies: &[SubtreeFrequencyState]) -> f64 {
+    1.0 / max_structural_frequency(expr, frequencies).max(1) as f64
+}
+
+fn max_structural_frequency(expr: &FactorExpr, frequencies: &[SubtreeFrequencyState]) -> usize {
+    let signatures = structural_signatures(expr);
+    frequencies
+        .iter()
+        .filter(|item| signatures.contains(&item.structural_signature))
+        .map(|item| item.count)
+        .max()
+        .unwrap_or(1)
+}
+
+fn structural_signatures(expr: &FactorExpr) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    out.insert(structural_signature(expr));
+    for subtree in inner_structural_subtrees(expr) {
+        out.insert(structural_signature(subtree));
+    }
+    out
+}
+
+fn structural_signature(expr: &FactorExpr) -> String {
+    match expr {
+        FactorExpr::Input(name) => format!("Input({name})"),
+        FactorExpr::Const(_) => "Const(_)".to_string(),
+        FactorExpr::Add(lhs, rhs) => commutative_signature("Add", lhs, rhs),
+        FactorExpr::Sub(lhs, rhs) => {
+            format!(
+                "Sub({},{})",
+                structural_signature(lhs),
+                structural_signature(rhs)
+            )
+        }
+        FactorExpr::Mul(lhs, rhs) => commutative_signature("Mul", lhs, rhs),
+        FactorExpr::SafeDiv(lhs, rhs) => {
+            format!(
+                "SafeDiv({},{})",
+                structural_signature(lhs),
+                structural_signature(rhs)
+            )
+        }
+        FactorExpr::Max(lhs, rhs) => commutative_signature("Max", lhs, rhs),
+        FactorExpr::Min(lhs, rhs) => commutative_signature("Min", lhs, rhs),
+        FactorExpr::Tanh(inner) => format!("Tanh({})", structural_signature(inner)),
+        FactorExpr::Log1pAbs(inner) => format!("Log1pAbs({})", structural_signature(inner)),
+        FactorExpr::SqrtAbs(inner) => format!("SqrtAbs({})", structural_signature(inner)),
+        FactorExpr::Clip { expr, .. } => format!("Clip(_,_,{})", structural_signature(expr)),
+        FactorExpr::Delta { expr, .. } => format!("Delta(_,{})", structural_signature(expr)),
+        FactorExpr::RollingMean { expr, .. } => {
+            format!("RollingMean(_,{})", structural_signature(expr))
+        }
+        FactorExpr::RollingStd { expr, .. } => {
+            format!("RollingStd(_,{})", structural_signature(expr))
+        }
+        FactorExpr::ZScore { expr, .. } => format!("ZScore(_,{})", structural_signature(expr)),
+        FactorExpr::Gate { expr, gate, .. } => {
+            format!(
+                "Gate(_,{},{})",
+                structural_signature(expr),
+                structural_signature(gate)
+            )
+        }
+    }
+}
+
+fn commutative_signature(op: &str, lhs: &FactorExpr, rhs: &FactorExpr) -> String {
+    let mut children = [structural_signature(lhs), structural_signature(rhs)];
+    children.sort();
+    format!("{op}({},{})", children[0], children[1])
+}
+
+fn inner_structural_subtrees(expr: &FactorExpr) -> Vec<&FactorExpr> {
+    let mut out = Vec::new();
+    collect_inner_structural_subtrees(expr, false, &mut out);
+    out
+}
+
+fn collect_inner_structural_subtrees<'a>(
+    expr: &'a FactorExpr,
+    include_current: bool,
+    out: &mut Vec<&'a FactorExpr>,
+) {
+    if include_current && structural_depth(expr) >= 2 {
+        out.push(expr);
+    }
+    match expr {
+        FactorExpr::Input(_) | FactorExpr::Const(_) => {}
+        FactorExpr::Add(lhs, rhs)
+        | FactorExpr::Sub(lhs, rhs)
+        | FactorExpr::Mul(lhs, rhs)
+        | FactorExpr::SafeDiv(lhs, rhs)
+        | FactorExpr::Max(lhs, rhs)
+        | FactorExpr::Min(lhs, rhs) => {
+            collect_inner_structural_subtrees(lhs, true, out);
+            collect_inner_structural_subtrees(rhs, true, out);
+        }
+        FactorExpr::Tanh(inner)
+        | FactorExpr::Log1pAbs(inner)
+        | FactorExpr::SqrtAbs(inner)
+        | FactorExpr::Clip { expr: inner, .. }
+        | FactorExpr::Delta { expr: inner, .. }
+        | FactorExpr::RollingMean { expr: inner, .. }
+        | FactorExpr::RollingStd { expr: inner, .. }
+        | FactorExpr::ZScore { expr: inner, .. } => {
+            collect_inner_structural_subtrees(inner, true, out);
+        }
+        FactorExpr::Gate { expr, gate, .. } => {
+            collect_inner_structural_subtrees(expr, true, out);
+            collect_inner_structural_subtrees(gate, true, out);
+        }
+    }
+}
+
+fn structural_depth(expr: &FactorExpr) -> usize {
+    match expr {
+        FactorExpr::Input(_) | FactorExpr::Const(_) => 1,
+        FactorExpr::Add(lhs, rhs)
+        | FactorExpr::Sub(lhs, rhs)
+        | FactorExpr::Mul(lhs, rhs)
+        | FactorExpr::SafeDiv(lhs, rhs)
+        | FactorExpr::Max(lhs, rhs)
+        | FactorExpr::Min(lhs, rhs) => 1 + structural_depth(lhs).max(structural_depth(rhs)),
+        FactorExpr::Tanh(inner)
+        | FactorExpr::Log1pAbs(inner)
+        | FactorExpr::SqrtAbs(inner)
+        | FactorExpr::Clip { expr: inner, .. }
+        | FactorExpr::Delta { expr: inner, .. }
+        | FactorExpr::RollingMean { expr: inner, .. }
+        | FactorExpr::RollingStd { expr: inner, .. }
+        | FactorExpr::ZScore { expr: inner, .. } => 1 + structural_depth(inner),
+        FactorExpr::Gate { expr, gate, .. } => {
+            1 + structural_depth(expr).max(structural_depth(gate))
+        }
+    }
+}
+
+/// Coarse root-operator-only structural fingerprint, shared by both the
+/// batch-local Frequent-Subtree Avoidance path (`avoided_subtrees`) and the
+/// cross-run Alpha Zoo grouping in `examples/persist_research_trace.rs`, so
+/// both diversity controls agree on what counts as "the same shape". Exported
+/// so callers outside this module (e.g. the `factor_registry` export path)
+/// can group historical rows the same way without duplicating this logic.
+pub fn root_gene(expr: &FactorExpr) -> String {
     match expr {
         FactorExpr::Input(_) => "Input",
         FactorExpr::Const(_) => "Const",
@@ -1360,6 +1746,77 @@ fn root_gene(expr: &FactorExpr) -> String {
         FactorExpr::Gate { .. } => "Gate",
     }
     .to_string()
+}
+
+/// Look up how many historically-accepted factors (across all runs, sourced
+/// from the durable `factor_registry` table) share this candidate's root
+/// gene. Returns `None` when there is no Alpha Zoo snapshot, the snapshot was
+/// exported for a different search target, or there is no matching entry.
+///
+/// The `target` check matters because reprice and settlement targets have
+/// unrelated factor populations: a snapshot exported for
+/// `full_depth_settlement_executable_pnl` must not penalize
+/// `full_depth_reprice_pnl_10s` candidates just because they share a root
+/// operator. Without this check, a caller that scores multiple targets with
+/// the same snapshot (see `factor_walk_forward_v2.rs`) would cross-contaminate
+/// unrelated target populations.
+///
+/// NOTE: this reuses the coarse root-operator-only `root_gene()` fingerprint
+/// on purpose. A finer-grained `structural_signature()` exists only in the
+/// still-unmerged Frequent-Subtree Avoidance PR; this can be upgraded to that
+/// signature once it lands on `main`.
+fn alpha_zoo_matching_count(
+    expr: &FactorExpr,
+    target: &str,
+    zoo: Option<&AlphaZooSnapshot>,
+) -> Option<usize> {
+    let zoo = zoo.filter(|zoo| zoo.target == target)?;
+    let gene = root_gene(expr);
+    zoo.entries
+        .iter()
+        .find(|entry| entry.root_gene == gene)
+        .map(|entry| entry.count)
+}
+
+/// Alpha Zoo novelty penalty: `0.0` (no-op) when there is no zoo snapshot, the
+/// snapshot targets a different search target, or the candidate has no
+/// target, mirroring how `AlphaSearchRuntimeFeedback` and `LlmPriorSpec`
+/// behave when absent. Otherwise, penalize candidates whose root gene is
+/// over-represented across ALL historical accepted factors for this target.
+///
+/// The threshold is `5`, higher than the batch-local Frequent-Subtree
+/// Avoidance threshold of `2` (see `avoided_subtrees` above), because the
+/// Alpha Zoo aggregates every historical run rather than just the current
+/// batch, so a much larger population of a single root gene is expected and
+/// tolerable before it counts as crowding.
+fn alpha_zoo_novelty_penalty(
+    expr: &FactorExpr,
+    target: Option<&str>,
+    zoo: Option<&AlphaZooSnapshot>,
+) -> f64 {
+    const ALPHA_ZOO_CROWDING_THRESHOLD: usize = 5;
+    match target.and_then(|target| alpha_zoo_matching_count(expr, target, zoo)) {
+        Some(count) if count > ALPHA_ZOO_CROWDING_THRESHOLD => {
+            ((count - ALPHA_ZOO_CROWDING_THRESHOLD) as f64 * 0.5).min(6.0)
+        }
+        _ => 0.0,
+    }
+}
+
+/// Normalized Alpha Zoo novelty score in `(0.0, 1.0]`: `1.0` when there is no
+/// zoo snapshot, the snapshot targets a different search target, the
+/// candidate has no target, or there is no matching root gene (maximally
+/// novel), otherwise `1.0 / count`, mirroring the shape of other normalized
+/// score helpers in this file (e.g. `diversity`, `overfit_risk`).
+fn alpha_zoo_novelty_score(
+    expr: &FactorExpr,
+    target: Option<&str>,
+    zoo: Option<&AlphaZooSnapshot>,
+) -> f64 {
+    match target.and_then(|target| alpha_zoo_matching_count(expr, target, zoo)) {
+        Some(count) => 1.0 / count.max(1) as f64,
+        None => 1.0,
+    }
 }
 
 fn normalized_positive(value: f64) -> f64 {
@@ -1584,7 +2041,189 @@ mod tests {
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
             reason: "passed".to_string(),
+            parent_name: None,
         }
+    }
+
+    #[test]
+    fn structural_signature_normalizes_commutative_operands() {
+        let lhs = FactorExpr::Add(
+            Box::new(FactorExpr::Input("near_strike_score".to_string())),
+            Box::new(FactorExpr::Mul(
+                Box::new(FactorExpr::Input("entry_capacity_score".to_string())),
+                Box::new(FactorExpr::Const(0.25)),
+            )),
+        );
+        let rhs = FactorExpr::Add(
+            Box::new(FactorExpr::Mul(
+                Box::new(FactorExpr::Const(0.25)),
+                Box::new(FactorExpr::Input("entry_capacity_score".to_string())),
+            )),
+            Box::new(FactorExpr::Input("near_strike_score".to_string())),
+        );
+
+        assert_eq!(structural_signature(&lhs), structural_signature(&rhs));
+    }
+
+    #[test]
+    fn structural_signature_normalizes_commutative_comparators() {
+        let lhs = FactorExpr::Max(
+            Box::new(FactorExpr::Input("near_strike_score".to_string())),
+            Box::new(FactorExpr::Min(
+                Box::new(FactorExpr::Input("entry_capacity_score".to_string())),
+                Box::new(FactorExpr::Const(0.25)),
+            )),
+        );
+        let rhs = FactorExpr::Max(
+            Box::new(FactorExpr::Min(
+                Box::new(FactorExpr::Const(0.25)),
+                Box::new(FactorExpr::Input("entry_capacity_score".to_string())),
+            )),
+            Box::new(FactorExpr::Input("near_strike_score".to_string())),
+        );
+
+        assert_eq!(structural_signature(&lhs), structural_signature(&rhs));
+    }
+
+    #[test]
+    fn structural_signature_abstracts_numeric_constants() {
+        let first = FactorExpr::SafeDiv(
+            Box::new(FactorExpr::Input(
+                "external_move_since_poly_update".to_string(),
+            )),
+            Box::new(FactorExpr::Const(0.01)),
+        );
+        let second = FactorExpr::SafeDiv(
+            Box::new(FactorExpr::Input(
+                "external_move_since_poly_update".to_string(),
+            )),
+            Box::new(FactorExpr::Const(0.05)),
+        );
+
+        assert_eq!(structural_signature(&first), structural_signature(&second));
+    }
+
+    #[test]
+    fn avoided_subtrees_counts_repeated_inner_structures() {
+        let inner = FactorExpr::SafeDiv(
+            Box::new(FactorExpr::Input(
+                "external_move_since_poly_update".to_string(),
+            )),
+            Box::new(FactorExpr::Add(
+                Box::new(FactorExpr::Input("pm_spread".to_string())),
+                Box::new(FactorExpr::Const(0.01)),
+            )),
+        );
+        let reports = vec![
+            AutoFactorReport {
+                name: "wrapped_tanh".to_string(),
+                expr: FactorExpr::Tanh(Box::new(inner.clone())),
+                complexity: 5,
+                ..sample_report("wrapped_tanh")
+            },
+            AutoFactorReport {
+                name: "wrapped_log".to_string(),
+                expr: FactorExpr::Log1pAbs(Box::new(inner.clone())),
+                complexity: 5,
+                ..sample_report("wrapped_log")
+            },
+            AutoFactorReport {
+                name: "wrapped_sqrt".to_string(),
+                expr: FactorExpr::SqrtAbs(Box::new(inner.clone())),
+                complexity: 5,
+                ..sample_report("wrapped_sqrt")
+            },
+        ];
+
+        let frequencies =
+            subtree_frequency_state("full_depth_settlement_executable_pnl", &reports, None, None);
+        let avoided = avoided_subtrees(&frequencies);
+        let inner_signature = structural_signature(&inner);
+        let subtree = avoided
+            .iter()
+            .find(|item| item.structural_signature == inner_signature)
+            .expect("shared inner subtree is crowded");
+
+        assert_eq!(subtree.root_gene, "SafeDiv");
+        assert_eq!(subtree.count, 3);
+        assert_eq!(subtree.reason, "structural_signature_crowding");
+    }
+
+    #[test]
+    fn subtree_frequencies_merge_prior_state_counts() {
+        let expr = FactorExpr::SafeDiv(
+            Box::new(FactorExpr::Input(
+                "external_move_since_poly_update".to_string(),
+            )),
+            Box::new(FactorExpr::Const(0.01)),
+        );
+        let report = AutoFactorReport {
+            name: "current_safe_div".to_string(),
+            expr: expr.clone(),
+            complexity: 3,
+            ..sample_report("current_safe_div")
+        };
+        let signature = structural_signature(&expr);
+        let prior = MctsSearchStateArtifact {
+            version: ALPHA_SEARCH_ARTIFACT_VERSION.to_string(),
+            mode: "cumulative_ucb_state".to_string(),
+            target: "full_depth_settlement_executable_pnl".to_string(),
+            total_visits: 0,
+            backpropagation_truncated_count: 0,
+            nodes: Vec::new(),
+            subtree_frequencies: vec![SubtreeFrequencyState {
+                root_gene: "SafeDiv".to_string(),
+                structural_signature: signature.clone(),
+                depth: structural_depth(&expr),
+                count: 2,
+            }],
+        };
+
+        let frequencies = subtree_frequency_state(
+            "full_depth_settlement_executable_pnl",
+            &[report],
+            Some(&prior),
+            None,
+        );
+        let item = frequencies
+            .iter()
+            .find(|item| item.structural_signature == signature)
+            .expect("merged signature");
+
+        assert_eq!(item.count, 3);
+    }
+
+    #[test]
+    fn crowded_signature_receives_reward_penalty() {
+        let expr = FactorExpr::SafeDiv(
+            Box::new(FactorExpr::Input(
+                "external_move_since_poly_update".to_string(),
+            )),
+            Box::new(FactorExpr::Const(0.01)),
+        );
+        let mut crowded = sample_report("crowded_safe_div");
+        crowded.expr = expr.clone();
+        crowded.complexity = 3;
+        let mut novel = sample_report("novel_tanh");
+        novel.expr = FactorExpr::Tanh(Box::new(FactorExpr::Input("near_strike_score".to_string())));
+        novel.complexity = 3;
+        let frequencies = vec![SubtreeFrequencyState {
+            root_gene: "SafeDiv".to_string(),
+            structural_signature: structural_signature(&expr),
+            depth: structural_depth(&expr),
+            count: 5,
+        }];
+        let runtime_avoidances = Vec::new();
+
+        assert!(
+            structural_diversity_penalty(&crowded.expr, &frequencies) > 0.0,
+            "crowded expression should be penalized"
+        );
+        assert!(
+            reward(&crowded, &runtime_avoidances, None, &frequencies)
+                < reward(&novel, &runtime_avoidances, None, &frequencies),
+            "same-quality crowded expression should rank below novel expression"
+        );
     }
 
     #[test]
@@ -1622,6 +2261,7 @@ mod tests {
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
             reason: "passed".to_string(),
+            parent_name: None,
         };
         let summary = write_alpha_search_artifacts(
             &tmp,
@@ -1901,14 +2541,17 @@ mod tests {
             complexity: 1,
             decision: AutoFactorDecision::Candidate,
             reason: "passed".to_string(),
+            parent_name: None,
         };
         let prior = MctsSearchStateArtifact {
             version: ALPHA_SEARCH_ARTIFACT_VERSION.to_string(),
             mode: "cumulative_ucb_state".to_string(),
             target: "full_depth_settlement_executable_pnl".to_string(),
             total_visits: 3,
+            backpropagation_truncated_count: 0,
             nodes: vec![MctsSearchStateNode {
                 factor_name: "auto_settlement_conservative_settlement_edge".to_string(),
+                parent_name: None,
                 visits: 3,
                 total_reward: 6.0,
                 best_reward: 2.0,
@@ -1916,6 +2559,7 @@ mod tests {
                 selected_dimension: "exploit".to_string(),
                 last_decision: "candidate".to_string(),
             }],
+            subtree_frequencies: Vec::new(),
         };
 
         write_alpha_search_artifacts_with_state(
@@ -1943,6 +2587,145 @@ mod tests {
     }
 
     #[test]
+    fn mcts_state_backpropagates_leaf_reward_to_ancestors() {
+        let runtime_avoidances = Vec::new();
+        let root = sample_report("root_factor");
+        let mut sibling = sample_report("sibling_factor");
+        sibling.top_bucket_avg_label = 0.15;
+        let mut child = sample_report("mut_root_factor_capacity");
+        child.parent_name = Some(root.name.clone());
+        child.top_bucket_avg_label = 0.30;
+        let mut grandchild = sample_report("mut2_root_factor_capacity_squashed");
+        grandchild.parent_name = Some(child.name.clone());
+        grandchild.top_bucket_avg_label = 0.40;
+
+        let reports = vec![root, sibling, child, grandchild];
+        let metrics = reports
+            .iter()
+            .enumerate()
+            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, None, &Vec::new()))
+            .collect::<Vec<_>>();
+        let reward_by_name = metrics
+            .iter()
+            .map(|metric| (metric.factor_name.as_str(), metric.reward))
+            .collect::<BTreeMap<_, _>>();
+        let state = mcts_search_state(
+            "full_depth_settlement_executable_pnl",
+            &metrics,
+            None,
+            Vec::new(),
+        );
+        let nodes = state
+            .nodes
+            .iter()
+            .map(|node| (node.factor_name.as_str(), node))
+            .collect::<BTreeMap<_, _>>();
+
+        let root_node = nodes.get("root_factor").expect("root node");
+        let child_node = nodes.get("mut_root_factor_capacity").expect("child node");
+        let grandchild_node = nodes
+            .get("mut2_root_factor_capacity_squashed")
+            .expect("grandchild node");
+        let sibling_node = nodes.get("sibling_factor").expect("sibling node");
+
+        assert_eq!(root_node.visits, 3);
+        assert_eq!(child_node.visits, 2);
+        assert_eq!(grandchild_node.visits, 1);
+        assert_eq!(sibling_node.visits, 1);
+        assert_eq!(
+            root_node.total_reward,
+            reward_by_name["root_factor"]
+                + reward_by_name["mut_root_factor_capacity"]
+                + reward_by_name["mut2_root_factor_capacity_squashed"]
+        );
+        assert_eq!(
+            child_node.total_reward,
+            reward_by_name["mut_root_factor_capacity"]
+                + reward_by_name["mut2_root_factor_capacity_squashed"]
+        );
+        assert_eq!(sibling_node.total_reward, reward_by_name["sibling_factor"]);
+    }
+
+    #[test]
+    fn mcts_state_backpropagates_through_long_lineage() {
+        let runtime_avoidances = Vec::new();
+        let mut reports = Vec::new();
+        for idx in 0..100 {
+            let mut report = sample_report(&format!("factor_{idx:03}"));
+            if idx > 0 {
+                report.parent_name = Some(format!("factor_{:03}", idx - 1));
+            }
+            report.top_bucket_avg_label = 0.20 + (idx as f64 * 0.001);
+            reports.push(report);
+        }
+
+        let metrics = reports
+            .iter()
+            .enumerate()
+            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances, None, &Vec::new()))
+            .collect::<Vec<_>>();
+        let expected_root_total = metrics.iter().map(|metric| metric.reward).sum::<f64>();
+        let state = mcts_search_state(
+            "full_depth_settlement_executable_pnl",
+            &metrics,
+            None,
+            Vec::new(),
+        );
+        let root = state
+            .nodes
+            .iter()
+            .find(|node| node.factor_name == "factor_000")
+            .expect("root node");
+
+        assert_eq!(state.backpropagation_truncated_count, 0);
+        assert_eq!(root.visits, 100);
+        assert!((root.total_reward - expected_root_total).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mcts_state_counts_cycle_truncated_backpropagation() {
+        let runtime_avoidances = Vec::new();
+        let mut report = sample_report("cycle_a");
+        report.parent_name = Some("cycle_b".to_string());
+        let metrics = [node_metric(
+            0,
+            &report,
+            &runtime_avoidances,
+            None,
+            &Vec::new(),
+        )];
+        let prior = MctsSearchStateArtifact {
+            version: ALPHA_SEARCH_ARTIFACT_VERSION.to_string(),
+            mode: "cumulative_ucb_state".to_string(),
+            target: "full_depth_settlement_executable_pnl".to_string(),
+            total_visits: 0,
+            backpropagation_truncated_count: 0,
+            nodes: vec![MctsSearchStateNode {
+                factor_name: "cycle_b".to_string(),
+                parent_name: Some("cycle_a".to_string()),
+                visits: 0,
+                total_reward: 0.0,
+                best_reward: f64::NEG_INFINITY,
+                last_reward: 0.0,
+                selected_dimension: "exploit".to_string(),
+                last_decision: "candidate".to_string(),
+            }],
+            subtree_frequencies: Vec::new(),
+        };
+
+        let state = mcts_search_state(
+            "full_depth_settlement_executable_pnl",
+            &metrics,
+            Some(&prior),
+            Vec::new(),
+        );
+
+        assert_eq!(state.backpropagation_truncated_count, 1);
+        assert!(state.nodes.iter().any(|node| node.factor_name == "cycle_a"));
+        assert!(state.nodes.iter().any(|node| node.factor_name == "cycle_b"));
+    }
+
+    #[test]
     fn repeated_event_candidate_ranks_below_one_event_candidate() {
         let mut repeated = sample_report("auto_settlement_high_raw_score_repeated_event");
         repeated.spearman_ic = 0.95;
@@ -1960,12 +2743,20 @@ mod tests {
 
         let reports = vec![repeated, one_event];
         let runtime_avoidances = Vec::new();
+        let subtree_frequencies = Vec::new();
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances))
+            .map(|(idx, report)| {
+                node_metric(idx, report, &runtime_avoidances, None, &subtree_frequencies)
+            })
             .collect::<Vec<_>>();
-        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let state = mcts_search_state(
+            "full_depth_settlement_executable_pnl",
+            &metrics,
+            None,
+            subtree_frequencies.clone(),
+        );
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
         assert_eq!(
@@ -1975,7 +2766,8 @@ mod tests {
             Some("auto_settlement_lower_raw_score_one_event")
         );
         assert!(
-            reward(&reports[0], &runtime_avoidances) < reward(&reports[1], &runtime_avoidances),
+            reward(&reports[0], &runtime_avoidances, None, &subtree_frequencies)
+                < reward(&reports[1], &runtime_avoidances, None, &subtree_frequencies),
             "repeated-event penalty should dominate raw IC/top-bucket strength"
         );
     }
@@ -2037,13 +2829,20 @@ mod tests {
             executable_edge_pass_min_edge: 5,
         };
         let runtime_avoidances = runtime_avoidances(Some(&feedback), None);
+        let subtree_frequencies = Vec::new();
 
         assert_eq!(
             selected_dimension(&collapsed, &runtime_avoidances),
             "runtime_executable_entry"
         );
         assert!(
-            reward(&collapsed, &runtime_avoidances) < reward(&alternative, &runtime_avoidances),
+            reward(&collapsed, &runtime_avoidances, None, &subtree_frequencies)
+                < reward(
+                    &alternative,
+                    &runtime_avoidances,
+                    None,
+                    &subtree_frequencies
+                ),
             "runtime pass-through collapse should dominate top-bucket reward"
         );
     }
@@ -2068,12 +2867,20 @@ mod tests {
         };
         let runtime_avoidances = runtime_avoidances(Some(&feedback), None);
         let reports = vec![collapsed, alternative];
+        let subtree_frequencies = Vec::new();
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, &runtime_avoidances))
+            .map(|(idx, report)| {
+                node_metric(idx, report, &runtime_avoidances, None, &subtree_frequencies)
+            })
             .collect::<Vec<_>>();
-        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let state = mcts_search_state(
+            "full_depth_settlement_executable_pnl",
+            &metrics,
+            None,
+            subtree_frequencies,
+        );
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
         assert!(
@@ -2107,6 +2914,7 @@ mod tests {
         let alternative = sample_report("auto_settlement_full_depth_settlement_edge_x_capacity");
         let prior = LlmPriorSpec {
             mutations: Vec::new(),
+            structural_avoid_signatures: Vec::new(),
             runtime_avoid_factors: vec![crate::autofactor::RuntimeAvoidFactorSpec {
                 base_factor: "mut_spread_adjusted_external_move_squashed".to_string(),
                 factor_family: Some("spread_adjusted_external_move".to_string()),
@@ -2119,12 +2927,20 @@ mod tests {
         };
         let prior_avoidances = runtime_avoidances(None, Some(&prior));
         let reports = vec![squashed, spread_adjusted, alternative];
+        let subtree_frequencies = Vec::new();
         let metrics = reports
             .iter()
             .enumerate()
-            .map(|(idx, report)| node_metric(idx, report, &prior_avoidances))
+            .map(|(idx, report)| {
+                node_metric(idx, report, &prior_avoidances, None, &subtree_frequencies)
+            })
             .collect::<Vec<_>>();
-        let state = mcts_search_state("full_depth_settlement_executable_pnl", &metrics, None);
+        let state = mcts_search_state(
+            "full_depth_settlement_executable_pnl",
+            &metrics,
+            None,
+            subtree_frequencies,
+        );
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
         assert!(
@@ -2144,6 +2960,7 @@ mod tests {
         );
         let composed_prior = LlmPriorSpec {
             mutations: Vec::new(),
+            structural_avoid_signatures: Vec::new(),
             runtime_avoid_factors: vec![crate::autofactor::RuntimeAvoidFactorSpec {
                 base_factor:
                     "mut_auto_settlement_model_full_depth_settlement_edge_x_external_pressure_spread_adjusted"
@@ -2176,6 +2993,7 @@ mod tests {
         );
         let selected_gate_prior = LlmPriorSpec {
             mutations: Vec::new(),
+            structural_avoid_signatures: Vec::new(),
             runtime_avoid_factors: vec![crate::autofactor::RuntimeAvoidFactorSpec {
                 base_factor:
                     "mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted"
@@ -2189,10 +3007,104 @@ mod tests {
                 metrics: serde_json::Value::Null,
             }],
         };
-        assert!(matching_runtime_avoidance(
-            &selected_gate_variant,
-            &runtime_avoidances(None, Some(&selected_gate_prior))
-        )
-        .is_some());
+        assert!(
+            matching_runtime_avoidance(
+                &selected_gate_variant,
+                &runtime_avoidances(None, Some(&selected_gate_prior))
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn alpha_zoo_crowded_root_gene_lowers_reward() {
+        let report = sample_report("auto_settlement_alpha_zoo_crowded_candidate");
+        let runtime_avoidances = Vec::new();
+        let baseline_reward = reward(&report, &runtime_avoidances, None, &Vec::new());
+
+        let zoo = AlphaZooSnapshot {
+            version: "alpha_zoo_v1".to_string(),
+            target: "full_depth_settlement_executable_pnl".to_string(),
+            entries: vec![AlphaZooEntry {
+                root_gene: root_gene(&report.expr),
+                count: 50,
+            }],
+        };
+        let penalized_reward = reward(&report, &runtime_avoidances, Some(&zoo), &Vec::new());
+
+        assert!(
+            penalized_reward < baseline_reward,
+            "a root gene crowded across all historical accepted factors should lower reward \
+             relative to the same report scored with no Alpha Zoo snapshot"
+        );
+        assert!(
+            alpha_zoo_novelty_penalty(&report.expr, report.target.as_deref(), Some(&zoo)) > 0.0
+        );
+    }
+
+    #[test]
+    fn alpha_zoo_snapshot_for_a_different_target_is_a_no_op() {
+        let report = sample_report("auto_settlement_alpha_zoo_cross_target_candidate");
+        let runtime_avoidances = Vec::new();
+        let baseline_reward = reward(&report, &runtime_avoidances, None, &Vec::new());
+
+        // The snapshot's root gene matches, but its `target` does not match
+        // this report's target. A snapshot exported for one search target
+        // (e.g. settlement) must never penalize candidates from an unrelated
+        // target (e.g. reprice) just because they share a root operator.
+        let zoo = AlphaZooSnapshot {
+            version: "alpha_zoo_v1".to_string(),
+            target: "full_depth_reprice_pnl_10s".to_string(),
+            entries: vec![AlphaZooEntry {
+                root_gene: root_gene(&report.expr),
+                count: 50,
+            }],
+        };
+        let reward_with_mismatched_zoo =
+            reward(&report, &runtime_avoidances, Some(&zoo), &Vec::new());
+
+        assert_eq!(
+            baseline_reward, reward_with_mismatched_zoo,
+            "a snapshot exported for a different target must not affect reward"
+        );
+        assert_eq!(
+            alpha_zoo_novelty_penalty(&report.expr, report.target.as_deref(), Some(&zoo)),
+            0.0
+        );
+        assert_eq!(
+            alpha_zoo_novelty_score(&report.expr, report.target.as_deref(), Some(&zoo)),
+            1.0
+        );
+    }
+
+    #[test]
+    fn alpha_zoo_absent_is_a_no_op_for_reward() {
+        let report = sample_report("auto_settlement_alpha_zoo_no_op_candidate");
+        let runtime_avoidances = Vec::new();
+
+        let reward_without_zoo = reward(&report, &runtime_avoidances, None, &Vec::new());
+
+        // An empty snapshot, and no snapshot at all, must be equivalent: absence
+        // of Alpha Zoo evidence should never change search behavior.
+        let empty_zoo = AlphaZooSnapshot {
+            version: "alpha_zoo_v1".to_string(),
+            target: "full_depth_settlement_executable_pnl".to_string(),
+            entries: Vec::new(),
+        };
+        let reward_with_empty_zoo =
+            reward(&report, &runtime_avoidances, Some(&empty_zoo), &Vec::new());
+
+        assert_eq!(
+            reward_without_zoo, reward_with_empty_zoo,
+            "omitting the Alpha Zoo snapshot must match an empty snapshot with no matching entries"
+        );
+        assert_eq!(
+            alpha_zoo_novelty_penalty(&report.expr, report.target.as_deref(), None),
+            0.0
+        );
+        assert_eq!(
+            alpha_zoo_novelty_score(&report.expr, report.target.as_deref(), None),
+            1.0
+        );
     }
 }

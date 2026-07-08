@@ -60,136 +60,6 @@ contracts, visible run creation, and sidecar-compatible run monitoring.
   headers can no longer be overwritten by `options.headers`, and LLM proposal
   validation rejects bools for numeric/window fields.
 
-- 2026-06-20: Closed the review blockers around `/builder`: `AgentRunRecord`
-  now matches nullable sidecar records, agent-run schemas generate shared
-  frontend/sidecar types, malformed run JSONL lines fail visibly instead of
-  disappearing, and `POST /api/agent/runs` queues an operator-gated strategy
-  run request while writing a monitor record. The sidecar now records normal
-  cycles, consumes queued Strategy Builder requests every cycle, exposes a
-  `complete_task` MCP tool, and keeps paper/live changes approval-gated. The
-  Builder page now calls the real create endpoint, uses generated contracts,
-  maps action parity to actual sidecar tools, deduplicates latest run monitor
-  rows through the backend, and moves model/artifact generation into
-  `agenticStrategyBuilder.ts`. Layout is responsive so mobile no longer gets
-  squeezed by the fixed sidebar. Validation passed: frontend build/lint,
-  frontend and sidecar contract checks, sidecar build, Rust schema snapshot
-  test, focused daemon-host agent-run tests, `rustfmt --check`, `rtk git diff
-  --check`, HTTP 200 readback for `/builder`, and desktop/mobile browser
-  screenshot review. Frontend build still reports existing Browserslist and
-  bundle-size warnings.
-
-# Current Session - Strategy Builder Agentic Automation Redesign (2026-06-20)
-
-Evidence stage: `diagnostic` frontend + control-plane product surface. Replace
-the manual strategy-builder feel with an agentic automation desk that shows the
-outcome request, agent loop, tool parity, completion signal, evidence gates,
-sidecar run visibility, and high-stakes approval boundary.
-
-## Files / Ownership
-
-- `ploy-frontend/src/pages/StrategyBuilder.tsx`
-  - Owner: agentic automation UI and deterministic automation packet preview.
-- `ploy-frontend/src/services/api.ts`
-  - Owner: expose existing control-plane agent-run read endpoints.
-- `ploy-frontend/src/types/index.ts`
-  - Owner: frontend type for control-plane agent run records.
-- `tasks/todo.md`
-  - Owner: session tracking and verification notes.
-
-## Tasks
-
-- [x] Redesign the page around an autonomous agent loop instead of a manual form.
-- [x] Surface tool/action parity and completion/approval gates explicitly.
-- [x] Read existing sidecar agent runs from `/api/agent/runs`.
-- [x] Preserve dry-run/live promotion safety semantics.
-- [x] Run frontend build, lint, browser verification, and record outcome.
-
-## Review
-
-- 2026-06-20: Reworked `/builder` from a manual strategy form into an
-  Agentic Strategy OS surface. The page now centers on one outcome prompt,
-  autonomy boundary, target evidence stage, agent loop, tool/action parity,
-  evidence gates, explicit `complete_task` completion semantics, artifact
-  previews, live sidecar agent-run visibility through `/api/agent/runs`, and
-  high-stakes approval boundaries for paper/dry-run/live actions. Live trading
-  remains locked; dry-run and paper-intent paths are represented as approval
-  gates, not automatic execution. Validation passed: `npm run build`,
-  `npm run lint`, `rtk git diff --check`, HTTP 200 readback for `/builder`,
-  Chrome render, accessibility snapshot, and screenshot review. Browser console
-  still shows expected React Router v7 future warnings and Vite-only backend
-  500s for auth/EventStream/agent-runs when `new-ployd` is not running behind
-  the dev server.
-
-# Current Session - Strategy Builder Visual Redesign (2026-06-20)
-
-Evidence stage: `diagnostic` frontend product surface. Redesign the builder
-screen after visual review feedback while keeping it as a gated draft surface,
-not a live execution path.
-
-## Files / Ownership
-
-- `ploy-frontend/src/pages/StrategyBuilder.tsx`
-  - Owner: visual redesign and interaction polish for the builder workspace.
-- `tasks/todo.md`
-  - Owner: session tracking and verification notes.
-
-## Tasks
-
-- [x] Replace the hero/card-heavy layout with an operator workbench layout.
-- [x] Preserve research issue / config preview generation and gate semantics.
-- [x] Run frontend build, lint, and browser verification.
-- [x] Record outcome.
-
-## Review
-
-- 2026-06-20: Reworked `/builder` into a light operator workbench with a
-  concise header, left-side strategy/data inputs, right-side evidence gate rail,
-  dark artifact previews, and a gated handoff section. The generated research
-  issue and TOML preview still stay draft-only: dry-run/live remain blocked by
-  replay, full-depth CLOB, parity, and manual approval gates. Validation passed:
-  `npm run build`, `npm run lint`, `rtk git diff --check`, Chrome render of
-  `http://127.0.0.1:5175/builder`, screenshot review, and HTTP 200 readback for
-  `/builder`. Browser console still shows expected React Router v7 future
-  warnings and Vite-only `/api/auth/session` / EventStream 500s because the
-  control-plane backend is not running behind the dev server.
-
-# Current Session - Strategy Builder Product Entry (2026-06-20)
-
-Evidence stage: `diagnostic` product surface. This adds the Horizon-style
-strategy-idea entrypoint while keeping promotion gated by the existing Ploy
-research, replay, dry-run, and live rules.
-
-## Files / Ownership
-
-- `ploy-frontend/src/pages/StrategyBuilder.tsx`
-  - Owner: natural-language strategy draft workspace and gated handoff previews.
-- `ploy-frontend/src/App.tsx`
-  - Owner: route registration for the builder page.
-- `ploy-frontend/src/components/Layout.tsx`
-  - Owner: sidebar navigation entry.
-- `tasks/todo.md`
-  - Owner: session tracking and verification notes.
-
-## Tasks
-
-- [x] Add the Strategy Builder frontend workspace.
-- [x] Wire the route and navigation entry.
-- [x] Run frontend type/build validation.
-- [x] Review diffs and record outcome.
-
-## Review
-
-- 2026-06-20: Added the frontend Strategy Builder entrypoint at `/builder`.
-  The page converts a natural-language strategy idea into a structured research
-  issue draft, config patch preview, required data surfaces, and a visible
-  idea -> contract -> evidence -> dry-run -> live gate track. The UI keeps
-  dry-run/live blocked until replay, parity, and operator approval gates pass.
-  Validation passed: `npm run build`, `npm run lint`, `rtk git diff --check`,
-  Chrome render of `http://127.0.0.1:5175/builder`, and HTTP 200 readback for
-  `/builder`. Browser console still shows expected control-plane/EventStream
-  500 errors because `new-ployd` is not running behind the Vite-only frontend
-  dev server.
-
 # Research Trace Plan Manager Workflow (2026-05-23)
 
 ## Current Session - Research Manager Fresh Runtime Candidate After Negative Replay (2026-05-28)
@@ -21895,40 +21765,33 @@ promotion gates, settlement, or runtime-parity contracts).
 
 ## Tasks
 
-- [ ] Stage 1: Add a canonical structural fingerprint
-      (`structural_signature(expr) -> String`) that normalizes commutative
-      operand order for `Add`/`Mul`, abstracts `Const` values to a placeholder
-      token, and produces both a whole-expression signature and depth>=2
-      inner sub-signatures. Keep `root_gene` for backward compatibility with
-      existing artifact readers.
-- [ ] Stage 1: Extend `AvoidedSubtree`/`avoided_subtrees()` to key crowding
-      counts by the new structural signature (multi-depth), not just the
-      top-level `root_gene`.
-- [ ] Stage 2: Persist crowding counts across chained hosted search runs
-      (reuse the existing `mcts-state.json` cross-run persistence pattern, or
-      add a sibling `subtree-frequency-state.json`) instead of recomputing
-      from a single run's batch only.
-- [ ] Stage 3: Wire a real `diversity_penalty` term into `reward()` driven by
-      persisted crowding counts. Split the currently-conflated `diversity`
-      field into clearly named `simplicity` (existing `1/complexity`) and
-      `structural_novelty` (new) fields on `NodeMetric`.
-- [ ] Stage 4: Feed the persisted crowded/forbidden signatures into
-      `llm-priors.json` generation in `scripts/alpha_search_closed_loop_agent.py`
-      so the next round's LLM prior actively avoids known-crowded shapes
-      instead of only being scored down after generation.
-- [ ] Update `docs/ALPHA_FACTOR_SEARCH_CICD.md` so the search-loop pseudocode
-      matches the implemented behavior.
-- [ ] Add Rust unit tests: commutative-reorder equivalence, constant
-      abstraction equivalence, reward delta between crowded vs novel
-      signatures.
-- [ ] Add Python test coverage for forbidden-structure prior injection.
-- [ ] Run focused validation: `cargo test -p ploy-research alpha_search --lib`,
-      `python3 -m unittest tests.test_alpha_search_closed_loop_agent`,
-      `rustfmt --edition 2024 --check crates/ploy-research/src/alpha_search.rs`,
-      `rtk git diff --check`.
-- [ ] Land as separate atomic PRs per stage (fingerprint+tests; reward
-      wiring+tests; closed-loop prior feedback+tests; docs), not one combined
-      commit.
+### Priority 1 — Alpha Zoo wiring
+
+- [x] Add `AlphaZooSnapshot` / `AlphaZooEntry` types and thread an optional
+      `alpha_zoo: Option<&AlphaZooSnapshot>` through
+      `write_alpha_search_artifacts_with_state_and_runtime_feedback`,
+      `node_metric()`, and `reward()`, so a crowded root gene across ALL
+      historical runs (not just the current batch) lowers reward, with no
+      effect when no snapshot is supplied.
+- [x] Add a DB-independent `group_factor_registry_rows_into_alpha_zoo_snapshot`
+      function in `persist_research_trace.rs`, plus a thin sqlx wrapper and an
+      `--export-alpha-zoo-snapshot` / `--alpha-zoo-snapshot-json` flag pair so
+      the snapshot flows from the durable `factor_registry` table into the
+      search loop.
+
+### Priority 2 — Full tree search (implemented)
+
+- [x] Stage A: thread explicit factor lineage through `NamedFactorExpr`,
+      `AutoFactorReport`, and `tree-trace.json` without changing reward or
+      ranking behavior.
+- [x] Stage B: extend cumulative MCTS state with `parent_name` and
+      backpropagate leaf rewards through ancestor nodes.
+- [x] Add focused lineage/backpropagation tests and run local validation.
+
+### Priority 3 — Deeper LLM-guided expansion (implemented)
+
+- [x] Explore LLM-proposed mutations beyond the current bounded typed-mutation
+      schema, still constrained to compile into existing `FactorExpr` nodes.
 
 ## Review
 
@@ -22337,9 +22200,24 @@ further action is needed beyond noting the decision in
       fails soft (prints a message, writes no output file), matching how
       the search path already degrades when
       `--alpha-search-llm-prior-json` is simply omitted.
-- [ ] Stage C: wire the real API call behind an opt-in flag + secret;
-      validate on one manual dispatch.
-- [ ] Stage D: docs + cost-accounting artifact.
+- [x] Stage C: wired real provider calls (`AnthropicLlmClient`,
+      `OpenAiLlmClient` in `scripts/alpha_search_llm_propose.py`) behind
+      `client_from_env()`, which returns `UnconfiguredLlmClient` (fail-soft)
+      unless `PLOY_RESEARCH_LLM_API_KEY` is set. Added `enable_llm_expansion`
+      (default `false`) / `llm_expansion_provider` / `llm_expansion_model` to
+      `factor-walk-forward-v2-hosted-artifact.yml`'s `options_json` schema and
+      a new "Propose LLM-driven alpha search mutations" step that calls the
+      script only when the flag is on and the secret resolves to a non-empty
+      value; otherwise it exits 0 and leaves the deterministic closed-loop
+      prior untouched. No GitHub secret was created and no real
+      `workflow_dispatch` was triggered in this pass — creating
+      `PLOY_RESEARCH_LLM_API_KEY` requires manual action by a repo admin, and
+      a real dispatch has real model-API cost; both are deferred to an
+      explicit follow-up decision rather than done silently here.
+- [x] Stage D: docs + cost-accounting artifact. Documented opt-in hosted CI
+      usage in `docs/ALPHA_FACTOR_SEARCH_CICD.md` and writes
+      `llm-expansion-usage.json` next to `next-llm-prior.json` when the real
+      provider returns token usage.
 
 ## Review
 
@@ -22371,3 +22249,114 @@ further action is needed beyond noting the decision in
   (72 tests, all pass), and `git diff --check`. No CI workflow, secret, or
   `docs/ALPHA_FACTOR_SEARCH_CICD.md` changes in this stage — Stage C is the
   first stage that touches CI plumbing.
+- 2026-07-05: Stage C implemented in a fresh worktree/branch
+  (`feat/llm-expansion-stage-c`, based on `origin/main` post-#729) because the
+  main checkout's working tree was stale relative to `origin/main` (missing
+  PR #729's `alpha_zoo_snapshot_json` field) and carried unrelated
+  in-progress user changes that should not be touched. Added
+  `AnthropicLlmClient` (direct Messages API call with a forced `tool_use`
+  matching a JSON schema generated from the same `ALLOWED_MUTATIONS`/
+  `REQUIRED_MUTATION_FIELDS` sets used by `validate_response()`, never a
+  hand-duplicated third copy) and `OpenAiLlmClient` (direct Responses API
+  call with `text.format.type: "json_schema"` + `strict: true`) to
+  `scripts/alpha_search_llm_propose.py`. Both call the provider's HTTP API
+  directly — never the Codex/Claude Code CLI, which is built for
+  interactive, locally-authenticated sessions and would be fragile to wire
+  into unattended CI. `client_from_env()` selects a client from
+  `PLOY_RESEARCH_LLM_API_KEY`/`PLOY_RESEARCH_LLM_PROVIDER`/
+  `PLOY_RESEARCH_LLM_MODEL` and returns `UnconfiguredLlmClient` (fail-soft)
+  when no key is set, so `main()`'s existing fail-soft handling covers the
+  unconfigured case without new logic. Structured-output enforcement is a
+  correctness aid, not a substitute for validation — `validate_response()`
+  still runs on whatever the provider returns, since schema-shape validity
+  doesn't guarantee semantic validity (e.g. a syntactically valid
+  `base_factor` that doesn't reference a real factor). Added 11 new tests
+  (`AnthropicLlmClientTests`, `OpenAiLlmClientTests`, `ClientFromEnvTests`),
+  all mocking `requests.post` — zero real network calls. Wired
+  `enable_llm_expansion` (default `false`) / `llm_expansion_provider` /
+  `llm_expansion_model` into `factor-walk-forward-v2-hosted-artifact.yml`'s
+  `options_json` defaults dict and `bool_keys` set (the existing generic
+  `WALK_{key.upper()}` env-var-emission loop picked up the three new keys
+  with no further code changes needed), and added a new "Propose LLM-driven
+  alpha search mutations" step placed after the existing deterministic
+  "Classify alpha search closed-loop action" step: it only overwrites
+  `next-llm-prior.json` when `enable_llm_expansion=true` and
+  `PLOY_RESEARCH_LLM_API_KEY` resolves to a non-empty secret; any other case
+  exits 0 and leaves the deterministic prior from the closed-loop agent
+  untouched, so LLM unavailability can never block the search path.
+  Deliberately not done in this pass: creating the actual
+  `PLOY_RESEARCH_LLM_API_KEY` GitHub secret (requires a repo admin, and the
+  value must never be chosen or seen by an agent) and triggering a real
+  `workflow_dispatch` with the flag on (real model-API cost) — both are
+  follow-up actions for a human to take deliberately, not something to do
+  silently while implementing the code path. Validation passed:
+  `python3 -m py_compile scripts/alpha_search_llm_propose.py
+  tests/test_alpha_search_llm_propose.py`, `python3 -m unittest
+  tests.test_alpha_search_llm_propose tests.test_alpha_search_closed_loop_agent
+  tests.test_factor_walk_forward_sweep` (85 tests, all pass), YAML syntax
+  check via `python3 -c "import yaml; yaml.safe_load(...)"`, `actionlint`
+  (clean, zero findings) against the full workflow file, and `git diff
+  --check`.
+- 2026-07-06: Closed the remaining PR review gaps after rebasing onto
+  `origin/main` post-#732. `alpha_search_llm_propose.py` now keeps artifact
+  loading inside the fail-soft boundary, leaves any deterministic prior
+  untouched when the model returns an empty mutation set, and records provider
+  usage in `llm-expansion-usage.json` when available. Added CLI happy-path,
+  empty-mutation, corrupt optional snapshot, and provider-usage tests.
+  Updated `docs/ALPHA_FACTOR_SEARCH_CICD.md` with the opt-in workflow usage
+  and current implemented status.
+- 2026-07-05: Priority 2 Stage A/B implemented. AutoFactor candidates and
+  reports now carry explicit `parent_name` lineage, `tree-trace.json` records
+  that parent, and `mcts-state.json` persists `parent_name` with
+  `serde(default)` for old artifacts. `mcts_search_state()` now seeds the
+  current batch into the cumulative node map before updating leaves, then
+  backpropagates each leaf reward through ancestor nodes with cycle/depth
+  guards. Validation passed: `rtk cargo check -p ploy-research --lib --tests`,
+  `rtk cargo test -p ploy-research alpha_search --lib`, `rtk cargo test -p
+  ploy-research autofactor --lib`, `rustfmt --edition 2024 --check
+  crates/ploy-research/src/alpha_search.rs crates/ploy-research/src/autofactor.rs`,
+  and `rtk git diff --check`.
+- 2026-07-05: Priority 3 implemented at the existing typed-prior boundary.
+  `remove_component` now compiles into a bounded `FactorExpr` ablation when a
+  prior names an existing feature, or unwraps a top-level robustness/gate
+  component when no feature is supplied. The closed-loop agent now emits an
+  existing feature for `overfit_risk -> remove_component` drafts, so generated
+  prior JSON stays compileable instead of becoming inert advice. This still
+  intentionally excludes direct live LLM API invocation inside CI.
+
+# MCTS Backpropagation Guardrails (2026-07-06)
+
+## Goal
+
+Remove the artificial fixed-depth cutoff from alpha-search MCTS reward
+backpropagation and make defensive truncation observable in `mcts-state.json`.
+
+Evidence stage: `factor_attribution` only. No promotion, dry-run, or live
+gates are touched.
+
+## Files / Ownership
+
+- `crates/ploy-research/src/alpha_search.rs`
+  - Owner: parent-chain backpropagation depth guard, truncation diagnostics, and
+    focused unit tests.
+- `docs/ALPHA_FACTOR_SEARCH_CICD.md`
+  - Owner: document the `backpropagation_truncated_count` artifact field.
+- `tasks/todo.md`
+  - Owner: current session tracking.
+
+## Tasks
+
+- [x] Replace the fixed `64` hop guard with a graph-size-bound guard using
+      `nodes.len().max(1)` while keeping cycle detection.
+- [x] Add `backpropagation_truncated_count` to `MctsSearchStateArtifact` with
+      `serde(default)` compatibility for old state artifacts.
+- [x] Warn in artifact generation when truncation count is non-zero.
+- [x] Add Rust coverage for a 100-node lineage and a synthetic cycle.
+- [x] Update docs and run focused validation.
+
+## Review
+
+- 2026-07-06: Implemented. Long acyclic lineage now backpropagates all the way
+  to the root instead of silently stopping at 64 hops. Cycle/max-hop defensive
+  stops increment `backpropagation_truncated_count`, and artifact generation
+  emits a warning when the count is non-zero.

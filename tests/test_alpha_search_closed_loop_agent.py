@@ -28,6 +28,7 @@ def artifact(
     promotion: dict | None = None,
     registry_preview: dict | None = None,
     candidate_strategy_replay: dict | None = None,
+    avoided_subtrees: list[dict] | None = None,
     write_feedback: bool = True,
 ) -> Path:
     factor_root = root / "factor-walk-forward-v2"
@@ -87,6 +88,8 @@ def artifact(
     )
     if registry_preview is not None:
         write_json(alpha_root / "factor-registry-preview.json", registry_preview)
+    if avoided_subtrees is not None:
+        write_json(alpha_root / "avoided-subtrees.json", avoided_subtrees)
     write_json(
         root / "alpha-search-chain" / "chain-decision.json",
         {
@@ -147,6 +150,26 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
             self.assertEqual(decision["decision"], "revise_prior")
             self.assertFalse(decision["allow_dispatch"])
             self.assertTrue(decision["prior_revision_required"])
+
+    def test_overfit_prior_remove_component_names_existing_feature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = artifact(
+                Path(tmp),
+                chain_reason="reward_stagnation",
+                selected_nodes=[
+                    {
+                        "factor_name": "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity",
+                        "selected_dimension": "overfit_risk",
+                        "proposed_mutation": "remove_component",
+                    }
+                ],
+            )
+            runs = [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            decision = agent.closed_loop_decision(runs)
+            prior = agent.build_prior(runs, decision, 1)
+
+            self.assertEqual(prior["mutations"][0]["mutation_type"], "remove_component")
+            self.assertEqual(prior["mutations"][0]["feature"], "near_strike_score")
 
     def test_high_rejection_generates_prior_from_selected_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1839,6 +1862,71 @@ class AlphaSearchClosedLoopAgentTest(unittest.TestCase):
                 prior["mutations"][0]["base_factor"],
                 "mut_spread_adjusted_external_move_squashed",
             )
+
+    def test_structural_avoid_signatures_enter_next_prior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            crowded_signature = "SafeDiv(Input(external_move_since_poly_update),Add(Const(_),Input(side_spread)))"
+            path = artifact(
+                Path(tmp),
+                chain_reason="reward_stagnation",
+                avoided_subtrees=[
+                    {
+                        "root_gene": "SafeDiv",
+                        "structural_signature": crowded_signature,
+                        "depth": 3,
+                        "count": 4,
+                        "action": "penalize",
+                        "reason": "structural_signature_crowding",
+                    }
+                ],
+            )
+
+            runs = [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            decision = agent.closed_loop_decision(runs)
+            prior = agent.build_prior(runs, decision, 3)
+
+            self.assertEqual(decision["decision"], "revise_prior")
+            self.assertEqual(
+                prior["structural_avoid_signatures"],
+                [
+                    {
+                        "structural_signature": crowded_signature,
+                        "root_gene": "SafeDiv",
+                        "count": 4,
+                        "reason": "structural_signature_crowding",
+                    }
+                ],
+            )
+
+    def test_prior_structural_avoid_signatures_carry_forward(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = artifact(Path(tmp), chain_reason="reward_stagnation")
+            write_json(
+                path
+                / "alpha-search-chain"
+                / "input-alpha-search-plan"
+                / "next-llm-prior.json",
+                {
+                    "structural_avoid_signatures": [
+                        {
+                            "structural_signature": "Mul(Input(a),Input(b))",
+                            "root_gene": "Mul",
+                            "count": 5,
+                            "reason": "structural_signature_crowding",
+                        }
+                    ]
+                },
+            )
+
+            runs = [agent.load_artifact(path, agent.DEFAULT_TARGET)]
+            decision = agent.closed_loop_decision(runs)
+            prior = agent.build_prior(runs, decision, 3)
+
+            self.assertEqual(
+                prior["structural_avoid_signatures"][0]["structural_signature"],
+                "Mul(Input(a),Input(b))",
+            )
+            self.assertEqual(prior["structural_avoid_signatures"][0]["count"], 5)
 
     def test_cli_markdown_includes_runtime_replay_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

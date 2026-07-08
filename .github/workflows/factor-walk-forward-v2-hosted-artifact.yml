@@ -34,7 +34,7 @@ on:
       options_json:
         description: "Advanced options JSON: walk windows, factor filters, event-complete gates, replay parity, promotion gate, durable trace persistence, optional issue/config handoff"
         required: false
-        default: '{"train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":"","pm_book_sample_secs":"","observation_sample_secs":"","max_quote_age_secs":"","top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","candidate_strategy_replay_json":"","candidate_strategy_replay_run_id":"","candidate_strategy_replay_artifact_name":"","full_depth_execution_surface_json":"","full_depth_execution_surface_run_id":"","full_depth_execution_surface_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":"","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"persist_research_trace":true,"dispatch_runtime_replay_requests":true,"strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
+        default: '{"train_window_days":2,"train_window_hours":"","test_window_days":1,"test_window_hours":"","step_days":1,"step_hours":"","lob_sample_secs":"","pm_book_sample_secs":"","observation_sample_secs":"","max_quote_age_secs":"","top_n":20,"min_observations":20,"top_quantile":0.2,"factor_name_filter":"","data_quality_mode":"event_complete","min_event_complete_events":20,"min_event_complete_rows":40,"replay_parity_json":"","replay_parity_run_id":"","replay_parity_artifact_name":"","candidate_strategy_replay_json":"","candidate_strategy_replay_run_id":"","candidate_strategy_replay_artifact_name":"","full_depth_execution_surface_json":"","full_depth_execution_surface_run_id":"","full_depth_execution_surface_artifact_name":"","alpha_search_plan_json":"","alpha_search_plan_run_id":"","alpha_search_plan_artifact_name":"","alpha_search_plan_target":"full_depth_settlement_executable_pnl","alpha_search_llm_prior_json":"","alpha_search_state_json":"","alpha_zoo_snapshot_json":"","alpha_search_min_reward_improvement":0.0,"chain_next_run":false,"chain_remaining":0,"required_strategy_profile":"settlement_probability","allowed_target":"full_depth_settlement_executable_pnl","issue_number":"","create_handoff_issue":false,"create_config_pr":false,"persist_research_trace":true,"dispatch_runtime_replay_requests":true,"enable_llm_expansion":false,"llm_expansion_provider":"anthropic","llm_expansion_model":"","strategy_config":"config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml","fail_if_blocked":false}'
       sweep_json:
         description: "Optional JSON array of walk-forward option overrides to run in one job after one download/build"
         required: false
@@ -113,6 +113,7 @@ jobs:
               "alpha_search_plan_target": "full_depth_settlement_executable_pnl",
               "alpha_search_llm_prior_json": "",
               "alpha_search_state_json": "",
+              "alpha_zoo_snapshot_json": "",
               "alpha_search_min_reward_improvement": "0.0",
               "chain_next_run": "false",
               "chain_remaining": "0",
@@ -123,10 +124,13 @@ jobs:
               "create_config_pr": "false",
               "persist_research_trace": "true",
               "dispatch_runtime_replay_requests": "true",
+              "enable_llm_expansion": "false",
+              "llm_expansion_provider": "anthropic",
+              "llm_expansion_model": "",
               "strategy_config": "config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
               "fail_if_blocked": "false",
           }
-          bool_keys = {"chain_next_run", "create_handoff_issue", "create_config_pr", "persist_research_trace", "dispatch_runtime_replay_requests", "fail_if_blocked", "require_deribit"}
+          bool_keys = {"chain_next_run", "create_handoff_issue", "create_config_pr", "persist_research_trace", "dispatch_runtime_replay_requests", "fail_if_blocked", "require_deribit", "enable_llm_expansion"}
           choices = {
               "report_suite": {"core", "full"},
               "data_quality_mode": {"strict_continuous", "event_complete"},
@@ -520,6 +524,9 @@ jobs:
           fi
           if [ -n "${alpha_search_state_json}" ]; then
             args+=(--alpha-search-state-json "${alpha_search_state_json}")
+          fi
+          if [ -n "${WALK_ALPHA_ZOO_SNAPSHOT_JSON}" ]; then
+            args+=(--alpha-zoo-snapshot-json "${WALK_ALPHA_ZOO_SNAPSHOT_JSON}")
           fi
           if [ -n "${WALK_ALPHA_SEARCH_LLM_PRIOR_JSON}" ]; then
             alpha_search_llm_prior_json="${WALK_ALPHA_SEARCH_LLM_PRIOR_JSON}"
@@ -1084,6 +1091,42 @@ jobs:
             --output-prior-json "${prior_path}"
           if [ -f "${prior_path}" ]; then
             echo "Generated closed-loop typed prior at ${prior_path}."
+          fi
+
+      - name: Propose LLM-driven alpha search mutations
+        if: always()
+        env:
+          PLOY_RESEARCH_LLM_API_KEY: ${{ secrets.PLOY_RESEARCH_LLM_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "${WALK_ENABLE_LLM_EXPANSION}" != "true" ]; then
+            echo "enable_llm_expansion is false; skipping real LLM-driven mutation proposal."
+            exit 0
+          fi
+          if [ ! -d artifacts/factor-walk-forward-v2-upload/factor-walk-forward-v2 ]; then
+            echo "No factor-walk-forward-v2 artifact directory found; skipping LLM proposal."
+            exit 0
+          fi
+          if [ -z "${PLOY_RESEARCH_LLM_API_KEY}" ]; then
+            echo "enable_llm_expansion is true but PLOY_RESEARCH_LLM_API_KEY is not configured; keeping the deterministic closed-loop prior unchanged."
+            exit 0
+          fi
+          target="${WALK_ALPHA_SEARCH_PLAN_TARGET}"
+          prior_path="artifacts/factor-walk-forward-v2-upload/factor-walk-forward-v2/alpha-search/${target}/next-llm-prior.json"
+          zoo_args=()
+          zoo_path="artifacts/factor-walk-forward-v2-upload/factor-walk-forward-v2/alpha-search/${target}/alpha-zoo-snapshot.json"
+          if [ -f "${zoo_path}" ]; then
+            zoo_args+=(--alpha-zoo-snapshot-json "${zoo_path}")
+          fi
+          PLOY_RESEARCH_LLM_PROVIDER="${WALK_LLM_EXPANSION_PROVIDER}" \
+          PLOY_RESEARCH_LLM_MODEL="${WALK_LLM_EXPANSION_MODEL}" \
+          python3 scripts/alpha_search_llm_propose.py \
+            artifacts/factor-walk-forward-v2-upload/factor-walk-forward-v2 \
+            --target "${target}" \
+            --output-prior-json "${prior_path}" \
+            "${zoo_args[@]}"
+          if [ -f "${prior_path}" ]; then
+            echo "LLM-proposed typed prior written to ${prior_path} (overrides the deterministic closed-loop prior when the model call succeeds)."
           fi
 
       - name: Summarize alpha search chain evidence
