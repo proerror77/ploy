@@ -1,3 +1,50 @@
+# Current Session - Agentic Strategy Loop Hardening (2026-07-08)
+
+Evidence stage: `diagnostic` agent-loop architecture closure. This keeps
+live trading paths locked and hardens Strategy Builder / sidecar loops so
+queued agent runs have durable claim/ack semantics, explicit completion
+signals, bounded retry, and visible evaluator checks.
+
+## Files / Ownership
+
+- `ploy-sidecar/src/runtime/session-store.ts` and
+  `ploy-sidecar/src/runtime/run-requests.ts`
+  - Owner: durable queued-run claim, recovery, ack, and bounded retry.
+- `ploy-sidecar/src/tools/agent-runtime.ts`,
+  `ploy-sidecar/src/runtime/evaluator.ts`,
+  `ploy-sidecar/src/runtime/run-recorder.ts`, and `ploy-sidecar/src/index.ts`
+  - Owner: structured `complete_task`, evaluator-driven run status, and loop
+    stop/retry behavior.
+- `ploy-frontend/src/pages/StrategyBuilder.tsx`
+  - Owner: run monitor polling and contract-evaluation visibility.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Add crash-recoverable in-progress queue handling and bounded
+      `needs_retry` requeue.
+- [x] Upgrade `complete_task` to structured completion and stop loops when it
+      is observed.
+- [x] Show live run refresh and contract checks in Strategy Builder.
+- [x] Run sidecar/frontend validation and commit/push the slice.
+
+## Review
+
+- 2026-07-08: Hardened Strategy Builder loops against crash/retry gaps. The
+  sidecar now claims queued agent-run requests into a durable in-progress JSONL
+  file, restores that file before claiming new queue entries, and only
+  acknowledges it after processing. `needs_retry` evaluator results are
+  requeued with a bounded attempt count (`SIDECAR_AGENT_RUN_MAX_RETRIES`,
+  default `1`). `complete_task` now carries structured decision,
+  `grok_decision`, evidence, blockers, and next-action fields, and sidecar
+  loops stop when that completion signal is observed. Strategy Builder now
+  refreshes run records every 10 seconds and displays persisted
+  `contract_evaluation` checks on the run monitor. Validation passed:
+  `npx tsx src/runtime/run-requests.ts`,
+  `npx tsx src/runtime/evaluator.ts`, `npm run build` in `ploy-sidecar`, and
+  `npm run build` in `ploy-frontend`.
+
 # Current Session - Agentic Strategy Run Closure (2026-06-20)
 
 Evidence stage: `diagnostic` frontend + control-plane + sidecar execution

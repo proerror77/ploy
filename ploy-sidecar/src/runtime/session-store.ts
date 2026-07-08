@@ -17,3 +17,12 @@ export async function agentRunRequestsPath(): Promise<string> {
   await mkdir(dirname(requestPath), { recursive: true });
   return requestPath;
 }
+
+export async function agentRunInProgressRequestsPath(): Promise<string> {
+  const requestPath = await agentRunRequestsPath();
+  const inProgressPath = process.env.PLOY_AGENT_RUN_IN_PROGRESS_FILE
+    ? resolve(process.env.PLOY_AGENT_RUN_IN_PROGRESS_FILE)
+    : resolve(dirname(requestPath), "agent-run-requests.in-progress.jsonl");
+  await mkdir(dirname(inProgressPath), { recursive: true });
+  return inProgressPath;
+}

@@ -32,6 +32,11 @@ export function evaluateRun(output: StructuredOutput): RunEvaluation {
 export type AgentTaskCompletion = {
   status: "success" | "partial" | "blocked";
   summary: string;
+  decision?: "continue" | "pass" | "trade" | "monitor" | "blocked";
+  grok_decision?: "trade" | "pass" | "not_queried";
+  evidence?: string[];
+  blockers?: string[];
+  next_action?: string;
 };
 
 export type ContractCheck = {
@@ -161,6 +166,18 @@ function completionCheck(completion: AgentTaskCompletion | null): ContractCheck 
 }
 
 function grokDecisionCheck(completion: AgentTaskCompletion | null): ContractCheck {
+  if (
+    completion?.grok_decision === "trade" ||
+    completion?.grok_decision === "pass" ||
+    completion?.grok_decision === "not_queried"
+  ) {
+    return {
+      name: "grok_decision",
+      status: "passed",
+      detail: `reported ${completion.grok_decision}`,
+    };
+  }
+
   const summary = completion?.summary ?? "";
   const match = summary.match(/\bgrok_decision\s*[:=]\s*(trade|pass|not_queried)\b/i);
   return {

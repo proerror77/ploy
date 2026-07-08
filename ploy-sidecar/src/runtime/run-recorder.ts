@@ -28,6 +28,11 @@ type StructuredOutput = {
 export type AgentTaskCompletion = {
   status: "success" | "partial" | "blocked";
   summary: string;
+  decision?: "continue" | "pass" | "trade" | "monitor" | "blocked";
+  grok_decision?: "trade" | "pass" | "not_queried";
+  evidence?: string[];
+  blockers?: string[];
+  next_action?: string;
 };
 
 export function newRunId() {

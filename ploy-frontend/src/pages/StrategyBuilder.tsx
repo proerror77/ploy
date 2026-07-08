@@ -52,7 +52,7 @@ import {
   type ToolCapability,
 } from '@/lib/agenticStrategyBuilder';
 import { api } from '@/services/api';
-import type { AgentRunRecord } from '@/types';
+import type { AgentRunRecord, JsonValue } from '@/types';
 import { cn } from '@/lib/utils';
 
 function copyText(value: string) {
@@ -83,9 +83,25 @@ function capabilityVariant(status: ToolCapability['status']) {
 function runStatusVariant(status: string) {
   const normalized = status.toLowerCase();
   if (normalized.includes('success') || normalized.includes('succeeded')) return 'success' as const;
-  if (normalized.includes('fail') || normalized.includes('error')) return 'destructive' as const;
-  if (normalized.includes('start') || normalized.includes('running')) return 'warning' as const;
+  if (normalized.includes('fail') || normalized.includes('error') || normalized.includes('blocked')) {
+    return 'destructive' as const;
+  }
+  if (
+    normalized.includes('retry') ||
+    normalized.includes('partial') ||
+    normalized.includes('start') ||
+    normalized.includes('running')
+  ) {
+    return 'warning' as const;
+  }
   return 'secondary' as const;
+}
+
+function contractCheckVariant(status: string) {
+  const normalized = status.toLowerCase();
+  if (normalized === 'passed') return 'success' as const;
+  if (normalized === 'blocked') return 'destructive' as const;
+  return 'warning' as const;
 }
 
 function formatTime(value?: string | null) {
@@ -102,6 +118,41 @@ function formatTime(value?: string | null) {
 
 function toolCount(run: AgentRunRecord) {
   return run.tool_calls.length;
+}
+
+type ContractCheckView = {
+  name: string;
+  status: string;
+  detail: string;
+};
+
+function contractChecks(run: AgentRunRecord): ContractCheckView[] {
+  const outputSummary = asJsonRecord(run.output_summary);
+  const evaluation = asJsonRecord(outputSummary?.contract_evaluation);
+  const checks = evaluation?.checks;
+  if (!Array.isArray(checks)) return [];
+
+  return checks
+    .map((check) => {
+      const record = asJsonRecord(check);
+      if (!record) return null;
+      return {
+        name: asString(record.name, 'contract'),
+        status: asString(record.status, 'unknown'),
+        detail: asString(record.detail, ''),
+      };
+    })
+    .filter((check): check is ContractCheckView => check !== null)
+    .slice(0, 5);
+}
+
+function asJsonRecord(value: JsonValue | undefined): Record<string, JsonValue> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value;
+}
+
+function asString(value: JsonValue | undefined, fallback: string) {
+  return typeof value === 'string' ? value : fallback;
 }
 
 export function StrategyBuilder() {
@@ -129,6 +180,7 @@ export function StrategyBuilder() {
     queryKey: ['agent', 'runs'],
     queryFn: () => api.getAgentRuns(),
     retry: false,
+    refetchInterval: 10000,
     refetchOnWindowFocus: false,
   });
 
@@ -470,6 +522,30 @@ export function StrategyBuilder() {
                     {run.failure_reason && (
                       <div className="mt-2 rounded-md bg-[#fff1f2] px-2 py-1 text-xs text-[#be123c]">
                         {run.failure_reason}
+                      </div>
+                    )}
+                    {contractChecks(run).length > 0 && (
+                      <div className="mt-3 space-y-2">
+                        {contractChecks(run).map((check) => (
+                          <div
+                            key={`${run.run_id}-${check.name}`}
+                            className="rounded-md border border-[#e5ece8] bg-[#fbfdf9] px-2 py-2"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="min-w-0 truncate text-xs font-semibold">
+                                {check.name}
+                              </span>
+                              <Badge variant={contractCheckVariant(check.status)}>
+                                {check.status}
+                              </Badge>
+                            </div>
+                            {check.detail && (
+                              <div className="mt-1 line-clamp-2 text-xs leading-5 text-[#64748b]">
+                                {check.detail}
+                              </div>
+                            )}
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>

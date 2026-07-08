@@ -22,6 +22,7 @@ import { researchServer } from "./tools/research.js";
 import { agentRuntimeServer } from "./tools/agent-runtime.js";
 import { tradingOutputSchema } from "./schemas/output.js";
 import type {
+  AgentRunRecord,
   AgentToolCallRecord,
   DeploymentSummary,
   JsonValue,
@@ -34,7 +35,12 @@ import {
   recordAgentRun,
   type AgentTaskCompletion,
 } from "./runtime/run-recorder.js";
-import { takeQueuedAgentRunRequests, type QueuedAgentRunRequest } from "./runtime/run-requests.js";
+import {
+  claimQueuedAgentRunRequests,
+  queuedAgentRunAttempt,
+  requeueAgentRunRequest,
+  type QueuedAgentRunRequest,
+} from "./runtime/run-requests.js";
 
 // ── Config ──────────────────────────────────────────
 
@@ -298,6 +304,11 @@ function parseCompletion(value: unknown): AgentTaskCompletion | null {
   const candidate = value as {
     status?: unknown;
     summary?: unknown;
+    decision?: unknown;
+    grok_decision?: unknown;
+    evidence?: unknown;
+    blockers?: unknown;
+    next_action?: unknown;
     text?: unknown;
     content?: unknown;
   };
@@ -310,9 +321,39 @@ function parseCompletion(value: unknown): AgentTaskCompletion | null {
       candidate.status === "blocked") &&
     typeof candidate.summary === "string"
   ) {
-    return { status: candidate.status, summary: candidate.summary };
+    return {
+      status: candidate.status,
+      summary: candidate.summary,
+      decision: parseDecision(candidate.decision),
+      grok_decision: parseGrokDecision(candidate.grok_decision),
+      evidence: parseStringArray(candidate.evidence),
+      blockers: parseStringArray(candidate.blockers),
+      next_action: typeof candidate.next_action === "string" ? candidate.next_action : undefined,
+    };
   }
   return parseCompletion(candidate.content);
+}
+
+function parseDecision(value: unknown): AgentTaskCompletion["decision"] | undefined {
+  return value === "continue" ||
+    value === "pass" ||
+    value === "trade" ||
+    value === "monitor" ||
+    value === "blocked"
+    ? value
+    : undefined;
+}
+
+function parseGrokDecision(value: unknown): AgentTaskCompletion["grok_decision"] | undefined {
+  return value === "trade" || value === "pass" || value === "not_queried"
+    ? value
+    : undefined;
+}
+
+function parseStringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? value
+    : undefined;
 }
 
 function completionFromMessage(message: unknown): AgentTaskCompletion | null {
@@ -335,7 +376,7 @@ function completionFromMessage(message: unknown): AgentTaskCompletion | null {
   return null;
 }
 
-async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<void> {
+async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<AgentRunRecord> {
   const startedAt = new Date().toISOString();
   const runtimeContext = await buildRuntimeContext();
   const toolCalls: AgentToolCallRecord[] = [];
@@ -364,7 +405,7 @@ ${queued.request.run_packet}
 Run contract:
 ${queued.request.run_contract}
 
-Use automatic tools for platform reads, live game checks, market search, Grok/X-style web evidence, research replay/backtest, config comparison, and oversight checks. For Grok Builder profiles, inspect ESPN state first, search web/X context for injury or momentum evidence, and report grok_decision as trade, pass, or not_queried. If the run contract requires grok_decision, the complete_task summary must include exactly one "grok_decision: trade", "grok_decision: pass", or "grok_decision: not_queried" line. Do not submit paper intents or apply deployments unless the request explicitly includes operator approval. Finish by calling complete_task.`,
+Use automatic tools for platform reads, live game checks, market search, Grok/X-style web evidence, research replay/backtest, config comparison, and oversight checks. For Grok Builder profiles, inspect ESPN state first, search web/X context for injury or momentum evidence, and call complete_task with grok_decision set to trade, pass, or not_queried. If the run contract requires grok_decision and your tool schema cannot set that field, the complete_task summary must include exactly one "grok_decision: trade", "grok_decision: pass", or "grok_decision: not_queried" line. Do not submit paper intents or apply deployments unless the request explicitly includes operator approval. Finish by calling complete_task.`,
       options: {
         model: MODEL,
         systemPrompt: `${SYSTEM_PROMPT}
@@ -432,29 +473,33 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
           }
           break;
       }
+      if (completion) {
+        console.log("  complete_task received; stopping queued run loop");
+        break;
+      }
     }
   } catch (error) {
     failureReason = error instanceof Error ? error.message : String(error);
     console.error(`  Error in queued strategy run:`, error);
-  } finally {
-    await recordAgentRun(
-      buildRunRecord({
-        runId: queued.run_id,
-        cycleKind: "agentic_strategy",
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        sessionId,
-        model: MODEL,
-        runtimeContext,
-        toolCalls,
-        structuredOutput: null,
-        totalCostUsd,
-        failureReason,
-        completion,
-        request: JSON.parse(JSON.stringify(queued.request)) as JsonValue,
-      })
-    );
   }
+
+  const record = buildRunRecord({
+    runId: queued.run_id,
+    cycleKind: "agentic_strategy",
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    sessionId,
+    model: MODEL,
+    runtimeContext,
+    toolCalls,
+    structuredOutput: null,
+    totalCostUsd,
+    failureReason,
+    completion,
+    request: JSON.parse(JSON.stringify(queued.request)) as JsonValue,
+  });
+  await recordAgentRun(record);
+  return record;
 }
 
 async function runScanCycle(): Promise<void> {
@@ -565,6 +610,10 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
           }
           break;
       }
+      if (completion) {
+        console.log("  complete_task received; stopping scan loop");
+        break;
+      }
     }
 
     // Log structured output
@@ -617,10 +666,45 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
 }
 
 async function runSidecarCycle(): Promise<void> {
-  for (const request of await takeQueuedAgentRunRequests()) {
-    await runQueuedStrategyRequest(request);
+  const batch = await claimQueuedAgentRunRequests();
+  if (batch) {
+    for (const request of batch.requests) {
+      const record = await runQueuedStrategyRequest(request);
+      if (record.status === "needs_retry") {
+        const reason = retryReason(record);
+        const retry = await requeueAgentRunRequest(request, reason);
+        if (retry) {
+          console.warn(
+            `  Requeued ${request.run_id} after needs_retry (${queuedAgentRunAttempt(retry)}/${process.env.SIDECAR_AGENT_RUN_MAX_RETRIES || "1"}): ${reason}`
+          );
+        } else {
+          console.warn(`  Retry limit reached for ${request.run_id}: ${reason}`);
+        }
+      }
+    }
+    await batch.acknowledge();
   }
   await runScanCycle();
+}
+
+function retryReason(record: AgentRunRecord): string {
+  const outputSummary = asJsonRecord(record.output_summary);
+  const contractEvaluation = asJsonRecord(outputSummary?.contract_evaluation);
+  const checks = Array.isArray(contractEvaluation?.checks) ? contractEvaluation.checks : [];
+  for (const checkValue of checks) {
+    const check = asJsonRecord(checkValue);
+    if (check?.status === "needs_retry") {
+      const name = typeof check.name === "string" ? check.name : "contract";
+      const detail = typeof check.detail === "string" ? check.detail : "needs retry";
+      return `${name}: ${detail}`;
+    }
+  }
+  return "contract evaluation requested retry";
+}
+
+function asJsonRecord(value: JsonValue | undefined): Record<string, JsonValue> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value;
 }
 
 // ── Entry Point ─────────────────────────────────────
