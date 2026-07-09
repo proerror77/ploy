@@ -20,6 +20,8 @@ routing, gated self-modification, and true Grok API adapter.
     proposal/apply path.
 - `tasks/todo.md`
   - Owner: session tracking and verification notes.
+- `Cargo.lock`
+  - Owner: dependency audit remediation for `crossbeam-epoch`.
 
 ## Tasks
 
@@ -50,6 +52,10 @@ routing, gated self-modification, and true Grok API adapter.
   `harness-context.md`, and `harness-events.jsonl`. The Claude Agent SDK
   process exited with code 1 on this machine, so the smoke proves queue/file/API
   behavior and failure capture, not a successful model completion.
+- 2026-07-09: PR dependency audit failed on `RUSTSEC-2026-0204` for
+  `crossbeam-epoch 0.9.18`. Updated the lockfile to `crossbeam-epoch 0.9.20`
+  and verified the CI-equivalent `cargo audit --ignore ...` command exits 0
+  locally with only the existing allowed warnings.
 
 # Current Session - Self-Improving Harness Memory (2026-07-09)
 
