@@ -23,7 +23,7 @@ approval gates.
 - [x] Make `SIDECAR_AGENT_ENGINE=codex` the default.
 - [x] Remove Claude Agent SDK imports and unused in-process MCP tool wrappers.
 - [x] Validate sidecar build/self-tests and real Codex CLI structured-output smokes.
-- [ ] Push PR, wait for CI, merge.
+- [x] Push PR, wait for CI, merge.
 
 ## Review
 
@@ -39,6 +39,9 @@ approval gates.
   smoke. `codex doctor --json` showed auth/config/network/WebSocket/version OK;
   its overall status was fail only because this non-interactive shell reports
   `TERM=dumb`.
+- 2026-07-09: PR #739 merged to `main` as `27e46788` after all required checks
+  passed. Post-merge local main verification passed `npm run build` and the
+  Claude SDK/reference scan had no matches.
 
 # Current Session - Harness Events Initialization (2026-07-09)
 
