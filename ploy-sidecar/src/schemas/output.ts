@@ -1,15 +1,17 @@
 /**
- * Structured output schema for the Claude Commander agent.
+ * Structured output schema for the sidecar agent.
  *
- * Forces Claude to return structured JSON with trading opportunities and
+ * Forces model output into structured JSON with trading opportunities and
  * explicit operator actions, ensuring deterministic parsing by the sidecar.
  */
 
 export const tradingOutputSchema = {
   type: "object" as const,
+  additionalProperties: false as const,
   properties: {
     scan_summary: {
       type: "object" as const,
+      additionalProperties: false as const,
       properties: {
         games_scanned: { type: "number" as const },
         in_progress_games: { type: "number" as const },
@@ -17,12 +19,19 @@ export const tradingOutputSchema = {
         markets_checked: { type: "number" as const },
         timestamp: { type: "string" as const },
       },
-      required: ["games_scanned", "in_progress_games", "timestamp"],
+      required: [
+        "games_scanned",
+        "in_progress_games",
+        "comeback_candidates",
+        "markets_checked",
+        "timestamp",
+      ],
     },
     opportunities: {
       type: "array" as const,
       items: {
         type: "object" as const,
+        additionalProperties: false as const,
         properties: {
           game_id: { type: "string" as const },
           game_name: { type: "string" as const },
@@ -60,11 +69,23 @@ export const tradingOutputSchema = {
         },
         required: [
           "game_id",
+          "game_name",
           "trailing_team",
+          "trailing_abbrev",
           "deficit",
+          "quarter",
+          "clock",
+          "market_slug",
+          "market_price",
+          "reward_risk_ratio",
+          "estimated_win_prob",
+          "expected_value",
+          "kelly_fraction",
           "action",
+          "grok_decision",
           "confidence",
           "reasoning",
+          "risk_factors",
         ],
       },
     },
@@ -72,13 +93,14 @@ export const tradingOutputSchema = {
       type: "array" as const,
       items: {
         type: "object" as const,
+        additionalProperties: false as const,
         properties: {
           kind: { type: "string" as const },
           target: { type: "string" as const },
           status: { type: "string" as const },
           details: { type: "string" as const },
         },
-        required: ["kind", "target", "status"],
+        required: ["kind", "target", "status", "details"],
       },
     },
   },
