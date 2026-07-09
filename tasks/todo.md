@@ -1,3 +1,49 @@
+# Current Session - Self-Mod PR Gate Continuation (2026-07-09)
+
+Evidence stage: `diagnostic` self-modification gate hardening. This extends
+the approved self-modification path from local patch application to optional
+branch/commit/push/PR publication while keeping deployment as an explicit
+post-merge workflow action.
+
+## Files / Ownership
+
+- `ploy-sidecar/src/runtime/self-modification.ts`
+  - Owner: approval-gated apply, verification, rollback, branch commit, push,
+    and PR publication.
+- `ploy-sidecar/src/tools/agent-runtime.ts`
+  - Owner: MCP schema for optional self-modification PR publication.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Add optional `publish_pull_request` path behind
+      `PLOY_HARNESS_SELF_MOD_ALLOW_PR=true`.
+- [x] Verify success path with a temp git repo, temp bare origin, and fake `gh`.
+- [x] Verify rollback path when the verification command fails.
+- [x] Verify real xAI/Grok API adapter call using the repo-local `.env`
+      `GROK_API_KEY` without printing the secret.
+- [ ] Push PR and verify CI.
+
+## Review
+
+- 2026-07-09: Added optional self-modification PR publication. An approved
+  proposal can now create a self-mod branch, apply the patch, run the proposal's
+  verification command, commit, push, and open a PR with `gh pr create`.
+  Publishing is disabled unless `PLOY_HARNESS_SELF_MOD_ALLOW_PR=true`; default
+  behavior remains local apply only. Validation passed:
+  `npx tsx src/runtime/self-modification.ts` and `npm run build` in
+  `ploy-sidecar`.
+- 2026-07-09: Verified the true Grok API adapter against xAI using the
+  repo-local `.env` `GROK_API_KEY`: built sidecar output returned
+  `provider=xai`, `model=grok-4.5`, and non-empty response text. The command
+  printed only provider/model/length, not the key or response content.
+- 2026-07-09: Rechecked the minimal Claude Agent SDK query needed for a fully
+  successful Strategy Builder smoke. It still exits before completion; debug
+  stderr shows the underlying API response is `402 Insufficient Balance`.
+  Queue/file/API smoke remains valid, but a successful model-completion smoke
+  is not proven until the Claude account balance/auth path is fixed.
+
 # Current Session - Harness Completion Slice (2026-07-09)
 
 Evidence stage: `diagnostic` harness completion. This closes the requested
@@ -32,7 +78,7 @@ routing, gated self-modification, and true Grok API adapter.
 - [x] Add xAI/Grok API adapter using `XAI_API_KEY` or `GROK_API_KEY`.
 - [x] Run ployd + Strategy Builder + sidecar smoke and confirm
       `agent-runs.jsonl`, `harness-context.md`, and `harness-events.jsonl`.
-- [ ] Commit/push and finish PR/CI integration.
+- [x] Commit/push and finish PR/CI integration.
 
 ## Review
 
@@ -56,6 +102,8 @@ routing, gated self-modification, and true Grok API adapter.
   `crossbeam-epoch 0.9.18`. Updated the lockfile to `crossbeam-epoch 0.9.20`
   and verified the CI-equivalent `cargo audit --ignore ...` command exits 0
   locally with only the existing allowed warnings.
+- 2026-07-09: PR #727 merged to `main` as `ec7fd1f7` after CodeRabbit and the
+  full GitHub Actions matrix passed.
 
 # Current Session - Self-Improving Harness Memory (2026-07-09)
 

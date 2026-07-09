@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
@@ -20,6 +20,9 @@ export type SelfModificationProposal = {
   status: "proposed" | "applied";
   created_at: string;
   applied_at?: string;
+  branch_name?: string;
+  commit_sha?: string;
+  pull_request_url?: string;
 };
 
 export async function proposeSelfModification(params: {
@@ -45,6 +48,12 @@ export async function proposeSelfModification(params: {
 export async function applyApprovedSelfModification(params: {
   proposal_id: string;
   approval_token: string;
+  publish_pull_request?: boolean;
+  branch_name?: string;
+  commit_message?: string;
+  pull_request_title?: string;
+  pull_request_body?: string;
+  base_branch?: string;
 }): Promise<SelfModificationProposal> {
   const expectedToken = process.env.PLOY_HARNESS_SELF_MOD_APPROVAL_TOKEN;
   if (!expectedToken) {
@@ -57,18 +66,99 @@ export async function applyApprovedSelfModification(params: {
   const proposal = await readProposal(params.proposal_id);
   const repoRoot = await findRepoRoot();
   await ensureCleanWorktree(repoRoot);
+  const publishPullRequest = params.publish_pull_request === true;
+  const branchName = publishPullRequest
+    ? params.branch_name || `selfmod/${proposal.proposal_id.slice(-12)}`
+    : undefined;
+  const originalBranch = publishPullRequest ? await currentBranch(repoRoot) : undefined;
+  let switchedBranch = false;
+  let patchApplied = false;
+  let committed = false;
+  let pushedBranch = false;
 
   try {
+    if (publishPullRequest) {
+      if (process.env.PLOY_HARNESS_SELF_MOD_ALLOW_PR !== "true") {
+        throw new Error("self-modification PR publishing is not enabled");
+      }
+      if (!branchName) throw new Error("self-modification PR branch name is missing");
+      await run(repoRoot, "git", ["check-ref-format", "--branch", branchName]);
+      await run(repoRoot, "git", ["switch", "-c", branchName]);
+      switchedBranch = true;
+    }
     await run(repoRoot, "git", ["apply", "--check", "-"], proposal.patch);
     await run(repoRoot, "git", ["apply", "-"], proposal.patch);
+    patchApplied = true;
     await runShell(repoRoot, proposal.verification_command);
+    if (publishPullRequest) {
+      await run(repoRoot, "git", ["add", "-A"]);
+      await run(repoRoot, "git", ["diff", "--cached", "--quiet"]).then(
+        () => {
+          throw new Error("self-modification patch produced no staged changes");
+        },
+        () => undefined
+      );
+      await run(repoRoot, "git", [
+        "commit",
+        "-m",
+        params.commit_message || proposal.title,
+      ]);
+      committed = true;
+      const commitSha = (await runOutput(repoRoot, "git", ["rev-parse", "HEAD"])).trim();
+      await run(repoRoot, "git", ["push", "-u", "origin", branchName!]);
+      pushedBranch = true;
+      const prUrl = (
+        await runOutput(repoRoot, "gh", [
+          "pr",
+          "create",
+          "--base",
+          params.base_branch || "main",
+          "--head",
+          branchName!,
+          "--title",
+          params.pull_request_title || proposal.title,
+          "--body",
+          params.pull_request_body ||
+            [
+              "Approval-gated harness self-modification.",
+              "",
+              `Proposal: ${proposal.proposal_id}`,
+              `Verification: ${proposal.verification_command}`,
+              "",
+              "Deployment: do not deploy from this branch; merge to main and use the repo's existing deployment workflows.",
+            ].join("\n"),
+        ])
+      ).trim();
+      return recordApplied(proposal, {
+        branch_name: branchName,
+        commit_sha: commitSha,
+        pull_request_url: prUrl,
+      });
+    }
   } catch (error) {
-    await run(repoRoot, "git", ["apply", "-R", "-"], proposal.patch).catch(() => undefined);
+    if (patchApplied && !committed) {
+      await run(repoRoot, "git", ["apply", "-R", "-"], proposal.patch).catch(() => undefined);
+    }
+    if (switchedBranch && originalBranch) {
+      await run(repoRoot, "git", ["switch", originalBranch]).catch(() => undefined);
+      await run(repoRoot, "git", ["branch", "-D", branchName!]).catch(() => undefined);
+    }
+    if (pushedBranch) {
+      await run(repoRoot, "git", ["push", "origin", `:${branchName}`]).catch(() => undefined);
+    }
     throw error;
   }
 
+  return recordApplied(proposal, {});
+}
+
+async function recordApplied(
+  proposal: SelfModificationProposal,
+  updates: Partial<SelfModificationProposal>
+): Promise<SelfModificationProposal> {
   const applied: SelfModificationProposal = {
     ...proposal,
+    ...updates,
     status: "applied",
     applied_at: new Date().toISOString(),
   };
@@ -111,6 +201,20 @@ async function ensureCleanWorktree(cwd: string): Promise<void> {
   }
 }
 
+async function currentBranch(cwd: string): Promise<string> {
+  const branch = (await runOutput(cwd, "git", ["branch", "--show-current"])).trim();
+  if (!branch) throw new Error("self-modification PR publishing requires a named git branch");
+  return branch;
+}
+
+async function runOutput(cwd: string, command: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync(command, args, {
+    cwd,
+    maxBuffer: 1024 * 1024 * 10,
+  });
+  return stdout;
+}
+
 async function run(cwd: string, command: string, args: string[], input?: string): Promise<void> {
   if (input === undefined) {
     await execFileAsync(command, args, {
@@ -148,21 +252,38 @@ async function selfTest() {
   const originalPath = process.env.PLOY_HARNESS_SELF_MODIFICATIONS_FILE;
   const originalRoot = process.env.PLOY_SELF_MOD_REPO_ROOT;
   const originalToken = process.env.PLOY_HARNESS_SELF_MOD_APPROVAL_TOKEN;
+  const originalAllowPr = process.env.PLOY_HARNESS_SELF_MOD_ALLOW_PR;
+  const originalPathValue = process.env.PATH;
   const dir = await mkdtemp(join(tmpdir(), "ploy-self-mod-"));
   const logDir = await mkdtemp(join(tmpdir(), "ploy-self-mod-log-"));
+  const binDir = await mkdtemp(join(tmpdir(), "ploy-self-mod-bin-"));
+  const remoteDir = await mkdtemp(join(tmpdir(), "ploy-self-mod-origin-"));
   const logPath = join(logDir, "self-mod.jsonl");
 
   try {
     process.env.PLOY_HARNESS_SELF_MODIFICATIONS_FILE = logPath;
     process.env.PLOY_SELF_MOD_REPO_ROOT = dir;
     process.env.PLOY_HARNESS_SELF_MOD_APPROVAL_TOKEN = "approve";
+    process.env.PLOY_HARNESS_SELF_MOD_ALLOW_PR = "true";
+    process.env.PATH = `${binDir}${delimiter}${process.env.PATH || ""}`;
+    await writeFile(
+      join(binDir, "gh"),
+      "#!/bin/sh\nprintf '%s\\n' 'https://github.example/ploy/pull/1'\n",
+      "utf8"
+    );
+    await chmod(join(binDir, "gh"), 0o755);
     await run(dir, "git", ["init"]);
+    await run(dir, "git", ["checkout", "-b", "main"]);
     await run(dir, "git", ["config", "user.email", "test@example.com"]);
     await run(dir, "git", ["config", "user.name", "Test"]);
     await writeFile(join(dir, "Cargo.toml"), "[workspace]\n", "utf8");
     await writeFile(join(dir, "README.md"), "before\n", "utf8");
     await run(dir, "git", ["add", "."]);
     await run(dir, "git", ["commit", "-m", "init"]);
+    await mkdir(remoteDir, { recursive: true });
+    await run(remoteDir, "git", ["init", "--bare"]);
+    await run(dir, "git", ["remote", "add", "origin", remoteDir]);
+    await run(dir, "git", ["push", "-u", "origin", "main"]);
 
     const proposal = await proposeSelfModification({
       title: "update readme",
@@ -172,16 +293,42 @@ async function selfTest() {
     const applied = await applyApprovedSelfModification({
       proposal_id: proposal.proposal_id,
       approval_token: "approve",
+      publish_pull_request: true,
+      branch_name: "selfmod/test",
     });
     assert.equal(applied.status, "applied");
+    assert.equal(applied.branch_name, "selfmod/test");
+    assert.match(applied.commit_sha ?? "", /^[0-9a-f]{40}$/);
+    assert.equal(applied.pull_request_url, "https://github.example/ploy/pull/1");
     assert.equal(await readFile(join(dir, "README.md"), "utf8"), "after\n");
     assert.match(await readFile(logPath, "utf8"), /"status":"applied"/);
+    assert.equal((await runOutput(dir, "git", ["branch", "--show-current"])).trim(), "selfmod/test");
+
+    const failedProposal = await proposeSelfModification({
+      title: "failing change",
+      patch: "diff --git a/FAIL.md b/FAIL.md\nnew file mode 100644\nindex 0000000..257cc56\n--- /dev/null\n+++ b/FAIL.md\n@@ -0,0 +1 @@\n+fail\n",
+      verification_command: "false",
+    });
+    await assert.rejects(
+      applyApprovedSelfModification({
+        proposal_id: failedProposal.proposal_id,
+        approval_token: "approve",
+        publish_pull_request: true,
+        branch_name: "selfmod/fail",
+      })
+    );
+    assert.equal((await runOutput(dir, "git", ["branch", "--show-current"])).trim(), "selfmod/test");
+    assert.equal((await runOutput(dir, "git", ["branch", "--list", "selfmod/fail"])).trim(), "");
   } finally {
     restoreEnv("PLOY_HARNESS_SELF_MODIFICATIONS_FILE", originalPath);
     restoreEnv("PLOY_SELF_MOD_REPO_ROOT", originalRoot);
     restoreEnv("PLOY_HARNESS_SELF_MOD_APPROVAL_TOKEN", originalToken);
+    restoreEnv("PLOY_HARNESS_SELF_MOD_ALLOW_PR", originalAllowPr);
+    restoreEnv("PATH", originalPathValue);
     await rm(dir, { recursive: true, force: true });
     await rm(logDir, { recursive: true, force: true });
+    await rm(binDir, { recursive: true, force: true });
+    await rm(remoteDir, { recursive: true, force: true });
   }
 }
 
