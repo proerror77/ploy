@@ -1,5 +1,5 @@
 /**
- * Ploy Sidecar — Claude Agent SDK operator client
+ * Ploy Sidecar — Codex CLI operator client
  *
  * Orchestrates NBA comeback research while staying grounded in the
  * trading-platform control plane:
@@ -10,16 +10,9 @@
  * 5. Operator recommendation → deployment-aware recommendation or action
  *
  * Architecture:
- *   Claude Sidecar (this)  →  research skills (ESPN, Polymarket, WebSearch)
- *                          →  ployd control plane (via Rust backend MCP)
+ *   Sidecar → Codex CLI / xAI Grok → ployd control plane
  */
 
-import { query } from "@anthropic-ai/claude-agent-sdk";
-import { espnServer } from "./tools/espn.js";
-import { polymarketServer } from "./tools/polymarket.js";
-import { ployBackendServer } from "./tools/ploy-backend.js";
-import { researchServer } from "./tools/research.js";
-import { agentRuntimeServer } from "./tools/agent-runtime.js";
 import { tradingOutputSchema } from "./schemas/output.js";
 import type {
   AgentRunRecord,
@@ -47,115 +40,20 @@ import {
   queryGrokStrategyCompletion,
   type GrokBuilderContext,
 } from "./runtime/grok.js";
+import {
+  queryCodexFocusedSubagent,
+  queryCodexScanOutput,
+  queryCodexStrategyCompletion,
+} from "./runtime/codex-cli.js";
 
 // ── Config ──────────────────────────────────────────
 
-function isMiniMaxAnthropicEndpoint(baseUrl: string | undefined): boolean {
-  if (!baseUrl) return false;
-
-  try {
-    const parsed = new URL(baseUrl);
-    const isMiniMaxHost =
-      parsed.hostname.includes("minimax.io") || parsed.hostname.includes("minimaxi.com");
-    return isMiniMaxHost && parsed.pathname.includes("/anthropic");
-  } catch {
-    return (
-      baseUrl.includes("api.minimax.io/anthropic") ||
-      baseUrl.includes("api.minimaxi.com/anthropic")
-    );
-  }
-}
-
-function applyMiniMaxCompatEnv(): string | null {
-  if (!isMiniMaxAnthropicEndpoint(process.env.ANTHROPIC_BASE_URL)) {
-    return null;
-  }
-
-  const minimaxModel = process.env.MINIMAX_ANTHROPIC_MODEL || "MiniMax-M2.5";
-  const anthropicApiKey = process.env.ANTHROPIC_API_KEY?.trim();
-
-  // MiniMax Anthropic-compatible endpoint expects Authorization header.
-  if (anthropicApiKey && !process.env.ANTHROPIC_CUSTOM_HEADERS) {
-    process.env.ANTHROPIC_CUSTOM_HEADERS = `Authorization: Bearer ${anthropicApiKey}`;
-  }
-
-  // Map Claude aliases to the MiniMax model unless user already set custom mappings.
-  if (!process.env.ANTHROPIC_DEFAULT_OPUS_MODEL) {
-    process.env.ANTHROPIC_DEFAULT_OPUS_MODEL = minimaxModel;
-  }
-  if (!process.env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
-    process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = minimaxModel;
-  }
-  if (!process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL) {
-    process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = minimaxModel;
-  }
-
-  return minimaxModel;
-}
-
-const minimaxCompatModel = applyMiniMaxCompatEnv();
-const MODEL = process.env.SIDECAR_MODEL || "sonnet";
-const AGENT_ENGINE = process.env.SIDECAR_AGENT_ENGINE || "claude";
+const CODEX_MODEL = process.env.CODEX_CLI_MODEL?.trim() || null;
+const AGENT_ENGINE = process.env.SIDECAR_AGENT_ENGINE || "codex";
 const POLL_INTERVAL = parseInt(process.env.SIDECAR_POLL_INTERVAL_SECS || "300", 10) * 1000;
 const MAX_BUDGET = parseFloat(process.env.SIDECAR_MAX_BUDGET_USD || "1.00");
 const DRY_RUN = process.env.SIDECAR_DRY_RUN !== "false";
 const PLOY_API = process.env.PLOY_API_URL || "http://localhost:8081";
-const MAX_SUBAGENT_TURNS = parseInt(process.env.SIDECAR_SUBAGENT_MAX_TURNS || "8", 10);
-
-// ── System Prompt ───────────────────────────────────
-
-const SYSTEM_PROMPT = `You are the Ploy Trading Platform Sidecar.
-
-## Your Mission
-Run NBA comeback research loops while staying grounded in the trading platform control plane.
-You are an operator-facing research client, not a direct execution path.
-
-## Control Plane Contract
-- Deployments are resources with deployment_id, desired_state, and observed_state.
-- Trading state comes from canonical /api/trading/state snapshots.
-- Do not assume legacy /api/sidecar/*, /api/config, or enable/disable endpoints exist.
-- If you need to change the platform, use apply_deployment, set_deployment_state, or submit_paper_intent.
-- Prefer paper deployments unless the operator explicitly asks for a different runtime mode.
-
-## Decision Framework
-1. **Inspect platform**: Use ploy-backend.get_system_status, get_trading_state, and list_deployments first
-2. **Scan**: Use espn.scoreboard to find live games in Q3 or late Q3/early Q4
-3. **Filter**: Only consider games where:
-   - A team is trailing by 1-15 points
-   - Quarter is 3 (ideal) or early Q4
-   - At least 8 minutes of game time remaining
-4. **Market lookup**: Use polymarket.search_markets to find the corresponding market
-5. **Risk check**: Calculate reward-to-risk ratio = (1 - price) / price
-   - ONLY proceed if RR ≥ 4.0x (price ≤ $0.20)
-   - Calculate EV = estimated_win_prob - price (need EV ≥ 5%)
-   - Calculate Kelly fraction = EV / (1 - price), cap at 25%
-6. **X.com research**: Use WebSearch to check X.com/Twitter for:
-   - Injury updates during the game
-   - Momentum shifts (runs, key plays)
-   - Betting sentiment
-7. **Recommendation**: Produce a deployment-aware recommendation or paper-only platform action
-
-## Safety Rules (NEVER violate)
-- Never claim an order was submitted unless you actually called submit_paper_intent on a paper deployment
-- Never start or create a non-paper deployment unless explicitly instructed
-- Always default to PASS or MONITOR when uncertain
-- Parse failures → PASS (never trade on garbage)
-- For Strategy Builder requests, complete with agent-runtime.complete_task using status success, partial, or blocked
-- Treat paper intent and deployment changes as approval-gated; research, replay, diagnostics, and comparisons are automatic
-
-## Scoring Comeback Probability
-Historical NBA comeback rates by deficit at end of Q3:
-- 1-3 pts: 35-45% (barely trailing, not a comeback scenario)
-- 4-6 pts: 20-30% (moderate trail)
-- 7-10 pts: 10-20% (significant trail — sweet spot for underpriced YES)
-- 11-15 pts: 5-12% (deep trail — needs big discount)
-- 16+ pts: <5% (too unlikely)
-
-Adjust for: team strength, home/away, rest days, key player status.
-
-## Output Format
-Return structured JSON with scan_summary, opportunities[], and operator_actions[].
-`;
 
 type RuntimeContext = {
   system: {
@@ -301,98 +199,6 @@ function isStructuredOutput(value: unknown): value is {
   return value !== null && typeof value === "object";
 }
 
-function parseCompletion(value: unknown): AgentTaskCompletion | null {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const parsed = parseCompletion(item);
-      if (parsed) return parsed;
-    }
-    return null;
-  }
-  if (typeof value === "string") {
-    try {
-      return parseCompletion(JSON.parse(value));
-    } catch {
-      return null;
-    }
-  }
-  if (!value || typeof value !== "object") return null;
-
-  const candidate = value as {
-    status?: unknown;
-    summary?: unknown;
-    decision?: unknown;
-    grok_decision?: unknown;
-    evidence?: unknown;
-    blockers?: unknown;
-    next_action?: unknown;
-    text?: unknown;
-    content?: unknown;
-  };
-  if (candidate.text && typeof candidate.text === "string") {
-    return parseCompletion(candidate.text);
-  }
-  if (
-    (candidate.status === "success" ||
-      candidate.status === "partial" ||
-      candidate.status === "blocked") &&
-    typeof candidate.summary === "string"
-  ) {
-    return {
-      status: candidate.status,
-      summary: candidate.summary,
-      decision: parseDecision(candidate.decision),
-      grok_decision: parseGrokDecision(candidate.grok_decision),
-      evidence: parseStringArray(candidate.evidence),
-      blockers: parseStringArray(candidate.blockers),
-      next_action: typeof candidate.next_action === "string" ? candidate.next_action : undefined,
-    };
-  }
-  return parseCompletion(candidate.content);
-}
-
-function parseDecision(value: unknown): AgentTaskCompletion["decision"] | undefined {
-  return value === "continue" ||
-    value === "pass" ||
-    value === "trade" ||
-    value === "monitor" ||
-    value === "blocked"
-    ? value
-    : undefined;
-}
-
-function parseGrokDecision(value: unknown): AgentTaskCompletion["grok_decision"] | undefined {
-  return value === "trade" || value === "pass" || value === "not_queried"
-    ? value
-    : undefined;
-}
-
-function parseStringArray(value: unknown): string[] | undefined {
-  return Array.isArray(value) && value.every((item) => typeof item === "string")
-    ? value
-    : undefined;
-}
-
-function completionFromMessage(message: unknown): AgentTaskCompletion | null {
-  const candidate = message as {
-    type?: string;
-    tool_use_result?: unknown;
-    message?: { content?: Array<{ type?: string; content?: unknown }> };
-  };
-  if (candidate.type !== "user") return null;
-
-  const direct = parseCompletion(candidate.tool_use_result);
-  if (direct) return direct;
-
-  for (const block of candidate.message?.content ?? []) {
-    if (block.type === "tool_result") {
-      const parsed = parseCompletion(block.content);
-      if (parsed) return parsed;
-    }
-  }
-  return null;
-}
-
 function selectSubagentProfiles(
   queued: QueuedAgentRunRequest,
   harnessContext: string
@@ -452,98 +258,36 @@ Runtime context:
 ${JSON.stringify(runtimeContext, null, 2)}`;
 }
 
-function subagentAllowedTools(profile: FocusedSubagentProfile): string[] {
-  if (profile === "grok-evidence") {
-    return [
-      "mcp__espn__scoreboard",
-      "mcp__espn__game_details",
-      "mcp__polymarket__search_markets",
-      "mcp__polymarket__market_snapshot",
-      "mcp__agent-runtime__complete_task",
-      "mcp__agent-runtime__propose_harness_improvement",
-      "WebSearch",
-      "WebFetch",
-    ];
-  }
-  return [
-    "mcp__research__replay_deployment",
-    "mcp__research__run_backtest",
-    "mcp__research__compare_configs",
-    "mcp__research__check_oversight",
-    "mcp__ploy-backend__get_system_status",
-    "mcp__ploy-backend__get_trading_state",
-    "mcp__ploy-backend__list_deployments",
-    "mcp__agent-runtime__complete_task",
-    "mcp__agent-runtime__propose_harness_improvement",
-  ];
-}
-
 async function runFocusedSubagent(params: {
   profile: FocusedSubagentProfile;
   queued: QueuedAgentRunRequest;
   runtimeContext: RuntimeContext;
   harnessContext: string;
 }): Promise<FocusedSubagentResult> {
-  const toolCalls: AgentToolCallRecord[] = [];
-  let completion: AgentTaskCompletion | null = null;
-  let failureReason: string | null = null;
   console.log(`  Subagent: ${params.profile}`);
 
   try {
-    for await (const message of query({
+    const result = await queryCodexFocusedSubagent({
+      profile: params.profile,
       prompt: subagentPrompt(params.profile, params.queued, params.runtimeContext),
-      options: {
-        model: MODEL,
-        systemPrompt: `${SYSTEM_PROMPT}
-
-## Focused Subagent Contract
-You are running as a narrow evidence subagent. Do not synthesize final trades or mutate deployments.
-Call complete_task when the focused evidence pass is done.
-
-## Harness Meta-Context
-${params.harnessContext}`,
-        mcpServers: {
-          espn: espnServer,
-          polymarket: polymarketServer,
-          "ploy-backend": ployBackendServer,
-          research: researchServer,
-          "agent-runtime": agentRuntimeServer,
-        },
-        allowedTools: subagentAllowedTools(params.profile),
-        maxTurns: Math.max(1, Math.min(MAX_SUBAGENT_TURNS, params.queued.request.max_turns)),
-        maxBudgetUsd: Math.max(0.1, Math.min(0.35, params.queued.request.budget_usd / 3)),
-        permissionMode: "bypassPermissions",
-      },
-    })) {
-      switch (message.type) {
-        case "assistant":
-          for (const block of message.message.content) {
-            if ("name" in block) {
-              toolCalls.push({ name: `${params.profile}:${String(block.name)}`, status: "called" });
-            }
-          }
-          break;
-        case "user": {
-          const reportedCompletion = completionFromMessage(message);
-          if (reportedCompletion) completion = reportedCompletion;
-          break;
-        }
-        case "result":
-          if (message.subtype !== "success") failureReason = message.subtype;
-          break;
-      }
-      if (completion) break;
-    }
+      runtimeContext: params.runtimeContext,
+      harnessContext: params.harnessContext,
+    });
+    const completion = result.value;
+    return {
+      profile: params.profile,
+      status: completion.status,
+      summary: completion.summary,
+      toolCalls: [{ name: `codex_cli__${params.profile}`, status: "called" }],
+    };
   } catch (error) {
-    failureReason = error instanceof Error ? error.message : String(error);
+    return {
+      profile: params.profile,
+      status: "failed",
+      summary: error instanceof Error ? error.message : String(error),
+      toolCalls: [{ name: `codex_cli__${params.profile}`, status: "failed" }],
+    };
   }
-
-  return {
-    profile: params.profile,
-    status: failureReason ? "failed" : completion?.status ?? "partial",
-    summary: failureReason ?? completion?.summary ?? "subagent did not report completion",
-    toolCalls,
-  };
 }
 
 async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<AgentRunRecord> {
@@ -557,34 +301,6 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
   let completion: AgentTaskCompletion | null = null;
   const subagentResults: FocusedSubagentResult[] = [];
   let grokApiContext: GrokBuilderContext | null = null;
-  const queuedAllowedTools = [
-    "mcp__espn__scoreboard",
-    "mcp__espn__game_details",
-    "mcp__polymarket__search_markets",
-    "mcp__polymarket__market_snapshot",
-    "mcp__ploy-backend__get_system_status",
-    "mcp__ploy-backend__get_trading_state",
-    "mcp__ploy-backend__list_deployments",
-    "mcp__research__replay_deployment",
-    "mcp__research__run_backtest",
-    "mcp__research__compare_configs",
-    "mcp__research__check_oversight",
-    "mcp__agent-runtime__complete_task",
-    "mcp__agent-runtime__propose_harness_improvement",
-    "mcp__agent-runtime__propose_self_modification",
-    "WebSearch",
-    "WebFetch",
-  ];
-  if (
-    process.env.SIDECAR_ALLOW_SELF_MODIFICATION === "true" &&
-    queued.request.run_contract.includes("requires_harness_self_modification = true")
-  ) {
-    queuedAllowedTools.push(
-      "mcp__agent-runtime__apply_self_modification",
-      "mcp__agent-runtime__dispatch_self_modification_deployment",
-      "mcp__agent-runtime__dispatch_self_modification_rollback"
-    );
-  }
 
   console.log(`\n[${startedAt}] Starting queued strategy run ${queued.run_id}`);
 
@@ -642,90 +358,19 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
       };
       console.log(`  Grok engine completed queued run with status: ${completion.status}`);
     } else {
-      for await (const message of query({
-      prompt: `Strategy Builder request created at ${queued.created_at}
-
-Runtime context snapshot:
-${JSON.stringify(runtimeContext, null, 2)}
-
-Focused subagent findings:
-${JSON.stringify(subagentResults, null, 2)}
-
-Grok API context:
-${JSON.stringify(grokApiContext, null, 2)}
-
-Run this agentic strategy request until it reaches success, partial completion, or a blocker.
-
-Objective:
-${queued.request.objective}
-
-Run packet:
-${queued.request.run_packet}
-
-Run contract:
-${queued.request.run_contract}
-
-Use automatic tools for platform reads, live game checks, market search, Grok/X-style web evidence, research replay/backtest, config comparison, and oversight checks. For Grok Builder profiles, inspect ESPN state first, search web/X context for injury or momentum evidence, and call complete_task with grok_decision set to trade, pass, or not_queried. If the run contract requires grok_decision and your tool schema cannot set that field, the complete_task summary must include exactly one "grok_decision: trade", "grok_decision: pass", or "grok_decision: not_queried" line. Do not submit paper intents or apply deployments unless the request explicitly includes operator approval. Finish by calling complete_task.`,
-      options: {
-        model: MODEL,
-        systemPrompt: `${SYSTEM_PROMPT}
-
-## Runtime Context (fresh snapshot for this queued strategy run)
-${JSON.stringify(runtimeContext, null, 2)}
-
-## Harness Meta-Context
-${harnessContext}`,
-        mcpServers: {
-          espn: espnServer,
-          polymarket: polymarketServer,
-          "ploy-backend": ployBackendServer,
-          research: researchServer,
-          "agent-runtime": agentRuntimeServer,
-        },
-        allowedTools: queuedAllowedTools,
-        maxTurns: Math.max(1, queued.request.max_turns),
-        maxBudgetUsd: Math.max(0.1, queued.request.budget_usd),
-        permissionMode: "bypassPermissions",
-      },
-    })) {
-      switch (message.type) {
-        case "system":
-          if (message.subtype === "init") {
-            sessionId = message.session_id ?? null;
-            console.log(`  Session: ${message.session_id}`);
-          }
-          break;
-        case "assistant":
-          for (const block of message.message.content) {
-            if ("name" in block) {
-              toolCalls.push({ name: String(block.name), status: "called" });
-              console.log(`  Tool: ${block.name}`);
-            }
-          }
-          break;
-        case "user": {
-          const reportedCompletion = completionFromMessage(message);
-          if (reportedCompletion) {
-            completion = reportedCompletion;
-            console.log(`  Task completion: ${completion.status}`);
-          }
-          break;
-        }
-        case "result":
-          if (message.subtype === "success") {
-            totalCostUsd = (message as any).total_cost_usd ?? null;
-            console.log(`  Completed queued run. Cost: $${(totalCostUsd ?? 0).toFixed(4)}`);
-          } else {
-            failureReason = message.subtype;
-            console.error(`  Queued run failed: ${message.subtype}`);
-          }
-          break;
-      }
-      if (completion) {
-        console.log("  complete_task received; stopping queued run loop");
-        break;
-      }
-      }
+      const codexRun = await queryCodexStrategyCompletion({
+        objective: queued.request.objective,
+        runPacket: queued.request.run_packet,
+        runContract: queued.request.run_contract,
+        runtimeContext,
+        harnessContext,
+        focusedSubagents: subagentResults,
+        grokApiContext,
+      });
+      completion = codexRun.value;
+      sessionId = codexRun.session_id;
+      toolCalls.push({ name: "codex_cli__exec", status: "called" });
+      console.log(`  Codex CLI completed queued run with status: ${completion.status}`);
     }
   } catch (error) {
     failureReason = error instanceof Error ? error.message : String(error);
@@ -738,7 +383,7 @@ ${harnessContext}`,
     startedAt,
     finishedAt: new Date().toISOString(),
     sessionId,
-    model: AGENT_ENGINE === "grok" && grokApiContext ? `xai:${grokApiContext.model}` : MODEL,
+    model: AGENT_ENGINE === "grok" && grokApiContext ? `xai:${grokApiContext.model}` : codexModelLabel(),
     runtimeContext,
     toolCalls,
     structuredOutput: null,
@@ -768,114 +413,18 @@ async function runScanCycle(): Promise<void> {
   let completion: AgentTaskCompletion | null = null;
   const runtimeContext = await buildRuntimeContext();
   const harnessContext = await readHarnessContext();
-  console.log(`\n[${timestamp}] Starting scan cycle (model=${MODEL}, dry_run=${DRY_RUN})`);
+  console.log(`\n[${timestamp}] Starting scan cycle (engine=codex, dry_run=${DRY_RUN})`);
 
   try {
-    for await (const message of query({
-      prompt: `Current time: ${timestamp}
-
-Runtime context snapshot:
-${JSON.stringify(runtimeContext, null, 2)}
-
-Run a full NBA comeback trading scan cycle:
-1. Check the ESPN scoreboard for today's live games
-2. Identify any Q3/Q4 comeback opportunities
-3. For each opportunity, search Polymarket for the market
-4. Compute risk metrics (RR, EV, Kelly)
-5. If any pass the 4x RR filter, research X.com for sentiment
-6. Compare the idea against current deployment resources and trading snapshots
-7. Return operator actions or paper-intent recommendations only when they fit the control-plane contract
-
-Return your structured analysis.`,
-      options: {
-        model: MODEL,
-        systemPrompt: `${SYSTEM_PROMPT}
-
-## Runtime Context (fresh snapshot for this cycle)
-${JSON.stringify(runtimeContext, null, 2)}
-
-## Harness Meta-Context
-${harnessContext}`,
-        mcpServers: {
-          espn: espnServer,
-          polymarket: polymarketServer,
-          "ploy-backend": ployBackendServer,
-          research: researchServer,
-          "agent-runtime": agentRuntimeServer,
-        },
-        allowedTools: [
-          "mcp__espn__*",
-          "mcp__polymarket__*",
-          "mcp__ploy-backend__get_system_status",
-          "mcp__ploy-backend__get_trading_state",
-          "mcp__ploy-backend__list_deployments",
-          "mcp__ploy-backend__get_deployment",
-          "mcp__research__*",
-          "mcp__agent-runtime__complete_task",
-          "mcp__agent-runtime__propose_harness_improvement",
-          "mcp__agent-runtime__propose_self_modification",
-          "WebSearch",
-          "WebFetch",
-        ],
-        maxTurns: 30,
-        maxBudgetUsd: MAX_BUDGET,
-        permissionMode: "bypassPermissions",
-        outputFormat: {
-          type: "json_schema",
-          schema: tradingOutputSchema,
-        },
-      },
-    })) {
-      switch (message.type) {
-        case "system":
-          if (message.subtype === "init") {
-            sessionId = message.session_id ?? null;
-            console.log(`  Session: ${message.session_id}`);
-            const mcpStatus = (message as any).mcp_servers;
-            if (mcpStatus) {
-              for (const s of mcpStatus) {
-                console.log(`  MCP ${s.name}: ${s.status}`);
-              }
-            }
-          }
-          break;
-
-        case "assistant":
-          // Log tool calls for observability
-          for (const block of message.message.content) {
-            if ("name" in block) {
-              toolCalls.push({ name: String(block.name), status: "called" });
-              console.log(`  Tool: ${block.name}`);
-            }
-          }
-          break;
-
-        case "user": {
-          const reportedCompletion = completionFromMessage(message);
-          if (reportedCompletion) {
-            completion = reportedCompletion;
-            console.log(`  Task completion: ${completion.status}`);
-          }
-          break;
-        }
-
-        case "result":
-          if (message.subtype === "success") {
-            resultOutput = (message as any).structured_output;
-            totalCostUsd = (message as any).total_cost_usd ?? null;
-            const cost = totalCostUsd ?? 0;
-            console.log(`  Completed. Cost: $${cost.toFixed(4)}`);
-          } else {
-            failureReason = message.subtype;
-            console.error(`  Scan failed: ${message.subtype}`);
-          }
-          break;
-      }
-      if (completion) {
-        console.log("  complete_task received; stopping scan loop");
-        break;
-      }
-    }
+    const codexRun = await queryCodexScanOutput({
+      timestamp,
+      runtimeContext,
+      harnessContext,
+      schema: tradingOutputSchema,
+    });
+    sessionId = codexRun.session_id;
+    resultOutput = codexRun.value;
+    toolCalls.push({ name: "codex_cli__exec", status: "called" });
 
     // Log structured output
     if (resultOutput) {
@@ -914,7 +463,7 @@ ${harnessContext}`,
         startedAt: timestamp,
         finishedAt: new Date().toISOString(),
         sessionId,
-        model: MODEL,
+        model: codexModelLabel(),
         runtimeContext,
         toolCalls,
         structuredOutput: isStructuredOutput(resultOutput) ? resultOutput : null,
@@ -968,6 +517,10 @@ function asJsonRecord(value: JsonValue | undefined): Record<string, JsonValue> |
   return value;
 }
 
+function codexModelLabel() {
+  return `codex-cli:${CODEX_MODEL || "default"}`;
+}
+
 // ── Entry Point ─────────────────────────────────────
 
 async function main() {
@@ -975,13 +528,11 @@ async function main() {
   console.log("║  Ploy Sidecar — Operator Client        ║");
   console.log("║  NBA Research + Deployment Console     ║");
   console.log("╚════════════════════════════════════════╝");
-  console.log(`  Model: ${MODEL}`);
+  console.log(`  Engine: ${AGENT_ENGINE}`);
+  console.log(`  Codex model: ${CODEX_MODEL || "default config"}`);
   console.log(`  Dry run: ${DRY_RUN}`);
   console.log(`  Poll interval: ${POLL_INTERVAL / 1000}s`);
   console.log(`  Max budget/cycle: $${MAX_BUDGET}`);
-  if (minimaxCompatModel) {
-    console.log(`  MiniMax compat: enabled (alias → ${minimaxCompatModel})`);
-  }
   console.log("");
 
   // Run first cycle immediately

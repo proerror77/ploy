@@ -1,3 +1,45 @@
+# Current Session - Codex CLI Sidecar Engine (2026-07-09)
+
+Evidence stage: `diagnostic` sidecar runtime migration. Replace the old
+Claude Agent SDK runtime with Codex CLI non-interactive execution while keeping
+the existing queue, recorder, contract evaluator, Grok direct API adapter, and
+approval gates.
+
+## Files / Ownership
+
+- `ploy-sidecar/src/runtime/codex-cli.ts`
+  - Owner: `codex exec` invocation, output schema handling, and completion
+    parsing.
+- `ploy-sidecar/src/index.ts`
+  - Owner: sidecar engine selection and run-cycle execution.
+- `ploy-sidecar/package.json`, `ploy-sidecar/package-lock.json`
+  - Owner: remove Claude SDK and unused MCP-tool dependencies.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Add Codex CLI execution wrapper using `codex exec`.
+- [x] Make `SIDECAR_AGENT_ENGINE=codex` the default.
+- [x] Remove Claude Agent SDK imports and unused in-process MCP tool wrappers.
+- [x] Validate sidecar build/self-tests and real Codex CLI structured-output smokes.
+- [ ] Push PR, wait for CI, merge.
+
+## Review
+
+- 2026-07-09: Local CLI readback showed `codex-cli 0.143.0` and
+  `codex exec` support for `--json`, `--output-schema`, and
+  `--output-last-message`. The sidecar now calls Codex CLI for queued Strategy
+  Builder runs, focused subagent passes, and the regular scan cycle; `grok`
+  remains available as an explicit `SIDECAR_AGENT_ENGINE=grok` path for xAI.
+- 2026-07-09: Validation passed for `npx tsx src/runtime/codex-cli.ts`,
+  `npx tsx src/runtime/grok.ts`, `npx tsx src/runtime/run-recorder.ts`,
+  `npm run build`, `rtk git diff --check`, real
+  `queryCodexStrategyCompletion()` smoke, and real `queryCodexScanOutput()`
+  smoke. `codex doctor --json` showed auth/config/network/WebSocket/version OK;
+  its overall status was fail only because this non-interactive shell reports
+  `TERM=dumb`.
+
 # Current Session - Harness Events Initialization (2026-07-09)
 
 Evidence stage: `diagnostic` end-to-end smoke closeout. The main-branch Grok
