@@ -3,8 +3,12 @@ import { z } from "zod";
 import { appendHarnessProposal } from "../runtime/harness-memory.js";
 import {
   applyApprovedSelfModification,
+  dispatchApprovedSelfModificationDeployment,
+  dispatchApprovedSelfModificationRollback,
   proposeSelfModification,
 } from "../runtime/self-modification.js";
+
+const workflowInputSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]));
 
 export const agentRuntimeServer = createSdkMcpServer({
   name: "agent-runtime",
@@ -139,6 +143,72 @@ export const agentRuntimeServer = createSdkMcpServer({
           pull_request_title,
           pull_request_body,
           base_branch,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result),
+            },
+          ],
+        };
+      }
+    ),
+    tool(
+      "dispatch_self_modification_deployment",
+      "Dispatch an allowlisted GitHub Actions deployment workflow after approval, with a required rollback workflow gate.",
+      {
+        approval_token: z.string(),
+        workflow: z.string().describe("Allowlisted workflow file, for example deploy-tango-1-1.yml"),
+        workflow_ref: z.string().default("main"),
+        inputs: workflowInputSchema.default({}),
+        rollback_workflow: z.string().describe("Allowlisted workflow file to use for rollback"),
+        rollback_workflow_ref: z.string().default("main"),
+        rollback_inputs: workflowInputSchema.default({}),
+      },
+      async ({
+        approval_token,
+        workflow,
+        workflow_ref,
+        inputs,
+        rollback_workflow,
+        rollback_workflow_ref,
+        rollback_inputs,
+      }) => {
+        const result = await dispatchApprovedSelfModificationDeployment({
+          approval_token,
+          workflow,
+          workflow_ref,
+          inputs,
+          rollback_workflow,
+          rollback_workflow_ref,
+          rollback_inputs,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result),
+            },
+          ],
+        };
+      }
+    ),
+    tool(
+      "dispatch_self_modification_rollback",
+      "Dispatch an allowlisted GitHub Actions rollback workflow after approval.",
+      {
+        approval_token: z.string(),
+        workflow: z.string(),
+        workflow_ref: z.string().default("main"),
+        inputs: workflowInputSchema.default({}),
+      },
+      async ({ approval_token, workflow, workflow_ref, inputs }) => {
+        const result = await dispatchApprovedSelfModificationRollback({
+          approval_token,
+          workflow,
+          workflow_ref,
+          inputs,
         });
         return {
           content: [

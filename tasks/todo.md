@@ -1,3 +1,41 @@
+# Current Session - Self-Mod Deploy Dispatch Gate (2026-07-09)
+
+Evidence stage: `diagnostic` self-modification deployment gate. This adds an
+approval-gated GitHub Actions dispatch path for self-mod deployments without
+duplicating deploy logic or bypassing protected environments.
+
+## Files / Ownership
+
+- `ploy-sidecar/src/runtime/self-modification.ts`
+  - Owner: allowlisted deployment and rollback workflow dispatch records.
+- `ploy-sidecar/src/tools/agent-runtime.ts`
+  - Owner: MCP schema for deployment and rollback dispatch.
+- `ploy-sidecar/src/index.ts`
+  - Owner: expose dispatch tools only for approved queued self-mod runs.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Add approval-token and env-gated deployment workflow dispatch.
+- [x] Require allowlisted deploy and rollback workflow names.
+- [x] Keep default dispatch refs on `main`; block non-main deploy refs unless
+      explicitly enabled.
+- [x] Add rollback dispatch tool and self-test coverage with fake `gh`.
+- [ ] Push PR and verify CI.
+
+## Review
+
+- 2026-07-09: Added self-mod deployment dispatch using existing GitHub Actions
+  workflows via `gh workflow run`. Dispatch requires
+  `PLOY_HARNESS_SELF_MOD_ALLOW_DEPLOY=true`, an allowlist in
+  `PLOY_HARNESS_SELF_MOD_DEPLOY_WORKFLOWS`, an approval token, and a rollback
+  workflow. The queued sidecar only exposes these tools when
+  `SIDECAR_ALLOW_SELF_MODIFICATION=true` and the run contract requires harness
+  self-modification. Validation passed:
+  `npx tsx src/runtime/self-modification.ts` and `npm run build` in
+  `ploy-sidecar`.
+
 # Current Session - Self-Mod PR Gate Continuation (2026-07-09)
 
 Evidence stage: `diagnostic` self-modification gate hardening. This extends

@@ -25,6 +25,33 @@ export type SelfModificationProposal = {
   pull_request_url?: string;
 };
 
+type WorkflowInputs = Record<string, string | number | boolean>;
+
+export type SelfModificationDeploymentDispatch = {
+  kind: "self_modification_deployment_dispatch";
+  deployment_id: string;
+  workflow: string;
+  workflow_ref: string;
+  inputs: WorkflowInputs;
+  rollback_workflow: string;
+  rollback_workflow_ref: string;
+  rollback_inputs: WorkflowInputs;
+  status: "dispatched";
+  run_url?: string;
+  created_at: string;
+};
+
+export type SelfModificationRollbackDispatch = {
+  kind: "self_modification_rollback_dispatch";
+  deployment_id: string;
+  workflow: string;
+  workflow_ref: string;
+  inputs: WorkflowInputs;
+  status: "dispatched";
+  run_url?: string;
+  created_at: string;
+};
+
 export async function proposeSelfModification(params: {
   title: string;
   patch: string;
@@ -45,6 +72,81 @@ export async function proposeSelfModification(params: {
   return proposal;
 }
 
+export async function dispatchApprovedSelfModificationDeployment(params: {
+  approval_token: string;
+  workflow: string;
+  workflow_ref?: string;
+  inputs?: WorkflowInputs;
+  rollback_workflow: string;
+  rollback_workflow_ref?: string;
+  rollback_inputs?: WorkflowInputs;
+}): Promise<SelfModificationDeploymentDispatch> {
+  verifySelfModificationApproval(params.approval_token);
+  if (process.env.PLOY_HARNESS_SELF_MOD_ALLOW_DEPLOY !== "true") {
+    throw new Error("self-modification deployment dispatch is not enabled");
+  }
+  const workflowRef = params.workflow_ref || "main";
+  const rollbackWorkflowRef = params.rollback_workflow_ref || "main";
+  const inputs = params.inputs || {};
+  const rollbackInputs = params.rollback_inputs || {};
+  validateWorkflowAllowed(params.workflow);
+  validateWorkflowAllowed(params.rollback_workflow);
+  validateWorkflowRef(workflowRef, inputs);
+  validateWorkflowRef(rollbackWorkflowRef, rollbackInputs);
+  validateWorkflowInputs(inputs);
+  validateWorkflowInputs(rollbackInputs);
+
+  const repoRoot = await findRepoRoot();
+  const runUrl = await dispatchWorkflow(repoRoot, params.workflow, workflowRef, inputs);
+  const record: SelfModificationDeploymentDispatch = {
+    kind: "self_modification_deployment_dispatch",
+    deployment_id: `selfdeploy-${randomUUID()}`,
+    workflow: params.workflow,
+    workflow_ref: workflowRef,
+    inputs,
+    rollback_workflow: params.rollback_workflow,
+    rollback_workflow_ref: rollbackWorkflowRef,
+    rollback_inputs: rollbackInputs,
+    status: "dispatched",
+    run_url: runUrl,
+    created_at: new Date().toISOString(),
+  };
+  await appendFile(await harnessSelfModificationsPath(), `${JSON.stringify(record)}\n`, "utf8");
+  return record;
+}
+
+export async function dispatchApprovedSelfModificationRollback(params: {
+  approval_token: string;
+  workflow: string;
+  workflow_ref?: string;
+  inputs?: WorkflowInputs;
+}): Promise<SelfModificationRollbackDispatch> {
+  verifySelfModificationApproval(params.approval_token);
+  if (process.env.PLOY_HARNESS_SELF_MOD_ALLOW_DEPLOY !== "true") {
+    throw new Error("self-modification rollback dispatch is not enabled");
+  }
+  const workflowRef = params.workflow_ref || "main";
+  const inputs = params.inputs || {};
+  validateWorkflowAllowed(params.workflow);
+  validateWorkflowRef(workflowRef, inputs);
+  validateWorkflowInputs(inputs);
+
+  const repoRoot = await findRepoRoot();
+  const runUrl = await dispatchWorkflow(repoRoot, params.workflow, workflowRef, inputs);
+  const record: SelfModificationRollbackDispatch = {
+    kind: "self_modification_rollback_dispatch",
+    deployment_id: `selfrollback-${randomUUID()}`,
+    workflow: params.workflow,
+    workflow_ref: workflowRef,
+    inputs,
+    status: "dispatched",
+    run_url: runUrl,
+    created_at: new Date().toISOString(),
+  };
+  await appendFile(await harnessSelfModificationsPath(), `${JSON.stringify(record)}\n`, "utf8");
+  return record;
+}
+
 export async function applyApprovedSelfModification(params: {
   proposal_id: string;
   approval_token: string;
@@ -55,14 +157,7 @@ export async function applyApprovedSelfModification(params: {
   pull_request_body?: string;
   base_branch?: string;
 }): Promise<SelfModificationProposal> {
-  const expectedToken = process.env.PLOY_HARNESS_SELF_MOD_APPROVAL_TOKEN;
-  if (!expectedToken) {
-    throw new Error("self-modification apply is not configured");
-  }
-  if (params.approval_token !== expectedToken) {
-    throw new Error("invalid self-modification approval token");
-  }
-
+  verifySelfModificationApproval(params.approval_token);
   const proposal = await readProposal(params.proposal_id);
   const repoRoot = await findRepoRoot();
   await ensureCleanWorktree(repoRoot);
@@ -150,6 +245,81 @@ export async function applyApprovedSelfModification(params: {
   }
 
   return recordApplied(proposal, {});
+}
+
+function verifySelfModificationApproval(approvalToken: string): void {
+  const expectedToken = process.env.PLOY_HARNESS_SELF_MOD_APPROVAL_TOKEN;
+  if (!expectedToken) {
+    throw new Error("self-modification approval is not configured");
+  }
+  if (approvalToken !== expectedToken) {
+    throw new Error("invalid self-modification approval token");
+  }
+}
+
+function validateWorkflowAllowed(workflow: string): void {
+  if (!/^[A-Za-z0-9._-]+\.ya?ml$/.test(workflow)) {
+    throw new Error(`invalid workflow name: ${workflow}`);
+  }
+  const allowed = new Set(
+    (process.env.PLOY_HARNESS_SELF_MOD_DEPLOY_WORKFLOWS || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+  );
+  if (!allowed.has(workflow)) {
+    throw new Error(`self-modification deployment workflow is not allowlisted: ${workflow}`);
+  }
+}
+
+function validateWorkflowInputs(inputs: WorkflowInputs): void {
+  for (const [key, value] of Object.entries(inputs)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(key)) {
+      throw new Error(`invalid workflow input name: ${key}`);
+    }
+    if (!["string", "number", "boolean"].includes(typeof value)) {
+      throw new Error(`invalid workflow input value for ${key}`);
+    }
+  }
+}
+
+function validateWorkflowRef(workflowRef: string, inputs: WorkflowInputs): void {
+  if (process.env.PLOY_HARNESS_SELF_MOD_ALLOW_NON_MAIN_DEPLOY_REF === "true") return;
+  if (workflowRef !== "main") {
+    throw new Error("self-modification deployment dispatch requires workflow_ref=main");
+  }
+  const gitRef = inputs.git_ref;
+  if (gitRef !== undefined && String(gitRef) !== "main") {
+    throw new Error("self-modification deployment dispatch requires git_ref=main");
+  }
+}
+
+async function dispatchWorkflow(
+  cwd: string,
+  workflow: string,
+  workflowRef: string,
+  inputs: WorkflowInputs
+): Promise<string | undefined> {
+  const args = ["workflow", "run", workflow, "--ref", workflowRef];
+  for (const [key, value] of Object.entries(inputs)) {
+    args.push("-f", `${key}=${String(value)}`);
+  }
+  await run(cwd, "gh", args);
+  const runUrl = (
+    await runOutput(cwd, "gh", [
+      "run",
+      "list",
+      "--workflow",
+      workflow,
+      "--limit",
+      "1",
+      "--json",
+      "url",
+      "--jq",
+      ".[0].url",
+    ]).catch(() => "")
+  ).trim();
+  return runUrl || undefined;
 }
 
 async function recordApplied(
@@ -253,6 +423,8 @@ async function selfTest() {
   const originalRoot = process.env.PLOY_SELF_MOD_REPO_ROOT;
   const originalToken = process.env.PLOY_HARNESS_SELF_MOD_APPROVAL_TOKEN;
   const originalAllowPr = process.env.PLOY_HARNESS_SELF_MOD_ALLOW_PR;
+  const originalAllowDeploy = process.env.PLOY_HARNESS_SELF_MOD_ALLOW_DEPLOY;
+  const originalDeployWorkflows = process.env.PLOY_HARNESS_SELF_MOD_DEPLOY_WORKFLOWS;
   const originalPathValue = process.env.PATH;
   const dir = await mkdtemp(join(tmpdir(), "ploy-self-mod-"));
   const logDir = await mkdtemp(join(tmpdir(), "ploy-self-mod-log-"));
@@ -265,10 +437,21 @@ async function selfTest() {
     process.env.PLOY_SELF_MOD_REPO_ROOT = dir;
     process.env.PLOY_HARNESS_SELF_MOD_APPROVAL_TOKEN = "approve";
     process.env.PLOY_HARNESS_SELF_MOD_ALLOW_PR = "true";
+    process.env.PLOY_HARNESS_SELF_MOD_ALLOW_DEPLOY = "true";
+    process.env.PLOY_HARNESS_SELF_MOD_DEPLOY_WORKFLOWS = "deploy-test.yml,rollback-test.yml";
     process.env.PATH = `${binDir}${delimiter}${process.env.PATH || ""}`;
     await writeFile(
       join(binDir, "gh"),
-      "#!/bin/sh\nprintf '%s\\n' 'https://github.example/ploy/pull/1'\n",
+      [
+        "#!/bin/sh",
+        "case \"$1 $2\" in",
+        "  \"pr create\") printf '%s\\n' 'https://github.example/ploy/pull/1' ;;",
+        "  \"workflow run\") exit 0 ;;",
+        "  \"run list\") printf '%s\\n' 'https://github.example/ploy/actions/runs/42' ;;",
+        "  *) exit 1 ;;",
+        "esac",
+        "",
+      ].join("\n"),
       "utf8"
     );
     await chmod(join(binDir, "gh"), 0o755);
@@ -319,11 +502,42 @@ async function selfTest() {
     );
     assert.equal((await runOutput(dir, "git", ["branch", "--show-current"])).trim(), "selfmod/test");
     assert.equal((await runOutput(dir, "git", ["branch", "--list", "selfmod/fail"])).trim(), "");
+
+    const deployment = await dispatchApprovedSelfModificationDeployment({
+      approval_token: "approve",
+      workflow: "deploy-test.yml",
+      inputs: { git_ref: "main", deploy: true },
+      rollback_workflow: "rollback-test.yml",
+      rollback_inputs: { git_ref: "main", deploy: true },
+    });
+    assert.equal(deployment.workflow, "deploy-test.yml");
+    assert.equal(deployment.rollback_workflow, "rollback-test.yml");
+    assert.equal(deployment.run_url, "https://github.example/ploy/actions/runs/42");
+    await assert.rejects(
+      dispatchApprovedSelfModificationDeployment({
+        approval_token: "approve",
+        workflow: "not-allowed.yml",
+        inputs: { git_ref: "main" },
+        rollback_workflow: "rollback-test.yml",
+      })
+    );
+
+    const rollback = await dispatchApprovedSelfModificationRollback({
+      approval_token: "approve",
+      workflow: "rollback-test.yml",
+      inputs: { git_ref: "main", deploy: true },
+    });
+    assert.equal(rollback.workflow, "rollback-test.yml");
+    assert.equal(rollback.run_url, "https://github.example/ploy/actions/runs/42");
+    assert.match(await readFile(logPath, "utf8"), /self_modification_deployment_dispatch/);
+    assert.match(await readFile(logPath, "utf8"), /self_modification_rollback_dispatch/);
   } finally {
     restoreEnv("PLOY_HARNESS_SELF_MODIFICATIONS_FILE", originalPath);
     restoreEnv("PLOY_SELF_MOD_REPO_ROOT", originalRoot);
     restoreEnv("PLOY_HARNESS_SELF_MOD_APPROVAL_TOKEN", originalToken);
     restoreEnv("PLOY_HARNESS_SELF_MOD_ALLOW_PR", originalAllowPr);
+    restoreEnv("PLOY_HARNESS_SELF_MOD_ALLOW_DEPLOY", originalAllowDeploy);
+    restoreEnv("PLOY_HARNESS_SELF_MOD_DEPLOY_WORKFLOWS", originalDeployWorkflows);
     restoreEnv("PATH", originalPathValue);
     await rm(dir, { recursive: true, force: true });
     await rm(logDir, { recursive: true, force: true });

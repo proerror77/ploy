@@ -574,7 +574,11 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
     process.env.SIDECAR_ALLOW_SELF_MODIFICATION === "true" &&
     queued.request.run_contract.includes("requires_harness_self_modification = true")
   ) {
-    queuedAllowedTools.push("mcp__agent-runtime__apply_self_modification");
+    queuedAllowedTools.push(
+      "mcp__agent-runtime__apply_self_modification",
+      "mcp__agent-runtime__dispatch_self_modification_deployment",
+      "mcp__agent-runtime__dispatch_self_modification_rollback"
+    );
   }
 
   console.log(`\n[${startedAt}] Starting queued strategy run ${queued.run_id}`);
