@@ -35,6 +35,7 @@ This file is maintained by the sidecar from completed agent runs.
 `;
 
 export async function readHarnessContext(maxChars = 6000): Promise<string> {
+  await ensureHarnessEventsLog();
   const path = await harnessContextPath();
   try {
     const body = await readFile(path, "utf8");
@@ -44,6 +45,10 @@ export async function readHarnessContext(maxChars = 6000): Promise<string> {
     await writeFile(path, DEFAULT_CONTEXT, "utf8");
     return DEFAULT_CONTEXT;
   }
+}
+
+async function ensureHarnessEventsLog(): Promise<void> {
+  await appendFile(await harnessEventsPath(), "", "utf8");
 }
 
 export function deriveHarnessLearning(record: AgentRunRecord): HarnessLearning | null {
@@ -193,6 +198,8 @@ async function selfTest() {
     process.env.PLOY_AGENT_RUNS_FILE = join(dir, "agent-runs.jsonl");
     process.env.PLOY_HARNESS_CONTEXT_FILE = join(dir, "harness-context.md");
     process.env.PLOY_HARNESS_EVENTS_FILE = join(dir, "harness-events.jsonl");
+    assert.equal(await readHarnessContext(), DEFAULT_CONTEXT);
+    assert.equal(await readFile(await harnessEventsPath(), "utf8"), "");
 
     const record = {
       run_id: "agent-test",
