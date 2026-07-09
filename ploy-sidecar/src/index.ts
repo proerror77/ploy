@@ -41,6 +41,7 @@ import {
   requeueAgentRunRequest,
   type QueuedAgentRunRequest,
 } from "./runtime/run-requests.js";
+import { readHarnessContext } from "./runtime/harness-memory.js";
 
 // ── Config ──────────────────────────────────────────
 
@@ -379,6 +380,7 @@ function completionFromMessage(message: unknown): AgentTaskCompletion | null {
 async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<AgentRunRecord> {
   const startedAt = new Date().toISOString();
   const runtimeContext = await buildRuntimeContext();
+  const harnessContext = await readHarnessContext();
   const toolCalls: AgentToolCallRecord[] = [];
   let sessionId: string | null = null;
   let totalCostUsd: number | null = null;
@@ -411,7 +413,10 @@ Use automatic tools for platform reads, live game checks, market search, Grok/X-
         systemPrompt: `${SYSTEM_PROMPT}
 
 ## Runtime Context (fresh snapshot for this queued strategy run)
-${JSON.stringify(runtimeContext, null, 2)}`,
+${JSON.stringify(runtimeContext, null, 2)}
+
+## Harness Meta-Context
+${harnessContext}`,
         mcpServers: {
           espn: espnServer,
           polymarket: polymarketServer,
@@ -432,6 +437,7 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
           "mcp__research__compare_configs",
           "mcp__research__check_oversight",
           "mcp__agent-runtime__complete_task",
+          "mcp__agent-runtime__propose_harness_improvement",
           "WebSearch",
           "WebFetch",
         ],
@@ -512,6 +518,7 @@ async function runScanCycle(): Promise<void> {
   let resultOutput: unknown = null;
   let completion: AgentTaskCompletion | null = null;
   const runtimeContext = await buildRuntimeContext();
+  const harnessContext = await readHarnessContext();
   console.log(`\n[${timestamp}] Starting scan cycle (model=${MODEL}, dry_run=${DRY_RUN})`);
 
   try {
@@ -536,7 +543,10 @@ Return your structured analysis.`,
         systemPrompt: `${SYSTEM_PROMPT}
 
 ## Runtime Context (fresh snapshot for this cycle)
-${JSON.stringify(runtimeContext, null, 2)}`,
+${JSON.stringify(runtimeContext, null, 2)}
+
+## Harness Meta-Context
+${harnessContext}`,
         mcpServers: {
           espn: espnServer,
           polymarket: polymarketServer,
@@ -553,6 +563,7 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
           "mcp__ploy-backend__get_deployment",
           "mcp__research__*",
           "mcp__agent-runtime__complete_task",
+          "mcp__agent-runtime__propose_harness_improvement",
           "WebSearch",
           "WebFetch",
         ],

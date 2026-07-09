@@ -126,6 +126,13 @@ type ContractCheckView = {
   detail: string;
 };
 
+type HarnessLearningView = {
+  category: string;
+  summary: string;
+  suggestedChange: string;
+  subagentProfile?: string;
+};
+
 function contractChecks(run: AgentRunRecord): ContractCheckView[] {
   const outputSummary = asJsonRecord(run.output_summary);
   const evaluation = asJsonRecord(outputSummary?.contract_evaluation);
@@ -144,6 +151,19 @@ function contractChecks(run: AgentRunRecord): ContractCheckView[] {
     })
     .filter((check): check is ContractCheckView => check !== null)
     .slice(0, 5);
+}
+
+function harnessLearning(run: AgentRunRecord): HarnessLearningView | null {
+  const outputSummary = asJsonRecord(run.output_summary);
+  const learning = asJsonRecord(outputSummary?.harness_learning);
+  if (!learning) return null;
+  return {
+    category: asString(learning.category, 'harness'),
+    summary: asString(learning.summary, ''),
+    suggestedChange: asString(learning.suggested_change, ''),
+    subagentProfile:
+      typeof learning.subagent_profile === 'string' ? learning.subagent_profile : undefined,
+  };
 }
 
 function asJsonRecord(value: JsonValue | undefined): Record<string, JsonValue> | null {
@@ -546,6 +566,21 @@ export function StrategyBuilder() {
                             )}
                           </div>
                         ))}
+                      </div>
+                    )}
+                    {harnessLearning(run) && (
+                      <div className="mt-3 rounded-md border border-[#bfdbfe] bg-[#eff6ff] px-2 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-semibold text-[#1d4ed8]">
+                            harness: {harnessLearning(run)?.category}
+                          </span>
+                          {harnessLearning(run)?.subagentProfile && (
+                            <Badge variant="outline">{harnessLearning(run)?.subagentProfile}</Badge>
+                          )}
+                        </div>
+                        <div className="mt-1 line-clamp-2 text-xs leading-5 text-[#1e3a8a]">
+                          {harnessLearning(run)?.suggestedChange || harnessLearning(run)?.summary}
+                        </div>
                       </div>
                     )}
                   </div>

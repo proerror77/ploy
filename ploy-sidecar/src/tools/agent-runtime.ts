@@ -1,5 +1,6 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { appendHarnessProposal } from "../runtime/harness-memory.js";
 
 export const agentRuntimeServer = createSdkMcpServer({
   name: "agent-runtime",
@@ -45,6 +46,38 @@ export const agentRuntimeServer = createSdkMcpServer({
           },
         ],
       })
+    ),
+    tool(
+      "propose_harness_improvement",
+      "Record a non-code harness improvement proposal for future human review.",
+      {
+        category: z.enum([
+          "completion_gap",
+          "tool_gap",
+          "runtime_error",
+          "approval_gate",
+          "negative_result",
+        ]),
+        summary: z.string().describe("What failed or could improve"),
+        suggested_change: z.string().describe("Smallest proposed harness/prompt/profile change"),
+        subagent_profile: z.string().optional().describe("Optional proposed subagent/profile name"),
+      },
+      async ({ category, summary, suggested_change, subagent_profile }) => {
+        const proposal = await appendHarnessProposal({
+          category,
+          summary,
+          suggested_change,
+          subagent_profile,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(proposal),
+            },
+          ],
+        };
+      }
     ),
   ],
 });

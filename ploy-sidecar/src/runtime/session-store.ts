@@ -26,3 +26,21 @@ export async function agentRunInProgressRequestsPath(): Promise<string> {
   await mkdir(dirname(inProgressPath), { recursive: true });
   return inProgressPath;
 }
+
+export async function harnessContextPath(): Promise<string> {
+  const configured = process.env.PLOY_HARNESS_CONTEXT_FILE;
+  const contextPath = configured
+    ? resolve(configured)
+    : resolve(dirname(await agentRunsLogPath()), "harness-context.md");
+  await mkdir(dirname(contextPath), { recursive: true });
+  return contextPath;
+}
+
+export async function harnessEventsPath(): Promise<string> {
+  const configured = process.env.PLOY_HARNESS_EVENTS_FILE;
+  const eventsPath = configured
+    ? resolve(configured)
+    : resolve(dirname(await agentRunsLogPath()), "harness-events.jsonl");
+  await mkdir(dirname(eventsPath), { recursive: true });
+  return eventsPath;
+}

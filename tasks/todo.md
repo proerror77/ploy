@@ -1,3 +1,49 @@
+# Current Session - Self-Improving Harness Memory (2026-07-09)
+
+Evidence stage: `diagnostic` harness-memory foundation. This adds
+self-improvement plumbing without enabling autonomous code modification or
+live trading changes.
+
+## Files / Ownership
+
+- `ploy-sidecar/src/runtime/harness-memory.ts`
+  - Owner: file-backed harness context, events, deterministic learning, and
+    agent proposals.
+- `ploy-sidecar/src/runtime/session-store.ts`,
+  `ploy-sidecar/src/runtime/run-recorder.ts`,
+  `ploy-sidecar/src/tools/agent-runtime.ts`, and `ploy-sidecar/src/index.ts`
+  - Owner: context paths, run-record learning, proposal tool, and prompt
+    injection.
+- `ploy-frontend/src/pages/StrategyBuilder.tsx`
+  - Owner: visible harness learning on recent run cards.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Add file-backed harness meta-context and events.
+- [x] Derive deterministic harness learnings from failed/partial/retry run
+      records.
+- [x] Allow agents to record non-code harness improvement proposals.
+- [x] Inject harness context into sidecar prompts.
+- [x] Surface harness learning in Strategy Builder.
+- [x] Run sidecar/frontend validation and commit/push the slice.
+
+## Review
+
+- 2026-07-09: Added a file-backed self-improving harness foundation without
+  enabling autonomous code modification. The sidecar now maintains
+  `harness-context.md` and `harness-events.jsonl`, derives deterministic
+  harness learnings from `failed` / `partial` / `needs_retry` run records,
+  injects bounded harness context into each sidecar prompt, and exposes
+  `agent-runtime.propose_harness_improvement` for non-code proposals. Strategy
+  Builder now shows run-level `harness_learning` suggestions and proposed
+  subagent profiles when present. Validation passed:
+  `npx tsx src/runtime/harness-memory.ts`,
+  `npx tsx src/runtime/run-requests.ts`,
+  `npx tsx src/runtime/evaluator.ts`, `npm run build` in `ploy-sidecar`, and
+  `npm run build` in `ploy-frontend`.
+
 # Current Session - Agentic Strategy Loop Hardening (2026-07-08)
 
 Evidence stage: `diagnostic` agent-loop architecture closure. This keeps

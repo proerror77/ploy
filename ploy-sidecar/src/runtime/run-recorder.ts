@@ -7,6 +7,7 @@ import type {
 } from "../contracts/operator-contracts.js";
 import { agentRunsLogPath } from "./session-store.js";
 import { evaluateAgentRunContract, evaluateRun, type ContractEvaluation } from "./evaluator.js";
+import { deriveHarnessLearning, recordHarnessLearning } from "./harness-memory.js";
 
 type RuntimeContext = {
   system: { status: string } | null;
@@ -42,6 +43,13 @@ export function newRunId() {
 export async function recordAgentRun(record: AgentRunRecord): Promise<void> {
   const logPath = await agentRunsLogPath();
   await appendFile(logPath, `${JSON.stringify(record)}\n`, "utf8");
+  await recordHarnessLearning(record).catch((error) => {
+    console.warn(
+      `Failed to record harness learning for ${record.run_id}: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  });
 }
 
 export function buildRunRecord(params: {
@@ -67,7 +75,7 @@ export function buildRunRecord(params: {
   });
   const structuredEvaluation = params.structuredOutput ? evaluateRun(params.structuredOutput) : null;
   const evaluation = contractEvaluation ?? structuredEvaluation;
-  return {
+  const record: AgentRunRecord = {
     run_id: params.runId,
     cycle_kind: params.cycleKind,
     status: runStatus(params, contractEvaluation),
@@ -109,6 +117,16 @@ export function buildRunRecord(params: {
       : null,
     evaluation,
   };
+  const harnessLearning = deriveHarnessLearning(record);
+  if (harnessLearning) {
+    record.output_summary = {
+      ...(record.output_summary && typeof record.output_summary === "object" && !Array.isArray(record.output_summary)
+        ? record.output_summary
+        : {}),
+      harness_learning: harnessLearning,
+    };
+  }
+  return record;
 }
 
 function runStatus(params: {
