@@ -1,3 +1,217 @@
+# Current Session - Harness Completion Slice (2026-07-09)
+
+Evidence stage: `diagnostic` harness completion. This closes the requested
+follow-up surface: real smoke, independent memory UI/API, focused subagent
+routing, gated self-modification, and true Grok API adapter.
+
+## Files / Ownership
+
+- `crates/ploy-daemon-host/src/http.rs`
+  - Owner: `GET /api/agent/harness-memory` read-only endpoint.
+- `ploy-frontend/src/pages/HarnessMemory.tsx`, `ploy-frontend/src/App.tsx`,
+  `ploy-frontend/src/components/Layout.tsx`, `ploy-frontend/src/services/api.ts`,
+  and `ploy-frontend/src/types/index.ts`
+  - Owner: independent Harness Memory / Proposal Queue UI.
+- `ploy-sidecar/src/index.ts`, `ploy-sidecar/src/runtime/run-recorder.ts`,
+  `ploy-sidecar/src/runtime/grok.ts`, `ploy-sidecar/src/runtime/self-modification.ts`,
+  `ploy-sidecar/src/runtime/session-store.ts`, and
+  `ploy-sidecar/src/tools/agent-runtime.ts`
+  - Owner: subagent routing, xAI/Grok adapter, and approval-gated self-mod
+    proposal/apply path.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+- `Cargo.lock`
+  - Owner: dependency audit remediation for `crossbeam-epoch`.
+
+## Tasks
+
+- [x] Add independent Harness Memory API/UI.
+- [x] Add proposal/context-driven focused subagent routing before queued runs.
+- [x] Add approval-token-gated self-modification proposal/apply path with
+      clean-worktree, `git apply --check`, verification, and rollback.
+- [x] Add xAI/Grok API adapter using `XAI_API_KEY` or `GROK_API_KEY`.
+- [x] Run ployd + Strategy Builder + sidecar smoke and confirm
+      `agent-runs.jsonl`, `harness-context.md`, and `harness-events.jsonl`.
+- [ ] Commit/push and finish PR/CI integration.
+
+## Review
+
+- 2026-07-09: Local validation passed:
+  `npx tsx src/runtime/grok.ts`,
+  `npx tsx src/runtime/self-modification.ts`,
+  `npx tsx src/runtime/harness-memory.ts`,
+  `npx tsx src/runtime/run-requests.ts`,
+  `npx tsx src/runtime/evaluator.ts`, `npm run build` in `ploy-sidecar`,
+  `npm run build` in `ploy-frontend`, and
+  `rtk cargo test -p ploy-daemon-host handle_runtime_request_reads_harness_memory`.
+  Real smoke used Vite Strategy Builder at `http://127.0.0.1:5173/builder`,
+  local `new-ployd` on `127.0.0.1:8081`, and sidecar against isolated
+  `tmp/harness-smoke`. The UI queued
+  `agent-68afce95-3a1e-4396-b7d5-df32b0693213`; sidecar consumed it and wrote
+  `tmp/harness-smoke/run/sidecar/agent-runs.jsonl`,
+  `harness-context.md`, and `harness-events.jsonl`. The Claude Agent SDK
+  process exited with code 1 on this machine, so the smoke proves queue/file/API
+  behavior and failure capture, not a successful model completion.
+- 2026-07-09: PR dependency audit failed on `RUSTSEC-2026-0204` for
+  `crossbeam-epoch 0.9.18`. Updated the lockfile to `crossbeam-epoch 0.9.20`
+  and verified the CI-equivalent `cargo audit --ignore ...` command exits 0
+  locally with only the existing allowed warnings.
+
+# Current Session - Self-Improving Harness Memory (2026-07-09)
+
+Evidence stage: `diagnostic` harness-memory foundation. This adds
+self-improvement plumbing without enabling autonomous code modification or
+live trading changes.
+
+## Files / Ownership
+
+- `ploy-sidecar/src/runtime/harness-memory.ts`
+  - Owner: file-backed harness context, events, deterministic learning, and
+    agent proposals.
+- `ploy-sidecar/src/runtime/session-store.ts`,
+  `ploy-sidecar/src/runtime/run-recorder.ts`,
+  `ploy-sidecar/src/tools/agent-runtime.ts`, and `ploy-sidecar/src/index.ts`
+  - Owner: context paths, run-record learning, proposal tool, and prompt
+    injection.
+- `ploy-frontend/src/pages/StrategyBuilder.tsx`
+  - Owner: visible harness learning on recent run cards.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Add file-backed harness meta-context and events.
+- [x] Derive deterministic harness learnings from failed/partial/retry run
+      records.
+- [x] Allow agents to record non-code harness improvement proposals.
+- [x] Inject harness context into sidecar prompts.
+- [x] Surface harness learning in Strategy Builder.
+- [x] Run sidecar/frontend validation and commit/push the slice.
+
+## Review
+
+- 2026-07-09: Added a file-backed self-improving harness foundation without
+  enabling autonomous code modification. The sidecar now maintains
+  `harness-context.md` and `harness-events.jsonl`, derives deterministic
+  harness learnings from `failed` / `partial` / `needs_retry` run records,
+  injects bounded harness context into each sidecar prompt, and exposes
+  `agent-runtime.propose_harness_improvement` for non-code proposals. Strategy
+  Builder now shows run-level `harness_learning` suggestions and proposed
+  subagent profiles when present. Validation passed:
+  `npx tsx src/runtime/harness-memory.ts`,
+  `npx tsx src/runtime/run-requests.ts`,
+  `npx tsx src/runtime/evaluator.ts`, `npm run build` in `ploy-sidecar`, and
+  `npm run build` in `ploy-frontend`.
+
+# Current Session - Agentic Strategy Loop Hardening (2026-07-08)
+
+Evidence stage: `diagnostic` agent-loop architecture closure. This keeps
+live trading paths locked and hardens Strategy Builder / sidecar loops so
+queued agent runs have durable claim/ack semantics, explicit completion
+signals, bounded retry, and visible evaluator checks.
+
+## Files / Ownership
+
+- `ploy-sidecar/src/runtime/session-store.ts` and
+  `ploy-sidecar/src/runtime/run-requests.ts`
+  - Owner: durable queued-run claim, recovery, ack, and bounded retry.
+- `ploy-sidecar/src/tools/agent-runtime.ts`,
+  `ploy-sidecar/src/runtime/evaluator.ts`,
+  `ploy-sidecar/src/runtime/run-recorder.ts`, and `ploy-sidecar/src/index.ts`
+  - Owner: structured `complete_task`, evaluator-driven run status, and loop
+    stop/retry behavior.
+- `ploy-frontend/src/pages/StrategyBuilder.tsx`
+  - Owner: run monitor polling and contract-evaluation visibility.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Add crash-recoverable in-progress queue handling and bounded
+      `needs_retry` requeue.
+- [x] Upgrade `complete_task` to structured completion and stop loops when it
+      is observed.
+- [x] Show live run refresh and contract checks in Strategy Builder.
+- [x] Run sidecar/frontend validation and commit/push the slice.
+
+## Review
+
+- 2026-07-08: Hardened Strategy Builder loops against crash/retry gaps. The
+  sidecar now claims queued agent-run requests into a durable in-progress JSONL
+  file, restores that file before claiming new queue entries, and only
+  acknowledges it after processing. `needs_retry` evaluator results are
+  requeued with a bounded attempt count (`SIDECAR_AGENT_RUN_MAX_RETRIES`,
+  default `1`). `complete_task` now carries structured decision,
+  `grok_decision`, evidence, blockers, and next-action fields, and sidecar
+  loops stop when that completion signal is observed. Strategy Builder now
+  refreshes run records every 10 seconds and displays persisted
+  `contract_evaluation` checks on the run monitor. Validation passed:
+  `npx tsx src/runtime/run-requests.ts`,
+  `npx tsx src/runtime/evaluator.ts`, `npm run build` in `ploy-sidecar`, and
+  `npm run build` in `ploy-frontend`.
+
+# Current Session - Agentic Strategy Run Closure (2026-06-20)
+
+Evidence stage: `diagnostic` frontend + control-plane + sidecar execution
+surface. Close the review findings by turning the Strategy Builder from a
+packet-only preview into a gated agent-run request surface with shared
+contracts, visible run creation, and sidecar-compatible run monitoring.
+
+## Files / Ownership
+
+- `crates/ploy-operator-contracts/`
+  - Owner: canonical agent-run request/record schemas for Rust, frontend, and
+    sidecar.
+- `crates/ploy-daemon-host/src/http.rs`
+  - Owner: robust agent-run JSONL reads plus operator-gated run request queue.
+- `ploy-sidecar/src/`
+  - Owner: sidecar run recorder/request processing bridge.
+- `ploy-frontend/src/`
+  - Owner: fully wired Agentic Strategy Builder UI and generated contract usage.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Make `AgentRunRecord` nullable where sidecar records are nullable.
+- [x] Add generated contracts for agent run records and create requests.
+- [x] Replace silent run-record parse drops with visible read errors.
+- [x] Add operator-gated `POST /api/agent/runs` request creation.
+- [x] Wire Strategy Builder to create real queued agent runs.
+- [x] Align UI capability labels with actual sidecar tools and approval gates.
+- [x] Split builder model/artifact logic out of the page component.
+- [x] Run contract, frontend, sidecar, and focused Rust validation.
+
+## Review
+
+- 2026-07-08: Tightened the Strategy Builder loop semantics with a deterministic
+  sidecar contract evaluator. Queued agent runs now evaluate `run_contract`
+  requirements against `complete_task`, tool calls, failure state, Grok decision
+  requirements, replay/runtime-parity gates, and approval-gated mutation calls.
+  The run record stores `contract_evaluation`, and unresolved contract checks
+  now surface as `needs_retry` / `blocked` instead of a generic successful
+  transcript. Builder-generated contracts now only require sports/Grok tools,
+  executable replay, full-depth CLOB, and runtime parity when the selected
+  strategy family and evidence target actually need them.
+
+- 2026-07-07: Integrated the trading-strategy Builder with a Grok Builder
+  profile. The frontend Strategy Builder now exposes `Grok Builder / NBA
+  comeback`, generates Grok/X evidence requirements in the run packet and
+  contract, and marks `grok_decision` as a required gate for that profile. The
+  sidecar queued-run path now enables ESPN scoreboard/game details, Polymarket
+  market snapshots, and WebSearch/WebFetch evidence collection for Grok Builder
+  runs while keeping paper intents and deployment changes approval-gated.
+
+- 2026-07-07: Closed follow-up code review findings on the agent-run surface:
+  sidecar queue draining now claims the queue atomically and skips malformed
+  lines, backend agent-run reads skip malformed JSONL rows, run creation writes
+  the visible requested record before the sidecar queue entry, `request_path`
+  was removed from the create response contract, `202 Accepted` is named
+  correctly, sidecar scan tools no longer wildcard all backend mutation tools,
+  `complete_task` status/summary is persisted into run records, frontend auth
+  headers can no longer be overwritten by `options.headers`, and LLM proposal
+  validation rejects bools for numeric/window fields.
+
 # Research Trace Plan Manager Workflow (2026-05-23)
 
 ## Current Session - Research Manager Fresh Runtime Candidate After Negative Replay (2026-05-28)

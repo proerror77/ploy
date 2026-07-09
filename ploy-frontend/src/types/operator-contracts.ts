@@ -132,3 +132,11 @@ export interface TradeResponse { entry_price: number; error_message?: string | n
 export interface TradingSnapshotEvent { trading: TradingStateSnapshot[]; }
 
 export type OperatorEvent = { data: LogEntry; type: "log"; } | { data: TradeResponse; type: "trade"; } | { data: PositionResponse; type: "position"; } | { data: MarketData; type: "market"; } | { data: StatusUpdate; type: "status"; } | { data: SystemSnapshotEvent; type: "system_snapshot"; } | { data: DeploymentSnapshotEvent; type: "deployment_snapshot"; } | { data: TradingSnapshotEvent; type: "trading_snapshot"; } | { data: MetricsSnapshotEvent; type: "metrics_snapshot"; } | { data: AlertSnapshotEvent; type: "alert_snapshot"; } | { data: OversightSnapshotEvent; type: "oversight_snapshot"; } | { data: ProposalSnapshotEvent; type: "proposal_snapshot"; };
+
+export interface AgentToolCallRecord { name: string; status: string; }
+
+export interface AgentRunRecord { cycle_kind: string; deployment_count: number; evaluation?: JsonValue; failure_reason?: string | null; finished_at?: string | null; model: string; operator_recommendations: number; output_summary?: JsonValue; oversight_alerts: number; oversight_playbook_count: number; oversight_signal_count: number; platform_status?: string | null; research_reports: number; run_id: string; runtime_context?: JsonValue; session_id?: string | null; started_at: string; status: string; tool_calls: AgentToolCallRecord[]; total_cost_usd?: number | null; }
+
+export interface AgentRunCreateRequest { autonomy_mode: string; budget_usd: number; max_turns: number; objective: string; run_contract: string; run_packet: string; strategy_profile: string; symbols: string[]; target_evidence: string; }
+
+export interface AgentRunCreateResponse { message: string; run_id: string; status: string; }

@@ -56,6 +56,18 @@ rules.
   one integrator.
 - Integrate parallel work intentionally, for example with `cherry-pick`, and
   remove stale temporary worktrees afterward.
+- Do not let completed session worktrees accumulate. After merge or PR close,
+  verify the worktree is clean or archive the branch with a local tag/bundle,
+  then remove the worktree and delete the local branch.
+- Keep only the main checkout plus currently active session worktrees. Clean
+  stale completed worktrees before starting new non-trivial work.
+- Do not convert cleanup archives into permanent local folders. Temporary
+  bundles, patches, screenshots, and archived worktree directories should be
+  removed after the merge/PR result is verified unless they are explicitly
+  retained as recovery evidence.
+- The final handoff for worktree-based sessions should state the cleanup proof:
+  `git worktree list`, `git worktree prune`, deleted local branches, and any
+  intentionally retained archive path.
 
 ## Git And Commits
 

@@ -9,8 +9,31 @@ export interface TodayStats {
   active_positions: number;
 }
 
+export interface HarnessMemoryEvent {
+  kind?: string;
+  run_id?: string;
+  cycle_kind?: string;
+  category?: string;
+  summary?: string;
+  suggested_change?: string;
+  subagent_profile?: string;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
+export interface HarnessMemoryResponse {
+  context: string;
+  events: HarnessMemoryEvent[];
+  event_count: number;
+  updated_at: string;
+}
+
 export type {
   ActiveAlert,
+  AgentRunCreateRequest,
+  AgentRunCreateResponse,
+  AgentRunRecord,
+  AgentToolCallRecord,
   AlertKind,
   AlertSeverity,
   AuditLogEntry,

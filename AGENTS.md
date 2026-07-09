@@ -121,7 +121,21 @@ Prefer **atomic commits** for landed repo changes:
 - Before editing, run preflight checks: `rtk git status --short`, `git branch --show-current`, `rtk git diff --name-only`.
 - Stage explicit paths only, then verify with `rtk git diff --cached` before commit.
 - Use one integration session to merge work: `git switch main && git pull --rebase`, then `git cherry-pick <sha...>`.
-- After merge, remove temporary worktrees to prevent stale branches and accidental edits.
+- After merge or PR close, remove temporary worktrees instead of leaving them
+  around. Before removing, verify the worktree is clean or archive the branch
+  with a local tag/bundle. Delete the local branch after its PR is merged or
+  explicitly abandoned.
+- Keep only the main checkout plus currently active session worktrees. If
+  `git worktree list` shows stale completed sessions, clean them before
+  starting new non-trivial work.
+- Treat archive folders as temporary recovery material, not a second workspace
+  system. After the merge/PR outcome is verified, remove archived worktree
+  folders, patches, screenshots, and local bundles that no longer protect
+  unmerged work.
+- A session is not done while legacy local worktree folders remain. Final
+  cleanup evidence should include `git worktree list`, `git worktree prune`,
+  and a check that project-level worktree/archive directories contain only
+  active or intentionally retained recovery artifacts.
 
 ## Git Flow
 

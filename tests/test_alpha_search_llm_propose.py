@@ -244,6 +244,32 @@ class ValidateResponseTests(unittest.TestCase):
         with self.assertRaises(propose.SchemaValidationError):
             propose.validate_response(response)
 
+    def test_rejects_boolean_window(self) -> None:
+        response = {
+            "mutations": [
+                {
+                    "base_factor": "auto_settlement_x",
+                    "mutation_type": "change_time_window",
+                    "window": True,
+                }
+            ]
+        }
+        with self.assertRaises(propose.SchemaValidationError):
+            propose.validate_response(response)
+
+    def test_rejects_boolean_numeric_constant(self) -> None:
+        response = {
+            "mutations": [
+                {
+                    "base_factor": "auto_settlement_x",
+                    "mutation_type": "add_spread_penalty",
+                    "constant": False,
+                }
+            ]
+        }
+        with self.assertRaises(propose.SchemaValidationError):
+            propose.validate_response(response)
+
 
 class ProposeMutationsTests(unittest.TestCase):
     def _run(self, tmp: str):

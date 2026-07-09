@@ -1,18 +1,19 @@
 use crate::events::EventBroker;
-use crate::runtime::{next_paper_intent_id, PloyDaemon};
+use crate::runtime::{PloyDaemon, next_paper_intent_id};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use ploy_operator_contracts::{
-    compute_oversight_report, AgentRunRecord, AlertSnapshotEvent, AuditLogEntry,
-    ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
+    AgentRunCreateRequest, AgentRunCreateResponse, AgentRunRecord, AlertSnapshotEvent,
+    AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
     DeploymentDiagnosticsReport, DeploymentSnapshotEvent, DiagnosticsEvidence, DiagnosticsFinding,
     DryRunPerformanceReport, IntentPurpose, MetricsSnapshotEvent, OperatorEvent,
     OrderReplaceRequest, OversightSnapshotEvent, PaperIntentRequest, PlatformDiagnosticsReport,
     ProposalCreateRequest, ProposalDecisionRequest, ProposalSnapshotEvent, StatusUpdate,
-    SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
+    SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent, compute_oversight_report,
 };
 use ploy_trading::{TradeSide, TradingIntent};
 use secrecy::{ExposeSecret, SecretString};
+use serde::Serialize;
 use sha2::Sha256;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
@@ -23,6 +24,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 #[cfg(test)]
 use crate::config::PlatformConfig;
@@ -103,6 +105,7 @@ fn json_error(status: u16, error: &str, message: impl Into<Option<String>>) -> (
 fn status_text(status_code: u16) -> &'static str {
     match status_code {
         200 => "OK",
+        202 => "Accepted",
         401 => "Unauthorized",
         429 => "Too Many Requests",
         400 => "Bad Request",
@@ -912,7 +915,9 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
         ("GET", "/api/audit/logs") => RequiredAccess::Admin,
         ("GET", "/api/system/diagnose") => RequiredAccess::ReadOnly,
         ("GET", "/api/agent/runs") => RequiredAccess::ReadOnly,
+        ("GET", "/api/agent/harness-memory") => RequiredAccess::ReadOnly,
         ("GET", _) if path.starts_with("/api/agent/runs/") => RequiredAccess::ReadOnly,
+        ("POST", "/api/agent/runs") => RequiredAccess::Operator,
         ("GET", "/api/proposals") | ("POST", "/api/proposals") => RequiredAccess::ReadOnly,
         ("GET", _) if path.starts_with("/api/proposals/") => RequiredAccess::ReadOnly,
         ("POST", _) if path.starts_with("/api/proposals/") => RequiredAccess::Operator,
@@ -989,11 +994,18 @@ fn audit_request(
 }
 
 fn append_audit_entry(path: &PathBuf, entry: &AuditLogEntry) -> io::Result<()> {
+    append_jsonl(path, entry)
+}
+
+fn append_jsonl<T>(path: &PathBuf, value: &T) -> io::Result<()>
+where
+    T: Serialize,
+{
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    let body = serde_json::to_string(entry)
+    let body = serde_json::to_string(value)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     writeln!(file, "{body}")
 }
@@ -1027,12 +1039,23 @@ fn read_agent_runs(path: &PathBuf) -> io::Result<Vec<AgentRunRecord>> {
         return Ok(Vec::new());
     }
     let body = fs::read_to_string(path)?;
-    let mut runs = body
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<AgentRunRecord>(line).ok())
-        .collect::<Vec<_>>();
+    let mut runs = Vec::new();
+    for (index, line) in body.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<AgentRunRecord>(line) {
+            Ok(run) => runs.push(run),
+            Err(err) => eprintln!(
+                "skipping invalid agent run record on line {} of {}: {err}",
+                index + 1,
+                path.display()
+            ),
+        }
+    }
     runs.reverse();
+    let mut seen = BTreeSet::new();
+    runs.retain(|run| seen.insert(run.run_id.clone()));
     Ok(runs)
 }
 
@@ -1040,6 +1063,138 @@ fn read_agent_run(path: &PathBuf, run_id: &str) -> io::Result<Option<AgentRunRec
     Ok(read_agent_runs(path)?
         .into_iter()
         .find(|run| run.run_id == run_id))
+}
+
+fn agent_run_requests_path(agent_runs_path: &Path) -> PathBuf {
+    agent_runs_path
+        .parent()
+        .map(|parent| parent.join("agent-run-requests.jsonl"))
+        .unwrap_or_else(|| PathBuf::from("agent-run-requests.jsonl"))
+}
+
+fn harness_context_path(agent_runs_path: &Path) -> PathBuf {
+    agent_runs_path
+        .parent()
+        .map(|parent| parent.join("harness-context.md"))
+        .unwrap_or_else(|| PathBuf::from("harness-context.md"))
+}
+
+fn harness_events_path(agent_runs_path: &Path) -> PathBuf {
+    agent_runs_path
+        .parent()
+        .map(|parent| parent.join("harness-events.jsonl"))
+        .unwrap_or_else(|| PathBuf::from("harness-events.jsonl"))
+}
+
+fn read_harness_events(path: &PathBuf, limit: usize) -> io::Result<Vec<serde_json::Value>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let body = fs::read_to_string(path)?;
+    let mut events = Vec::new();
+    for (index, line) in body.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(event) => events.push(event),
+            Err(err) => eprintln!(
+                "skipping invalid harness event on line {} of {}: {err}",
+                index + 1,
+                path.display()
+            ),
+        }
+    }
+    events.reverse();
+    events.truncate(limit);
+    Ok(events)
+}
+
+fn read_harness_memory(agent_runs_path: &PathBuf) -> io::Result<serde_json::Value> {
+    let context_path = harness_context_path(agent_runs_path);
+    let events_path = harness_events_path(agent_runs_path);
+    let context = if context_path.exists() {
+        fs::read_to_string(&context_path)?
+    } else {
+        String::new()
+    };
+    let events = read_harness_events(&events_path, 100)?;
+    Ok(serde_json::json!({
+        "context": context,
+        "events": events,
+        "event_count": events.len(),
+        "updated_at": Utc::now(),
+    }))
+}
+
+fn queue_agent_run_request(
+    state: &Arc<AppState>,
+    request: AgentRunCreateRequest,
+) -> io::Result<AgentRunCreateResponse> {
+    let run_id = format!("agent-{}", Uuid::new_v4());
+    let created_at = Utc::now();
+    let request_snapshot = request.clone();
+    let agent_runs_file = agent_runs_path(state).map_err(|response| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            response_message(&response.1).unwrap_or(response.1),
+        )
+    })?;
+    let request_file = agent_run_requests_path(&agent_runs_file);
+    let platform_status = state
+        .daemon
+        .lock()
+        .ok()
+        .map(|daemon| daemon.control_plane.system.status().status.to_string());
+
+    let queued = AgentRunRecord {
+        run_id: run_id.clone(),
+        cycle_kind: "agentic_strategy".to_string(),
+        status: "requested".to_string(),
+        started_at: created_at,
+        finished_at: None,
+        session_id: None,
+        model: "sidecar".to_string(),
+        platform_status,
+        deployment_count: 0,
+        oversight_signal_count: 0,
+        oversight_playbook_count: 0,
+        total_cost_usd: None,
+        tool_calls: Vec::new(),
+        research_reports: 0,
+        oversight_alerts: 0,
+        operator_recommendations: 0,
+        failure_reason: None,
+        runtime_context: Some(serde_json::json!({
+            "request": {
+                "objective": request_snapshot.objective,
+                "strategy_profile": request_snapshot.strategy_profile,
+                "autonomy_mode": request_snapshot.autonomy_mode,
+                "target_evidence": request_snapshot.target_evidence,
+                "symbols": request_snapshot.symbols,
+                "max_turns": request_snapshot.max_turns,
+                "budget_usd": request_snapshot.budget_usd,
+            }
+        })),
+        output_summary: None,
+        evaluation: None,
+    };
+
+    append_jsonl(&agent_runs_file, &queued)?;
+    append_jsonl(
+        &request_file,
+        &serde_json::json!({
+            "run_id": run_id,
+            "created_at": created_at,
+            "request": request,
+        }),
+    )?;
+
+    Ok(AgentRunCreateResponse {
+        run_id: queued.run_id,
+        status: queued.status,
+        message: "agent run request queued for sidecar processing".to_string(),
+    })
 }
 
 fn build_platform_diagnostics_report(
@@ -1839,6 +1994,35 @@ fn handle_runtime_request(
             ),
             Err(response) => response,
         },
+        ("GET", "/api/agent/harness-memory") => match agent_runs_path(state)
+            .map_err(|response| response)
+            .and_then(|path| {
+                read_harness_memory(&path).map_err(|err| {
+                    json_error(500, "harness_memory_unavailable", Some(err.to_string()))
+                })
+            }) {
+            Ok(memory) => (
+                200,
+                serde_json::to_string(&memory).unwrap_or_else(|_| "{}".to_string()),
+            ),
+            Err(response) => response,
+        },
+        ("POST", "/api/agent/runs") => {
+            let Some(body) = body else {
+                return json_error(400, "missing_body", None);
+            };
+            let request: AgentRunCreateRequest = match serde_json::from_str(body) {
+                Ok(request) => request,
+                Err(err) => return json_error(400, "invalid_json", Some(err.to_string())),
+            };
+            match queue_agent_run_request(state, request) {
+                Ok(response) => (
+                    202,
+                    serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+                ),
+                Err(err) => json_error(500, "agent_run_queue_failed", Some(err.to_string())),
+            }
+        }
         ("GET", _) if path.starts_with("/api/agent/runs/") => {
             let run_id = path.trim_start_matches("/api/agent/runs/");
             match agent_runs_path(state)
@@ -2329,10 +2513,10 @@ fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_session_cookie, append_audit_entry, content_length, handle_api_request,
+        ADMIN_SESSION_COOKIE_NAME, AppState, AuthLevel, RateLimiter, admin_session_cookie,
+        append_audit_entry, content_length, handle_api_request,
         handle_authenticated_runtime_request, handle_runtime_request, header_end_offset,
-        request_auth_level, response_headers, route_request, snapshot_events, AppState, AuthLevel,
-        RateLimiter, ADMIN_SESSION_COOKIE_NAME,
+        request_auth_level, response_headers, route_request, snapshot_events,
     };
     use crate::events::EventBroker;
     use chrono::{Duration, Utc};
@@ -2579,11 +2763,13 @@ mod tests {
             Some("secret-token"),
             "cookie-secret",
         );
-        assert!(login_headers
-            .iter()
-            .any(|(name, value)| name == "Set-Cookie"
-                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=v1."))
-                && !value.contains("secret-token")));
+        assert!(
+            login_headers
+                .iter()
+                .any(|(name, value)| name == "Set-Cookie"
+                    && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=v1."))
+                    && !value.contains("secret-token"))
+        );
 
         let logout_headers = response_headers(
             "POST",
@@ -2592,11 +2778,13 @@ mod tests {
             Some("secret-token"),
             "cookie-secret",
         );
-        assert!(logout_headers
-            .iter()
-            .any(|(name, value)| name == "Set-Cookie"
-                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
-                && value.contains("Max-Age=0")));
+        assert!(
+            logout_headers
+                .iter()
+                .any(|(name, value)| name == "Set-Cookie"
+                    && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
+                    && value.contains("Max-Age=0"))
+        );
     }
 
     #[test]
@@ -2937,12 +3125,16 @@ mod tests {
         assert_eq!(alerts_code, 200);
         let alerts: Vec<ploy_operator_contracts::ActiveAlert> =
             serde_json::from_str(&alerts_body).expect("alerts json");
-        assert!(alerts
-            .iter()
-            .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale));
-        assert!(alerts
-            .iter()
-            .any(|alert| alert.source_id.contains("live_reconcile")));
+        assert!(
+            alerts
+                .iter()
+                .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale)
+        );
+        assert!(
+            alerts
+                .iter()
+                .any(|alert| alert.source_id.contains("live_reconcile"))
+        );
     }
 
     #[test]
@@ -3457,6 +3649,181 @@ mod tests {
         assert_eq!(status_code, 200);
         assert!(body.contains("\"run_id\":\"run-operator-detail\""));
         assert!(body.contains("\"diagnostic_candidates\":[\"example.paper\"]"));
+    }
+
+    #[test]
+    fn handle_runtime_request_reads_nullable_sidecar_agent_runs() {
+        let root = temp_dir("runtime-agent-run-nullable");
+        let runtime_root = root.join("run/platform");
+        let agent_runs_file = root.join("run/sidecar/agent-runs.jsonl");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(runtime_root.clone()).expect("create runtime root");
+        fs::create_dir_all(agent_runs_file.parent().expect("agent runs parent"))
+            .expect("create agent runs dir");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(&registry_file, "[]").expect("registry");
+        let valid_run = serde_json::json!({
+                "run_id": "run-nullable",
+                "cycle_kind": "research_oversight",
+                "status": "started",
+                "started_at": Utc::now(),
+                "finished_at": null,
+                "session_id": null,
+                "model": "sonnet",
+                "platform_status": null,
+                "deployment_count": 0,
+                "oversight_signal_count": 0,
+                "oversight_playbook_count": 0,
+                "total_cost_usd": null,
+                "tool_calls": [],
+                "research_reports": 0,
+                "oversight_alerts": 0,
+                "operator_recommendations": 0,
+                "failure_reason": null,
+                "runtime_context": null,
+                "output_summary": null,
+                "evaluation": null
+            })
+            .to_string();
+        fs::write(
+            &agent_runs_file,
+            format!("{{broken json\n{valid_run}\n"),
+        )
+        .expect("agent runs");
+
+        let config = crate::config::PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            agent_runs_file,
+            ..crate::config::PlatformConfig::default()
+        };
+
+        let daemon = crate::runtime::PloyDaemon::boot(&config).expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (status_code, body) = handle_runtime_request("GET", "/api/agent/runs", None, &state);
+        assert_eq!(status_code, 200);
+        assert!(body.contains("\"run_id\":\"run-nullable\""));
+        assert!(body.contains("\"finished_at\":null"));
+    }
+
+    #[test]
+    fn handle_runtime_request_reads_harness_memory() {
+        let root = temp_dir("runtime-harness-memory");
+        let runtime_root = root.join("run/platform");
+        let agent_runs_file = root.join("run/sidecar/agent-runs.jsonl");
+        let context_file = root.join("run/sidecar/harness-context.md");
+        let events_file = root.join("run/sidecar/harness-events.jsonl");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(runtime_root.clone()).expect("create runtime root");
+        fs::create_dir_all(agent_runs_file.parent().expect("agent runs parent"))
+            .expect("create agent runs dir");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(&registry_file, "[]").expect("registry");
+        fs::write(&agent_runs_file, "").expect("agent runs");
+        fs::write(&context_file, "# Harness\n\n- learned: use grok-evidence\n").expect("context");
+        fs::write(
+            &events_file,
+            format!(
+                "{{bad json\n{}\n",
+                serde_json::json!({
+                    "kind": "harness_learning",
+                    "run_id": "agent-test",
+                    "category": "tool_gap",
+                    "summary": "missing WebSearch"
+                })
+            ),
+        )
+        .expect("events");
+
+        let config = crate::config::PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            agent_runs_file,
+            ..crate::config::PlatformConfig::default()
+        };
+
+        let daemon = crate::runtime::PloyDaemon::boot(&config).expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (status_code, body) =
+            handle_runtime_request("GET", "/api/agent/harness-memory", None, &state);
+        assert_eq!(status_code, 200);
+        assert!(body.contains("use grok-evidence"));
+        assert!(body.contains("\"event_count\":1"));
+        assert!(body.contains("\"summary\":\"missing WebSearch\""));
+        assert!(!body.contains("harness-context.md"));
+    }
+
+    #[test]
+    fn handle_runtime_request_queues_agent_run_request() {
+        let root = temp_dir("runtime-agent-run-queue");
+        let runtime_root = root.join("run/platform");
+        let agent_runs_file = root.join("run/sidecar/agent-runs.jsonl");
+        let request_file = root.join("run/sidecar/agent-run-requests.jsonl");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(runtime_root.clone()).expect("create runtime root");
+        fs::create_dir_all(agent_runs_file.parent().expect("agent runs parent"))
+            .expect("create agent runs dir");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(&registry_file, "[]").expect("registry");
+
+        let config = crate::config::PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            agent_runs_file: agent_runs_file.clone(),
+            ..crate::config::PlatformConfig::default()
+        };
+
+        let daemon = crate::runtime::PloyDaemon::boot(&config).expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let request = serde_json::json!({
+            "objective": "Find a gated PM5D research candidate",
+            "strategy_profile": "pm5d.settlement_probability.agent",
+            "autonomy_mode": "research_until_blocked",
+            "target_evidence": "executable_replay",
+            "symbols": ["BTCUSDT", "ETHUSDT"],
+            "max_turns": 30,
+            "budget_usd": 1.0,
+            "run_packet": "# packet",
+            "run_contract": "[agentic_strategy_run]"
+        })
+        .to_string();
+
+        let (status_code, body) =
+            handle_runtime_request("POST", "/api/agent/runs", Some(&request), &state);
+        assert_eq!(status_code, 202);
+        let response: ploy_operator_contracts::AgentRunCreateResponse =
+            serde_json::from_str(&body).expect("queue response");
+        assert_eq!(response.status, "requested");
+        assert!(response.run_id.starts_with("agent-"));
+        assert!(!body.contains("request_path"));
+        assert!(request_file.exists());
+        assert!(agent_runs_file.exists());
+
+        let queued_request = fs::read_to_string(request_file).expect("request file");
+        assert!(queued_request.contains("\"objective\":\"Find a gated PM5D research candidate\""));
+        let queued_runs = fs::read_to_string(agent_runs_file).expect("runs file");
+        assert!(queued_runs.contains("\"status\":\"requested\""));
     }
 
     #[test]

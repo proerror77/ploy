@@ -18,12 +18,31 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { espnServer } from "./tools/espn.js";
 import { polymarketServer } from "./tools/polymarket.js";
 import { ployBackendServer } from "./tools/ploy-backend.js";
+import { researchServer } from "./tools/research.js";
+import { agentRuntimeServer } from "./tools/agent-runtime.js";
 import { tradingOutputSchema } from "./schemas/output.js";
 import type {
+  AgentRunRecord,
+  AgentToolCallRecord,
   DeploymentSummary,
+  JsonValue,
   SystemStatus,
   TradingStateSnapshot,
 } from "./contracts/operator-contracts.js";
+import {
+  buildRunRecord,
+  newRunId,
+  recordAgentRun,
+  type AgentTaskCompletion,
+} from "./runtime/run-recorder.js";
+import {
+  claimQueuedAgentRunRequests,
+  queuedAgentRunAttempt,
+  requeueAgentRunRequest,
+  type QueuedAgentRunRequest,
+} from "./runtime/run-requests.js";
+import { readHarnessContext } from "./runtime/harness-memory.js";
+import { queryGrokBuilderContext, type GrokBuilderContext } from "./runtime/grok.js";
 
 // ── Config ──────────────────────────────────────────
 
@@ -76,6 +95,7 @@ const POLL_INTERVAL = parseInt(process.env.SIDECAR_POLL_INTERVAL_SECS || "300", 
 const MAX_BUDGET = parseFloat(process.env.SIDECAR_MAX_BUDGET_USD || "1.00");
 const DRY_RUN = process.env.SIDECAR_DRY_RUN !== "false";
 const PLOY_API = process.env.PLOY_API_URL || "http://localhost:8081";
+const MAX_SUBAGENT_TURNS = parseInt(process.env.SIDECAR_SUBAGENT_MAX_TURNS || "8", 10);
 
 // ── System Prompt ───────────────────────────────────
 
@@ -115,6 +135,8 @@ You are an operator-facing research client, not a direct execution path.
 - Never start or create a non-paper deployment unless explicitly instructed
 - Always default to PASS or MONITOR when uncertain
 - Parse failures → PASS (never trade on garbage)
+- For Strategy Builder requests, complete with agent-runtime.complete_task using status success, partial, or blocked
+- Treat paper intent and deployment changes as approval-gated; research, replay, diagnostics, and comparisons are automatic
 
 ## Scoring Comeback Probability
 Historical NBA comeback rates by deficit at end of Q3:
@@ -163,6 +185,15 @@ type RuntimeContext = {
       observed_state: string;
     }>;
   } | null;
+};
+
+type FocusedSubagentProfile = "grok-evidence" | "replay-parity";
+
+type FocusedSubagentResult = {
+  profile: FocusedSubagentProfile;
+  status: "success" | "partial" | "blocked" | "failed";
+  summary: string;
+  toolCalls: AgentToolCallRecord[];
 };
 
 async function backendFetchJson<T>(path: string): Promise<T | null> {
@@ -257,14 +288,461 @@ async function buildRuntimeContext(): Promise<RuntimeContext> {
 
 // ── Main Loop ───────────────────────────────────────
 
+function isStructuredOutput(value: unknown): value is {
+  research_reports?: Array<unknown>;
+  oversight_alerts?: Array<unknown>;
+  operator_recommendations?: Array<unknown>;
+} {
+  return value !== null && typeof value === "object";
+}
+
+function parseCompletion(value: unknown): AgentTaskCompletion | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const parsed = parseCompletion(item);
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+  if (typeof value === "string") {
+    try {
+      return parseCompletion(JSON.parse(value));
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== "object") return null;
+
+  const candidate = value as {
+    status?: unknown;
+    summary?: unknown;
+    decision?: unknown;
+    grok_decision?: unknown;
+    evidence?: unknown;
+    blockers?: unknown;
+    next_action?: unknown;
+    text?: unknown;
+    content?: unknown;
+  };
+  if (candidate.text && typeof candidate.text === "string") {
+    return parseCompletion(candidate.text);
+  }
+  if (
+    (candidate.status === "success" ||
+      candidate.status === "partial" ||
+      candidate.status === "blocked") &&
+    typeof candidate.summary === "string"
+  ) {
+    return {
+      status: candidate.status,
+      summary: candidate.summary,
+      decision: parseDecision(candidate.decision),
+      grok_decision: parseGrokDecision(candidate.grok_decision),
+      evidence: parseStringArray(candidate.evidence),
+      blockers: parseStringArray(candidate.blockers),
+      next_action: typeof candidate.next_action === "string" ? candidate.next_action : undefined,
+    };
+  }
+  return parseCompletion(candidate.content);
+}
+
+function parseDecision(value: unknown): AgentTaskCompletion["decision"] | undefined {
+  return value === "continue" ||
+    value === "pass" ||
+    value === "trade" ||
+    value === "monitor" ||
+    value === "blocked"
+    ? value
+    : undefined;
+}
+
+function parseGrokDecision(value: unknown): AgentTaskCompletion["grok_decision"] | undefined {
+  return value === "trade" || value === "pass" || value === "not_queried"
+    ? value
+    : undefined;
+}
+
+function parseStringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    ? value
+    : undefined;
+}
+
+function completionFromMessage(message: unknown): AgentTaskCompletion | null {
+  const candidate = message as {
+    type?: string;
+    tool_use_result?: unknown;
+    message?: { content?: Array<{ type?: string; content?: unknown }> };
+  };
+  if (candidate.type !== "user") return null;
+
+  const direct = parseCompletion(candidate.tool_use_result);
+  if (direct) return direct;
+
+  for (const block of candidate.message?.content ?? []) {
+    if (block.type === "tool_result") {
+      const parsed = parseCompletion(block.content);
+      if (parsed) return parsed;
+    }
+  }
+  return null;
+}
+
+function selectSubagentProfiles(
+  queued: QueuedAgentRunRequest,
+  harnessContext: string
+): FocusedSubagentProfile[] {
+  const profiles = new Set<FocusedSubagentProfile>();
+  const contract = queued.request.run_contract;
+  const profile = queued.request.strategy_profile;
+  if (
+    profile.includes("grok_builder") ||
+    contract.includes("requires_grok_decision = true") ||
+    harnessContext.includes("subagent_profile: grok-evidence")
+  ) {
+    profiles.add("grok-evidence");
+  }
+  if (
+    contract.includes("requires_executable_replay = true") ||
+    contract.includes("requires_runtime_parity = true") ||
+    harnessContext.includes("subagent_profile: replay-parity")
+  ) {
+    profiles.add("replay-parity");
+  }
+  return [...profiles].slice(0, 2);
+}
+
+function subagentPrompt(
+  profile: FocusedSubagentProfile,
+  queued: QueuedAgentRunRequest,
+  runtimeContext: RuntimeContext
+): string {
+  if (profile === "grok-evidence") {
+    return `Focused subagent profile: grok-evidence.
+
+Collect only the sports/X/market evidence needed for this Strategy Builder run.
+Return a compact evidence summary and call complete_task with status success, partial, or blocked.
+
+Objective:
+${queued.request.objective}
+
+Run contract:
+${queued.request.run_contract}
+
+Runtime context:
+${JSON.stringify(runtimeContext, null, 2)}`;
+  }
+  return `Focused subagent profile: replay-parity.
+
+Collect only replay, backtest, config comparison, and oversight parity evidence for this Strategy Builder run.
+Return a compact verification summary and call complete_task with status success, partial, or blocked.
+
+Objective:
+${queued.request.objective}
+
+Run contract:
+${queued.request.run_contract}
+
+Runtime context:
+${JSON.stringify(runtimeContext, null, 2)}`;
+}
+
+function subagentAllowedTools(profile: FocusedSubagentProfile): string[] {
+  if (profile === "grok-evidence") {
+    return [
+      "mcp__espn__scoreboard",
+      "mcp__espn__game_details",
+      "mcp__polymarket__search_markets",
+      "mcp__polymarket__market_snapshot",
+      "mcp__agent-runtime__complete_task",
+      "mcp__agent-runtime__propose_harness_improvement",
+      "WebSearch",
+      "WebFetch",
+    ];
+  }
+  return [
+    "mcp__research__replay_deployment",
+    "mcp__research__run_backtest",
+    "mcp__research__compare_configs",
+    "mcp__research__check_oversight",
+    "mcp__ploy-backend__get_system_status",
+    "mcp__ploy-backend__get_trading_state",
+    "mcp__ploy-backend__list_deployments",
+    "mcp__agent-runtime__complete_task",
+    "mcp__agent-runtime__propose_harness_improvement",
+  ];
+}
+
+async function runFocusedSubagent(params: {
+  profile: FocusedSubagentProfile;
+  queued: QueuedAgentRunRequest;
+  runtimeContext: RuntimeContext;
+  harnessContext: string;
+}): Promise<FocusedSubagentResult> {
+  const toolCalls: AgentToolCallRecord[] = [];
+  let completion: AgentTaskCompletion | null = null;
+  let failureReason: string | null = null;
+  console.log(`  Subagent: ${params.profile}`);
+
+  try {
+    for await (const message of query({
+      prompt: subagentPrompt(params.profile, params.queued, params.runtimeContext),
+      options: {
+        model: MODEL,
+        systemPrompt: `${SYSTEM_PROMPT}
+
+## Focused Subagent Contract
+You are running as a narrow evidence subagent. Do not synthesize final trades or mutate deployments.
+Call complete_task when the focused evidence pass is done.
+
+## Harness Meta-Context
+${params.harnessContext}`,
+        mcpServers: {
+          espn: espnServer,
+          polymarket: polymarketServer,
+          "ploy-backend": ployBackendServer,
+          research: researchServer,
+          "agent-runtime": agentRuntimeServer,
+        },
+        allowedTools: subagentAllowedTools(params.profile),
+        maxTurns: Math.max(1, Math.min(MAX_SUBAGENT_TURNS, params.queued.request.max_turns)),
+        maxBudgetUsd: Math.max(0.1, Math.min(0.35, params.queued.request.budget_usd / 3)),
+        permissionMode: "bypassPermissions",
+      },
+    })) {
+      switch (message.type) {
+        case "assistant":
+          for (const block of message.message.content) {
+            if ("name" in block) {
+              toolCalls.push({ name: `${params.profile}:${String(block.name)}`, status: "called" });
+            }
+          }
+          break;
+        case "user": {
+          const reportedCompletion = completionFromMessage(message);
+          if (reportedCompletion) completion = reportedCompletion;
+          break;
+        }
+        case "result":
+          if (message.subtype !== "success") failureReason = message.subtype;
+          break;
+      }
+      if (completion) break;
+    }
+  } catch (error) {
+    failureReason = error instanceof Error ? error.message : String(error);
+  }
+
+  return {
+    profile: params.profile,
+    status: failureReason ? "failed" : completion?.status ?? "partial",
+    summary: failureReason ?? completion?.summary ?? "subagent did not report completion",
+    toolCalls,
+  };
+}
+
+async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<AgentRunRecord> {
+  const startedAt = new Date().toISOString();
+  const runtimeContext = await buildRuntimeContext();
+  const harnessContext = await readHarnessContext();
+  const toolCalls: AgentToolCallRecord[] = [];
+  let sessionId: string | null = null;
+  let totalCostUsd: number | null = null;
+  let failureReason: string | null = null;
+  let completion: AgentTaskCompletion | null = null;
+  const subagentResults: FocusedSubagentResult[] = [];
+  let grokApiContext: GrokBuilderContext | null = null;
+  const queuedAllowedTools = [
+    "mcp__espn__scoreboard",
+    "mcp__espn__game_details",
+    "mcp__polymarket__search_markets",
+    "mcp__polymarket__market_snapshot",
+    "mcp__ploy-backend__get_system_status",
+    "mcp__ploy-backend__get_trading_state",
+    "mcp__ploy-backend__list_deployments",
+    "mcp__research__replay_deployment",
+    "mcp__research__run_backtest",
+    "mcp__research__compare_configs",
+    "mcp__research__check_oversight",
+    "mcp__agent-runtime__complete_task",
+    "mcp__agent-runtime__propose_harness_improvement",
+    "mcp__agent-runtime__propose_self_modification",
+    "WebSearch",
+    "WebFetch",
+  ];
+  if (
+    process.env.SIDECAR_ALLOW_SELF_MODIFICATION === "true" &&
+    queued.request.run_contract.includes("requires_harness_self_modification = true")
+  ) {
+    queuedAllowedTools.push("mcp__agent-runtime__apply_self_modification");
+  }
+
+  console.log(`\n[${startedAt}] Starting queued strategy run ${queued.run_id}`);
+
+  try {
+    if (queued.request.strategy_profile.includes("grok_builder")) {
+      try {
+        grokApiContext = await queryGrokBuilderContext({
+          objective: queued.request.objective,
+          runPacket: queued.request.run_packet,
+          runContract: queued.request.run_contract,
+        });
+        toolCalls.push({
+          name: "xai__grok_chat_completions",
+          status: grokApiContext ? "called" : "not_configured",
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        toolCalls.push({ name: "xai__grok_chat_completions", status: "failed" });
+        subagentResults.push({
+          profile: "grok-evidence",
+          status: "partial",
+          summary: `Grok API failed: ${message}`,
+          toolCalls: [],
+        });
+      }
+    }
+
+    for (const profile of selectSubagentProfiles(queued, harnessContext)) {
+      const result = await runFocusedSubagent({
+        profile,
+        queued,
+        runtimeContext,
+        harnessContext,
+      });
+      subagentResults.push(result);
+      toolCalls.push({ name: `subagent__${profile}`, status: result.status });
+      toolCalls.push(...result.toolCalls);
+    }
+
+    for await (const message of query({
+      prompt: `Strategy Builder request created at ${queued.created_at}
+
+Runtime context snapshot:
+${JSON.stringify(runtimeContext, null, 2)}
+
+Focused subagent findings:
+${JSON.stringify(subagentResults, null, 2)}
+
+Grok API context:
+${JSON.stringify(grokApiContext, null, 2)}
+
+Run this agentic strategy request until it reaches success, partial completion, or a blocker.
+
+Objective:
+${queued.request.objective}
+
+Run packet:
+${queued.request.run_packet}
+
+Run contract:
+${queued.request.run_contract}
+
+Use automatic tools for platform reads, live game checks, market search, Grok/X-style web evidence, research replay/backtest, config comparison, and oversight checks. For Grok Builder profiles, inspect ESPN state first, search web/X context for injury or momentum evidence, and call complete_task with grok_decision set to trade, pass, or not_queried. If the run contract requires grok_decision and your tool schema cannot set that field, the complete_task summary must include exactly one "grok_decision: trade", "grok_decision: pass", or "grok_decision: not_queried" line. Do not submit paper intents or apply deployments unless the request explicitly includes operator approval. Finish by calling complete_task.`,
+      options: {
+        model: MODEL,
+        systemPrompt: `${SYSTEM_PROMPT}
+
+## Runtime Context (fresh snapshot for this queued strategy run)
+${JSON.stringify(runtimeContext, null, 2)}
+
+## Harness Meta-Context
+${harnessContext}`,
+        mcpServers: {
+          espn: espnServer,
+          polymarket: polymarketServer,
+          "ploy-backend": ployBackendServer,
+          research: researchServer,
+          "agent-runtime": agentRuntimeServer,
+        },
+        allowedTools: queuedAllowedTools,
+        maxTurns: Math.max(1, queued.request.max_turns),
+        maxBudgetUsd: Math.max(0.1, queued.request.budget_usd),
+        permissionMode: "bypassPermissions",
+      },
+    })) {
+      switch (message.type) {
+        case "system":
+          if (message.subtype === "init") {
+            sessionId = message.session_id ?? null;
+            console.log(`  Session: ${message.session_id}`);
+          }
+          break;
+        case "assistant":
+          for (const block of message.message.content) {
+            if ("name" in block) {
+              toolCalls.push({ name: String(block.name), status: "called" });
+              console.log(`  Tool: ${block.name}`);
+            }
+          }
+          break;
+        case "user": {
+          const reportedCompletion = completionFromMessage(message);
+          if (reportedCompletion) {
+            completion = reportedCompletion;
+            console.log(`  Task completion: ${completion.status}`);
+          }
+          break;
+        }
+        case "result":
+          if (message.subtype === "success") {
+            totalCostUsd = (message as any).total_cost_usd ?? null;
+            console.log(`  Completed queued run. Cost: $${(totalCostUsd ?? 0).toFixed(4)}`);
+          } else {
+            failureReason = message.subtype;
+            console.error(`  Queued run failed: ${message.subtype}`);
+          }
+          break;
+      }
+      if (completion) {
+        console.log("  complete_task received; stopping queued run loop");
+        break;
+      }
+    }
+  } catch (error) {
+    failureReason = error instanceof Error ? error.message : String(error);
+    console.error(`  Error in queued strategy run:`, error);
+  }
+
+  const record = buildRunRecord({
+    runId: queued.run_id,
+    cycleKind: "agentic_strategy",
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    sessionId,
+    model: MODEL,
+    runtimeContext,
+    toolCalls,
+    structuredOutput: null,
+    totalCostUsd,
+    failureReason,
+    completion,
+    request: JSON.parse(JSON.stringify(queued.request)) as JsonValue,
+    harnessSubagents: JSON.parse(
+      JSON.stringify({
+        focused_subagents: subagentResults,
+        grok_api: grokApiContext,
+      })
+    ) as JsonValue,
+  });
+  await recordAgentRun(record);
+  return record;
+}
+
 async function runScanCycle(): Promise<void> {
+  const runId = newRunId();
   const timestamp = new Date().toISOString();
+  const toolCalls: AgentToolCallRecord[] = [];
+  let sessionId: string | null = null;
+  let totalCostUsd: number | null = null;
+  let failureReason: string | null = null;
+  let resultOutput: unknown = null;
+  let completion: AgentTaskCompletion | null = null;
+  const runtimeContext = await buildRuntimeContext();
+  const harnessContext = await readHarnessContext();
   console.log(`\n[${timestamp}] Starting scan cycle (model=${MODEL}, dry_run=${DRY_RUN})`);
 
   try {
-    const runtimeContext = await buildRuntimeContext();
-    let resultOutput: unknown = null;
-
     for await (const message of query({
       prompt: `Current time: ${timestamp}
 
@@ -286,16 +764,28 @@ Return your structured analysis.`,
         systemPrompt: `${SYSTEM_PROMPT}
 
 ## Runtime Context (fresh snapshot for this cycle)
-${JSON.stringify(runtimeContext, null, 2)}`,
+${JSON.stringify(runtimeContext, null, 2)}
+
+## Harness Meta-Context
+${harnessContext}`,
         mcpServers: {
           espn: espnServer,
           polymarket: polymarketServer,
           "ploy-backend": ployBackendServer,
+          research: researchServer,
+          "agent-runtime": agentRuntimeServer,
         },
         allowedTools: [
           "mcp__espn__*",
           "mcp__polymarket__*",
-          "mcp__ploy-backend__*",
+          "mcp__ploy-backend__get_system_status",
+          "mcp__ploy-backend__get_trading_state",
+          "mcp__ploy-backend__list_deployments",
+          "mcp__ploy-backend__get_deployment",
+          "mcp__research__*",
+          "mcp__agent-runtime__complete_task",
+          "mcp__agent-runtime__propose_harness_improvement",
+          "mcp__agent-runtime__propose_self_modification",
           "WebSearch",
           "WebFetch",
         ],
@@ -311,6 +801,7 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
       switch (message.type) {
         case "system":
           if (message.subtype === "init") {
+            sessionId = message.session_id ?? null;
             console.log(`  Session: ${message.session_id}`);
             const mcpStatus = (message as any).mcp_servers;
             if (mcpStatus) {
@@ -325,20 +816,36 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
           // Log tool calls for observability
           for (const block of message.message.content) {
             if ("name" in block) {
+              toolCalls.push({ name: String(block.name), status: "called" });
               console.log(`  Tool: ${block.name}`);
             }
           }
           break;
 
+        case "user": {
+          const reportedCompletion = completionFromMessage(message);
+          if (reportedCompletion) {
+            completion = reportedCompletion;
+            console.log(`  Task completion: ${completion.status}`);
+          }
+          break;
+        }
+
         case "result":
           if (message.subtype === "success") {
             resultOutput = (message as any).structured_output;
-            const cost = (message as any).total_cost_usd || 0;
+            totalCostUsd = (message as any).total_cost_usd ?? null;
+            const cost = totalCostUsd ?? 0;
             console.log(`  Completed. Cost: $${cost.toFixed(4)}`);
           } else {
+            failureReason = message.subtype;
             console.error(`  Scan failed: ${message.subtype}`);
           }
           break;
+      }
+      if (completion) {
+        console.log("  complete_task received; stopping scan loop");
+        break;
       }
     }
 
@@ -369,8 +876,68 @@ ${JSON.stringify(runtimeContext, null, 2)}`,
       }
     }
   } catch (err) {
+    failureReason = err instanceof Error ? err.message : String(err);
     console.error(`  Error in scan cycle:`, err);
+  } finally {
+    await recordAgentRun(
+      buildRunRecord({
+        runId,
+        cycleKind: "research_oversight",
+        startedAt: timestamp,
+        finishedAt: new Date().toISOString(),
+        sessionId,
+        model: MODEL,
+        runtimeContext,
+        toolCalls,
+        structuredOutput: isStructuredOutput(resultOutput) ? resultOutput : null,
+        totalCostUsd,
+        failureReason,
+        completion,
+      })
+    );
   }
+}
+
+async function runSidecarCycle(): Promise<void> {
+  const batch = await claimQueuedAgentRunRequests();
+  if (batch) {
+    for (const request of batch.requests) {
+      const record = await runQueuedStrategyRequest(request);
+      if (record.status === "needs_retry") {
+        const reason = retryReason(record);
+        const retry = await requeueAgentRunRequest(request, reason);
+        if (retry) {
+          console.warn(
+            `  Requeued ${request.run_id} after needs_retry (${queuedAgentRunAttempt(retry)}/${process.env.SIDECAR_AGENT_RUN_MAX_RETRIES || "1"}): ${reason}`
+          );
+        } else {
+          console.warn(`  Retry limit reached for ${request.run_id}: ${reason}`);
+        }
+      }
+    }
+    await batch.acknowledge();
+  }
+  await runScanCycle();
+}
+
+function retryReason(record: AgentRunRecord): string {
+  const outputSummary = asJsonRecord(record.output_summary);
+  const contractEvaluation = asJsonRecord(outputSummary?.contract_evaluation);
+  const checks = Array.isArray(contractEvaluation?.checks) ? contractEvaluation.checks : [];
+  for (const checkValue of checks) {
+    const check = asJsonRecord(checkValue);
+    if (check?.status === "needs_retry") {
+      const name = typeof check.name === "string" ? check.name : "contract";
+      const detail = typeof check.detail === "string" ? check.detail : "needs retry";
+      return `${name}: ${detail}`;
+    }
+  }
+  return "contract evaluation requested retry";
+}
+
+function asJsonRecord(value: JsonValue | undefined): Record<string, JsonValue> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value;
 }
 
 // ── Entry Point ─────────────────────────────────────
@@ -390,10 +957,10 @@ async function main() {
   console.log("");
 
   // Run first cycle immediately
-  await runScanCycle();
+  await runSidecarCycle();
 
   // Then run on interval
-  setInterval(runScanCycle, POLL_INTERVAL);
+  setInterval(runSidecarCycle, POLL_INTERVAL);
 }
 
 main().catch((err) => {

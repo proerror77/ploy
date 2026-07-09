@@ -475,11 +475,16 @@ def validate_response(response: Any) -> list[dict[str, Any]]:
                 f"the allowed set: {', '.join(sorted(ALLOWED_MUTATIONS))}"
             )
         for numeric_field in ("constant", "lo", "hi"):
-            if numeric_field in item and not isinstance(item[numeric_field], (int, float)):
+            if numeric_field in item and (
+                isinstance(item[numeric_field], bool)
+                or not isinstance(item[numeric_field], (int, float))
+            ):
                 raise SchemaValidationError(
                     f"mutations[{index}].{numeric_field} must be numeric"
                 )
-        if "window" in item and not isinstance(item["window"], int):
+        if "window" in item and (
+            isinstance(item["window"], bool) or not isinstance(item["window"], int)
+        ):
             raise SchemaValidationError(f"mutations[{index}].window must be an integer")
         for string_field in ("name", "feature", "denominator_feature"):
             if string_field in item and not isinstance(item[string_field], str):

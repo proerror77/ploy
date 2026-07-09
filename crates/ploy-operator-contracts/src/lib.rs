@@ -14,7 +14,8 @@ pub use deployments::{
     DeploymentSummary, DesiredState, ObservedState,
 };
 pub use diagnostics::{
-    AgentRunRecord, DeploymentDiagnosticsMetrics, DeploymentDiagnosticsReport, DiagnosticsEvidence,
+    AgentRunCreateRequest, AgentRunCreateResponse, AgentRunRecord, AgentToolCallRecord,
+    DeploymentDiagnosticsMetrics, DeploymentDiagnosticsReport, DiagnosticsEvidence,
     DiagnosticsFinding, OversightRecommendedAction, OversightReport, OversightSignal,
     OversightSnapshotEvent, PlatformDiagnosticsReport, ProposalActionKind, ProposalCreateRequest,
     ProposalDecisionRequest, ProposalSnapshotEvent, ProposalStatus, SafetyProposal,
