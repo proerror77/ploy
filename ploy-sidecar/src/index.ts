@@ -42,7 +42,11 @@ import {
   type QueuedAgentRunRequest,
 } from "./runtime/run-requests.js";
 import { readHarnessContext } from "./runtime/harness-memory.js";
-import { queryGrokBuilderContext, type GrokBuilderContext } from "./runtime/grok.js";
+import {
+  queryGrokBuilderContext,
+  queryGrokStrategyCompletion,
+  type GrokBuilderContext,
+} from "./runtime/grok.js";
 
 // ── Config ──────────────────────────────────────────
 
@@ -91,6 +95,7 @@ function applyMiniMaxCompatEnv(): string | null {
 
 const minimaxCompatModel = applyMiniMaxCompatEnv();
 const MODEL = process.env.SIDECAR_MODEL || "sonnet";
+const AGENT_ENGINE = process.env.SIDECAR_AGENT_ENGINE || "claude";
 const POLL_INTERVAL = parseInt(process.env.SIDECAR_POLL_INTERVAL_SECS || "300", 10) * 1000;
 const MAX_BUDGET = parseFloat(process.env.SIDECAR_MAX_BUDGET_USD || "1.00");
 const DRY_RUN = process.env.SIDECAR_DRY_RUN !== "false";
@@ -619,7 +624,25 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
       toolCalls.push(...result.toolCalls);
     }
 
-    for await (const message of query({
+    if (AGENT_ENGINE === "grok") {
+      const grokRun = await queryGrokStrategyCompletion({
+        objective: queued.request.objective,
+        runPacket: queued.request.run_packet,
+        runContract: queued.request.run_contract,
+        runtimeContext,
+        harnessContext,
+      });
+      completion = grokRun.completion;
+      sessionId = `xai:${grokRun.model}`;
+      toolCalls.push({ name: "xai__grok_chat_completions", status: "called" });
+      grokApiContext = {
+        provider: "xai",
+        model: grokRun.model,
+        summary: grokRun.completion.summary,
+      };
+      console.log(`  Grok engine completed queued run with status: ${completion.status}`);
+    } else {
+      for await (const message of query({
       prompt: `Strategy Builder request created at ${queued.created_at}
 
 Runtime context snapshot:
@@ -702,6 +725,7 @@ ${harnessContext}`,
         console.log("  complete_task received; stopping queued run loop");
         break;
       }
+      }
     }
   } catch (error) {
     failureReason = error instanceof Error ? error.message : String(error);
@@ -714,7 +738,7 @@ ${harnessContext}`,
     startedAt,
     finishedAt: new Date().toISOString(),
     sessionId,
-    model: MODEL,
+    model: AGENT_ENGINE === "grok" && grokApiContext ? `xai:${grokApiContext.model}` : MODEL,
     runtimeContext,
     toolCalls,
     structuredOutput: null,

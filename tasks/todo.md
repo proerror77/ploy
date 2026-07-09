@@ -1,3 +1,38 @@
+# Current Session - Grok Sidecar Engine Smoke Path (2026-07-09)
+
+Evidence stage: `diagnostic` end-to-end smoke unblocker. This adds an explicit
+Grok execution engine for queued Strategy Builder runs so the sidecar can
+complete a real model-backed smoke when Claude Code SDK is blocked by API
+balance.
+
+## Files / Ownership
+
+- `ploy-sidecar/src/runtime/grok.ts`
+  - Owner: xAI/Grok text completion and strategy completion JSON parsing.
+- `ploy-sidecar/src/index.ts`
+  - Owner: `SIDECAR_AGENT_ENGINE=grok` queued-run execution path.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Add real xAI/Grok completion path for queued diagnostic runs.
+- [x] Keep Claude SDK as the default engine.
+- [x] Verify Grok strategy completion with the repo-local `.env` `GROK_API_KEY`.
+- [ ] Push PR, merge to main, and rerun Strategy Builder smoke on main.
+
+## Review
+
+- 2026-07-09: Added `SIDECAR_AGENT_ENGINE=grok` for queued Strategy Builder
+  runs. It calls xAI chat completions, parses a completion JSON object, records
+  the result through the existing `buildRunRecord` and contract evaluator, and
+  does not synthesize tool calls. This is intended for diagnostic contracts
+  where the required proof is a real model completion signal. Validation
+  passed: `npx tsx src/runtime/grok.ts`, `npx tsx src/runtime/evaluator.ts`,
+  `npx tsx src/runtime/run-recorder.ts`, `npm run build` in `ploy-sidecar`, and
+  a real xAI smoke returning `provider=xai`, `model=grok-4.5`,
+  `status=success`, and non-empty summary text without printing the secret.
+
 # Current Session - Self-Mod Deploy Dispatch Gate (2026-07-09)
 
 Evidence stage: `diagnostic` self-modification deployment gate. This adds an
