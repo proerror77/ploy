@@ -15,7 +15,7 @@ so the memory API/UI and smoke checks have a stable file contract.
 ## Tasks
 
 - [x] Ensure `harness-events.jsonl` exists when meta-context is initialized.
-- [ ] Push PR, merge to main, and rerun Strategy Builder Grok smoke on main.
+- [x] Push PR, merge to main, and rerun Strategy Builder Grok smoke on main.
 
 ## Review
 
@@ -23,6 +23,12 @@ so the memory API/UI and smoke checks have a stable file contract.
   This preserves learning semantics: successful runs do not create fake events,
   but the append-only `harness-events.jsonl` file now exists for API/UI and E2E
   smoke verification.
+- 2026-07-09: PR #737 merged to `main` as `b494aef7`. Final main-branch
+  Strategy Builder-shaped Grok smoke passed with run
+  `agent-8764932b-dd30-417d-b20e-ea4b54cf6c58`: `agent-runs.jsonl`,
+  `harness-context.md`, and an empty append-only `harness-events.jsonl` were all
+  present under `tmp/harness-smoke-grok-main/run/sidecar`; the run status was
+  `succeeded`, model `xai:grok-4.5`, and contract evaluation `passed`.
 
 # Current Session - Grok Sidecar Engine Smoke Path (2026-07-09)
 
@@ -45,7 +51,7 @@ balance.
 - [x] Add real xAI/Grok completion path for queued diagnostic runs.
 - [x] Keep Claude SDK as the default engine.
 - [x] Verify Grok strategy completion with the repo-local `.env` `GROK_API_KEY`.
-- [ ] Push PR, merge to main, and rerun Strategy Builder smoke on main.
+- [x] Push PR, merge to main, and rerun Strategy Builder smoke on main.
 
 ## Review
 
@@ -58,6 +64,8 @@ balance.
   `npx tsx src/runtime/run-recorder.ts`, `npm run build` in `ploy-sidecar`, and
   a real xAI smoke returning `provider=xai`, `model=grok-4.5`,
   `status=success`, and non-empty summary text without printing the secret.
+- 2026-07-09: PR #736 merged to `main` as `1e0c49d5`; PR #737 then completed
+  the stable event-log file contract and the final main smoke evidence.
 
 # Current Session - Self-Mod Deploy Dispatch Gate (2026-07-09)
 
@@ -83,7 +91,7 @@ duplicating deploy logic or bypassing protected environments.
 - [x] Keep default dispatch refs on `main`; block non-main deploy refs unless
       explicitly enabled.
 - [x] Add rollback dispatch tool and self-test coverage with fake `gh`.
-- [ ] Push PR and verify CI.
+- [x] Push PR and verify CI.
 
 ## Review
 
@@ -96,6 +104,8 @@ duplicating deploy logic or bypassing protected environments.
   self-modification. Validation passed:
   `npx tsx src/runtime/self-modification.ts` and `npm run build` in
   `ploy-sidecar`.
+- 2026-07-09: PR #735 merged to `main` as `7185d0c3` after the full GitHub
+  Actions matrix and CodeRabbit passed.
 
 # Current Session - Self-Mod PR Gate Continuation (2026-07-09)
 
