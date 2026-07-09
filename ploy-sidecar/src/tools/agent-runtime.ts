@@ -109,15 +109,36 @@ export const agentRuntimeServer = createSdkMcpServer({
     ),
     tool(
       "apply_self_modification",
-      "Apply an approved harness self-modification proposal with rollback on verification failure.",
+      "Apply an approved harness self-modification proposal with rollback on verification failure, optionally publishing a PR.",
       {
         proposal_id: z.string(),
         approval_token: z.string(),
+        publish_pull_request: z.boolean().default(false),
+        branch_name: z.string().optional(),
+        commit_message: z.string().optional(),
+        pull_request_title: z.string().optional(),
+        pull_request_body: z.string().optional(),
+        base_branch: z.string().optional(),
       },
-      async ({ proposal_id, approval_token }) => {
+      async ({
+        proposal_id,
+        approval_token,
+        publish_pull_request,
+        branch_name,
+        commit_message,
+        pull_request_title,
+        pull_request_body,
+        base_branch,
+      }) => {
         const result = await applyApprovedSelfModification({
           proposal_id,
           approval_token,
+          publish_pull_request,
+          branch_name,
+          commit_message,
+          pull_request_title,
+          pull_request_body,
+          base_branch,
         });
         return {
           content: [
