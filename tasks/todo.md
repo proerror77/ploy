@@ -1,3 +1,29 @@
+# Current Session - Harness Events Initialization (2026-07-09)
+
+Evidence stage: `diagnostic` end-to-end smoke closeout. The main-branch Grok
+smoke succeeded, but a fully successful run does not naturally create a
+learning event. The harness should still expose an empty append-only event log
+so the memory API/UI and smoke checks have a stable file contract.
+
+## Files / Ownership
+
+- `ploy-sidecar/src/runtime/harness-memory.ts`
+  - Owner: meta-context and append-only harness event log initialization.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Ensure `harness-events.jsonl` exists when meta-context is initialized.
+- [ ] Push PR, merge to main, and rerun Strategy Builder Grok smoke on main.
+
+## Review
+
+- 2026-07-09: Added empty event-log initialization to `readHarnessContext()`.
+  This preserves learning semantics: successful runs do not create fake events,
+  but the append-only `harness-events.jsonl` file now exists for API/UI and E2E
+  smoke verification.
+
 # Current Session - Grok Sidecar Engine Smoke Path (2026-07-09)
 
 Evidence stage: `diagnostic` end-to-end smoke unblocker. This adds an explicit
