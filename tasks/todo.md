@@ -23,7 +23,7 @@ post-merge workflow action.
 - [x] Verify rollback path when the verification command fails.
 - [x] Verify real xAI/Grok API adapter call using the repo-local `.env`
       `GROK_API_KEY` without printing the secret.
-- [ ] Push PR and verify CI.
+- [x] Push PR and verify CI.
 
 ## Review
 
@@ -43,6 +43,8 @@ post-merge workflow action.
   stderr shows the underlying API response is `402 Insufficient Balance`.
   Queue/file/API smoke remains valid, but a successful model-completion smoke
   is not proven until the Claude account balance/auth path is fixed.
+- 2026-07-09: PR #733 merged to `main` as `910ab8ff` after CodeRabbit and the
+  full GitHub Actions matrix passed.
 
 # Current Session - Harness Completion Slice (2026-07-09)
 
