@@ -42,6 +42,7 @@ import {
   type QueuedAgentRunRequest,
 } from "./runtime/run-requests.js";
 import { readHarnessContext } from "./runtime/harness-memory.js";
+import { queryGrokBuilderContext, type GrokBuilderContext } from "./runtime/grok.js";
 
 // ── Config ──────────────────────────────────────────
 
@@ -94,6 +95,7 @@ const POLL_INTERVAL = parseInt(process.env.SIDECAR_POLL_INTERVAL_SECS || "300", 
 const MAX_BUDGET = parseFloat(process.env.SIDECAR_MAX_BUDGET_USD || "1.00");
 const DRY_RUN = process.env.SIDECAR_DRY_RUN !== "false";
 const PLOY_API = process.env.PLOY_API_URL || "http://localhost:8081";
+const MAX_SUBAGENT_TURNS = parseInt(process.env.SIDECAR_SUBAGENT_MAX_TURNS || "8", 10);
 
 // ── System Prompt ───────────────────────────────────
 
@@ -183,6 +185,15 @@ type RuntimeContext = {
       observed_state: string;
     }>;
   } | null;
+};
+
+type FocusedSubagentProfile = "grok-evidence" | "replay-parity";
+
+type FocusedSubagentResult = {
+  profile: FocusedSubagentProfile;
+  status: "success" | "partial" | "blocked" | "failed";
+  summary: string;
+  toolCalls: AgentToolCallRecord[];
 };
 
 async function backendFetchJson<T>(path: string): Promise<T | null> {
@@ -377,6 +388,159 @@ function completionFromMessage(message: unknown): AgentTaskCompletion | null {
   return null;
 }
 
+function selectSubagentProfiles(
+  queued: QueuedAgentRunRequest,
+  harnessContext: string
+): FocusedSubagentProfile[] {
+  const profiles = new Set<FocusedSubagentProfile>();
+  const contract = queued.request.run_contract;
+  const profile = queued.request.strategy_profile;
+  if (
+    profile.includes("grok_builder") ||
+    contract.includes("requires_grok_decision = true") ||
+    harnessContext.includes("subagent_profile: grok-evidence")
+  ) {
+    profiles.add("grok-evidence");
+  }
+  if (
+    contract.includes("requires_executable_replay = true") ||
+    contract.includes("requires_runtime_parity = true") ||
+    harnessContext.includes("subagent_profile: replay-parity")
+  ) {
+    profiles.add("replay-parity");
+  }
+  return [...profiles].slice(0, 2);
+}
+
+function subagentPrompt(
+  profile: FocusedSubagentProfile,
+  queued: QueuedAgentRunRequest,
+  runtimeContext: RuntimeContext
+): string {
+  if (profile === "grok-evidence") {
+    return `Focused subagent profile: grok-evidence.
+
+Collect only the sports/X/market evidence needed for this Strategy Builder run.
+Return a compact evidence summary and call complete_task with status success, partial, or blocked.
+
+Objective:
+${queued.request.objective}
+
+Run contract:
+${queued.request.run_contract}
+
+Runtime context:
+${JSON.stringify(runtimeContext, null, 2)}`;
+  }
+  return `Focused subagent profile: replay-parity.
+
+Collect only replay, backtest, config comparison, and oversight parity evidence for this Strategy Builder run.
+Return a compact verification summary and call complete_task with status success, partial, or blocked.
+
+Objective:
+${queued.request.objective}
+
+Run contract:
+${queued.request.run_contract}
+
+Runtime context:
+${JSON.stringify(runtimeContext, null, 2)}`;
+}
+
+function subagentAllowedTools(profile: FocusedSubagentProfile): string[] {
+  if (profile === "grok-evidence") {
+    return [
+      "mcp__espn__scoreboard",
+      "mcp__espn__game_details",
+      "mcp__polymarket__search_markets",
+      "mcp__polymarket__market_snapshot",
+      "mcp__agent-runtime__complete_task",
+      "mcp__agent-runtime__propose_harness_improvement",
+      "WebSearch",
+      "WebFetch",
+    ];
+  }
+  return [
+    "mcp__research__replay_deployment",
+    "mcp__research__run_backtest",
+    "mcp__research__compare_configs",
+    "mcp__research__check_oversight",
+    "mcp__ploy-backend__get_system_status",
+    "mcp__ploy-backend__get_trading_state",
+    "mcp__ploy-backend__list_deployments",
+    "mcp__agent-runtime__complete_task",
+    "mcp__agent-runtime__propose_harness_improvement",
+  ];
+}
+
+async function runFocusedSubagent(params: {
+  profile: FocusedSubagentProfile;
+  queued: QueuedAgentRunRequest;
+  runtimeContext: RuntimeContext;
+  harnessContext: string;
+}): Promise<FocusedSubagentResult> {
+  const toolCalls: AgentToolCallRecord[] = [];
+  let completion: AgentTaskCompletion | null = null;
+  let failureReason: string | null = null;
+  console.log(`  Subagent: ${params.profile}`);
+
+  try {
+    for await (const message of query({
+      prompt: subagentPrompt(params.profile, params.queued, params.runtimeContext),
+      options: {
+        model: MODEL,
+        systemPrompt: `${SYSTEM_PROMPT}
+
+## Focused Subagent Contract
+You are running as a narrow evidence subagent. Do not synthesize final trades or mutate deployments.
+Call complete_task when the focused evidence pass is done.
+
+## Harness Meta-Context
+${params.harnessContext}`,
+        mcpServers: {
+          espn: espnServer,
+          polymarket: polymarketServer,
+          "ploy-backend": ployBackendServer,
+          research: researchServer,
+          "agent-runtime": agentRuntimeServer,
+        },
+        allowedTools: subagentAllowedTools(params.profile),
+        maxTurns: Math.max(1, Math.min(MAX_SUBAGENT_TURNS, params.queued.request.max_turns)),
+        maxBudgetUsd: Math.max(0.1, Math.min(0.35, params.queued.request.budget_usd / 3)),
+        permissionMode: "bypassPermissions",
+      },
+    })) {
+      switch (message.type) {
+        case "assistant":
+          for (const block of message.message.content) {
+            if ("name" in block) {
+              toolCalls.push({ name: `${params.profile}:${String(block.name)}`, status: "called" });
+            }
+          }
+          break;
+        case "user": {
+          const reportedCompletion = completionFromMessage(message);
+          if (reportedCompletion) completion = reportedCompletion;
+          break;
+        }
+        case "result":
+          if (message.subtype !== "success") failureReason = message.subtype;
+          break;
+      }
+      if (completion) break;
+    }
+  } catch (error) {
+    failureReason = error instanceof Error ? error.message : String(error);
+  }
+
+  return {
+    profile: params.profile,
+    status: failureReason ? "failed" : completion?.status ?? "partial",
+    summary: failureReason ?? completion?.summary ?? "subagent did not report completion",
+    toolCalls,
+  };
+}
+
 async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<AgentRunRecord> {
   const startedAt = new Date().toISOString();
   const runtimeContext = await buildRuntimeContext();
@@ -386,15 +550,82 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
   let totalCostUsd: number | null = null;
   let failureReason: string | null = null;
   let completion: AgentTaskCompletion | null = null;
+  const subagentResults: FocusedSubagentResult[] = [];
+  let grokApiContext: GrokBuilderContext | null = null;
+  const queuedAllowedTools = [
+    "mcp__espn__scoreboard",
+    "mcp__espn__game_details",
+    "mcp__polymarket__search_markets",
+    "mcp__polymarket__market_snapshot",
+    "mcp__ploy-backend__get_system_status",
+    "mcp__ploy-backend__get_trading_state",
+    "mcp__ploy-backend__list_deployments",
+    "mcp__research__replay_deployment",
+    "mcp__research__run_backtest",
+    "mcp__research__compare_configs",
+    "mcp__research__check_oversight",
+    "mcp__agent-runtime__complete_task",
+    "mcp__agent-runtime__propose_harness_improvement",
+    "mcp__agent-runtime__propose_self_modification",
+    "WebSearch",
+    "WebFetch",
+  ];
+  if (
+    process.env.SIDECAR_ALLOW_SELF_MODIFICATION === "true" &&
+    queued.request.run_contract.includes("requires_harness_self_modification = true")
+  ) {
+    queuedAllowedTools.push("mcp__agent-runtime__apply_self_modification");
+  }
 
   console.log(`\n[${startedAt}] Starting queued strategy run ${queued.run_id}`);
 
   try {
+    if (queued.request.strategy_profile.includes("grok_builder")) {
+      try {
+        grokApiContext = await queryGrokBuilderContext({
+          objective: queued.request.objective,
+          runPacket: queued.request.run_packet,
+          runContract: queued.request.run_contract,
+        });
+        toolCalls.push({
+          name: "xai__grok_chat_completions",
+          status: grokApiContext ? "called" : "not_configured",
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        toolCalls.push({ name: "xai__grok_chat_completions", status: "failed" });
+        subagentResults.push({
+          profile: "grok-evidence",
+          status: "partial",
+          summary: `Grok API failed: ${message}`,
+          toolCalls: [],
+        });
+      }
+    }
+
+    for (const profile of selectSubagentProfiles(queued, harnessContext)) {
+      const result = await runFocusedSubagent({
+        profile,
+        queued,
+        runtimeContext,
+        harnessContext,
+      });
+      subagentResults.push(result);
+      toolCalls.push({ name: `subagent__${profile}`, status: result.status });
+      toolCalls.push(...result.toolCalls);
+    }
+
     for await (const message of query({
       prompt: `Strategy Builder request created at ${queued.created_at}
 
 Runtime context snapshot:
 ${JSON.stringify(runtimeContext, null, 2)}
+
+Focused subagent findings:
+${JSON.stringify(subagentResults, null, 2)}
+
+Grok API context:
+${JSON.stringify(grokApiContext, null, 2)}
 
 Run this agentic strategy request until it reaches success, partial completion, or a blocker.
 
@@ -424,23 +655,7 @@ ${harnessContext}`,
           research: researchServer,
           "agent-runtime": agentRuntimeServer,
         },
-        allowedTools: [
-          "mcp__espn__scoreboard",
-          "mcp__espn__game_details",
-          "mcp__polymarket__search_markets",
-          "mcp__polymarket__market_snapshot",
-          "mcp__ploy-backend__get_system_status",
-          "mcp__ploy-backend__get_trading_state",
-          "mcp__ploy-backend__list_deployments",
-          "mcp__research__replay_deployment",
-          "mcp__research__run_backtest",
-          "mcp__research__compare_configs",
-          "mcp__research__check_oversight",
-          "mcp__agent-runtime__complete_task",
-          "mcp__agent-runtime__propose_harness_improvement",
-          "WebSearch",
-          "WebFetch",
-        ],
+        allowedTools: queuedAllowedTools,
         maxTurns: Math.max(1, queued.request.max_turns),
         maxBudgetUsd: Math.max(0.1, queued.request.budget_usd),
         permissionMode: "bypassPermissions",
@@ -503,6 +718,12 @@ ${harnessContext}`,
     failureReason,
     completion,
     request: JSON.parse(JSON.stringify(queued.request)) as JsonValue,
+    harnessSubagents: JSON.parse(
+      JSON.stringify({
+        focused_subagents: subagentResults,
+        grok_api: grokApiContext,
+      })
+    ) as JsonValue,
   });
   await recordAgentRun(record);
   return record;
@@ -564,6 +785,7 @@ ${harnessContext}`,
           "mcp__research__*",
           "mcp__agent-runtime__complete_task",
           "mcp__agent-runtime__propose_harness_improvement",
+          "mcp__agent-runtime__propose_self_modification",
           "WebSearch",
           "WebFetch",
         ],

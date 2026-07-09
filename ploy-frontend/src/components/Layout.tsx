@@ -7,6 +7,7 @@ import { LiveParityBanner } from '@/components/LiveParityBanner';
 import { useStore } from '@/store';
 import {
   Bot,
+  Brain,
   ClipboardCheck,
   FileText,
   LayoutDashboard,
@@ -54,6 +55,7 @@ const navigationSections: Array<{
     description: '策略发现到证据',
     items: [
       { name: '策略构建器', description: '自动 agent run', href: '/builder', icon: Bot },
+      { name: 'Harness Memory', description: '上下文与 proposal', href: '/harness', icon: Brain },
       { name: 'Dry-run 报表', description: '回放与候选证据', href: '/dry-run', icon: FileText, aliases: ['/reports/'] },
       { name: 'Dry/Live 对比', description: '执行路径校验', href: '/parity', icon: GitCompare },
       { name: 'NBA Legacy', description: '体育事件旧链路', href: '/nba-swing', icon: TrendingUp },

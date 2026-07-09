@@ -66,6 +66,7 @@ export function buildRunRecord(params: {
   failureReason: string | null;
   completion: AgentTaskCompletion | null;
   request?: JsonValue;
+  harnessSubagents?: JsonValue;
 }): AgentRunRecord {
   const contractEvaluation = evaluateAgentRunContract({
     request: params.request,
@@ -100,7 +101,7 @@ export function buildRunRecord(params: {
       diagnostic_candidates: summarizeDiagnosticCandidates(params.runtimeContext),
       request: params.request ?? null,
     },
-    output_summary: params.structuredOutput || params.completion || contractEvaluation
+    output_summary: params.structuredOutput || params.completion || contractEvaluation || params.harnessSubagents
       ? {
           contract_evaluation: contractEvaluation,
           task_completion: params.completion,
@@ -113,6 +114,7 @@ export function buildRunRecord(params: {
           operator_recommendation_summaries: params.structuredOutput
             ? summarizeRecommendations(params.structuredOutput)
             : [],
+          harness_subagents: params.harnessSubagents ?? [],
         }
       : null,
     evaluation,

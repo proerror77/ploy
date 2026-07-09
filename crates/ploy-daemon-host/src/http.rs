@@ -915,6 +915,7 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
         ("GET", "/api/audit/logs") => RequiredAccess::Admin,
         ("GET", "/api/system/diagnose") => RequiredAccess::ReadOnly,
         ("GET", "/api/agent/runs") => RequiredAccess::ReadOnly,
+        ("GET", "/api/agent/harness-memory") => RequiredAccess::ReadOnly,
         ("GET", _) if path.starts_with("/api/agent/runs/") => RequiredAccess::ReadOnly,
         ("POST", "/api/agent/runs") => RequiredAccess::Operator,
         ("GET", "/api/proposals") | ("POST", "/api/proposals") => RequiredAccess::ReadOnly,
@@ -1069,6 +1070,61 @@ fn agent_run_requests_path(agent_runs_path: &Path) -> PathBuf {
         .parent()
         .map(|parent| parent.join("agent-run-requests.jsonl"))
         .unwrap_or_else(|| PathBuf::from("agent-run-requests.jsonl"))
+}
+
+fn harness_context_path(agent_runs_path: &Path) -> PathBuf {
+    agent_runs_path
+        .parent()
+        .map(|parent| parent.join("harness-context.md"))
+        .unwrap_or_else(|| PathBuf::from("harness-context.md"))
+}
+
+fn harness_events_path(agent_runs_path: &Path) -> PathBuf {
+    agent_runs_path
+        .parent()
+        .map(|parent| parent.join("harness-events.jsonl"))
+        .unwrap_or_else(|| PathBuf::from("harness-events.jsonl"))
+}
+
+fn read_harness_events(path: &PathBuf, limit: usize) -> io::Result<Vec<serde_json::Value>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let body = fs::read_to_string(path)?;
+    let mut events = Vec::new();
+    for (index, line) in body.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(event) => events.push(event),
+            Err(err) => eprintln!(
+                "skipping invalid harness event on line {} of {}: {err}",
+                index + 1,
+                path.display()
+            ),
+        }
+    }
+    events.reverse();
+    events.truncate(limit);
+    Ok(events)
+}
+
+fn read_harness_memory(agent_runs_path: &PathBuf) -> io::Result<serde_json::Value> {
+    let context_path = harness_context_path(agent_runs_path);
+    let events_path = harness_events_path(agent_runs_path);
+    let context = if context_path.exists() {
+        fs::read_to_string(&context_path)?
+    } else {
+        String::new()
+    };
+    let events = read_harness_events(&events_path, 100)?;
+    Ok(serde_json::json!({
+        "context": context,
+        "events": events,
+        "event_count": events.len(),
+        "updated_at": Utc::now(),
+    }))
 }
 
 fn queue_agent_run_request(
@@ -1935,6 +1991,19 @@ fn handle_runtime_request(
             Ok(runs) => (
                 200,
                 serde_json::to_string(&runs).unwrap_or_else(|_| "[]".to_string()),
+            ),
+            Err(response) => response,
+        },
+        ("GET", "/api/agent/harness-memory") => match agent_runs_path(state)
+            .map_err(|response| response)
+            .and_then(|path| {
+                read_harness_memory(&path).map_err(|err| {
+                    json_error(500, "harness_memory_unavailable", Some(err.to_string()))
+                })
+            }) {
+            Ok(memory) => (
+                200,
+                serde_json::to_string(&memory).unwrap_or_else(|_| "{}".to_string()),
             ),
             Err(response) => response,
         },
@@ -3642,6 +3711,60 @@ mod tests {
         assert_eq!(status_code, 200);
         assert!(body.contains("\"run_id\":\"run-nullable\""));
         assert!(body.contains("\"finished_at\":null"));
+    }
+
+    #[test]
+    fn handle_runtime_request_reads_harness_memory() {
+        let root = temp_dir("runtime-harness-memory");
+        let runtime_root = root.join("run/platform");
+        let agent_runs_file = root.join("run/sidecar/agent-runs.jsonl");
+        let context_file = root.join("run/sidecar/harness-context.md");
+        let events_file = root.join("run/sidecar/harness-events.jsonl");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(runtime_root.clone()).expect("create runtime root");
+        fs::create_dir_all(agent_runs_file.parent().expect("agent runs parent"))
+            .expect("create agent runs dir");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(&registry_file, "[]").expect("registry");
+        fs::write(&agent_runs_file, "").expect("agent runs");
+        fs::write(&context_file, "# Harness\n\n- learned: use grok-evidence\n").expect("context");
+        fs::write(
+            &events_file,
+            format!(
+                "{{bad json\n{}\n",
+                serde_json::json!({
+                    "kind": "harness_learning",
+                    "run_id": "agent-test",
+                    "category": "tool_gap",
+                    "summary": "missing WebSearch"
+                })
+            ),
+        )
+        .expect("events");
+
+        let config = crate::config::PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            agent_runs_file,
+            ..crate::config::PlatformConfig::default()
+        };
+
+        let daemon = crate::runtime::PloyDaemon::boot(&config).expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (status_code, body) =
+            handle_runtime_request("GET", "/api/agent/harness-memory", None, &state);
+        assert_eq!(status_code, 200);
+        assert!(body.contains("use grok-evidence"));
+        assert!(body.contains("\"event_count\":1"));
+        assert!(body.contains("\"summary\":\"missing WebSearch\""));
+        assert!(!body.contains("harness-context.md"));
     }
 
     #[test]

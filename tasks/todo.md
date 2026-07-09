@@ -1,3 +1,56 @@
+# Current Session - Harness Completion Slice (2026-07-09)
+
+Evidence stage: `diagnostic` harness completion. This closes the requested
+follow-up surface: real smoke, independent memory UI/API, focused subagent
+routing, gated self-modification, and true Grok API adapter.
+
+## Files / Ownership
+
+- `crates/ploy-daemon-host/src/http.rs`
+  - Owner: `GET /api/agent/harness-memory` read-only endpoint.
+- `ploy-frontend/src/pages/HarnessMemory.tsx`, `ploy-frontend/src/App.tsx`,
+  `ploy-frontend/src/components/Layout.tsx`, `ploy-frontend/src/services/api.ts`,
+  and `ploy-frontend/src/types/index.ts`
+  - Owner: independent Harness Memory / Proposal Queue UI.
+- `ploy-sidecar/src/index.ts`, `ploy-sidecar/src/runtime/run-recorder.ts`,
+  `ploy-sidecar/src/runtime/grok.ts`, `ploy-sidecar/src/runtime/self-modification.ts`,
+  `ploy-sidecar/src/runtime/session-store.ts`, and
+  `ploy-sidecar/src/tools/agent-runtime.ts`
+  - Owner: subagent routing, xAI/Grok adapter, and approval-gated self-mod
+    proposal/apply path.
+- `tasks/todo.md`
+  - Owner: session tracking and verification notes.
+
+## Tasks
+
+- [x] Add independent Harness Memory API/UI.
+- [x] Add proposal/context-driven focused subagent routing before queued runs.
+- [x] Add approval-token-gated self-modification proposal/apply path with
+      clean-worktree, `git apply --check`, verification, and rollback.
+- [x] Add xAI/Grok API adapter using `XAI_API_KEY` or `GROK_API_KEY`.
+- [x] Run ployd + Strategy Builder + sidecar smoke and confirm
+      `agent-runs.jsonl`, `harness-context.md`, and `harness-events.jsonl`.
+- [ ] Commit/push and finish PR/CI integration.
+
+## Review
+
+- 2026-07-09: Local validation passed:
+  `npx tsx src/runtime/grok.ts`,
+  `npx tsx src/runtime/self-modification.ts`,
+  `npx tsx src/runtime/harness-memory.ts`,
+  `npx tsx src/runtime/run-requests.ts`,
+  `npx tsx src/runtime/evaluator.ts`, `npm run build` in `ploy-sidecar`,
+  `npm run build` in `ploy-frontend`, and
+  `rtk cargo test -p ploy-daemon-host handle_runtime_request_reads_harness_memory`.
+  Real smoke used Vite Strategy Builder at `http://127.0.0.1:5173/builder`,
+  local `new-ployd` on `127.0.0.1:8081`, and sidecar against isolated
+  `tmp/harness-smoke`. The UI queued
+  `agent-68afce95-3a1e-4396-b7d5-df32b0693213`; sidecar consumed it and wrote
+  `tmp/harness-smoke/run/sidecar/agent-runs.jsonl`,
+  `harness-context.md`, and `harness-events.jsonl`. The Claude Agent SDK
+  process exited with code 1 on this machine, so the smoke proves queue/file/API
+  behavior and failure capture, not a successful model completion.
+
 # Current Session - Self-Improving Harness Memory (2026-07-09)
 
 Evidence stage: `diagnostic` harness-memory foundation. This adds

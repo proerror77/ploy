@@ -20,6 +20,7 @@ import type {
   AgentRunCreateRequest,
   AgentRunCreateResponse,
   AgentRunRecord,
+  HarnessMemoryResponse,
 } from '@/types';
 
 const API_BASE = '/api';
@@ -236,6 +237,10 @@ class ApiService {
 
   async getAgentRun(runId: string): Promise<AgentRunRecord> {
     return this.fetch<AgentRunRecord>(`/agent/runs/${encodeURIComponent(runId)}`);
+  }
+
+  async getHarnessMemory(): Promise<HarnessMemoryResponse> {
+    return this.fetch<HarnessMemoryResponse>('/agent/harness-memory');
   }
 
   async createAgentRun(request: AgentRunCreateRequest): Promise<AgentRunCreateResponse> {
