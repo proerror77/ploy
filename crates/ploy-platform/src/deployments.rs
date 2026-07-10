@@ -97,6 +97,10 @@ impl DeploymentRegistry {
         self.deployments.get(deployment_id)
     }
 
+    pub fn remove(&mut self, deployment_id: &str) -> Option<DeploymentRecord> {
+        self.deployments.remove(deployment_id)
+    }
+
     pub fn summaries(&self) -> Vec<DeploymentSummary> {
         self.deployments
             .values()

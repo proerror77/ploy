@@ -1,9 +1,10 @@
 use chrono::Duration;
-use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
+use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor, CANONICAL_CONTROL_GENERATION};
 use ploy_operator_contracts::{
     DeploymentRuntimeMode, DeploymentState, DesiredState, ObservedState,
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -13,6 +14,7 @@ pub struct WorkerTickConfig {
     pub runner_binary: PathBuf,
     pub strategy_config_root: PathBuf,
     pub working_directory: PathBuf,
+    pub canonical_live_ledgers: BTreeSet<String>,
 }
 
 pub fn build_worker_launch_spec(
@@ -33,6 +35,8 @@ pub fn build_worker_launch_spec(
         "--deployment-id".to_string(),
         record.deployment_id.clone(),
         "--foreground".to_string(),
+        "--control-generation".to_string(),
+        CANONICAL_CONTROL_GENERATION.to_string(),
     ];
     match record.runtime_mode {
         DeploymentRuntimeMode::Paper => args.push("--dry-run".to_string()),
@@ -102,6 +106,23 @@ pub fn tick_workers(
             }
             continue;
         }
+        if record.runtime_mode == DeploymentRuntimeMode::Live
+            && !config
+                .canonical_live_ledgers
+                .contains(&record.deployment_id)
+        {
+            control_plane
+                .system
+                .clear_source(&format!("worker:{}", record.deployment_id));
+            supervisor.terminate_pidfile_worker(build_worker_launch_spec(&record, config));
+            control_plane
+                .deployments
+                .set_desired_state(&record.deployment_id, DesiredState::Paused);
+            control_plane
+                .deployments
+                .set_observed_state(&record.deployment_id, ObservedState::Degraded);
+            continue;
+        }
         match record.desired_state {
             DesiredState::Running => {
                 let status = supervisor
@@ -114,7 +135,7 @@ pub fn tick_workers(
                     Some(
                         ObservedState::Paused | ObservedState::Stopped | ObservedState::Failed,
                     ) => {
-                        supervisor.restart(&record.deployment_id);
+                        supervisor.restart_with_spec(build_worker_launch_spec(&record, config));
                     }
                     Some(
                         ObservedState::Starting | ObservedState::Running | ObservedState::Degraded,
@@ -212,6 +233,7 @@ mod tests {
     use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
     use ploy_platform::{ControlPlane, DeploymentRecord};
     use rust_decimal_macros::dec;
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -260,6 +282,7 @@ mod tests {
             runner_binary: test_runner_binary(),
             strategy_config_root: PathBuf::from("config/strategies"),
             working_directory: test_working_directory(),
+            canonical_live_ledgers: BTreeSet::new(),
         }
     }
 
@@ -281,6 +304,94 @@ mod tests {
 
         tick_workers(&mut control_plane, &mut supervisor, &config);
         assert!(supervisor.status("example.paper").is_some());
+    }
+
+    #[test]
+    fn tick_blocks_live_worker_start_without_canonical_ledger_presence() {
+        let mut control_plane = ControlPlane::default();
+        let mut supervisor = WorkerSupervisor::default();
+        let config = config();
+        control_plane.deployments.upsert(DeploymentRecord {
+            deployment_id: "missing-ledger.live".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+            account_id: "acct-live".to_string(),
+            max_gross_exposure: Some(dec!(5)),
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Running,
+            observed_state: ObservedState::Starting,
+        });
+
+        tick_workers(&mut control_plane, &mut supervisor, &config);
+
+        let record = control_plane
+            .deployments
+            .get("missing-ledger.live")
+            .expect("deployment");
+        assert_eq!(record.desired_state, DesiredState::Paused);
+        assert_eq!(record.observed_state, ObservedState::Degraded);
+        assert!(supervisor.status("missing-ledger.live").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_live_ledger_terminates_legacy_pidfile_worker() {
+        let working_directory = test_working_directory();
+        let pid_file = working_directory.join("run/platform/workers/missing-ledger.live.pid");
+        fs::create_dir_all(pid_file.parent().expect("pid parent")).expect("pid parent");
+        let mut legacy = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "sleep 30; :",
+                "worker",
+                "--deployment-id",
+                "missing-ledger.live",
+            ])
+            .spawn()
+            .expect("spawn legacy worker");
+        let legacy_pid = legacy.id();
+        fs::write(&pid_file, format!("{legacy_pid}\n")).expect("pidfile");
+        let config = WorkerTickConfig {
+            listen_addr: "127.0.0.1:8081".to_string(),
+            worker_heartbeat_stale_after_ms: 15_000,
+            runner_binary: PathBuf::from("/bin/sh"),
+            strategy_config_root: PathBuf::from("config/strategies"),
+            working_directory,
+            canonical_live_ledgers: BTreeSet::new(),
+        };
+        let mut control_plane = ControlPlane::default();
+        let mut supervisor = WorkerSupervisor::default();
+        control_plane.deployments.upsert(DeploymentRecord {
+            deployment_id: "missing-ledger.live".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+            account_id: "acct-live".to_string(),
+            max_gross_exposure: Some(dec!(5)),
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Running,
+            observed_state: ObservedState::Starting,
+        });
+
+        tick_workers(&mut control_plane, &mut supervisor, &config);
+
+        let exited = (0..100).any(|_| match legacy.try_wait() {
+            Ok(Some(_)) => true,
+            Ok(None) => {
+                thread::sleep(StdDuration::from_millis(10));
+                false
+            }
+            Err(error) => panic!("wait legacy worker: {error}"),
+        });
+        if !exited {
+            let _ = legacy.kill();
+            let _ = legacy.wait();
+        }
+        assert!(
+            exited,
+            "legacy pidfile worker survived missing-ledger cutover"
+        );
+        assert!(!pid_file.exists());
+        assert!(supervisor.status("missing-ledger.live").is_none());
     }
 
     #[test]
@@ -340,6 +451,10 @@ mod tests {
             .map(|window| window[1].as_str());
         assert_eq!(deployment_id_arg, Some("pm5d.v2.paper"));
         assert!(spec.args.contains(&"--dry-run".to_string()));
+        assert!(spec.args.windows(2).any(|window| {
+            window[0] == "--control-generation"
+                && window[1] == ploy_deployments::CANONICAL_CONTROL_GENERATION
+        }));
     }
 
     #[test]
@@ -452,5 +567,76 @@ mod tests {
             restarted,
             "worker did not restart from paused state; final status={status:?}"
         );
+    }
+
+    #[test]
+    fn resume_replaces_stale_launch_spec_with_current_registry_spec() {
+        let working_directory = test_working_directory();
+        let launch_log = working_directory.join("launches.log");
+        let runner = working_directory.join("recording-runner.sh");
+        fs::write(
+            &runner,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nsleep 30\n",
+                launch_log.display()
+            ),
+        )
+        .expect("write recording runner");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&runner, fs::Permissions::from_mode(0o755))
+                .expect("chmod recording runner");
+        }
+        let config = WorkerTickConfig {
+            listen_addr: "127.0.0.1:8081".to_string(),
+            worker_heartbeat_stale_after_ms: 15_000,
+            runner_binary: runner,
+            strategy_config_root: PathBuf::from("config/strategies"),
+            working_directory,
+            canonical_live_ledgers: ["resume.current".to_string()].into_iter().collect(),
+        };
+        let mut control_plane = ControlPlane::default();
+        let mut supervisor = WorkerSupervisor::default();
+        control_plane.deployments.upsert(DeploymentRecord {
+            deployment_id: "resume.current".to_string(),
+            bundle_id: "old-live".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+            account_id: "acct-live".to_string(),
+            max_gross_exposure: Some(dec!(5)),
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Running,
+            observed_state: ObservedState::Starting,
+        });
+        tick_workers(&mut control_plane, &mut supervisor, &config);
+        supervisor.pause("resume.current").expect("pause worker");
+
+        control_plane.deployments.upsert(DeploymentRecord {
+            deployment_id: "resume.current".to_string(),
+            bundle_id: "new-paper".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+            account_id: "acct-live".to_string(),
+            max_gross_exposure: Some(dec!(5)),
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Running,
+            observed_state: ObservedState::Starting,
+        });
+        tick_workers(&mut control_plane, &mut supervisor, &config);
+
+        let launches = (0..1000)
+            .find_map(|_| {
+                if let Ok(launches) = fs::read_to_string(&launch_log) {
+                    if launches.lines().count() >= 1 {
+                        return Some(launches);
+                    }
+                }
+                thread::sleep(StdDuration::from_millis(10));
+                None
+            })
+            .expect("resumed launch record");
+        let resumed = launches.lines().last().expect("resumed launch");
+        assert!(resumed.contains("config/strategies/new-paper.toml"));
+        assert!(resumed.contains("--dry-run"));
+        assert!(!resumed.contains("old-live"));
     }
 }

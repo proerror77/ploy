@@ -5402,6 +5402,7 @@ dependencies = [
 name = "ploy-runner-host"
 version = "0.1.0"
 dependencies = [
+ "ploy-deployments",
  "ploy-market-data",
  "ploy-strategy-bundles",
  "ploy-strategy-runtime",

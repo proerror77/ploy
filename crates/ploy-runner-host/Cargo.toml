@@ -16,6 +16,7 @@ ops = ["dep:ploy-market-data", "dep:sqlx", "ploy-market-data/live"]
 run-full = ["ploy-strategy-runtime/full"]
 
 [dependencies]
+ploy-deployments.workspace = true
 ploy-market-data = { path = "../ploy-market-data", optional = true, default-features = false }
 ploy-strategy-bundles = { path = "../ploy-strategy-bundles", default-features = false }
 ploy-strategy-runtime = { path = "../ploy-strategy-runtime", default-features = false }

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use std::path::PathBuf;
 
+pub const CANONICAL_CONTROL_GENERATION: &str = "canonical-control-v1";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerLaunchSpec {
     pub deployment_id: String,

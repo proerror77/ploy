@@ -3381,6 +3381,7 @@ mod tests {
             ..crate::config::PlatformConfig::default()
         };
 
+        crate::runtime::seed_empty_live_ledgers(&config);
         let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::acknowledged("venue-live-http-1")),
@@ -3448,6 +3449,7 @@ mod tests {
             ..crate::config::PlatformConfig::default()
         };
 
+        crate::runtime::seed_empty_live_ledgers(&config);
         let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::failed(
@@ -3520,6 +3522,7 @@ mod tests {
 
         let gateway = StaticExecutionGateway::acknowledged("venue-live-http-cancel-1")
             .with_cancel_result(Ok(CancellationOutcome::Canceled));
+        crate::runtime::seed_empty_live_ledgers(&config);
         let daemon =
             crate::runtime::PloyDaemon::boot_with_live_execution(&config, Box::new(gateway))
                 .expect("boot daemon");
@@ -3604,6 +3607,7 @@ mod tests {
             .with_replace_result(Ok(ReplaceOutcome::Replaced {
                 venue_order_id: "venue-live-http-replace-2".to_string(),
             }));
+        crate::runtime::seed_empty_live_ledgers(&config);
         let daemon =
             crate::runtime::PloyDaemon::boot_with_live_execution(&config, Box::new(gateway))
                 .expect("boot daemon");
@@ -3689,6 +3693,7 @@ mod tests {
             ..crate::config::PlatformConfig::default()
         };
 
+        crate::runtime::seed_empty_live_ledgers(&config);
         let mut daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::acknowledged("venue-live-http-2")),

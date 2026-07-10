@@ -28,7 +28,7 @@ use ploy_platform_runtime::{
     write_json, LiveHealthConfig, PreparedLiveIntent, ProposalStore, ReconcileStatus,
     WorkerTickConfig,
 };
-use ploy_trading::{TradingIntent, TradingRuntime};
+use ploy_trading::{TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
 use std::fs;
@@ -69,6 +69,14 @@ pub struct PloyDaemon {
     fail_trading_state_write_on_attempt: Option<usize>,
     #[cfg(test)]
     trading_state_write_attempts: usize,
+    #[cfg(test)]
+    fail_registry_write_on_attempt: Option<usize>,
+    #[cfg(test)]
+    registry_write_attempts: usize,
+    #[cfg(test)]
+    fail_status_write_on_attempt: Option<usize>,
+    #[cfg(test)]
+    status_write_attempts: usize,
 }
 
 impl PloyDaemon {
@@ -101,9 +109,18 @@ impl PloyDaemon {
             fail_trading_state_write_on_attempt: None,
             #[cfg(test)]
             trading_state_write_attempts: 0,
+            #[cfg(test)]
+            fail_registry_write_on_attempt: None,
+            #[cfg(test)]
+            registry_write_attempts: 0,
+            #[cfg(test)]
+            fail_status_write_on_attempt: None,
+            #[cfg(test)]
+            status_write_attempts: 0,
         };
-        daemon.load_registry()?;
+        daemon.load_registry_records_only()?;
         daemon.load_trading_snapshots()?;
+        daemon.load_registry()?;
         daemon.load_proposals()?;
         if daemon.config.trading_state_file.exists() {
             daemon
@@ -150,10 +167,7 @@ impl PloyDaemon {
                 .mark_degraded(&self.config.listen_addr);
             return Err(err);
         }
-        write_json(
-            &self.config.status_file,
-            &self.control_plane.system.status(),
-        )?;
+        self.persist_status_snapshot()?;
         write_json(
             &self.config.deployment_status_file,
             &self.control_plane.deployments.summaries(),
@@ -196,13 +210,15 @@ impl PloyDaemon {
             .deployments
             .records()
             .into_iter()
-            .map(|record| {
-                let snapshot = self
-                    .trading
-                    .get(&record.deployment_id)
-                    .map(|runtime| runtime.snapshot(&BTreeMap::new()))
-                    .unwrap_or_default();
-                build_trading_state_snapshot(record, snapshot)
+            .filter_map(|record| {
+                let snapshot = match self.trading.get(&record.deployment_id) {
+                    Some(runtime) => runtime.snapshot(&BTreeMap::new()),
+                    None if record.runtime_mode == DeploymentRuntimeMode::Paper => {
+                        Default::default()
+                    }
+                    None => return None,
+                };
+                Some(build_trading_state_snapshot(record, snapshot))
             })
             .collect()
     }
@@ -211,6 +227,21 @@ impl PloyDaemon {
         &mut self,
         request: DeploymentApplyRequest,
     ) -> io::Result<DeploymentRecord> {
+        let existing = self
+            .control_plane
+            .deployments
+            .get(&request.deployment_id)
+            .cloned();
+        let deployment_id = request.deployment_id.clone();
+        let prior_runtime = self
+            .trading
+            .get(&deployment_id)
+            .map(|runtime| runtime.snapshot(&BTreeMap::new()));
+        if existing.as_ref().is_some_and(|current| {
+            current.runtime_mode != request.runtime_mode || current.account_id != request.account_id
+        }) {
+            self.ensure_deployment_flat_for_reassignment(&request.deployment_id)?;
+        }
         if request.deployment_state == DeploymentState::Archived {
             self.ensure_deployment_flat_for_archive(&request.deployment_id)?;
         }
@@ -227,9 +258,98 @@ impl PloyDaemon {
             }
         }
         let record = apply_deployment_record(&mut self.control_plane.deployments, request)?;
-        self.persist_registry()?;
-        self.write_runtime_snapshots()?;
+        if existing.is_none() && record.runtime_mode == DeploymentRuntimeMode::Live {
+            self.trading
+                .insert(record.deployment_id.clone(), TradingRuntime::default());
+            if let Err(error) = self.persist_trading_state() {
+                return Err(self.rollback_failed_apply(
+                    &deployment_id,
+                    existing.clone(),
+                    prior_runtime.clone(),
+                    error,
+                ));
+            }
+        }
+        if let Err(error) = self.persist_registry() {
+            return Err(self.rollback_failed_apply(&deployment_id, existing, prior_runtime, error));
+        }
+        let warning_source = format!("derived_snapshot:{}", record.deployment_id);
+        self.control_plane.system.clear_source(&warning_source);
+        if let Err(error) = self.write_runtime_snapshots() {
+            self.mark_derived_snapshot_failure(&record.deployment_id, &error);
+            return Ok(self
+                .inspect_deployment(&record.deployment_id)
+                .unwrap_or(record));
+        }
         Ok(record)
+    }
+
+    fn rollback_failed_apply(
+        &mut self,
+        deployment_id: &str,
+        prior_record: Option<DeploymentRecord>,
+        prior_runtime: Option<TradingRuntimeSnapshot>,
+        apply_error: io::Error,
+    ) -> io::Error {
+        match prior_record.as_ref() {
+            Some(record) => {
+                self.control_plane.deployments.upsert(record.clone());
+            }
+            None => {
+                self.control_plane.deployments.remove(deployment_id);
+            }
+        }
+        match prior_runtime {
+            Some(snapshot) => {
+                self.trading
+                    .insert(deployment_id.to_string(), TradingRuntime::restore(snapshot));
+            }
+            None => {
+                self.trading.remove(deployment_id);
+            }
+        }
+        if prior_record
+            .as_ref()
+            .is_none_or(|record| record.desired_state != DesiredState::Running)
+        {
+            self.supervisor.stop(deployment_id);
+        }
+
+        let mut rollback_errors = Vec::new();
+        if let Err(error) = self.persist_trading_state() {
+            rollback_errors.push(format!("trading state: {error}"));
+        }
+        if let Err(error) = self.persist_registry() {
+            rollback_errors.push(format!("registry: {error}"));
+        }
+
+        if rollback_errors.is_empty() {
+            apply_error
+        } else {
+            io::Error::new(
+                apply_error.kind(),
+                format!(
+                    "{apply_error}; rollback persistence also failed: {}",
+                    rollback_errors.join("; ")
+                ),
+            )
+        }
+    }
+
+    fn mark_derived_snapshot_failure(&mut self, deployment_id: &str, error: &io::Error) {
+        let source_id = format!("derived_snapshot:{deployment_id}");
+        self.control_plane
+            .system
+            .mark_degraded(&self.config.listen_addr);
+        self.control_plane.system.note_source_failure(
+            source_id,
+            "derived_snapshot",
+            chrono::Duration::minutes(5),
+            format!("core apply committed; derived snapshot refresh failed: {error}"),
+        );
+        self.control_plane
+            .deployments
+            .set_observed_state(deployment_id, ObservedState::Degraded);
     }
 
     pub fn create_proposal(
@@ -340,6 +460,28 @@ impl PloyDaemon {
                 format!(
                     "deployment `{deployment_id}` cannot be archived with {} active orders or {} open positions",
                     risk.active_orders, risk.open_positions
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_deployment_flat_for_reassignment(&self, deployment_id: &str) -> io::Result<()> {
+        let runtime = self.trading.get(deployment_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "deployment `{deployment_id}` cannot change runtime_mode or account_id without a canonical ledger"
+                ),
+            )
+        })?;
+        let active_orders = runtime.orders().active_orders();
+        let open_positions = runtime.positions().positions().count();
+        if active_orders > 0 || open_positions > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "deployment `{deployment_id}` cannot change runtime_mode or account_id with {active_orders} nonterminal orders or {open_positions} nonzero positions"
                 ),
             ));
         }
@@ -698,6 +840,7 @@ impl PloyDaemon {
             runner_binary: self.config.runner_binary.clone(),
             strategy_config_root: self.config.strategy_config_root.clone(),
             working_directory: deployment_working_directory(&self.config),
+            canonical_live_ledgers: self.trading.keys().cloned().collect(),
         };
         apply_loaded_registry_state(
             records,
@@ -710,9 +853,19 @@ impl PloyDaemon {
         Ok(())
     }
 
+    fn load_registry_records_only(&mut self) -> io::Result<()> {
+        for record in load_registry_records(&self.config.registry_file)? {
+            self.control_plane.deployments.upsert(record);
+        }
+        Ok(())
+    }
+
     fn load_trading_snapshots(&mut self) -> io::Result<()> {
         let runtimes = load_trading_runtimes(&self.config.trading_state_file, |deployment_id| {
-            self.control_plane.deployments.get(deployment_id).is_some()
+            self.control_plane
+                .deployments
+                .get(deployment_id)
+                .map(|record| record.runtime_mode.clone())
         })?;
         self.trading.extend(runtimes);
         Ok(())
@@ -730,6 +883,7 @@ impl PloyDaemon {
             runner_binary: self.config.runner_binary.clone(),
             strategy_config_root: self.config.strategy_config_root.clone(),
             working_directory: deployment_working_directory(&self.config),
+            canonical_live_ledgers: self.trading.keys().cloned().collect(),
         };
         tick_platform_workers(&mut self.control_plane, &mut self.supervisor, &tick_config);
     }
@@ -738,10 +892,37 @@ impl PloyDaemon {
         refresh_platform_source_health(&mut self.control_plane, &self.config.listen_addr);
     }
 
-    fn persist_registry(&self) -> io::Result<()> {
+    fn persist_registry(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            self.registry_write_attempts += 1;
+            if self.fail_registry_write_on_attempt == Some(self.registry_write_attempts) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "injected registry persistence failure",
+                ));
+            }
+        }
         write_json(
             &self.config.registry_file,
             &self.control_plane.deployments.records(),
+        )
+    }
+
+    fn persist_status_snapshot(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            self.status_write_attempts += 1;
+            if self.fail_status_write_on_attempt == Some(self.status_write_attempts) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "injected status snapshot persistence failure",
+                ));
+            }
+        }
+        write_json(
+            &self.config.status_file,
+            &self.control_plane.system.status(),
         )
     }
 
@@ -819,6 +1000,29 @@ fn deployment_working_directory(config: &PlatformConfig) -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| ".".into())
 }
 
+#[cfg(test)]
+pub(crate) fn seed_empty_live_ledgers(config: &PlatformConfig) {
+    let snapshots = load_registry_records(&config.registry_file)
+        .expect("load test registry")
+        .into_iter()
+        .filter(|record| record.runtime_mode == DeploymentRuntimeMode::Live)
+        .map(|record| {
+            build_trading_state_snapshot(
+                record,
+                TradingRuntime::default().snapshot(&BTreeMap::new()),
+            )
+        })
+        .collect::<Vec<_>>();
+    fs::create_dir_all(
+        config
+            .trading_state_file
+            .parent()
+            .expect("test trading state parent"),
+    )
+    .expect("create test trading state parent");
+    write_json(&config.trading_state_file, &snapshots).expect("seed canonical live ledgers");
+}
+
 pub fn run_shared_forever(
     daemon: Arc<Mutex<PloyDaemon>>,
     events: Arc<EventBroker>,
@@ -851,7 +1055,7 @@ pub fn run_shared_forever(
 
 #[cfg(test)]
 mod tests {
-    use super::{PloyDaemon, ReconcileStatus};
+    use super::{seed_empty_live_ledgers, PloyDaemon, ReconcileStatus};
     use crate::config::PlatformConfig;
     use ploy_connectivity::{
         CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
@@ -862,9 +1066,14 @@ mod tests {
         DeploymentApplyRequest, DeploymentControlRequest, DeploymentRuntimeMode, DeploymentState,
         DesiredState, ObservedState,
     };
+    use ploy_platform::DeploymentRecord;
     use ploy_platform_runtime::live_reconcile_backoff_ms;
-    use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
+    use ploy_trading::{
+        FillRecord, IntentPurpose, OrderRecord, OrderState, PositionSnapshot, TradeSide,
+        TradingIntent, TradingRuntime, TradingRuntimeSnapshot,
+    };
     use rust_decimal_macros::dec;
+    use std::collections::BTreeMap;
     use std::fs;
     use std::io::ErrorKind;
     use std::path::PathBuf;
@@ -892,6 +1101,44 @@ mod tests {
             std::fs::set_permissions(&runner, perms).expect("set runner permissions");
         }
         root
+    }
+
+    fn paused_live_request(deployment_id: &str, account_id: &str) -> DeploymentApplyRequest {
+        DeploymentApplyRequest {
+            deployment_id: deployment_id.to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: DeploymentRuntimeMode::Live,
+            account_id: account_id.to_string(),
+            max_gross_exposure: Some(dec!(5)),
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Paused,
+        }
+    }
+
+    fn order_runtime(deployment_id: &str, state: OrderState) -> TradingRuntime {
+        TradingRuntime::restore(TradingRuntimeSnapshot {
+            orders: vec![OrderRecord {
+                order_id: "order-1".to_string(),
+                intent_id: "intent-1".to_string(),
+                deployment_id: deployment_id.to_string(),
+                token_id: "token-1".to_string(),
+                requested_qty: dec!(1),
+                limit_price: Some(dec!(0.5)),
+                venue_order_id: Some("venue-1".to_string()),
+                venue_order_history: Vec::new(),
+                revision: 0,
+                state,
+                filled_qty: if state == OrderState::PartiallyFilled {
+                    dec!(0.5)
+                } else {
+                    dec!(0)
+                },
+                rejection_reason: None,
+                last_error: None,
+                idempotency_key: None,
+            }],
+            ..TradingRuntimeSnapshot::default()
+        })
     }
 
     #[derive(Debug, Default, Clone)]
@@ -997,6 +1244,537 @@ mod tests {
                 Ok(Vec::new())
             }
         }
+    }
+
+    #[test]
+    fn boot_blocks_legacy_live_registry_without_canonical_ledger() {
+        let root = temp_dir("legacy-live-cutover");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("mkdir");
+        fs::write(
+            &registry_file,
+            serde_json::json!([{
+                "deployment_id": "legacy.live",
+                "bundle_id": "example",
+                "runtime_mode": "live",
+                "account_id": "acct-live",
+                "max_gross_exposure": "5",
+                "deployment_state": "enabled",
+                "desired_state": "running",
+                "observed_state": "starting"
+            }])
+            .to_string(),
+        )
+        .expect("registry");
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+
+        let mut daemon = PloyDaemon::boot(&config).expect("boot fail closed");
+        let deployment = daemon
+            .inspect_deployment("legacy.live")
+            .expect("deployment");
+        assert_eq!(deployment.desired_state, DesiredState::Paused);
+        assert_eq!(deployment.observed_state, ObservedState::Degraded);
+        assert!(!daemon.trading.contains_key("legacy.live"));
+        assert!(daemon.supervisor.status("legacy.live").is_none());
+        daemon.write_runtime_snapshots().expect("write snapshots");
+        let snapshots: serde_json::Value = serde_json::from_slice(
+            &fs::read(&config.trading_state_file).expect("trading state snapshot"),
+        )
+        .expect("snapshot json");
+        assert_eq!(snapshots, serde_json::json!([]));
+
+        let restarted = PloyDaemon::boot(&config).expect("restart fail closed");
+        assert!(!restarted.trading.contains_key("legacy.live"));
+        assert!(restarted.supervisor.status("legacy.live").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paper_snapshot_with_live_registry_is_quarantined_and_pid_is_killed() {
+        let root = temp_dir("snapshot-mode-mismatch");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("mkdir");
+        fs::write(
+            &registry_file,
+            serde_json::json!([{
+                "deployment_id":"mismatch.live", "bundle_id":"example",
+                "runtime_mode":"live", "account_id":"acct-live",
+                "deployment_state":"enabled", "desired_state":"running",
+                "observed_state":"starting"
+            }])
+            .to_string(),
+        )
+        .expect("registry");
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            runner_binary: PathBuf::from("/bin/sh"),
+            ..PlatformConfig::default()
+        };
+        let paper_record = DeploymentRecord {
+            deployment_id: "mismatch.live".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: DeploymentRuntimeMode::Paper,
+            account_id: "acct-live".to_string(),
+            max_gross_exposure: None,
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Running,
+            observed_state: ObservedState::Running,
+        };
+        super::write_json(
+            &config.trading_state_file,
+            &[super::build_trading_state_snapshot(
+                paper_record,
+                TradingRuntime::default().snapshot(&BTreeMap::new()),
+            )],
+        )
+        .expect("paper snapshot");
+        let pid_file = runtime_root.join("workers/mismatch.live.pid");
+        fs::create_dir_all(pid_file.parent().expect("pid parent")).expect("pid parent");
+        let mut legacy = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "sleep 30; :",
+                "worker",
+                "--deployment-id",
+                "mismatch.live",
+            ])
+            .spawn()
+            .expect("legacy worker");
+        fs::write(&pid_file, format!("{}\n", legacy.id())).expect("pidfile");
+
+        let daemon = PloyDaemon::boot(&config).expect("fail-closed boot");
+        let record = daemon.inspect_deployment("mismatch.live").expect("record");
+        assert_eq!(record.desired_state, DesiredState::Paused);
+        assert_eq!(record.observed_state, ObservedState::Degraded);
+        assert!(!daemon.trading.contains_key("mismatch.live"));
+        assert!(daemon.supervisor.status("mismatch.live").is_none());
+        let exited = (0..100).any(|_| match legacy.try_wait() {
+            Ok(Some(_)) => true,
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }
+            Err(error) => panic!("wait legacy: {error}"),
+        });
+        if !exited {
+            let _ = legacy.kill();
+            let _ = legacy.wait();
+        }
+        assert!(exited, "mode-mismatched legacy worker survived cutover");
+    }
+
+    #[test]
+    fn new_live_apply_seeds_and_persists_empty_canonical_ledger() {
+        let root = temp_dir("new-live-canonical-ledger");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        daemon
+            .apply_deployment(paused_live_request("new.live", "acct-live"))
+            .expect("apply new live");
+
+        assert!(daemon.trading.contains_key("new.live"));
+        let snapshots: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config.trading_state_file).expect("ledger file"))
+                .expect("ledger json");
+        let snapshot = snapshots
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item["deployment_id"] == "new.live")
+            })
+            .expect("new live canonical ledger");
+        assert_eq!(snapshot["orders"], serde_json::json!([]));
+        assert_eq!(snapshot["positions"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn failed_first_live_ledger_persist_rolls_back_new_apply_without_resurrection() {
+        let root = temp_dir("apply-ledger-failure-rollback");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        daemon.fail_trading_state_write_on_attempt = Some(1);
+
+        daemon
+            .apply_deployment(paused_live_request("failed.live", "acct-live"))
+            .expect_err("injected ledger persistence failure");
+        assert!(daemon.inspect_deployment("failed.live").is_none());
+        assert!(!daemon.trading.contains_key("failed.live"));
+        assert!(daemon.supervisor.status("failed.live").is_none());
+
+        daemon.write_runtime_snapshots().expect("later tick");
+        assert!(daemon.inspect_deployment("failed.live").is_none());
+        assert!(!daemon.trading.contains_key("failed.live"));
+        assert!(daemon.supervisor.status("failed.live").is_none());
+    }
+
+    #[test]
+    fn failed_registry_persist_after_ledger_write_rolls_back_and_restarts_absent() {
+        let root = temp_dir("apply-registry-failure-rollback");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        daemon.fail_registry_write_on_attempt = Some(daemon.registry_write_attempts + 1);
+
+        daemon
+            .apply_deployment(paused_live_request("failed.live", "acct-live"))
+            .expect_err("injected registry persistence failure");
+        assert!(daemon.inspect_deployment("failed.live").is_none());
+        assert!(!daemon.trading.contains_key("failed.live"));
+        assert!(daemon.supervisor.status("failed.live").is_none());
+
+        daemon.write_runtime_snapshots().expect("later tick");
+        let restarted = PloyDaemon::boot(&config).expect("restart");
+        assert!(restarted.inspect_deployment("failed.live").is_none());
+        assert!(!restarted.trading.contains_key("failed.live"));
+        assert!(restarted.supervisor.status("failed.live").is_none());
+    }
+
+    #[test]
+    fn failed_update_persist_restores_old_record_runtime_and_idempotency() {
+        let root = temp_dir("apply-update-failure-rollback");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        daemon
+            .apply_deployment(DeploymentApplyRequest {
+                deployment_id: "existing.paper".to_string(),
+                bundle_id: "old-bundle".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Paper,
+                account_id: "acct-old".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            })
+            .expect("initial apply");
+        let intent = TradingIntent {
+            intent_id: "intent-existing".to_string(),
+            deployment_id: "existing.paper".to_string(),
+            market_id: "market-1".to_string(),
+            token_id: "token-1".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(1),
+            limit_price: Some(dec!(0.5)),
+            purpose: IntentPurpose::Entry,
+            created_at: chrono::Utc::now(),
+        };
+        let original_response = daemon
+            .submit_intent_idempotent(intent.clone(), Some("stable-key"))
+            .expect("submit");
+        daemon
+            .control_deployment(
+                "existing.paper",
+                DeploymentControlRequest {
+                    desired_state: Some(DesiredState::Paused),
+                    deployment_state: None,
+                },
+            )
+            .expect("pause");
+        let old_record = daemon
+            .inspect_deployment("existing.paper")
+            .expect("old record");
+        let old_runtime = daemon
+            .trading
+            .get("existing.paper")
+            .expect("old runtime")
+            .snapshot(&BTreeMap::new());
+        daemon.fail_registry_write_on_attempt = Some(daemon.registry_write_attempts + 1);
+
+        daemon
+            .apply_deployment(DeploymentApplyRequest {
+                deployment_id: "existing.paper".to_string(),
+                bundle_id: "new-bundle".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Paper,
+                account_id: "acct-old".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Paused,
+            })
+            .expect_err("injected update persistence failure");
+
+        assert_eq!(
+            daemon.inspect_deployment("existing.paper"),
+            Some(old_record)
+        );
+        assert_eq!(
+            daemon
+                .trading
+                .get("existing.paper")
+                .expect("restored runtime")
+                .snapshot(&BTreeMap::new()),
+            old_runtime
+        );
+        let replay = daemon
+            .submit_intent_idempotent(intent, Some("stable-key"))
+            .expect("restored idempotency replay");
+        assert_eq!(replay, original_response);
+    }
+
+    #[test]
+    fn second_registry_write_failure_accepts_core_apply_and_marks_degraded() {
+        let root = temp_dir("apply-derived-registry-failure");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        daemon.fail_registry_write_on_attempt = Some(daemon.registry_write_attempts + 2);
+        let mut request = paused_live_request("accepted.live", "acct-live");
+        request.desired_state = DesiredState::Running;
+
+        let applied = daemon
+            .apply_deployment(request.clone())
+            .expect("core-persisted apply is accepted");
+        assert_eq!(applied.deployment_id, "accepted.live");
+        assert!(config.registry_file.exists());
+        assert!(config.trading_state_file.exists());
+        assert_eq!(daemon.control_plane.deployments.records().len(), 1);
+        assert!(daemon.control_plane.system.is_degraded());
+        assert!(!daemon.active_alerts().is_empty());
+        let first_pid = daemon
+            .supervisor
+            .status("accepted.live")
+            .and_then(|status| status.pid);
+
+        daemon
+            .apply_deployment(request)
+            .expect("idempotent client retry");
+        assert_eq!(daemon.control_plane.deployments.records().len(), 1);
+        assert_eq!(
+            daemon
+                .supervisor
+                .status("accepted.live")
+                .and_then(|status| status.pid),
+            first_pid
+        );
+    }
+
+    #[test]
+    fn status_snapshot_failure_accepts_core_apply_and_marks_degraded() {
+        let root = temp_dir("apply-derived-status-failure");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        daemon.fail_status_write_on_attempt = Some(1);
+        let mut request = paused_live_request("accepted.live", "acct-live");
+        request.desired_state = DesiredState::Running;
+
+        daemon
+            .apply_deployment(request.clone())
+            .expect("core-persisted apply is accepted");
+        assert!(config.registry_file.exists());
+        assert!(config.trading_state_file.exists());
+        assert_eq!(daemon.control_plane.deployments.records().len(), 1);
+        assert!(daemon.control_plane.system.is_degraded());
+        assert!(!daemon.active_alerts().is_empty());
+
+        daemon
+            .apply_deployment(request)
+            .expect("idempotent client retry");
+        assert_eq!(daemon.control_plane.deployments.records().len(), 1);
+    }
+
+    #[test]
+    fn paper_registry_without_snapshot_keeps_existing_bootstrap_behavior() {
+        let root = temp_dir("paper-bootstrap-unchanged");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("mkdir");
+        fs::write(
+            &registry_file,
+            serde_json::json!([{
+                "deployment_id": "legacy.paper",
+                "bundle_id": "example",
+                "runtime_mode": "paper",
+                "account_id": "acct-paper",
+                "max_gross_exposure": "5",
+                "deployment_state": "enabled",
+                "desired_state": "running",
+                "observed_state": "starting"
+            }])
+            .to_string(),
+        )
+        .expect("registry");
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+
+        let daemon = PloyDaemon::boot(&config).expect("paper boot");
+        assert!(daemon.trading.contains_key("legacy.paper"));
+        assert!(daemon.supervisor.status("legacy.paper").is_some());
+    }
+
+    #[test]
+    fn mode_change_rejects_each_nonterminal_order_state_before_registry_mutation() {
+        for state in [
+            OrderState::Pending,
+            OrderState::Acknowledged,
+            OrderState::PartiallyFilled,
+            OrderState::Unknown,
+        ] {
+            let root = temp_dir("mode-change-active-order");
+            let runtime_root = root.join("run/platform");
+            let config = PlatformConfig {
+                registry_file: root.join("data/state/deployments.json"),
+                runtime_root: runtime_root.clone(),
+                status_file: runtime_root.join("system-status.json"),
+                deployment_status_file: runtime_root.join("deployments.json"),
+                trading_state_file: runtime_root.join("trading-state.json"),
+                ..PlatformConfig::default()
+            };
+            let mut daemon = PloyDaemon::boot(&config).expect("boot");
+            daemon
+                .apply_deployment(paused_live_request("reassign.live", "acct-old"))
+                .expect("apply");
+            daemon.trading.insert(
+                "reassign.live".to_string(),
+                order_runtime("reassign.live", state),
+            );
+
+            let mut request = paused_live_request("reassign.live", "acct-old");
+            request.runtime_mode = DeploymentRuntimeMode::Paper;
+            let error = daemon
+                .apply_deployment(request)
+                .expect_err("nonterminal order blocks mode reassignment");
+            assert_eq!(error.kind(), ErrorKind::InvalidInput);
+            assert_eq!(
+                daemon
+                    .inspect_deployment("reassign.live")
+                    .expect("record")
+                    .runtime_mode,
+                DeploymentRuntimeMode::Live
+            );
+        }
+    }
+
+    #[test]
+    fn account_move_rejects_nonzero_position_before_registry_mutation() {
+        let root = temp_dir("account-move-position");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        daemon
+            .apply_deployment(paused_live_request("move.live", "acct-old"))
+            .expect("apply");
+        daemon.trading.insert(
+            "move.live".to_string(),
+            TradingRuntime::restore(TradingRuntimeSnapshot {
+                positions: vec![PositionSnapshot {
+                    token_id: "token-1".to_string(),
+                    net_qty: dec!(1),
+                    avg_entry_price: dec!(0.5),
+                    realized_pnl: dec!(0),
+                }],
+                ..TradingRuntimeSnapshot::default()
+            }),
+        );
+
+        let error = daemon
+            .apply_deployment(paused_live_request("move.live", "acct-new"))
+            .expect_err("position blocks account move");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(
+            daemon
+                .inspect_deployment("move.live")
+                .expect("record")
+                .account_id,
+            "acct-old"
+        );
+    }
+
+    #[test]
+    fn flat_ledger_with_terminal_history_allows_mode_and_account_reassignment() {
+        let root = temp_dir("flat-reassignment");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        daemon
+            .apply_deployment(paused_live_request("flat.live", "acct-old"))
+            .expect("apply");
+        daemon.trading.insert(
+            "flat.live".to_string(),
+            order_runtime("flat.live", OrderState::Canceled),
+        );
+        let mut request = paused_live_request("flat.live", "acct-new");
+        request.runtime_mode = DeploymentRuntimeMode::Paper;
+
+        let updated = daemon.apply_deployment(request).expect("flat reassignment");
+        assert_eq!(updated.runtime_mode, DeploymentRuntimeMode::Paper);
+        assert_eq!(updated.account_id, "acct-new");
     }
 
     #[test]
@@ -1284,6 +2062,7 @@ mod tests {
             purpose: IntentPurpose::Entry,
             created_at: chrono::Utc::now(),
         };
+        seed_empty_live_ledgers(&config);
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(CountingAckGateway {
@@ -1363,6 +2142,7 @@ mod tests {
             ..PlatformConfig::default()
         };
 
+        seed_empty_live_ledgers(&config);
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::acknowledged("venue-live-1")),
@@ -1422,6 +2202,7 @@ mod tests {
             trading_state_file: trading_state_file.clone(),
             ..PlatformConfig::default()
         };
+        seed_empty_live_ledgers(&config);
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(PendingPersistGateway { trading_state_file }),
@@ -1473,6 +2254,7 @@ mod tests {
         let gateway = CountingAckGateway {
             submits: submits.clone(),
         };
+        seed_empty_live_ledgers(&config);
         let mut daemon =
             PloyDaemon::boot_with_live_execution(&config, Box::new(gateway.clone())).expect("boot");
         daemon.fail_trading_state_write_on_attempt = Some(2);
@@ -1540,6 +2322,7 @@ mod tests {
             ..PlatformConfig::default()
         };
 
+        seed_empty_live_ledgers(&config);
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::rejected("market closed")),
@@ -1601,6 +2384,7 @@ mod tests {
             ..PlatformConfig::default()
         };
 
+        seed_empty_live_ledgers(&config);
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::failed(
@@ -1667,6 +2451,7 @@ mod tests {
 
         let gateway = StaticExecutionGateway::acknowledged("venue-live-cancel-1")
             .with_cancel_result(Ok(CancellationOutcome::Canceled));
+        seed_empty_live_ledgers(&config);
         let mut daemon =
             PloyDaemon::boot_with_live_execution(&config, Box::new(gateway)).expect("boot");
         daemon
@@ -1729,6 +2514,7 @@ mod tests {
             .with_replace_result(Ok(ReplaceOutcome::Replaced {
                 venue_order_id: "venue-live-replace-2".to_string(),
             }));
+        seed_empty_live_ledgers(&config);
         let mut daemon =
             PloyDaemon::boot_with_live_execution(&config, Box::new(gateway)).expect("boot");
         daemon
@@ -1827,6 +2613,7 @@ mod tests {
             fee: dec!(0.01),
             timestamp: chrono::Utc::now(),
         };
+        seed_empty_live_ledgers(&config);
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(
@@ -2240,6 +3027,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
 
+        seed_empty_live_ledgers(&config);
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(
@@ -2302,6 +3090,7 @@ mod tests {
             ..PlatformConfig::default()
         };
 
+        seed_empty_live_ledgers(&config);
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::acknowledged("venue-live-restart-1")),
@@ -2403,6 +3192,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
         };
 
+        seed_empty_live_ledgers(&config);
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(
@@ -2472,6 +3262,7 @@ mod tests {
             ..PlatformConfig::default()
         };
 
+        seed_empty_live_ledgers(&config);
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(FlakyReconcileGateway::default()),
@@ -2574,6 +3365,7 @@ mod tests {
             ..PlatformConfig::default()
         };
 
+        seed_empty_live_ledgers(&config);
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(FlakyReconcileGateway::default()),
@@ -2636,6 +3428,7 @@ mod tests {
             ..PlatformConfig::default()
         };
 
+        seed_empty_live_ledgers(&config);
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(FlakyReconcileGateway::default()),

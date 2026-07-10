@@ -1,5 +1,6 @@
 use crate::health::heartbeat;
 use crate::protocol::{WorkerLaunchSpec, WorkerStatus};
+use crate::runtime::terminate_pidfile_worker;
 use crate::runtime::DeploymentRuntime;
 use std::collections::BTreeMap;
 
@@ -52,6 +53,19 @@ impl WorkerSupervisor {
         let status = runtime.restart();
         heartbeat(status);
         Some(status)
+    }
+
+    pub fn restart_with_spec(&mut self, spec: WorkerLaunchSpec) -> &WorkerStatus {
+        self.stop(&spec.deployment_id);
+        self.start(spec)
+    }
+
+    pub fn terminate_pidfile_worker(&mut self, spec: WorkerLaunchSpec) -> bool {
+        if self.stop(&spec.deployment_id).is_some() {
+            true
+        } else {
+            terminate_pidfile_worker(&spec)
+        }
     }
 
     pub fn workers(&self) -> impl Iterator<Item = &WorkerStatus> {

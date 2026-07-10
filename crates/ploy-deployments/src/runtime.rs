@@ -1,4 +1,4 @@
-use crate::protocol::{WorkerLaunchSpec, WorkerStatus};
+use crate::protocol::{WorkerLaunchSpec, WorkerStatus, CANONICAL_CONTROL_GENERATION};
 use chrono::Utc;
 use ploy_operator_contracts::ObservedState;
 use std::fs;
@@ -41,6 +41,7 @@ impl DeploymentRuntime {
         }
 
         let mut command = Command::new(&self.spec.command);
+        configure_worker_command(&mut command);
         command
             .args(&self.spec.args)
             .current_dir(&self.spec.working_directory)
@@ -186,13 +187,45 @@ impl DeploymentRuntime {
     fn existing_live_pid(&self) -> Option<u32> {
         let raw = fs::read_to_string(&self.spec.pid_file).ok()?;
         let pid: u32 = raw.trim().parse().ok()?;
-        if process_matches_spec_after_spawn(pid, &self.spec) {
+        if spec_has_current_generation(&self.spec)
+            && process_matches_spec_after_spawn(pid, &self.spec)
+        {
             Some(pid)
         } else {
+            if process_matches_worker_identity(pid, &self.spec) {
+                kill_pid(pid);
+            }
             let _ = fs::remove_file(&self.spec.pid_file);
             None
         }
     }
+}
+
+fn spec_has_current_generation(spec: &WorkerLaunchSpec) -> bool {
+    spec.args.windows(2).any(|window| {
+        window[0] == "--control-generation" && window[1] == CANONICAL_CONTROL_GENERATION
+    })
+}
+
+pub(crate) fn terminate_pidfile_worker(spec: &WorkerLaunchSpec) -> bool {
+    let Some(pid) = fs::read_to_string(&spec.pid_file)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+    else {
+        return false;
+    };
+    let matches = process_matches_spec(pid, spec) || process_matches_worker_identity(pid, spec);
+    if matches {
+        kill_pid(pid);
+    }
+    let _ = fs::remove_file(&spec.pid_file);
+    matches
+}
+
+fn configure_worker_command(command: &mut Command) {
+    command
+        .env_remove("POLYMARKET_PRIVATE_KEY")
+        .env_remove("PRIVATE_KEY");
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -263,8 +296,58 @@ fn process_identity_matches(pid: u32, spec: &WorkerLaunchSpec) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn process_identity_matches(pid: u32, _spec: &WorkerLaunchSpec) -> bool {
-    process_alive(pid)
+fn process_identity_matches(pid: u32, spec: &WorkerLaunchSpec) -> bool {
+    process_command(pid).is_some_and(|command| {
+        command.contains(spec.command.to_string_lossy().as_ref())
+            && spec.args.iter().all(|arg| command.contains(arg))
+    })
+}
+
+fn process_matches_worker_identity(pid: u32, spec: &WorkerLaunchSpec) -> bool {
+    if !process_alive(pid) {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) else {
+            return false;
+        };
+        let parts = raw
+            .split(|byte| *byte == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .collect::<Vec<_>>();
+        return parts.first().is_some_and(|command| {
+            command == spec.command.to_string_lossy().as_ref()
+                && argument_value(&parts, "--deployment-id") == Some(spec.deployment_id.as_str())
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    process_command(pid).is_some_and(|command| {
+        command.contains(spec.command.to_string_lossy().as_ref())
+            && command.contains("--deployment-id")
+            && command.contains(&spec.deployment_id)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn argument_value<'a>(parts: &'a [String], name: &str) -> Option<&'a str> {
+    parts
+        .windows(2)
+        .find(|window| window[0] == name)
+        .map(|window| window[1].as_str())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_command(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn kill_pid(pid: u32) {
@@ -288,15 +371,17 @@ fn kill_pid(pid: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::process_alive;
-    use super::DeploymentRuntime;
+    use super::{configure_worker_command, process_alive, DeploymentRuntime};
     use crate::protocol::WorkerLaunchSpec;
     #[cfg(target_os = "linux")]
     use crate::protocol::WorkerStatus;
+    use crate::CANONICAL_CONTROL_GENERATION;
     #[cfg(target_os = "linux")]
     use chrono::Utc;
     use ploy_operator_contracts::{DeploymentRuntimeMode, DesiredState, ObservedState};
+    use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn unique_pid_file(label: &str) -> PathBuf {
@@ -317,6 +402,27 @@ mod tests {
             args: vec!["30".to_string()],
             working_directory: std::env::current_dir().expect("cwd"),
             pid_file: unique_pid_file("test"),
+        }
+    }
+
+    fn generated_shell_spec(pid_file: PathBuf, env_file: &std::path::Path) -> WorkerLaunchSpec {
+        WorkerLaunchSpec {
+            deployment_id: "example.live".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: DeploymentRuntimeMode::Live,
+            desired_state: DesiredState::Running,
+            command: PathBuf::from("/bin/sh"),
+            args: vec![
+                "-c".to_string(),
+                format!("env > '{}'; sleep 30", env_file.display()),
+                "worker".to_string(),
+                "--deployment-id".to_string(),
+                "example.live".to_string(),
+                "--control-generation".to_string(),
+                CANONICAL_CONTROL_GENERATION.to_string(),
+            ],
+            working_directory: std::env::current_dir().expect("cwd"),
+            pid_file,
         }
     }
 
@@ -352,6 +458,89 @@ mod tests {
         let runtime = DeploymentRuntime::new(spec);
         assert_eq!(runtime.boot_status().observed_state, ObservedState::Failed);
         assert!(runtime.boot_status().last_error.is_some());
+    }
+
+    #[test]
+    fn worker_child_does_not_inherit_signing_keys() {
+        let mut command = std::process::Command::new("/usr/bin/env");
+        command
+            .env("POLYMARKET_PRIVATE_KEY", "polymarket-secret")
+            .env("PRIVATE_KEY", "generic-secret")
+            .env("PLOY_API_URL", "http://control-plane.test");
+
+        configure_worker_command(&mut command);
+        let output = command.output().expect("run child env");
+        let stdout = String::from_utf8(output.stdout).expect("utf8 env");
+
+        assert!(!stdout.contains("POLYMARKET_PRIVATE_KEY="));
+        assert!(!stdout.contains("PRIVATE_KEY="));
+        assert!(stdout.contains("PLOY_API_URL=http://control-plane.test"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_generation_pid_is_replaced_by_current_scrubbed_worker() {
+        let pid_file = unique_pid_file("legacy-generation");
+        let env_file = pid_file.with_extension("env");
+        let mut legacy = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "sleep 30; :",
+                "worker",
+                "--deployment-id",
+                "example.live",
+            ])
+            .spawn()
+            .expect("spawn legacy worker");
+        let legacy_pid = legacy.id();
+        fs::write(&pid_file, format!("{legacy_pid}\n")).expect("legacy pidfile");
+
+        let mut current = DeploymentRuntime::new(generated_shell_spec(pid_file.clone(), &env_file));
+        let current_pid = current.boot_status().pid.expect("current pid");
+        assert_ne!(current_pid, legacy_pid);
+        let legacy_exited = (0..100).any(|_| match legacy.try_wait() {
+            Ok(Some(_)) => true,
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }
+            Err(error) => panic!("wait legacy worker: {error}"),
+        });
+        if !legacy_exited {
+            let _ = legacy.kill();
+            let _ = legacy.wait();
+        }
+        assert!(legacy_exited, "legacy generation worker was not terminated");
+        let env = (0..100)
+            .find_map(|_| {
+                fs::read_to_string(&env_file).ok().or_else(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    None
+                })
+            })
+            .expect("replacement environment");
+        assert!(!env.contains("POLYMARKET_PRIVATE_KEY="));
+        assert!(!env.contains("PRIVATE_KEY="));
+        current.stop();
+        let _ = fs::remove_file(pid_file);
+        let _ = fs::remove_file(env_file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_current_generation_pid_is_adopted() {
+        let pid_file = unique_pid_file("current-generation");
+        let env_file = pid_file.with_extension("env");
+        let spec = generated_shell_spec(pid_file.clone(), &env_file);
+        let mut first = DeploymentRuntime::new(spec.clone());
+        let first_pid = first.boot_status().pid.expect("first pid");
+        let mut adopted = DeploymentRuntime::new(spec);
+        assert_eq!(adopted.boot_status().pid, Some(first_pid));
+        adopted.stop();
+        first.refresh_status();
+        assert!(!process_alive(first_pid));
+        let _ = fs::remove_file(pid_file);
+        let _ = fs::remove_file(env_file);
     }
 
     #[cfg(unix)]
