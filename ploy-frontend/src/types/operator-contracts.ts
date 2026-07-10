@@ -17,13 +17,15 @@ export type ObservedState = "starting" | "running" | "degraded" | "paused" | "st
 
 export interface DeploymentSummary { account_id?: string; deployment_id: string; deployment_state?: DeploymentState; desired_state: DesiredState; max_gross_exposure?: string | null; observed_state: ObservedState; }
 
-export interface DeploymentApplyRequest { account_id?: string; bundle_id: string; deployment_id: string; deployment_state?: DeploymentState; desired_state: DesiredState; max_gross_exposure?: string | null; runtime_mode: string; }
+export type DeploymentRuntimeMode = "paper" | "live";
+
+export interface DeploymentApplyRequest { account_id?: string; bundle_id: string; deployment_id: string; deployment_state?: DeploymentState; desired_state: DesiredState; max_gross_exposure?: string | null; runtime_mode: DeploymentRuntimeMode; }
 
 export interface DeploymentControlRequest { deployment_state?: DeploymentState | null; desired_state?: DesiredState | null; }
 
 export type IntentPurpose = "entry" | "exit" | "reduce" | "hedge" | "cancel";
 
-export interface PaperIntentRequest { limit_price?: string | null; market_id: string; purpose: IntentPurpose; quantity: string; side: string; token_id: string; }
+export interface PaperIntentRequest { idempotency_key?: string | null; limit_price?: string | null; market_id: string; purpose: IntentPurpose; quantity: string; side: string; token_id: string; }
 
 export interface PaperIntentResponse { deployment_id: string; intent_id: string; last_error?: string | null; order_id: string; rejection_reason?: string | null; state: string; venue_order_id?: string | null; }
 
@@ -39,7 +41,7 @@ export interface RiskSnapshotResponse { active_orders: number; gross_exposure: s
 
 export interface TradingIntentSnapshot { created_at: string; intent_id: string; limit_price?: string | null; market_id: string; purpose: IntentPurpose; quantity: string; side: string; token_id: string; }
 
-export interface TradingStateSnapshot { deployment_id: string; fills: FillSnapshot[]; intents: TradingIntentSnapshot[]; orders: OrderSnapshot[]; pnl: PnlSnapshotResponse; positions: PositionSnapshotResponse[]; risk: RiskSnapshotResponse; runtime_mode: string; }
+export interface TradingStateSnapshot { deployment_id: string; fills: FillSnapshot[]; intents: TradingIntentSnapshot[]; orders: OrderSnapshot[]; pnl: PnlSnapshotResponse; positions: PositionSnapshotResponse[]; risk: RiskSnapshotResponse; runtime_mode: DeploymentRuntimeMode; }
 
 export interface DryRunClosedTradeRow { closed_at?: string | null; deployment_id?: string | null; entry_price?: number | null; entry_time_remaining_secs?: number | null; event_id?: string | null; exit_price?: number | null; exit_type: string; experiment_label?: string | null; market_side?: string | null; net_pnl: number; notional: number; opened_at?: string | null; quantity: number; runtime_mode?: string | null; strategy_id?: string | null; symbol?: string | null; trade_key?: string | null; window_label: string; window_secs?: number | null; }
 

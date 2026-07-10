@@ -9,6 +9,7 @@ import { ws } from '@/services/websocket';
 
 import type { DeploymentState, DeploymentSummary, DesiredState } from '@/types';
 import { useEffect } from 'react';
+import { batchFailure, mutationError } from '@/lib/operatorViewState.mjs';
 
 function getStatusVariant(entry: DeploymentSummary) {
   switch (entry.observed_state) {
@@ -114,9 +115,10 @@ export function StrategyMonitor() {
   const pauseAllMutation = useMutation({
     mutationFn: async () => {
       const active = deployments.filter((entry) => entry.desired_state === 'running');
-      await Promise.all(
+      const failure = batchFailure(await Promise.allSettled(
         active.map((entry) => api.updateDeploymentState(entry.deployment_id, 'paused'))
-      );
+      ));
+      if (failure) throw new Error(failure);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['deployments'] });
@@ -126,9 +128,10 @@ export function StrategyMonitor() {
   const resumeAllMutation = useMutation({
     mutationFn: async () => {
       const paused = deployments.filter((entry) => entry.desired_state !== 'running');
-      await Promise.all(
+      const failure = batchFailure(await Promise.allSettled(
         paused.map((entry) => api.updateDeploymentState(entry.deployment_id, 'running'))
-      );
+      ));
+      if (failure) throw new Error(failure);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['deployments'] });
@@ -197,6 +200,11 @@ export function StrategyMonitor() {
           {deployments.filter((entry) => entry.deployment_state === 'draining').length}
         </span>
       </div>
+
+      {[setDeploymentState.error, pauseAllMutation.error, resumeAllMutation.error]
+        .map(mutationError)
+        .filter((message): message is string => Boolean(message))
+        .map((message) => <div key={message} role="alert" className="mb-3 rounded border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{message}</div>)}
 
       <div className="space-y-4">
         {deployments.length === 0 ? (
