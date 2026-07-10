@@ -209,4 +209,3 @@ Files:
   - rtk git diff --check
 - [ ] Record exact results in tasks/todo.md.
 - [ ] Commit ci: enforce safety and contract gates.
-
