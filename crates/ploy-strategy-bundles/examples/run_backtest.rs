@@ -953,6 +953,7 @@ fn intent_purpose_label(purpose: ploy_trading::IntentPurpose) -> &'static str {
 fn order_state_label(state: ploy_trading::OrderState) -> &'static str {
     match state {
         ploy_trading::OrderState::Pending => "PENDING",
+        ploy_trading::OrderState::Unknown => "UNKNOWN",
         ploy_trading::OrderState::Acknowledged => "ACKNOWLEDGED",
         ploy_trading::OrderState::PartiallyFilled => "PARTIALLY_FILLED",
         ploy_trading::OrderState::Filled => "FILLED",

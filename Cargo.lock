@@ -5440,9 +5440,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
- "ploy-connectivity",
+ "ploy-control-client",
  "ploy-feed-loaders",
  "ploy-market-data",
+ "ploy-operator-contracts",
+ "ploy-platform-runtime",
  "ploy-strategy-bundles",
  "ploy-trading",
  "rust_decimal",

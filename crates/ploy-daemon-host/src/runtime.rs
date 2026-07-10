@@ -12,7 +12,7 @@ use ploy_operator_contracts::{
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
 use ploy_platform_runtime::{
-    LiveHealthConfig, ProposalStore, ReconcileStatus, WorkerTickConfig,
+    LiveHealthConfig, PreparedLiveIntent, ProposalStore, ReconcileStatus, WorkerTickConfig,
     apply_deployment as apply_deployment_record, apply_loaded_registry_state,
     build_trading_state_snapshot, cancel_order as cancel_runtime_order,
     control_deployment as control_deployment_record,
@@ -23,8 +23,9 @@ use ploy_platform_runtime::{
     reconcile_live_fills as reconcile_runtime_live_fills,
     refresh_source_health as refresh_platform_source_health,
     replace_order as replace_runtime_order,
+    finish_live_intent as finish_live_runtime_intent,
+    prepare_live_intent as prepare_live_runtime_intent,
     set_deployment_max_gross_exposure as set_record_max_gross_exposure,
-    submit_live_intent as submit_live_runtime_intent,
     submit_paper_intent as submit_paper_runtime_intent, tick_workers as tick_platform_workers,
     write_json,
 };
@@ -65,6 +66,10 @@ pub struct PloyDaemon {
     live_reconcile_failures: u32,
     next_live_reconcile_at: Option<DateTime<Utc>>,
     last_live_reconcile_error: Option<String>,
+    #[cfg(test)]
+    fail_trading_state_write_on_attempt: Option<usize>,
+    #[cfg(test)]
+    trading_state_write_attempts: usize,
 }
 
 impl PloyDaemon {
@@ -93,6 +98,10 @@ impl PloyDaemon {
             live_reconcile_failures: 0,
             next_live_reconcile_at: None,
             last_live_reconcile_error: None,
+            #[cfg(test)]
+            fail_trading_state_write_on_attempt: None,
+            #[cfg(test)]
+            trading_state_write_attempts: 0,
         };
         daemon.load_registry()?;
         daemon.load_trading_snapshots()?;
@@ -347,28 +356,17 @@ impl PloyDaemon {
         intent: TradingIntent,
         idempotency_key: Option<&str>,
     ) -> io::Result<PaperIntentResponse> {
-        if let Some(runtime) = self.trading.get(&intent.deployment_id) {
-            if let Some(order) = runtime
-                .idempotent_order(&intent, idempotency_key)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?
-            {
-                return Ok(PaperIntentResponse {
-                    deployment_id: intent.deployment_id,
-                    intent_id: order.intent_id.clone(),
-                    order_id: order.order_id.clone(),
-                    state: order_state_wire(order.state),
-                    venue_order_id: order.venue_order_id.clone(),
-                    rejection_reason: order.rejection_reason.clone(),
-                    last_error: order.last_error.clone(),
-                });
-            }
-        }
         let deployment = self
             .control_plane
             .deployments
             .get(&intent.deployment_id)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "deployment not found"))?;
+        if let Some(response) =
+            self.account_idempotent_response(&deployment.account_id, &intent, idempotency_key)?
+        {
+            return Ok(response);
+        }
         ensure_intent_allowed(&deployment, &intent)?;
         enforce_intent_exposure_limit(
             &deployment,
@@ -382,6 +380,60 @@ impl PloyDaemon {
             }
             DeploymentRuntimeMode::Live => self.submit_live_intent(intent, idempotency_key),
         }
+    }
+
+    fn account_idempotent_response(
+        &self,
+        account_id: &str,
+        intent: &TradingIntent,
+        idempotency_key: Option<&str>,
+    ) -> io::Result<Option<PaperIntentResponse>> {
+        let Some(key) = idempotency_key.map(str::trim).filter(|key| !key.is_empty()) else {
+            return Ok(None);
+        };
+        for deployment in self
+            .control_plane
+            .deployments
+            .records()
+            .into_iter()
+            .filter(|deployment| deployment.account_id == account_id)
+        {
+            let Some(runtime) = self.trading.get(&deployment.deployment_id) else {
+                continue;
+            };
+            let Some(order) = runtime
+                .orders()
+                .orders()
+                .find(|order| order.idempotency_key.as_deref() == Some(key))
+            else {
+                continue;
+            };
+            let existing = runtime
+                .intent(&order.intent_id)
+                .expect("idempotent order has intent");
+            if existing.market_id != intent.market_id
+                || existing.token_id != intent.token_id
+                || existing.side != intent.side
+                || existing.quantity != intent.quantity
+                || existing.limit_price != intent.limit_price
+                || existing.purpose != intent.purpose
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "idempotency key payload mismatch",
+                ));
+            }
+            return Ok(Some(PaperIntentResponse {
+                deployment_id: order.deployment_id.clone(),
+                intent_id: order.intent_id.clone(),
+                order_id: order.order_id.clone(),
+                state: order_state_wire(order.state),
+                venue_order_id: order.venue_order_id.clone(),
+                rejection_reason: order.rejection_reason.clone(),
+                last_error: order.last_error.clone(),
+            }));
+        }
+        Ok(None)
     }
 
     pub fn submit_paper_intent(
@@ -477,16 +529,73 @@ impl PloyDaemon {
         intent: TradingIntent,
         idempotency_key: Option<&str>,
     ) -> io::Result<PaperIntentResponse> {
-        let runtime = self
-            .trading
-            .entry(intent.deployment_id.clone())
-            .or_default();
-        submit_live_runtime_intent(
-            runtime,
-            self.live_execution.as_ref(),
+        let deployment_id = intent.deployment_id.clone();
+        let prepared = prepare_live_runtime_intent(
+            self.trading.entry(deployment_id.clone()).or_default(),
             intent,
             idempotency_key,
-        )
+        )?;
+        if matches!(prepared, PreparedLiveIntent::Pending { .. }) {
+            self.persist_trading_state()?;
+        }
+        let mut response = finish_live_runtime_intent(
+            self.trading
+                .get_mut(&deployment_id)
+                .expect("prepared live runtime"),
+            self.live_execution.as_ref(),
+            prepared,
+        )?;
+        if response.state != "unknown" {
+            if let Err(error) = self.persist_trading_state() {
+                self.trading
+                    .get_mut(&deployment_id)
+                    .expect("prepared live runtime")
+                    .mark_order_unknown(&response.order_id, format!("final persistence failed: {error}"));
+                response.state = "unknown".to_string();
+                response.venue_order_id = None;
+                response.last_error = Some(format!("final persistence failed: {error}"));
+            }
+        }
+        if response.state == "unknown" {
+            let _ = control_deployment_record(
+                &mut self.control_plane.deployments,
+                &deployment_id,
+                DeploymentControlRequest {
+                    desired_state: Some(DesiredState::Paused),
+                    deployment_state: None,
+                },
+            )?;
+            self.mark_live_runtime_degraded(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                response
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "live submission outcome unknown".to_string()),
+            ));
+            self.control_plane
+                .deployments
+                .set_observed_state(&deployment_id, ObservedState::Degraded);
+            self.persist_registry()?;
+            self.persist_trading_state()?;
+        }
+        Ok(response)
+    }
+
+    fn persist_trading_state(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            self.trading_state_write_attempts += 1;
+            if self.fail_trading_state_write_on_attempt
+                == Some(self.trading_state_write_attempts)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "injected trading-state persistence failure",
+                ));
+            }
+        }
+        fs::create_dir_all(&self.config.runtime_root)?;
+        write_json(&self.config.trading_state_file, &self.trading_state())
     }
 
     pub fn reconcile_live_fills(&mut self) -> io::Result<ReconcileStatus> {
@@ -760,6 +869,7 @@ mod tests {
     use std::io::ErrorKind;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -787,6 +897,66 @@ mod tests {
     #[derive(Debug, Default, Clone)]
     struct FlakyReconcileGateway {
         attempts: Arc<Mutex<usize>>,
+    }
+
+    #[derive(Debug)]
+    struct PendingPersistGateway {
+        trading_state_file: PathBuf,
+    }
+
+    #[derive(Debug, Clone)]
+    struct CountingAckGateway {
+        submits: Arc<AtomicUsize>,
+    }
+
+    impl LiveExecutionGateway for CountingAckGateway {
+        fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
+            let attempt = self.submits.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(ExecutionOutcome::Acknowledged {
+                venue_order_id: format!("venue-{attempt}"),
+            })
+        }
+
+        fn cancel(&self, _request: &CancellationRequest) -> Result<CancellationOutcome, ExecutionError> {
+            Ok(CancellationOutcome::Canceled)
+        }
+
+        fn replace(&self, _request: &ReplaceRequest) -> Result<ReplaceOutcome, ExecutionError> {
+            unreachable!()
+        }
+
+        fn reconcile_fills(&self, _tracked_orders: &[ploy_connectivity::TrackedOrder]) -> Result<Vec<FillRecord>, ExecutionError> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl LiveExecutionGateway for PendingPersistGateway {
+        fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
+            let snapshots: serde_json::Value = serde_json::from_slice(
+                &fs::read(&self.trading_state_file).expect("pending state persisted before submit"),
+            )
+            .expect("pending state json");
+            assert_eq!(snapshots[0]["orders"][0]["state"], "pending");
+            Err(ExecutionError::Transport("response lost".to_string()))
+        }
+
+        fn cancel(
+            &self,
+            _request: &CancellationRequest,
+        ) -> Result<CancellationOutcome, ExecutionError> {
+            Ok(CancellationOutcome::Canceled)
+        }
+
+        fn replace(&self, _request: &ReplaceRequest) -> Result<ReplaceOutcome, ExecutionError> {
+            unreachable!()
+        }
+
+        fn reconcile_fills(
+            &self,
+            _tracked_orders: &[ploy_connectivity::TrackedOrder],
+        ) -> Result<Vec<FillRecord>, ExecutionError> {
+            Ok(Vec::new())
+        }
     }
 
     impl LiveExecutionGateway for FlakyReconcileGateway {
@@ -1075,6 +1245,78 @@ mod tests {
     }
 
     #[test]
+    fn account_scoped_idempotency_survives_restart_and_cross_deployment_replay() {
+        let root = temp_dir("account-idempotency");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([
+                {"deployment_id":"a.live","bundle_id":"a","runtime_mode":"live","account_id":"acct-1","desired_state":"running","observed_state":"running"},
+                {"deployment_id":"b.live","bundle_id":"b","runtime_mode":"live","account_id":"acct-1","desired_state":"running","observed_state":"running"},
+                {"deployment_id":"c.live","bundle_id":"c","runtime_mode":"live","account_id":"acct-2","desired_state":"running","observed_state":"running"}
+            ])
+            .to_string(),
+        )
+        .expect("write registry");
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let submits = Arc::new(AtomicUsize::new(0));
+        let make_intent = |deployment_id: &str, intent_id: &str, quantity| TradingIntent {
+            intent_id: intent_id.to_string(),
+            deployment_id: deployment_id.to_string(),
+            market_id: "market-1".to_string(),
+            token_id: "token-1".to_string(),
+            side: TradeSide::Buy,
+            quantity,
+            limit_price: Some(dec!(0.40)),
+            purpose: IntentPurpose::Entry,
+            created_at: chrono::Utc::now(),
+        };
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(CountingAckGateway { submits: submits.clone() }),
+        )
+        .expect("boot");
+        let first = daemon
+            .submit_intent_idempotent(make_intent("a.live", "intent-a", dec!(1)), Some("key-1"))
+            .expect("first submit");
+        let replay = daemon
+            .submit_intent_idempotent(make_intent("b.live", "intent-b", dec!(1)), Some("key-1"))
+            .expect("same-account replay");
+        assert_eq!(replay.order_id, first.order_id);
+        assert_eq!(replay.deployment_id, "a.live");
+        assert!(daemon
+            .submit_intent_idempotent(make_intent("b.live", "intent-mismatch", dec!(2)), Some("key-1"))
+            .expect_err("mismatch")
+            .to_string()
+            .contains("payload mismatch"));
+        daemon
+            .submit_intent_idempotent(make_intent("c.live", "intent-c", dec!(1)), Some("key-1"))
+            .expect("different account may reuse key");
+        assert_eq!(submits.load(Ordering::SeqCst), 2);
+
+        daemon.write_runtime_snapshots().expect("persist before restart");
+        let mut restored = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(CountingAckGateway { submits: submits.clone() }),
+        )
+        .expect("restore");
+        let restored_replay = restored
+            .submit_intent_idempotent(make_intent("b.live", "intent-after-restart", dec!(1)), Some("key-1"))
+            .expect("restored replay");
+        assert_eq!(restored_replay.order_id, first.order_id);
+        assert_eq!(submits.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn daemon_routes_live_intent_into_acknowledged_order_snapshot() {
         let root = temp_dir("live-intent-ack");
         let runtime_root = root.join("run/platform");
@@ -1135,6 +1377,114 @@ mod tests {
             trading_state[0].orders[0].venue_order_id.as_deref(),
             Some("venue-live-1")
         );
+    }
+
+    #[test]
+    fn live_submission_persists_pending_before_side_effect_and_pauses_on_unknown() {
+        let root = temp_dir("live-pending-before-submit");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([{
+                "deployment_id": "example.live",
+                "bundle_id": "example",
+                "runtime_mode": "live",
+                "desired_state": "running",
+                "observed_state": "running"
+            }])
+            .to_string(),
+        )
+        .expect("write registry");
+        let trading_state_file = runtime_root.join("trading-state.json");
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: trading_state_file.clone(),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(PendingPersistGateway { trading_state_file }),
+        )
+        .expect("boot");
+
+        let response = daemon
+            .submit_intent(TradingIntent {
+                intent_id: "request-intent-unknown".to_string(),
+                deployment_id: "example.live".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(1),
+                limit_price: Some(dec!(0.41)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("unknown response");
+
+        assert_eq!(response.state, "unknown");
+        let deployment = daemon.inspect_deployment("example.live").expect("deployment");
+        assert_eq!(deployment.desired_state, DesiredState::Paused);
+        assert_eq!(deployment.observed_state, ObservedState::Degraded);
+    }
+
+    #[test]
+    fn acknowledged_submit_with_final_persistence_failure_becomes_durable_unknown() {
+        let root = temp_dir("ack-final-persist-failure");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([{"deployment_id":"example.live","bundle_id":"example","runtime_mode":"live","account_id":"acct-1","desired_state":"running","observed_state":"running"}]).to_string(),
+        )
+        .expect("registry");
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let submits = Arc::new(AtomicUsize::new(0));
+        let gateway = CountingAckGateway { submits: submits.clone() };
+        let mut daemon = PloyDaemon::boot_with_live_execution(&config, Box::new(gateway.clone()))
+            .expect("boot");
+        daemon.fail_trading_state_write_on_attempt = Some(2);
+        let intent = TradingIntent {
+            intent_id: "intent-1".to_string(),
+            deployment_id: "example.live".to_string(),
+            market_id: "market-1".to_string(),
+            token_id: "token-1".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(1),
+            limit_price: Some(dec!(0.40)),
+            purpose: IntentPurpose::Entry,
+            created_at: chrono::Utc::now(),
+        };
+        let response = daemon
+            .submit_intent_idempotent(intent.clone(), Some("key-1"))
+            .expect("unknown response");
+        assert_eq!(response.state, "unknown");
+        assert_eq!(submits.load(Ordering::SeqCst), 1);
+        let deployment = daemon.inspect_deployment("example.live").expect("deployment");
+        assert_eq!(deployment.desired_state, DesiredState::Paused);
+        assert_eq!(deployment.observed_state, ObservedState::Degraded);
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &fs::read(&config.trading_state_file).expect("durable unknown snapshot"),
+        )
+        .expect("snapshot json");
+        assert_eq!(persisted[0]["orders"][0]["state"], "unknown");
+        let replay = daemon
+            .submit_intent_idempotent(intent, Some("key-1"))
+            .expect("idempotent unknown replay");
+        assert_eq!(replay.state, "unknown");
+        assert_eq!(submits.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1199,7 +1549,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_surfaces_live_gateway_transport_failure_as_error_without_finalizing_order() {
+    fn daemon_records_live_gateway_transport_ambiguity_as_unknown() {
         let root = temp_dir("live-intent-transport-error");
         let runtime_root = root.join("run/platform");
         let registry_file = root.join("data/state/deployments.json");
@@ -1236,7 +1586,7 @@ mod tests {
             )),
         )
         .expect("boot");
-        let err = daemon
+        let response = daemon
             .submit_intent(TradingIntent {
                 intent_id: "intent-live-transport".to_string(),
                 deployment_id: "example.live".to_string(),
@@ -1248,12 +1598,12 @@ mod tests {
                 purpose: IntentPurpose::Entry,
                 created_at: chrono::Utc::now(),
             })
-            .expect_err("transport failure should surface");
+            .expect("transport ambiguity response");
 
-        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(response.state, "unknown");
         let trading_state = daemon.trading_state();
         assert_eq!(trading_state[0].orders.len(), 1);
-        assert_eq!(trading_state[0].orders[0].state, "pending");
+        assert_eq!(trading_state[0].orders[0].state, "unknown");
         assert!(trading_state[0].orders[0].rejection_reason.is_none());
         assert!(
             trading_state[0].orders[0]
@@ -1503,7 +1853,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_enforces_account_exposure_limits_across_deployments() {
+    fn concurrent_account_submissions_cannot_exceed_cap() {
         let root = temp_dir("account-exposure-limit");
         let runtime_root = root.join("run/platform");
         let registry_file = root.join("data/state/deployments.json");

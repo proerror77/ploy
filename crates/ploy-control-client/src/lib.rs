@@ -2,6 +2,7 @@ use ploy_operator_contracts::{
     ActiveAlert, AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest,
     DeploymentControlRequest, DeploymentState, DeploymentSummary, DesiredState, OperatorEvent,
     OrderControlResponse, OrderReplaceRequest, PlatformMetrics, SystemStatus, TradingStateSnapshot,
+    PaperIntentRequest, PaperIntentResponse,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -9,7 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ControlPlaneClient {
     pub control_plane_addr: String,
     pub admin_token: Option<String>,
@@ -225,6 +226,18 @@ impl ControlPlaneClient {
         )
     }
 
+    pub fn submit_intent(
+        &self,
+        deployment_id: &str,
+        request: &PaperIntentRequest,
+    ) -> Result<PaperIntentResponse, String> {
+        self.send_json(
+            "POST",
+            &format!("/api/deployments/{deployment_id}/intents"),
+            request,
+        )
+    }
+
     fn read_status_snapshot(&self) -> Result<SystemStatus, String> {
         match self.read_status_over_http() {
             Ok(status) => return Ok(status),
@@ -413,8 +426,9 @@ mod tests {
     use super::ControlPlaneClient;
     use ploy_operator_contracts::{
         DeploymentApplyRequest, DeploymentSnapshotEvent, DeploymentState, DeploymentSummary,
-        DesiredState, ObservedState, OperatorEvent, OrderControlResponse, OrderReplaceRequest,
-        SystemSnapshotEvent, SystemStatus, TradingStateSnapshot,
+        DesiredState, IntentPurpose, ObservedState, OperatorEvent, OrderControlResponse,
+        OrderReplaceRequest, PaperIntentRequest, SystemSnapshotEvent, SystemStatus,
+        TradingStateSnapshot,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -429,6 +443,59 @@ mod tests {
             .expect("duration")
             .as_nanos();
         std::env::temp_dir().join(format!("ployctl-{label}-{unique}"))
+    }
+
+    #[test]
+    fn worker_live_submit_uses_control_plane_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 4096];
+            let bytes = stream.read(&mut request).expect("read request");
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(request.starts_with("POST /api/deployments/example.live/intents"));
+            assert!(request.contains("Authorization: Bearer worker-token"));
+            assert!(request.contains("\"idempotency_key\":\"intent-1\""));
+            let body = serde_json::json!({
+                "deployment_id": "example.live",
+                "intent_id": "daemon-intent-1",
+                "order_id": "order-daemon-intent-1",
+                "state": "acknowledged",
+                "venue_order_id": "venue-1",
+                "rejection_reason": null,
+                "last_error": null
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        });
+
+        let mut client = ControlPlaneClient::default();
+        client.control_plane_addr = addr.to_string();
+        client.admin_token = Some("worker-token".to_string());
+        let response = client
+            .submit_intent(
+                "example.live",
+                &PaperIntentRequest {
+                    idempotency_key: Some("intent-1".to_string()),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: "buy".to_string(),
+                    quantity: rust_decimal::Decimal::ONE,
+                    limit_price: Some(rust_decimal::Decimal::new(45, 2)),
+                    purpose: IntentPurpose::Entry,
+                },
+            )
+            .expect("submit intent");
+
+        assert_eq!(response.state, "acknowledged");
+        server.join().expect("server");
     }
 
     #[test]

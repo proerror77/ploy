@@ -32,7 +32,10 @@ pub use health_runtime::{
 };
 pub use reconcile::reconcile_live_fills;
 pub use trade_control::{cancel_order, replace_order};
-pub use trade_submit::{submit_live_intent, submit_paper_intent};
+pub use trade_submit::{
+    PreparedLiveIntent, finish_live_intent, prepare_live_intent, submit_live_intent,
+    submit_paper_intent,
+};
 pub use worker_tick::{build_worker_launch_spec, WorkerTickConfig, refresh_source_health, tick_workers};
 pub use state_io::{load_proposal_store, load_registry_records, load_trading_runtimes};
 

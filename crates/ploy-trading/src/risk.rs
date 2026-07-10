@@ -38,6 +38,7 @@ pub fn snapshot_from_state(
                     && matches!(
                         order.state,
                         crate::orders::OrderState::Pending
+                            | crate::orders::OrderState::Unknown
                             | crate::orders::OrderState::Acknowledged
                             | crate::orders::OrderState::PartiallyFilled
                     )

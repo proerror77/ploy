@@ -31,7 +31,8 @@ pub fn reconcile_live_fills(
                 order.venue_order_id.is_some()
                     && matches!(
                         order.state,
-                        ploy_trading::OrderState::Acknowledged
+                        ploy_trading::OrderState::Unknown
+                            | ploy_trading::OrderState::Acknowledged
                             | ploy_trading::OrderState::PartiallyFilled
                     )
             })
@@ -113,6 +114,7 @@ mod tests {
         )
         .expect("valid intent");
         runtime.acknowledge_order("order-1", "venue-1");
+        runtime.mark_order_unknown("order-1", "final persistence lost");
 
         let fill = FillRecord {
             fill_id: "fill-1".to_string(),
@@ -140,6 +142,48 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn unknown_without_venue_order_id_is_not_reconciled() {
+        let deployment = DeploymentRecord {
+            deployment_id: "example.live".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+            account_id: "acct-live".to_string(),
+            max_gross_exposure: None,
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Paused,
+            observed_state: ObservedState::Degraded,
+        };
+        let mut runtime = TradingRuntime::default();
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "intent-unknown".to_string(),
+                    deployment_id: "example.live".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(1),
+                    limit_price: Some(dec!(0.40)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: chrono::Utc::now(),
+                },
+                "order-unknown",
+                None,
+            )
+            .unwrap();
+        runtime.mark_order_unknown("order-unknown", "transport lost");
+        let mut runtimes = BTreeMap::from([("example.live".to_string(), runtime)]);
+
+        let result = reconcile_live_fills(
+            &StaticExecutionGateway::acknowledged("unused"),
+            &[deployment],
+            &mut runtimes,
+        )
+        .unwrap();
+        assert_eq!(result, crate::ReconcileStatus::Noop);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use serde_json::json;
 use std::collections::HashMap;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Clone, Default)]
 struct TokenExecutionContext {
@@ -82,7 +82,7 @@ impl RuntimeDbRecorder {
         );
     }
 
-    async fn persist_signal(&self, signal: &SignalRecord) {
+    async fn persist_signal(&self, signal: &SignalRecord) -> Result<(), String> {
         let confidence = Decimal::from_f64(signal.p_hat);
         let edge = Decimal::from_f64(signal.edge);
         let context = json!({
@@ -91,7 +91,7 @@ impl RuntimeDbRecorder {
             "intent_id": signal.intent_id,
         });
 
-        if let Err(error) = sqlx::query(
+        sqlx::query(
             r#"
             INSERT INTO signal_history (
                 recorded_at,
@@ -137,9 +137,8 @@ impl RuntimeDbRecorder {
         .bind(context)
         .execute(&self.pool)
         .await
-        {
-            warn!(error = %error, "Failed to persist signal record");
-        }
+        .map_err(|error| format!("persist signal record: {error}"))?;
+        Ok(())
     }
 
     async fn persist_order(
@@ -150,7 +149,7 @@ impl RuntimeDbRecorder {
         signal: Option<&SignalRecord>,
         report: &ExecutionReport,
         order_id: &str,
-    ) {
+    ) -> Result<(), String> {
         let fill = report.fill.as_ref();
         let status = if report.rejected {
             "REJECTED"
@@ -186,7 +185,7 @@ impl RuntimeDbRecorder {
             "market_impact": report.market_impact.map(|value| value.to_string()),
         });
 
-        if let Err(error) = sqlx::query(
+        sqlx::query(
             r#"
             INSERT INTO strategy_runtime_orders (
                 recorded_at,
@@ -272,9 +271,8 @@ impl RuntimeDbRecorder {
         .bind(context_json)
         .execute(&self.pool)
         .await
-        {
-            warn!(error = %error, order_id, "Failed to persist execution order");
-        }
+        .map_err(|error| format!("persist execution order {order_id}: {error}"))?;
+        Ok(())
     }
 
     async fn persist_fill(
@@ -284,14 +282,14 @@ impl RuntimeDbRecorder {
         context: &TokenExecutionContext,
         fill: &FillRecord,
         report: &ExecutionReport,
-    ) {
+    ) -> Result<(), String> {
         let context_json = json!({
             "runtime_mode": self.mode_label,
             "slippage": report.slippage.map(|value| value.to_string()),
             "market_impact": report.market_impact.map(|value| value.to_string()),
         });
 
-        if let Err(error) = sqlx::query(
+        sqlx::query(
             r#"
             INSERT INTO strategy_runtime_fills (
                 recorded_at,
@@ -344,17 +342,16 @@ impl RuntimeDbRecorder {
         .bind(context_json)
         .execute(&self.pool)
         .await
-        {
-            warn!(error = %error, fill_id = %fill.fill_id, "Failed to persist execution fill");
-        }
+        .map_err(|error| format!("persist execution fill {}: {error}", fill.fill_id))?;
+        Ok(())
     }
 }
 
 #[async_trait]
 impl Recorder for RuntimeDbRecorder {
-    async fn record_signal(&mut self, signal: &SignalRecord) {
+    async fn record_signal(&mut self, signal: &SignalRecord) -> Result<(), String> {
         self.remember_signal_context(signal);
-        self.persist_signal(signal).await;
+        self.persist_signal(signal).await
     }
 
     async fn record_order(
@@ -364,11 +361,14 @@ impl Recorder for RuntimeDbRecorder {
         signal: Option<&SignalRecord>,
         report: &ExecutionReport,
         order_id: &str,
-    ) {
+    ) -> Result<(), String> {
+        if self.mode_label == "live" {
+            return Ok(());
+        }
         let context = self.merge_context(intent, signal);
         self.remember_context(&intent.token_id, &context);
         self.persist_order(strategy, intent, &context, signal, report, order_id)
-            .await;
+            .await
     }
 
     async fn record_fill(
@@ -378,14 +378,19 @@ impl Recorder for RuntimeDbRecorder {
         signal: Option<&SignalRecord>,
         fill: &FillRecord,
         report: &ExecutionReport,
-    ) {
+    ) -> Result<(), String> {
+        if self.mode_label == "live" {
+            return Ok(());
+        }
         let context = self.merge_context(intent, signal);
         self.remember_context(&intent.token_id, &context);
         self.persist_fill(strategy, intent, &context, fill, report)
-            .await;
+            .await
     }
 
-    async fn flush(&mut self) {}
+    async fn flush(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub(crate) fn build_signal_recorder(

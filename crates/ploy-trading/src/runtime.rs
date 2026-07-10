@@ -111,10 +111,24 @@ impl TradingRuntime {
             .map(|(index, intent)| (intent.intent_id.clone(), index))
             .collect();
 
+        let order_by_idempotency_key = snapshot
+            .orders
+            .iter()
+            .filter_map(|order| {
+                let key = order.idempotency_key.clone()?;
+                let intent = snapshot
+                    .intents
+                    .iter()
+                    .find(|intent| intent.intent_id == order.intent_id)?
+                    .clone();
+                Some((key, (order.order_id.clone(), intent)))
+            })
+            .collect();
+
         Self {
             intents: snapshot.intents,
             intent_by_id,
-            order_by_idempotency_key: BTreeMap::new(),
+            order_by_idempotency_key,
             orders: OrderLedger::restore(snapshot.orders),
             fills: FillLedger::restore(snapshot.fills),
             positions,
@@ -189,6 +203,7 @@ impl TradingRuntime {
         self.intents.push(intent.clone());
         self.orders.insert_from_intent(order_id.clone(), &intent);
         if let Some(key) = idempotency_key {
+            self.orders.set_idempotency_key(&order_id, key);
             self.order_by_idempotency_key
                 .insert(key.to_string(), (order_id.clone(), intent));
         }
@@ -240,7 +255,7 @@ impl TradingRuntime {
             .filter(|order| {
                 matches!(
                     order.state,
-                    OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
+                    OrderState::Pending | OrderState::Unknown | OrderState::Acknowledged | OrderState::PartiallyFilled
                 ) && order.token_id == intent.token_id
                     && excluded_order_id != Some(order.order_id.as_str())
             })
@@ -333,6 +348,14 @@ impl TradingRuntime {
         self.orders.record_error(order_id, error)
     }
 
+    pub fn mark_order_unknown(
+        &mut self,
+        order_id: &str,
+        error: impl Into<String>,
+    ) -> Option<&crate::orders::OrderRecord> {
+        self.orders.mark_unknown(order_id, error)
+    }
+
     pub fn cancel_order(&mut self, order_id: &str) -> Option<&crate::orders::OrderRecord> {
         self.orders.cancel(order_id)
     }
@@ -344,7 +367,7 @@ impl TradingRuntime {
             .filter(|order| {
                 matches!(
                     order.state,
-                    OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
+                    OrderState::Pending | OrderState::Unknown | OrderState::Acknowledged | OrderState::PartiallyFilled
                 )
             })
             .filter(|order| {
@@ -472,9 +495,11 @@ impl TradingRuntime {
                 matches!(
                     order.state,
                     crate::orders::OrderState::Pending
+                        | crate::orders::OrderState::Unknown
                         | crate::orders::OrderState::Acknowledged
                         | crate::orders::OrderState::PartiallyFilled
-                ) || self.positions.net_qty(&order.token_id) != Decimal::ZERO
+                ) || order.idempotency_key.is_some()
+                    || self.positions.net_qty(&order.token_id) != Decimal::ZERO
             })
             .map(|order| order.intent_id.as_str())
             .collect::<std::collections::BTreeSet<_>>();
@@ -504,6 +529,7 @@ impl TradingRuntime {
                         && matches!(
                             order.state,
                             crate::orders::OrderState::Pending
+                                | crate::orders::OrderState::Unknown
                                 | crate::orders::OrderState::Acknowledged
                                 | crate::orders::OrderState::PartiallyFilled
                         )
@@ -573,6 +599,7 @@ mod tests {
                 filled_qty: dec!(1),
                 rejection_reason: None,
                 last_error: None,
+                idempotency_key: None,
             }],
             fills: vec![FillRecord {
                 fill_id: "fill-1".to_string(),

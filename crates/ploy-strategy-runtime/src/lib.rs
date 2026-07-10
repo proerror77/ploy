@@ -468,6 +468,7 @@ fn intent_purpose_label(purpose: ploy_trading::IntentPurpose) -> &'static str {
 fn order_state_label(state: ploy_trading::OrderState) -> &'static str {
     match state {
         ploy_trading::OrderState::Pending => "PENDING",
+        ploy_trading::OrderState::Unknown => "UNKNOWN",
         ploy_trading::OrderState::Acknowledged => "ACKNOWLEDGED",
         ploy_trading::OrderState::PartiallyFilled => "PARTIALLY_FILLED",
         ploy_trading::OrderState::Filled => "FILLED",
@@ -536,7 +537,7 @@ fn prepare_feed_symbols(mode: RuntimeMode, strategy_symbols: &[String]) -> Vec<S
 
 #[cfg(any(feature = "live", test))]
 fn database_unavailable_is_fatal(mode: RuntimeMode, database_url_present: bool) -> bool {
-    database_url_present && matches!(mode, RuntimeMode::Live | RuntimeMode::DryRun)
+    mode == RuntimeMode::Live || (database_url_present && mode == RuntimeMode::DryRun)
 }
 
 #[cfg(test)]
@@ -554,6 +555,7 @@ mod tests {
     #[test]
     fn treats_live_and_dry_run_db_connection_failures_as_fatal_when_configured() {
         assert!(database_unavailable_is_fatal(RuntimeMode::Live, true));
+        assert!(database_unavailable_is_fatal(RuntimeMode::Live, false));
         assert!(database_unavailable_is_fatal(RuntimeMode::DryRun, true));
         assert!(!database_unavailable_is_fatal(RuntimeMode::Backtest, true));
         assert!(!database_unavailable_is_fatal(RuntimeMode::Replay, true));

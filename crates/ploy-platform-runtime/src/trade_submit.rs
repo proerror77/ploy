@@ -1,4 +1,4 @@
-use crate::{io_error_from_execution_error, order_state_wire};
+use crate::order_state_wire;
 use ploy_connectivity::{
     ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
 };
@@ -59,16 +59,72 @@ pub fn submit_live_intent(
     intent: TradingIntent,
     idempotency_key: Option<&str>,
 ) -> io::Result<PaperIntentResponse> {
+    let prepared = prepare_live_intent(runtime, intent, idempotency_key)?;
+    finish_live_intent(runtime, gateway, prepared)
+}
+
+pub enum PreparedLiveIntent {
+    Existing(PaperIntentResponse),
+    Pending {
+        intent: TradingIntent,
+        order_id: String,
+    },
+}
+
+pub fn prepare_live_intent(
+    runtime: &mut TradingRuntime,
+    intent: TradingIntent,
+    idempotency_key: Option<&str>,
+) -> io::Result<PreparedLiveIntent> {
     if let Some(order) = runtime
         .idempotent_order(&intent, idempotency_key)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?
     {
-        return Ok(response_for_order(intent.deployment_id.clone(), order));
+        return Ok(PreparedLiveIntent::Existing(response_for_order(
+            intent.deployment_id.clone(),
+            order,
+        )));
+    }
+    if let Some(existing) = runtime.intent(&intent.intent_id) {
+        let order = runtime
+            .orders()
+            .orders()
+            .find(|order| order.intent_id == intent.intent_id)
+            .expect("restored intent has order");
+        if existing.deployment_id != intent.deployment_id
+            || existing.market_id != intent.market_id
+            || existing.token_id != intent.token_id
+            || existing.side != intent.side
+            || existing.quantity != intent.quantity
+            || existing.limit_price != intent.limit_price
+            || existing.purpose != intent.purpose
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "idempotency key payload mismatch",
+            ));
+        }
+        return Ok(PreparedLiveIntent::Existing(response_for_order(
+            intent.deployment_id.clone(),
+            order,
+        )));
     }
     let order_id = format!("order-{}", intent.intent_id);
     runtime
         .submit_intent(intent.clone(), order_id.clone(), idempotency_key)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    Ok(PreparedLiveIntent::Pending { intent, order_id })
+}
+
+pub fn finish_live_intent(
+    runtime: &mut TradingRuntime,
+    gateway: &dyn LiveExecutionGateway,
+    prepared: PreparedLiveIntent,
+) -> io::Result<PaperIntentResponse> {
+    let (intent, order_id) = match prepared {
+        PreparedLiveIntent::Existing(response) => return Ok(response),
+        PreparedLiveIntent::Pending { intent, order_id } => (intent, order_id),
+    };
 
     let outcome = gateway.submit(&ExecutionRequest {
         order_id: order_id.clone(),
@@ -106,8 +162,16 @@ pub fn submit_live_intent(
             })
         }
         Err(err) => {
-            runtime.record_order_error(&order_id, err.to_string());
-            Err(io_error_from_execution_error(err))
+            runtime.mark_order_unknown(&order_id, err.to_string());
+            Ok(PaperIntentResponse {
+                deployment_id: intent.deployment_id,
+                intent_id: intent.intent_id,
+                order_id,
+                state: "unknown".to_string(),
+                venue_order_id: None,
+                rejection_reason: None,
+                last_error: Some(err.to_string()),
+            })
         }
     }
 }
@@ -118,7 +182,7 @@ mod tests {
     use ploy_connectivity::{
         CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
         ExecutionRequest, LiveExecutionGateway, ReplaceOutcome, ReplaceRequest,
-        StaticExecutionGateway, TrackedOrder,
+        TrackedOrder,
     };
     use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
     use ploy_platform::DeploymentRecord;
@@ -151,6 +215,36 @@ mod tests {
             Ok(ReplaceOutcome::Replaced {
                 venue_order_id: "venue-2".to_string(),
             })
+        }
+
+        fn reconcile_fills(
+            &self,
+            _tracked_orders: &[TrackedOrder],
+        ) -> Result<Vec<FillRecord>, ExecutionError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TransportGateway {
+        submits: AtomicUsize,
+    }
+
+    impl LiveExecutionGateway for TransportGateway {
+        fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
+            self.submits.fetch_add(1, Ordering::SeqCst);
+            Err(ExecutionError::Transport("offline".to_string()))
+        }
+
+        fn cancel(
+            &self,
+            _request: &CancellationRequest,
+        ) -> Result<CancellationOutcome, ExecutionError> {
+            Ok(CancellationOutcome::Canceled)
+        }
+
+        fn replace(&self, _request: &ReplaceRequest) -> Result<ReplaceOutcome, ExecutionError> {
+            unreachable!()
         }
 
         fn reconcile_fills(
@@ -254,11 +348,25 @@ mod tests {
     }
 
     #[test]
-    fn live_submit_rejection_is_recorded() {
+    fn transport_error_stays_unknown_and_is_not_retried() {
         let mut runtime = TradingRuntime::default();
-        let gateway =
-            StaticExecutionGateway::failed(ExecutionError::Transport("offline".to_string()));
-        let error = submit_live_intent(&mut runtime, &gateway, intent(), None).expect_err("error");
-        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        let gateway = TransportGateway::default();
+        let first = submit_live_intent(&mut runtime, &gateway, intent(), Some("request-1"))
+            .expect("unknown response");
+        let snapshot = runtime.snapshot(&Default::default());
+        let mut restored = TradingRuntime::restore(snapshot);
+        let replay_gateway = CountingGateway::default();
+        let replay = submit_live_intent(
+            &mut restored,
+            &replay_gateway,
+            intent(),
+            Some("request-1"),
+        )
+            .expect("durable replay");
+
+        assert_eq!(first.state, "unknown");
+        assert_eq!(replay.order_id, first.order_id);
+        assert_eq!(gateway.submits.load(Ordering::SeqCst), 1);
+        assert_eq!(replay_gateway.submits.load(Ordering::SeqCst), 0);
     }
 }

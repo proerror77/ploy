@@ -66,6 +66,7 @@ pub fn build_trading_state_snapshot(
                 filled_qty: order.filled_qty,
                 rejection_reason: order.rejection_reason,
                 last_error: order.last_error,
+                idempotency_key: order.idempotency_key,
             })
             .collect(),
         fills: snapshot
@@ -111,6 +112,7 @@ pub fn build_trading_state_snapshot(
 
 pub fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<TradingRuntime> {
     let deployment_id = snapshot.deployment_id.clone();
+    let persisted_positions = snapshot.positions.clone();
     let intents = snapshot
         .intents
         .into_iter()
@@ -146,6 +148,7 @@ pub fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<Tra
                 filled_qty: order.filled_qty,
                 rejection_reason: order.rejection_reason,
                 last_error: order.last_error,
+                idempotency_key: order.idempotency_key,
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -165,30 +168,33 @@ pub fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<Tra
             })
         })
         .collect::<io::Result<Vec<_>>>()?;
-    let positions = snapshot
-        .positions
-        .into_iter()
-        .map(|position| ploy_trading::PositionSnapshot {
-            token_id: position.token_id,
-            net_qty: position.net_qty,
-            avg_entry_price: position.avg_entry_price,
-            realized_pnl: position.realized_pnl,
-        })
-        .collect();
-    let pnl = ploy_trading::PnlSnapshot {
-        realized_pnl: snapshot.pnl.realized_pnl,
-        unrealized_pnl: snapshot.pnl.unrealized_pnl,
-        total_fees: snapshot.pnl.total_fees,
-    };
-
-    Ok(TradingRuntime::restore(TradingRuntimeSnapshot {
+    let runtime = TradingRuntime::restore(TradingRuntimeSnapshot {
         intents,
         orders,
         fills,
-        positions,
-        pnl,
+        positions: Vec::new(),
+        pnl: Default::default(),
         risk: Default::default(),
-    }))
+    });
+    if !persisted_positions.is_empty() {
+        let rebuilt = runtime.snapshot(&Default::default()).positions;
+        let matches = persisted_positions.len() == rebuilt.len()
+            && persisted_positions.iter().all(|persisted| {
+                rebuilt.iter().any(|position| {
+                    position.token_id == persisted.token_id
+                        && position.net_qty == persisted.net_qty
+                        && position.avg_entry_price == persisted.avg_entry_price
+                        && position.realized_pnl == persisted.realized_pnl
+                })
+            });
+        if !matches {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "persisted positions do not match fill-rebuilt positions",
+            ));
+        }
+    }
+    Ok(runtime)
 }
 
 pub fn build_order_control_response(
@@ -231,6 +237,7 @@ pub fn trade_side_from_wire(side: &str) -> io::Result<TradeSide> {
 pub fn order_state_wire(state: OrderState) -> String {
     match state {
         OrderState::Pending => "pending".to_string(),
+        OrderState::Unknown => "unknown".to_string(),
         OrderState::Acknowledged => "acknowledged".to_string(),
         OrderState::PartiallyFilled => "partially_filled".to_string(),
         OrderState::Filled => "filled".to_string(),
@@ -242,6 +249,7 @@ pub fn order_state_wire(state: OrderState) -> String {
 pub fn order_state_from_wire(state: &str) -> io::Result<OrderState> {
     match state {
         "pending" => Ok(OrderState::Pending),
+        "unknown" => Ok(OrderState::Unknown),
         "acknowledged" => Ok(OrderState::Acknowledged),
         "partially_filled" => Ok(OrderState::PartiallyFilled),
         "filled" => Ok(OrderState::Filled),
@@ -350,12 +358,14 @@ mod tests {
         trade_side_wire,
     };
     use ploy_operator_contracts::{
-        DeploymentState, DesiredState, ObservedState, PnlSnapshotResponse,
-        PositionSnapshotResponse, RiskSnapshotResponse, TradingStateSnapshot,
+        DeploymentState, DesiredState, FillSnapshot, IntentPurpose, ObservedState, OrderSnapshot,
+        PnlSnapshotResponse, PositionSnapshotResponse, RiskSnapshotResponse,
+        TradingIntentSnapshot, TradingStateSnapshot,
     };
     use ploy_trading::{OrderRecord, OrderState, TradeSide};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+    use std::io;
 
     #[test]
     fn state_and_side_wire_formats_round_trip() {
@@ -400,6 +410,7 @@ mod tests {
             filled_qty: Decimal::new(25, 0),
             rejection_reason: None,
             last_error: None,
+            idempotency_key: None,
         };
 
         let response = build_order_control_response("dep-1".to_string(), &order);
@@ -409,8 +420,8 @@ mod tests {
     }
 
     #[test]
-    fn restore_trading_runtime_preserves_persisted_position_exposure() {
-        let runtime = restore_trading_runtime(TradingStateSnapshot {
+    fn restore_rejects_persisted_position_mismatch() {
+        let error = restore_trading_runtime(TradingStateSnapshot {
             deployment_id: "dep-1".to_string(),
             runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
             positions: vec![PositionSnapshotResponse {
@@ -428,12 +439,59 @@ mod tests {
             risk: RiskSnapshotResponse::default(),
             ..TradingStateSnapshot::default()
         })
-        .expect("restore runtime");
+        .expect_err("mismatched persisted position must block restore");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn restore_reconstructs_positions_from_filled_orders() {
+        let now = chrono::Utc::now();
+        let runtime = restore_trading_runtime(TradingStateSnapshot {
+            deployment_id: "dep-1".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+            intents: vec![TradingIntentSnapshot {
+                intent_id: "intent-1".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "token-1".to_string(),
+                side: "buy".to_string(),
+                quantity: dec!(4),
+                limit_price: Some(dec!(0.25)),
+                purpose: IntentPurpose::Entry,
+                created_at: now,
+            }],
+            orders: vec![OrderSnapshot {
+                order_id: "order-1".to_string(),
+                intent_id: "intent-1".to_string(),
+                token_id: "token-1".to_string(),
+                requested_qty: dec!(4),
+                limit_price: Some(dec!(0.25)),
+                venue_order_id: Some("venue-1".to_string()),
+                venue_order_history: Vec::new(),
+                revision: 0,
+                state: "filled".to_string(),
+                filled_qty: dec!(4),
+                rejection_reason: None,
+                last_error: None,
+                idempotency_key: None,
+            }],
+            fills: vec![FillSnapshot {
+                fill_id: "fill-1".to_string(),
+                order_id: "order-1".to_string(),
+                token_id: "token-1".to_string(),
+                side: "buy".to_string(),
+                quantity: dec!(4),
+                price: dec!(0.25),
+                fee: dec!(0.01),
+                timestamp: now,
+            }],
+            positions: Vec::new(),
+            ..TradingStateSnapshot::default()
+        })
+        .expect("restore filled runtime");
 
         let restored = runtime.snapshot(&Default::default());
-        assert_eq!(restored.positions.len(), 1);
         assert_eq!(restored.positions[0].net_qty, dec!(4));
-        assert_eq!(restored.pnl.total_fees, dec!(0.02));
-        assert_eq!(restored.risk.gross_exposure, dec!(1.00));
+        assert_eq!(restored.fills.len(), 1);
+        assert_eq!(restored.orders[0].state, OrderState::Filled);
     }
 }

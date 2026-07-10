@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "snake_case")]
 pub enum OrderState {
     Pending,
+    Unknown,
     Acknowledged,
     PartiallyFilled,
     Filled,
@@ -32,6 +33,8 @@ pub struct OrderRecord {
     pub filled_qty: Decimal,
     pub rejection_reason: Option<String>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -68,9 +71,16 @@ impl OrderLedger {
             filled_qty: Decimal::ZERO,
             rejection_reason: None,
             last_error: None,
+            idempotency_key: None,
         };
         self.orders.insert(order_id.clone(), record);
         self.orders.get(&order_id).expect("order inserted")
+    }
+
+    pub fn set_idempotency_key(&mut self, order_id: &str, key: impl Into<String>) {
+        if let Some(order) = self.orders.get_mut(order_id) {
+            order.idempotency_key = Some(key.into());
+        }
     }
 
     pub fn acknowledge(
@@ -138,6 +148,20 @@ impl OrderLedger {
         Some(record)
     }
 
+    pub fn mark_unknown(
+        &mut self,
+        order_id: &str,
+        error: impl Into<String>,
+    ) -> Option<&OrderRecord> {
+        let record = self.orders.get_mut(order_id)?;
+        if !matches!(record.state, OrderState::Filled | OrderState::Canceled | OrderState::Rejected)
+        {
+            record.state = OrderState::Unknown;
+            record.last_error = Some(error.into());
+        }
+        Some(record)
+    }
+
     pub fn cancel(&mut self, order_id: &str) -> Option<&OrderRecord> {
         let record = self.orders.get_mut(order_id)?;
         if matches!(record.state, OrderState::Filled | OrderState::Rejected) {
@@ -170,7 +194,7 @@ impl OrderLedger {
             .filter(|record| {
                 matches!(
                     record.state,
-                    OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
+                    OrderState::Pending | OrderState::Unknown | OrderState::Acknowledged | OrderState::PartiallyFilled
                 )
             })
             .count()

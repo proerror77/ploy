@@ -489,7 +489,11 @@ pub fn handle_api_request(
             match PloyDaemon::boot(config) {
                 Ok(mut daemon) => {
                     let response = daemon.submit_intent_idempotent(TradingIntent {
-                        intent_id: next_paper_intent_id(deployment_id),
+                        intent_id: request
+                            .idempotency_key
+                            .as_deref()
+                            .map(|key| format!("request-{key}"))
+                            .unwrap_or_else(|| next_paper_intent_id(deployment_id)),
                         deployment_id: deployment_id.to_string(),
                         market_id: request.market_id,
                         token_id: request.token_id,
@@ -499,12 +503,6 @@ pub fn handle_api_request(
                         purpose: intent_purpose_from_wire(request.purpose),
                         created_at: chrono::Utc::now(),
                     }, request.idempotency_key.as_deref());
-                    match daemon.write_runtime_snapshots() {
-                        Ok(()) => {}
-                        Err(err) => {
-                            return json_error(500, "snapshot_write_failed", Some(err.to_string()));
-                        }
-                    }
                     match response {
                         Ok(response) => (
                             200,
@@ -2305,7 +2303,11 @@ fn handle_runtime_request(
             match state.daemon.lock() {
                 Ok(mut daemon) => {
                     let response = daemon.submit_intent_idempotent(TradingIntent {
-                        intent_id: next_paper_intent_id(deployment_id),
+                        intent_id: request
+                            .idempotency_key
+                            .as_deref()
+                            .map(|key| format!("request-{key}"))
+                            .unwrap_or_else(|| next_paper_intent_id(deployment_id)),
                         deployment_id: deployment_id.to_string(),
                         market_id: request.market_id,
                         token_id: request.token_id,
@@ -2315,14 +2317,7 @@ fn handle_runtime_request(
                         purpose: intent_purpose_from_wire(request.purpose),
                         created_at: chrono::Utc::now(),
                     }, request.idempotency_key.as_deref());
-                    match daemon.write_runtime_snapshots() {
-                        Ok(()) => {
-                            publish_snapshot_events(&daemon, &state.events);
-                        }
-                        Err(err) => {
-                            return json_error(500, "snapshot_write_failed", Some(err.to_string()));
-                        }
-                    }
+                    publish_snapshot_events(&daemon, &state.events);
                     match response {
                         Ok(response) => (
                             200,

@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use ploy_market_data::feeds::{
     spawn_chainlink_feed, spawn_db_aggtrade_feed, spawn_db_l2_feed, spawn_db_polymarket_feed,
     spawn_db_spot_feed, spawn_pyth_reference_feed, spawn_spot_feed,
@@ -9,12 +8,8 @@ use ploy_market_data::sports_feed::spawn_sports_feed;
 use ploy_strategy_bundles::{
     Feed, FullConfig, LiveFeed, RecordingFeed, RuntimeMode, StrategyLogic,
 };
-use ploy_trading::{
-    FillRecord, IntentPurpose, OrderRecord, OrderState, PnlSnapshot, TradeSide, TradingIntent,
-    TradingRuntime, TradingRuntimeSnapshot,
-};
-use rust_decimal::Decimal;
-use sqlx::{postgres::PgPoolOptions, FromRow, PgPool};
+use ploy_trading::TradingRuntime;
+use sqlx::postgres::PgPoolOptions;
 use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -23,44 +18,58 @@ use tracing::{error, info, warn};
 #[cfg(all(feature = "live", feature = "live-execution"))]
 mod execution {
     use async_trait::async_trait;
+    use ploy_control_client::ControlPlaneClient;
+    use ploy_operator_contracts::{IntentPurpose, PaperIntentRequest};
     use ploy_strategy_bundles::{ExecutionPolicy, ExecutionReport};
     use ploy_trading::{FillRecord, TradeSide, TradingIntent};
     use rust_decimal::Decimal;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-    use tracing::{debug, error, info};
+    use std::collections::{BTreeMap, BTreeSet};
+    use tracing::{debug, error};
 
-    #[derive(Clone)]
     pub(super) struct LiveExecutor {
-        gateway: Arc<ploy_connectivity::PolymarketExecutionGateway>,
-        next_reconcile_at: Option<Instant>,
+        client: ControlPlaneClient,
         policy: ExecutionPolicy,
+        deployment_id: String,
+        seen_fill_ids: BTreeSet<String>,
         last_reconcile_attempted: bool,
+        canonical_to_local_order: BTreeMap<String, String>,
     }
 
     impl LiveExecutor {
         pub(super) fn new(
-            gateway: Arc<ploy_connectivity::PolymarketExecutionGateway>,
+            client: ControlPlaneClient,
             policy: ExecutionPolicy,
+            deployment_id: impl Into<String>,
         ) -> Self {
             Self {
-                gateway,
-                next_reconcile_at: None,
+                client,
                 policy,
+                deployment_id: deployment_id.into(),
+                seen_fill_ids: BTreeSet::new(),
                 last_reconcile_attempted: false,
+                canonical_to_local_order: BTreeMap::new(),
             }
         }
 
-        fn build_request(&self, intent: &TradingIntent) -> ploy_connectivity::ExecutionRequest {
-            let quantity = intent.quantity.trunc_with_scale(2);
-            ploy_connectivity::ExecutionRequest {
-                order_id: intent.intent_id.clone(),
+        fn request(intent: &TradingIntent, idempotency_key: &str) -> PaperIntentRequest {
+            PaperIntentRequest {
+                idempotency_key: Some(idempotency_key.to_string()),
+                market_id: intent.market_id.clone(),
                 token_id: intent.token_id.clone(),
-                side: intent.side,
-                quantity,
+                side: match intent.side {
+                    TradeSide::Buy => "buy",
+                    TradeSide::Sell => "sell",
+                }
+                .to_string(),
+                quantity: intent.quantity,
                 limit_price: intent.limit_price,
-                order_type: ploy_connectivity::OrderExecutionType::FAK,
-                aggressive_ticks: 0,
+                purpose: match intent.purpose {
+                    ploy_trading::IntentPurpose::Entry => IntentPurpose::Entry,
+                    ploy_trading::IntentPurpose::Exit => IntentPurpose::Exit,
+                    ploy_trading::IntentPurpose::Reduce => IntentPurpose::Reduce,
+                    ploy_trading::IntentPurpose::Hedge => IntentPurpose::Hedge,
+                    ploy_trading::IntentPurpose::Cancel => IntentPurpose::Cancel,
+                },
             }
         }
 
@@ -126,6 +135,10 @@ mod execution {
             self.last_reconcile_attempted
         }
 
+        fn owns_live_retries(&self) -> bool {
+            false
+        }
+
         fn prepare_intent(&self, intent: &TradingIntent) -> TradingIntent {
             let mut prepared = intent.clone();
             let (quantity, limit_price) = self.prepared_quantity_and_price(intent);
@@ -134,63 +147,95 @@ mod execution {
             prepared
         }
 
-        async fn submit(&mut self, intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
-            use ploy_connectivity::{ExecutionOutcome, LiveExecutionGateway};
-
-            let gateway = self.gateway.clone();
-            let request = self.build_request(intent);
-
-            match tokio::task::spawn_blocking(move || gateway.submit(&request)).await {
-                Ok(Ok(outcome)) => match outcome {
-                    ExecutionOutcome::Acknowledged { venue_order_id } => {
-                        info!(venue_order_id = %venue_order_id, "Order acknowledged");
-                        ExecutionReport {
-                            order_id: venue_order_id,
-                            fill: None,
-                            rejected: false,
-                            rejection_reason: None,
-                            slippage: None,
-                            market_impact: None,
-                            price_basis: None,
-                        }
+        async fn submit(&mut self, intent: &TradingIntent, order_id: &str) -> ExecutionReport {
+            let client = self.client.clone();
+            let deployment_id = intent.deployment_id.clone();
+            let request = Self::request(intent, &intent.intent_id);
+            match tokio::task::spawn_blocking(move || {
+                client.submit_intent(&deployment_id, &request)
+            })
+            .await
+            {
+                Ok(Ok(response)) if response.deployment_id != intent.deployment_id => ExecutionReport {
+                    order_id: String::new(),
+                    fill: None,
+                    rejected: false,
+                    rejection_reason: Some(format!(
+                        "idempotent replay is owned by deployment `{}`",
+                        response.deployment_id
+                    )),
+                    slippage: None,
+                    market_impact: None,
+                    price_basis: None,
+                },
+                Ok(Ok(response)) if response.state == "rejected" => ExecutionReport {
+                    order_id: response.order_id,
+                    fill: None,
+                    rejected: true,
+                    rejection_reason: response.rejection_reason.or(response.last_error),
+                    slippage: None,
+                    market_impact: None,
+                    price_basis: None,
+                },
+                Ok(Ok(response)) if response.state == "unknown" => ExecutionReport {
+                    order_id: String::new(),
+                    fill: None,
+                    rejected: false,
+                    rejection_reason: response.last_error.or(Some("submission outcome unknown".to_string())),
+                    slippage: None,
+                    market_impact: None,
+                    price_basis: None,
+                },
+                Ok(Ok(response)) if matches!(response.state.as_str(), "acknowledged" | "partially_filled" | "filled") => {
+                    let Some(venue_order_id) = response.venue_order_id else {
+                        return ExecutionReport {
+                            order_id: String::new(), fill: None, rejected: false,
+                            rejection_reason: Some("acknowledged response missing venue_order_id".to_string()),
+                            slippage: None, market_impact: None, price_basis: None,
+                        };
+                    };
+                    self.canonical_to_local_order
+                        .insert(response.order_id.clone(), order_id.to_string());
+                    ExecutionReport {
+                        order_id: venue_order_id,
+                        fill: None,
+                        rejected: false,
+                        rejection_reason: None,
+                        slippage: None,
+                        market_impact: None,
+                        price_basis: None,
                     }
-                    ExecutionOutcome::Rejected { reason } => {
-                        error!(reason = %reason, "Order rejected by venue");
-                        ExecutionReport {
-                            order_id: String::new(),
-                            fill: None,
-                            rejected: true,
-                            rejection_reason: Some(reason),
-                            slippage: None,
-                            market_impact: None,
-                            price_basis: None,
-                        }
-                    }
+                }
+                Ok(Ok(response)) => ExecutionReport {
+                    order_id: String::new(),
+                    fill: None,
+                    rejected: false,
+                    rejection_reason: Some(format!("unsupported control-plane submit state `{}`", response.state)),
+                    slippage: None,
+                    market_impact: None,
+                    price_basis: None,
                 },
                 Ok(Err(error)) => {
-                    error!(error = %error, "Execution gateway error");
+                    error!(%error, "Control-plane submission outcome is unknown");
                     ExecutionReport {
                         order_id: String::new(),
                         fill: None,
-                        rejected: true,
-                        rejection_reason: Some(error.to_string()),
+                        rejected: false,
+                        rejection_reason: Some(error),
                         slippage: None,
                         market_impact: None,
                         price_basis: None,
                     }
                 }
-                Err(error) => {
-                    error!(error = %error, "Spawn blocking failed");
-                    ExecutionReport {
-                        order_id: String::new(),
-                        fill: None,
-                        rejected: true,
-                        rejection_reason: Some(format!("internal: {error}")),
-                        slippage: None,
-                        market_impact: None,
-                        price_basis: None,
-                    }
-                }
+                Err(error) => ExecutionReport {
+                    order_id: String::new(),
+                    fill: None,
+                    rejected: false,
+                    rejection_reason: Some(format!("control-plane task failed: {error}")),
+                    slippage: None,
+                    market_impact: None,
+                    price_basis: None,
+                },
             }
         }
 
@@ -200,60 +245,41 @@ mod execution {
 
         async fn reconcile_fills(
             &mut self,
-            orders: &ploy_trading::OrderLedger,
+            _orders: &ploy_trading::OrderLedger,
         ) -> Result<Vec<FillRecord>, String> {
-            use ploy_connectivity::{LiveExecutionGateway, TrackedOrder};
-
-            self.last_reconcile_attempted = false;
-            let now = Instant::now();
-            if let Some(next_reconcile_at) = self.next_reconcile_at {
-                if now < next_reconcile_at {
-                    return Ok(Vec::new());
-                }
-            }
-
-            let tracked_orders: Vec<TrackedOrder> = orders
-                .orders()
-                .filter(|order| {
-                    order.venue_order_id.is_some()
-                        && matches!(
-                            order.state,
-                            ploy_trading::OrderState::Acknowledged
-                                | ploy_trading::OrderState::PartiallyFilled
-                        )
-                })
-                .filter_map(|order| {
-                    Some(TrackedOrder {
-                        order_id: order.order_id.clone(),
-                        venue_order_id: order.venue_order_id.clone()?,
-                        token_id: order.token_id.clone(),
+            let client = self.client.clone();
+            let deployment_id = self.deployment_id.clone();
+            let snapshot = tokio::task::spawn_blocking(move || {
+                client.inspect_trading_state(&deployment_id)
+            })
+            .await
+            .map_err(|error| format!("control-plane reconcile task failed: {error}"))??;
+            self.last_reconcile_attempted = true;
+            snapshot
+                .fills
+                .into_iter()
+                .filter(|fill| self.seen_fill_ids.insert(fill.fill_id.clone()))
+                .map(|fill| {
+                    Ok(FillRecord {
+                        fill_id: fill.fill_id,
+                        order_id: self
+                            .canonical_to_local_order
+                            .get(&fill.order_id)
+                            .cloned()
+                            .unwrap_or(fill.order_id),
+                        token_id: fill.token_id,
+                        side: match fill.side.as_str() {
+                            "buy" => TradeSide::Buy,
+                            "sell" => TradeSide::Sell,
+                            side => return Err(format!("unsupported fill side `{side}`")),
+                        },
+                        quantity: fill.quantity,
+                        price: fill.price,
+                        fee: fill.fee,
+                        timestamp: fill.timestamp,
                     })
                 })
-                .collect();
-
-            if tracked_orders.is_empty() {
-                self.next_reconcile_at = None;
-                return Ok(Vec::new());
-            }
-
-            let gateway = self.gateway.clone();
-            match tokio::task::spawn_blocking(move || gateway.reconcile_fills(&tracked_orders))
-                .await
-            {
-                Ok(Ok(fills)) => {
-                    self.last_reconcile_attempted = true;
-                    self.next_reconcile_at = Some(now + Duration::from_secs(3));
-                    Ok(fills)
-                }
-                Ok(Err(error)) => {
-                    self.next_reconcile_at = Some(now + Duration::from_secs(10));
-                    Err(error.to_string())
-                }
-                Err(error) => {
-                    self.next_reconcile_at = Some(now + Duration::from_secs(10));
-                    Err(format!("reconcile task failed: {error}"))
-                }
-            }
+                .collect()
         }
     }
 
@@ -261,17 +287,24 @@ mod execution {
     mod tests {
         use super::*;
         use chrono::Utc;
+        use ploy_operator_contracts::{DeploymentRuntimeMode, FillSnapshot, TradingStateSnapshot};
         use ploy_strategy_bundles::Executor;
         use ploy_trading::IntentPurpose;
+        use std::fs;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+        use std::time::{SystemTime, UNIX_EPOCH};
 
         fn test_executor(max_slippage_bps: Decimal) -> LiveExecutor {
             LiveExecutor::new(
-                Arc::new(ploy_connectivity::PolymarketExecutionGateway::from_env()),
+                ControlPlaneClient::default(),
                 ExecutionPolicy {
                     max_slippage_bps,
                     max_attempts: 2,
                     reconcile_cycles_before_retry: 2,
                 },
+                "deployment",
             )
         }
 
@@ -289,19 +322,106 @@ mod execution {
             }
         }
 
+        async fn submit_response(deployment_id: &str, state: &str, venue_order_id: Option<&str>) -> (LiveExecutor, ExecutionReport) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let body = serde_json::json!({
+                "deployment_id": deployment_id,
+                "intent_id": "intent-buy",
+                "order_id": "canonical-order-1",
+                "state": state,
+                "venue_order_id": venue_order_id,
+                "rejection_reason": null,
+                "last_error": null
+            }).to_string();
+            thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            });
+            let mut client = ControlPlaneClient::default();
+            client.control_plane_addr = addr.to_string();
+            let mut executor = LiveExecutor::new(client, ExecutionPolicy::default(), "deployment");
+            let report = executor.submit(&buy_intent(Decimal::ONE, Decimal::new(40, 2)), "local-1").await;
+            (executor, report)
+        }
+
+        #[tokio::test]
+        async fn cross_deployment_replay_does_not_create_local_order_mapping() {
+            let (executor, report) = submit_response("other.live", "acknowledged", Some("venue-1")).await;
+            assert_eq!(report.submit_outcome(), ploy_strategy_bundles::SubmitOutcome::Unknown);
+            assert!(executor.canonical_to_local_order.is_empty());
+        }
+
+        #[tokio::test]
+        async fn unsupported_submit_states_fail_closed_without_venue_mapping() {
+            for state in ["pending", "acknowleged", "future_state"] {
+                let (executor, report) = submit_response("deployment", state, Some("venue-1")).await;
+                assert_eq!(report.submit_outcome(), ploy_strategy_bundles::SubmitOutcome::Unknown);
+                assert!(report.order_id.is_empty());
+                assert!(executor.canonical_to_local_order.is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn control_plane_reconcile_propagates_only_incremental_fills() {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("ploy-live-fills-{unique}"));
+            fs::create_dir_all(&root).expect("runtime root");
+            let snapshot_path = root.join("trading-state.json");
+            let write_fills = |fills: Vec<FillSnapshot>| {
+                fs::write(
+                    &snapshot_path,
+                    serde_json::to_vec(&vec![TradingStateSnapshot {
+                        deployment_id: "deployment".to_string(),
+                        runtime_mode: DeploymentRuntimeMode::Live,
+                        fills,
+                        ..TradingStateSnapshot::default()
+                    }])
+                    .expect("snapshot json"),
+                )
+                .expect("write snapshot");
+            };
+            let fill = |id: &str| FillSnapshot {
+                fill_id: id.to_string(),
+                order_id: "order-1".to_string(),
+                token_id: "token-1".to_string(),
+                side: "buy".to_string(),
+                quantity: Decimal::ONE,
+                price: Decimal::new(40, 2),
+                fee: Decimal::ZERO,
+                timestamp: Utc::now(),
+            };
+            write_fills(vec![fill("fill-1")]);
+            let mut client = ControlPlaneClient::from_runtime_root(root);
+            client.control_plane_addr = "127.0.0.1:9".to_string();
+            let mut executor = LiveExecutor::new(client, ExecutionPolicy::default(), "deployment");
+            let orders = ploy_trading::OrderLedger::default();
+
+            assert_eq!(executor.reconcile_fills(&orders).await.unwrap().len(), 1);
+            assert!(executor.reconcile_fills(&orders).await.unwrap().is_empty());
+            write_fills(vec![fill("fill-1"), fill("fill-2")]);
+            let incremental = executor.reconcile_fills(&orders).await.unwrap();
+            assert_eq!(incremental.len(), 1);
+            assert_eq!(incremental[0].fill_id, "fill-2");
+            assert!(executor.last_reconcile_attempted());
+        }
+
         #[test]
         fn prepare_intent_caps_buy_quantity_to_slippage_bounded_notional() {
             let executor = test_executor(Decimal::new(150, 0));
             let intent = buy_intent(Decimal::new(142_857_143, 6), Decimal::new(105, 3));
 
             let prepared = executor.prepare_intent(&intent);
-            let request = executor.build_request(&prepared);
-            let execution_price = request.limit_price.expect("bounded live price");
+            let execution_price = prepared.limit_price.expect("bounded live price");
 
             assert_eq!(prepared.limit_price, Some(Decimal::new(11, 2)));
             assert_eq!(execution_price, Decimal::new(11, 2));
             assert_eq!(prepared.quantity, Decimal::new(13_636, 2));
-            assert_eq!(request.quantity, Decimal::new(13_636, 2));
             assert!(prepared.quantity * execution_price <= Decimal::new(1_500, 2));
         }
 
@@ -311,46 +431,15 @@ mod execution {
             let intent = buy_intent(Decimal::new(150, 0), Decimal::new(10, 2));
 
             let prepared = executor.prepare_intent(&intent);
-            let request = executor.build_request(&prepared);
 
             assert_eq!(prepared.limit_price, Some(Decimal::new(10, 2)));
-            assert_eq!(request.limit_price, Some(Decimal::new(10, 2)));
             assert_eq!(prepared.quantity, Decimal::new(15_000, 2));
-            assert_eq!(request.quantity, Decimal::new(15_000, 2));
         }
     }
 }
 
 use crate::recording::build_signal_recorder;
 use crate::{database_unavailable_is_fatal, RuntimeModeConfig};
-
-#[derive(Debug, FromRow)]
-struct LiveOrderRestoreRow {
-    intent_id: String,
-    order_id: String,
-    deployment_id: String,
-    event_id: Option<String>,
-    token_id: String,
-    order_side: String,
-    quantity: Decimal,
-    limit_price: Option<Decimal>,
-    venue_order_id: Option<String>,
-    filled_quantity: Decimal,
-    status: String,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, FromRow)]
-struct LiveFillRestoreRow {
-    order_id: String,
-    fill_id: String,
-    token_id: String,
-    fill_side: String,
-    quantity: Decimal,
-    price: Decimal,
-    fee: Decimal,
-    fill_timestamp: DateTime<Utc>,
-}
 
 pub(crate) async fn run_live_or_dry_run_entry(
     config: &FullConfig,
@@ -365,154 +454,20 @@ pub(crate) async fn run_live_or_dry_run_entry(
     run_live_or_dry_run(config, symbols, strategy, runtime_config, deployment_id).await
 }
 
-async fn restore_active_live_trading_runtime(pool: &PgPool) -> Option<TradingRuntime> {
-    let orders = match sqlx::query_as::<_, LiveOrderRestoreRow>(
-        r#"
-        SELECT
-            intent_id,
-            order_id,
-            deployment_id,
-            event_id,
-            token_id,
-            order_side,
-            quantity,
-            limit_price,
-            venue_order_id,
-            filled_quantity,
-            status,
-            created_at
-        FROM strategy_runtime_orders
-        WHERE runtime_mode = 'live'
-          AND venue_order_id IS NOT NULL
-          AND status IN ('ACKNOWLEDGED', 'PARTIALLY_FILLED', 'acknowledged', 'partially_filled')
-        ORDER BY created_at DESC
-        LIMIT 500
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            warn!(error = %error, "Failed to restore active live orders from DB");
-            return None;
-        }
-    };
-
-    if orders.is_empty() {
-        return None;
+#[cfg(feature = "live-execution")]
+fn restore_live_trading_runtime(
+    client: &ploy_control_client::ControlPlaneClient,
+    deployment_id: &str,
+) -> Result<TradingRuntime, String> {
+    let snapshot = client.inspect_trading_state(deployment_id)?;
+    if snapshot.deployment_id != deployment_id {
+        return Err(format!(
+            "control plane returned deployment `{}` while restoring `{deployment_id}`",
+            snapshot.deployment_id
+        ));
     }
-
-    let order_ids = orders
-        .iter()
-        .map(|order| order.order_id.clone())
-        .collect::<Vec<_>>();
-    let fills = match sqlx::query_as::<_, LiveFillRestoreRow>(
-        r#"
-        SELECT order_id, fill_id, token_id, fill_side, quantity, price, fee, fill_timestamp
-        FROM strategy_runtime_fills
-        WHERE runtime_mode = 'live'
-          AND order_id = ANY($1)
-        ORDER BY fill_timestamp ASC
-        "#,
-    )
-    .bind(&order_ids)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            warn!(error = %error, "Failed to restore live fills from DB");
-            Vec::new()
-        }
-    };
-
-    let intents = orders
-        .iter()
-        .map(|order| TradingIntent {
-            intent_id: order.intent_id.clone(),
-            deployment_id: order.deployment_id.clone(),
-            market_id: order.event_id.clone().unwrap_or_default(),
-            token_id: order.token_id.clone(),
-            side: trade_side_from_db(&order.order_side),
-            quantity: order.quantity,
-            limit_price: order.limit_price,
-            purpose: intent_purpose_from_side(&order.order_side),
-            created_at: order.created_at,
-        })
-        .collect::<Vec<_>>();
-    let order_records = orders
-        .into_iter()
-        .map(|order| OrderRecord {
-            order_id: order.order_id,
-            intent_id: order.intent_id,
-            deployment_id: order.deployment_id,
-            token_id: order.token_id,
-            requested_qty: order.quantity,
-            limit_price: order.limit_price,
-            venue_order_id: order.venue_order_id,
-            venue_order_history: Vec::new(),
-            revision: 0,
-            state: order_state_from_db(&order.status),
-            filled_qty: order.filled_quantity,
-            rejection_reason: None,
-            last_error: None,
-        })
-        .collect::<Vec<_>>();
-    let fill_records = fills
-        .into_iter()
-        .map(|fill| FillRecord {
-            fill_id: fill.fill_id,
-            order_id: fill.order_id,
-            token_id: fill.token_id,
-            side: trade_side_from_db(&fill.fill_side),
-            quantity: fill.quantity,
-            price: fill.price,
-            fee: fill.fee,
-            timestamp: fill.fill_timestamp,
-        })
-        .collect::<Vec<_>>();
-
-    info!(
-        orders = order_records.len(),
-        fills = fill_records.len(),
-        "Restored active live trading runtime from DB"
-    );
-
-    Some(TradingRuntime::restore(TradingRuntimeSnapshot {
-        intents,
-        orders: order_records,
-        fills: fill_records,
-        positions: Vec::new(),
-        pnl: PnlSnapshot::default(),
-        risk: Default::default(),
-    }))
-}
-
-fn trade_side_from_db(side: &str) -> TradeSide {
-    if side.eq_ignore_ascii_case("SELL") {
-        TradeSide::Sell
-    } else {
-        TradeSide::Buy
-    }
-}
-
-fn intent_purpose_from_side(side: &str) -> IntentPurpose {
-    if side.eq_ignore_ascii_case("SELL") {
-        IntentPurpose::Exit
-    } else {
-        IntentPurpose::Entry
-    }
-}
-
-fn order_state_from_db(status: &str) -> OrderState {
-    match status.to_ascii_uppercase().as_str() {
-        "PARTIALLY_FILLED" => OrderState::PartiallyFilled,
-        "FILLED" => OrderState::Filled,
-        "CANCELED" | "CANCELLED" => OrderState::Canceled,
-        "REJECTED" => OrderState::Rejected,
-        _ => OrderState::Acknowledged,
-    }
+    ploy_platform_runtime::restore_trading_runtime(snapshot)
+        .map_err(|error| format!("restore trading state: {error}"))
 }
 
 async fn run_live_or_dry_run(
@@ -546,6 +501,10 @@ async fn run_live_or_dry_run(
             }
         },
         None => {
+            if database_unavailable_is_fatal(runtime_config.mode, false) {
+                error!("DATABASE_URL not set for live runtime; refusing to start without persistence");
+                std::process::exit(1);
+            }
             info!("DATABASE_URL not set — running without DB persistence");
             None
         }
@@ -647,13 +606,18 @@ async fn run_live_or_dry_run(
 
         #[cfg(feature = "live-execution")]
         {
-            let executor = build_live_executor(config.live_execution_policy());
-            let trading = match db_pool.as_ref() {
-                Some(pool) => restore_active_live_trading_runtime(pool)
-                    .await
-                    .unwrap_or_default(),
-                None => TradingRuntime::default(),
-            };
+            let client = ploy_control_client::ControlPlaneClient::default();
+            let trading = restore_live_trading_runtime(&client, &deployment_id).unwrap_or_else(
+                |error| {
+                    error!(%error, %deployment_id, "Live restore failed; refusing to start empty");
+                    std::process::exit(1);
+                },
+            );
+            let executor = build_live_executor(
+                client,
+                config.live_execution_policy(),
+                &deployment_id,
+            );
             let mut runtime = ploy_strategy_bundles::StrategyRuntime::new_with_trading(
                 strategy,
                 feed,
@@ -694,7 +658,61 @@ async fn run_live_or_dry_run(
 }
 
 #[cfg(all(feature = "live", feature = "live-execution"))]
-fn build_live_executor(policy: ploy_strategy_bundles::ExecutionPolicy) -> execution::LiveExecutor {
-    let gateway = Arc::new(ploy_connectivity::PolymarketExecutionGateway::from_env());
-    execution::LiveExecutor::new(gateway, policy)
+fn build_live_executor(
+    client: ploy_control_client::ControlPlaneClient,
+    policy: ploy_strategy_bundles::ExecutionPolicy,
+    deployment_id: &str,
+) -> execution::LiveExecutor {
+    execution::LiveExecutor::new(client, policy, deployment_id)
+}
+
+#[cfg(all(test, feature = "live-execution"))]
+mod restore_tests {
+    use super::restore_live_trading_runtime;
+    use ploy_control_client::ControlPlaneClient;
+    use ploy_operator_contracts::{DeploymentRuntimeMode, TradingStateSnapshot};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn client_with_snapshots(snapshots: Vec<TradingStateSnapshot>) -> ControlPlaneClient {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ploy-live-restore-{unique}"));
+        fs::create_dir_all(&root).expect("create runtime root");
+        fs::write(
+            root.join("trading-state.json"),
+            serde_json::to_vec(&snapshots).expect("serialize snapshots"),
+        )
+        .expect("write snapshots");
+        let mut client = ControlPlaneClient::from_runtime_root(root);
+        client.control_plane_addr = "127.0.0.1:9".to_string();
+        client
+    }
+
+    #[test]
+    fn restore_is_scoped_to_deployment() {
+        let client = client_with_snapshots(vec![
+            TradingStateSnapshot {
+                deployment_id: "other.live".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Live,
+                ..TradingStateSnapshot::default()
+            },
+            TradingStateSnapshot {
+                deployment_id: "target.live".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Live,
+                ..TradingStateSnapshot::default()
+            },
+        ]);
+
+        let runtime = restore_live_trading_runtime(&client, "target.live").expect("restore target");
+        assert!(runtime.snapshot(&Default::default()).intents.is_empty());
+    }
+
+    #[test]
+    fn restore_failure_does_not_start_empty_live_runtime() {
+        let client = client_with_snapshots(Vec::new());
+        assert!(restore_live_trading_runtime(&client, "missing.live").is_err());
+    }
 }

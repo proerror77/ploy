@@ -87,6 +87,8 @@ pub struct OrderSnapshot {
     pub filled_qty: Decimal,
     pub rejection_reason: Option<String>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

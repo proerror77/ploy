@@ -37,7 +37,7 @@ pub use strategies::ThreeLayerStrategy;
 pub use strategies::registry::{build_strategy, canonical_strategy_variant};
 pub use traits::{
     ExecutionPolicy, ExecutionReport, Executor, NullRecorder, Recorder, SignalRecord,
-    StrategyDecision, StrategyLogic,
+    StrategyDecision, StrategyLogic, SubmitOutcome,
 };
 
 pub const CRATE_MARKER: &str = "ploy-strategy-bundles";
