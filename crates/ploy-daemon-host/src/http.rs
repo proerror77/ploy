@@ -2047,6 +2047,14 @@ fn handle_runtime_request(
                 Ok(request) => request,
                 Err(err) => return json_error(400, "invalid_json", Some(err.to_string())),
             };
+            if request.max_turns == 0
+                || request.max_turns > 30
+                || !request.budget_usd.is_finite()
+                || request.budget_usd <= 0.0
+                || request.budget_usd > 1.0
+            {
+                return json_error(400, "agent_run_limits_exceeded", Some("max_turns must be 1..=30 and budget_usd must be (0, 1]".to_string()));
+            }
             match queue_agent_run_request(state, request) {
                 Ok(response) => (
                     202,
@@ -4001,6 +4009,44 @@ mod tests {
         assert!(queued_request.contains("\"objective\":\"Find a gated PM5D research candidate\""));
         let queued_runs = fs::read_to_string(agent_runs_file).expect("runs file");
         assert!(queued_runs.contains("\"status\":\"requested\""));
+
+        let over_limit = serde_json::json!({
+            "objective":"bounded", "strategy_profile":"test", "autonomy_mode":"research_until_blocked",
+            "target_evidence":"diagnostic", "symbols":["BTCUSDT"], "max_turns":31,
+            "budget_usd":1.0, "run_packet":"packet", "run_contract":"contract"
+        }).to_string();
+        let (status_code, body) = handle_runtime_request("POST", "/api/agent/runs", Some(&over_limit), &state);
+        assert_eq!(status_code, 400);
+        assert!(body.contains("agent_run_limits_exceeded"));
+
+        for (max_turns, budget_usd) in [
+            (0, serde_json::json!(1.0)),
+            (1, serde_json::json!(0.0)),
+            (1, serde_json::json!(1.01)),
+        ] {
+            let invalid = serde_json::json!({
+                "objective":"bounded", "strategy_profile":"test",
+                "autonomy_mode":"research_until_blocked", "target_evidence":"diagnostic",
+                "symbols":["BTCUSDT"], "max_turns":max_turns, "budget_usd":budget_usd,
+                "run_packet":"packet", "run_contract":"contract"
+            }).to_string();
+            let (status_code, body) =
+                handle_runtime_request("POST", "/api/agent/runs", Some(&invalid), &state);
+            assert_eq!(status_code, 400);
+            assert!(body.contains("agent_run_limits_exceeded"));
+        }
+
+        for invalid_json in [
+            r#"{"objective":"bounded","strategy_profile":"test","autonomy_mode":"research_until_blocked","target_evidence":"diagnostic","symbols":[],"budget_usd":1.0,"run_packet":"packet","run_contract":"contract"}"#,
+            r#"{"objective":"bounded","strategy_profile":"test","autonomy_mode":"research_until_blocked","target_evidence":"diagnostic","symbols":[],"max_turns":1,"run_packet":"packet","run_contract":"contract"}"#,
+            r#"{"objective":"bounded","strategy_profile":"test","autonomy_mode":"research_until_blocked","target_evidence":"diagnostic","symbols":[],"max_turns":1,"budget_usd":NaN,"run_packet":"packet","run_contract":"contract"}"#,
+            r#"{"objective":"bounded","strategy_profile":"test","autonomy_mode":"research_until_blocked","target_evidence":"diagnostic","symbols":[],"max_turns":1,"budget_usd":Infinity,"run_packet":"packet","run_contract":"contract"}"#,
+        ] {
+            let (status_code, body) =
+                handle_runtime_request("POST", "/api/agent/runs", Some(invalid_json), &state);
+            assert_eq!(status_code, 400);
+            assert!(body.contains("invalid_json"));
+        }
     }
 
     #[test]

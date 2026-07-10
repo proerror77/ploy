@@ -195,7 +195,9 @@ function requiredToolCheck(
   alternatives: string[][]
 ): ContractCheck {
   const missing = alternatives.filter(
-    (group) => !group.some((toolName) => toolCalls.some((call) => call.name.includes(toolName)))
+    (group) => !group.some((toolName) => toolCalls.some((call) =>
+      call.name.includes(toolName) && ["called", "success", "completed"].includes(call.status)
+    ))
   );
   return {
     name,
@@ -243,6 +245,14 @@ requires_operator_approval = true
     toolCalls: [],
   });
   assert.equal(needsRetry?.status, "needs_retry");
+
+  const failedTool = evaluateAgentRunContract({
+    request: { run_contract: "requires_executable_replay = true" },
+    completion: null,
+    failureReason: null,
+    toolCalls: [{ name: "mcp__research__replay_deployment", status: "failed" }],
+  });
+  assert.equal(failedTool?.status, "needs_retry", "matching_failed_tool_does_not_satisfy_contract");
 
   const blocked = evaluateAgentRunContract({
     request,

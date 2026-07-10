@@ -6,6 +6,7 @@ import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { JsonValue } from "../contracts/operator-contracts.js";
+import type { AgentToolCallRecord } from "../contracts/operator-contracts.js";
 import type { AgentTaskCompletion } from "./run-recorder.js";
 
 type CommandRunner = (args: string[], prompt: string) => Promise<{
@@ -19,6 +20,7 @@ export type CodexCliResult<T> = {
   model: string;
   session_id: string;
   value: T;
+  tool_calls: AgentToolCallRecord[];
 };
 
 const COMPLETION_SCHEMA = {
@@ -167,10 +169,38 @@ async function runCodexExec(params: {
       model: model || "default",
       session_id: "codex-cli",
       value: parseJsonObject(raw),
+      tool_calls: parseCodexToolCalls(completed.stdout),
     };
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+export function parseCodexToolCalls(stdout: string): AgentToolCallRecord[] {
+  const calls: AgentToolCallRecord[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as any;
+      const item = event.item ?? event.data?.item ?? event;
+      const name = item.type === "mcp_tool_call" && typeof item.server === "string" && typeof item.tool === "string"
+        ? `mcp__${item.server}__${item.tool}`
+        : item.tool_name ?? item.name ?? item.tool;
+      const type = String(event.type ?? item.type ?? "");
+      if (typeof name === "string" && (type.includes("completed") || type.includes("tool"))) {
+        const hasError = nonEmptyError(item.error);
+        calls.push({ name, status: type.includes("failed") || item.status === "failed" || hasError ? "failed" : "completed" });
+      }
+    } catch { /* non-event output */ }
+  }
+  return calls;
+}
+
+function nonEmptyError(error: unknown): boolean {
+  if (error === undefined || error === null || error === "") return false;
+  if (Array.isArray(error)) return error.length > 0;
+  if (typeof error === "object") return Object.keys(error).length > 0;
+  return true;
 }
 
 function defaultCodexWorkdir() {
@@ -284,6 +314,14 @@ async function selfTest() {
   });
   assert.equal(completion.value.status, "success");
   assert.equal(completion.value.summary, "done");
+  const calls = parseCodexToolCalls([
+    '{"type":"item.completed","item":{"type":"mcp_tool_call","server":"research","tool":"run_backtest","error":null}}',
+    '{"type":"item.completed","item":{"type":"mcp_tool_call","server":"research","tool":"compare_configs","error":{"message":"denied"}}}',
+  ].join("\n"));
+  assert.deepEqual(calls, [
+    { name: "mcp__research__run_backtest", status: "completed" },
+    { name: "mcp__research__compare_configs", status: "failed" },
+  ], "codex_jsonl_mcp_tool_receipts_preserve_success_and_failure");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
