@@ -19,7 +19,7 @@ Plan: docs/superpowers/plans/2026-07-10-comprehensive-safety-hardening.md
 
 ## Tasks
 
-- [ ] Task 1: Enforce trading-domain invariants and collision-proof IDs.
+- [x] Task 1: Enforce trading-domain invariants and collision-proof IDs.
 - [ ] Task 2: Type deployment modes and close lifecycle/spec drift.
 - [ ] Task 3: Centralize live submission, ambiguity handling, and restore.
 - [ ] Task 4: Make API/workflow security fail closed.
@@ -36,7 +36,10 @@ Plan: docs/superpowers/plans/2026-07-10-comprehensive-safety-hardening.md
 
 ## Review
 
-- Pending implementation and per-task review.
+- Task 1 complete in `20895cc7`: final spec/quality review approved with no
+  Critical, Important, or Minor findings. Covering suites passed 109 tests;
+  the final unknown-mode regression slice passed 87 platform/daemon tests.
+- Tasks 2-7 pending implementation and per-task review.
 
 
 # Current Session - Codex CLI Sidecar Engine (2026-07-09)
