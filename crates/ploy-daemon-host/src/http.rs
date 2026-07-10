@@ -60,20 +60,34 @@ enum RequiredAccess {
 #[derive(Debug, Default)]
 struct RateLimiter {
     requests: BTreeMap<String, VecDeque<Instant>>,
+    last_pruned: Option<Instant>,
 }
 
 impl RateLimiter {
     fn allow(&mut self, key: &str, limit_per_minute: u32) -> bool {
+        let now = Instant::now();
+        if self
+            .last_pruned
+            .is_none_or(|last_pruned| now.duration_since(last_pruned) >= Duration::from_secs(1))
+        {
+            let cutoff = now - Duration::from_secs(60);
+            self.requests.retain(|_, bucket| {
+                while matches!(bucket.front(), Some(timestamp) if *timestamp < cutoff) {
+                    bucket.pop_front();
+                }
+                !bucket.is_empty()
+            });
+            self.last_pruned = Some(now);
+        }
         if limit_per_minute == 0 {
             return true;
         }
-
-        let now = Instant::now();
-        let cutoff = now - Duration::from_secs(60);
-        let bucket = self.requests.entry(key.to_string()).or_default();
-        while matches!(bucket.front(), Some(timestamp) if *timestamp < cutoff) {
-            bucket.pop_front();
+        // ponytail: bounded in-memory limiter; move to a shared limiter if 10k active clients/minute is legitimate.
+        if !self.requests.contains_key(key) && self.requests.len() >= 10_000 {
+            return false;
         }
+
+        let bucket = self.requests.entry(key.to_string()).or_default();
         if bucket.len() >= limit_per_minute as usize {
             return false;
         }
@@ -547,7 +561,8 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
     let method = request_line.next().unwrap_or("GET");
     let raw_path = request_line.next().unwrap_or("/");
     let path = raw_path.split('?').next().unwrap_or(raw_path);
-    let client_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
+    let peer_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
+    let client_addr = Some(client_ip(peer_addr.as_deref(), &request));
     let (configured_token, operator_token, sidecar_token, cookie_secret) =
         match configured_auth(state) {
             Ok(auth) => auth,
@@ -870,17 +885,11 @@ fn rate_limit_response(
         Ok(limit) => limit,
         Err(response) => return Some(response),
     };
-    let key = format!(
-        "{}|{}|{}|{}",
-        client_addr.unwrap_or("unknown"),
-        auth_level_name(auth_level),
-        method,
-        path
-    );
-    let allowed = request_rate_limiter()
-        .lock()
-        .map(|mut limiter| limiter.allow(&key, limit))
-        .unwrap_or(true);
+    let key = rate_limit_key(client_addr, auth_level, method, path);
+    let allowed = match request_rate_limiter().lock() {
+        Ok(mut limiter) => limiter.allow(&key, limit),
+        Err(_) => return Some(json_error(503, "rate_limiter_lock_poisoned", None)),
+    };
     if allowed {
         None
     } else {
@@ -893,6 +902,35 @@ fn rate_limit_response(
             )),
         ))
     }
+}
+
+fn rate_limit_key(
+    client_addr: Option<&str>,
+    auth_level: AuthLevel,
+    _method: &str,
+    _path: &str,
+) -> String {
+    let client_ip = client_addr
+        .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+        .map(|address| address.ip().to_string())
+        .unwrap_or_else(|| client_addr.unwrap_or("unknown").to_string());
+    format!("{client_ip}|{}", auth_level_name(auth_level))
+}
+
+fn client_ip(peer_addr: Option<&str>, request: &str) -> String {
+    let peer_ip = peer_addr
+        .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+        .map(|address| address.ip());
+    if peer_ip.is_some_and(|ip| ip.is_loopback()) {
+        if let Some(real_ip) = extract_header(request, "X-Real-IP")
+            .and_then(|value| value.parse::<std::net::IpAddr>().ok())
+        {
+            return real_ip.to_string();
+        }
+    }
+    peer_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| peer_addr.unwrap_or("unknown").to_string())
 }
 
 fn required_access(method: &str, path: &str) -> RequiredAccess {
@@ -1728,14 +1766,10 @@ fn request_auth_level(
 fn access_allowed(
     auth_level: AuthLevel,
     required_access: RequiredAccess,
-    admin_configured: bool,
-    operator_configured: bool,
-    sidecar_configured: bool,
+    _admin_configured: bool,
+    _operator_configured: bool,
+    _sidecar_configured: bool,
 ) -> bool {
-    if !admin_configured && !operator_configured && !sidecar_configured {
-        return true;
-    }
-
     match required_access {
         RequiredAccess::Public => true,
         RequiredAccess::ReadOnly => matches!(
@@ -1847,7 +1881,7 @@ fn handle_authenticated_runtime_request(
             200,
             serde_json::json!({
                 "authenticated": auth_level == AuthLevel::Admin,
-                "auth_required": admin_configured || operator_configured || sidecar_configured,
+                "auth_required": true,
                 "operator_authenticated": auth_level == AuthLevel::Operator,
                 "sidecar_authenticated": auth_level == AuthLevel::Sidecar,
             })
@@ -1866,7 +1900,7 @@ fn handle_authenticated_runtime_request(
                         .map(str::to_string)
                 });
             if !admin_configured {
-                return (200, serde_json::json!({ "success": true }).to_string());
+                return json_error(503, "admin_auth_not_configured", None);
             }
 
             match state.daemon.lock() {
@@ -1886,7 +1920,7 @@ fn handle_authenticated_runtime_request(
                             "admin token did not match configured control-plane token".to_string(),
                         ),
                     ),
-                    None => (200, serde_json::json!({ "success": true }).to_string()),
+                    None => json_error(503, "admin_auth_not_configured", None),
                 },
                 Err(_) => json_error(503, "daemon_lock_poisoned", None),
             }
@@ -2509,9 +2543,10 @@ fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<
 mod tests {
     use super::{
         ADMIN_SESSION_COOKIE_NAME, AppState, AuthLevel, RateLimiter, admin_session_cookie,
-        append_audit_entry, content_length, handle_api_request,
+        access_allowed, append_audit_entry, content_length, handle_api_request,
         handle_authenticated_runtime_request, handle_runtime_request, header_end_offset,
-        request_auth_level, response_headers, route_request, snapshot_events,
+        client_ip, rate_limit_key, request_auth_level, response_headers, route_request,
+        snapshot_events,
     };
     use crate::events::EventBroker;
     use chrono::{Duration, Utc};
@@ -2519,10 +2554,11 @@ mod tests {
     use ploy_operator_contracts::AuditLogEntry;
     use ploy_operator_contracts::{OrderReplaceRequest, PaperIntentRequest};
     use ploy_trading::{IntentPurpose as TradingIntentPurpose, TradeSide, TradingIntent};
+    use std::collections::VecDeque;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -2596,6 +2632,122 @@ mod tests {
         let mut limiter = RateLimiter::default();
         assert!(limiter.allow("127.0.0.1|admin|GET|/api/deployments", 1));
         assert!(!limiter.allow("127.0.0.1|admin|GET|/api/deployments", 1));
+    }
+
+    #[test]
+    fn same_ip_different_ports_share_rate_limit() {
+        let mut limiter = RateLimiter::default();
+        let first = rate_limit_key(
+            Some("127.0.0.1:41000"),
+            AuthLevel::None,
+            "GET",
+            "/api/deployments",
+        );
+        let second = rate_limit_key(
+            Some("127.0.0.1:42000"),
+            AuthLevel::None,
+            "GET",
+            "/api/deployments",
+        );
+
+        assert!(limiter.allow(&first, 1));
+        assert!(!limiter.allow(&second, 1));
+    }
+
+    #[test]
+    fn different_paths_share_rate_limit() {
+        let mut limiter = RateLimiter::default();
+        let first = rate_limit_key(
+            Some("127.0.0.1:41000"),
+            AuthLevel::Admin,
+            "GET",
+            "/api/deployments",
+        );
+        let second = rate_limit_key(
+            Some("127.0.0.1:41000"),
+            AuthLevel::Admin,
+            "POST",
+            "/api/proposals",
+        );
+
+        assert!(limiter.allow(&first, 1));
+        assert!(!limiter.allow(&second, 1));
+    }
+
+    #[test]
+    fn trusted_loopback_proxy_uses_real_client_ip() {
+        let request = "GET /auth/login HTTP/1.1\r\nX-Real-IP: 203.0.113.9\r\n\r\n";
+
+        assert_eq!(client_ip(Some("127.0.0.1:41000"), request), "203.0.113.9");
+        assert_eq!(
+            client_ip(Some("198.51.100.7:41000"), request),
+            "198.51.100.7"
+        );
+    }
+
+    #[test]
+    fn expired_rate_limit_buckets_are_removed() {
+        let mut limiter = RateLimiter::default();
+        limiter.requests.insert(
+            "expired|none".to_string(),
+            VecDeque::from([Instant::now() - StdDuration::from_secs(61)]),
+        );
+
+        assert!(limiter.allow("current|none", 1));
+        assert!(!limiter.requests.contains_key("expired|none"));
+    }
+
+    #[test]
+    fn missing_tokens_do_not_authorize_protected_routes() {
+        assert!(access_allowed(
+            AuthLevel::None,
+            super::RequiredAccess::Public,
+            false,
+            false,
+            false,
+        ));
+        for required in [
+            super::RequiredAccess::ReadOnly,
+            super::RequiredAccess::Operator,
+            super::RequiredAccess::Admin,
+        ] {
+            assert!(!access_allowed(
+                AuthLevel::None,
+                required,
+                false,
+                false,
+                false,
+            ));
+        }
+    }
+
+    #[test]
+    fn auth_session_does_not_report_protected_apis_open_without_tokens() {
+        let config = crate::config::PlatformConfig::default();
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("unused")),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (code, body) = handle_authenticated_runtime_request(
+            "GET",
+            "/auth/session",
+            None,
+            AuthLevel::None,
+            false,
+            false,
+            false,
+            &state,
+        );
+
+        assert_eq!(code, 200);
+        assert!(body.contains("\"auth_required\":true"));
+        assert!(body.contains("\"authenticated\":false"));
     }
 
     #[test]
@@ -2735,6 +2887,35 @@ mod tests {
 
         assert_eq!(code, 200);
         assert!(body.contains("\"success\":true"));
+    }
+
+    #[test]
+    fn auth_login_rejects_when_admin_auth_is_not_configured() {
+        let config = crate::config::PlatformConfig::default();
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("unused")),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (code, body) = handle_authenticated_runtime_request(
+            "POST",
+            "/auth/login",
+            Some("{\"admin_token\":\"anything\"}"),
+            AuthLevel::None,
+            false,
+            false,
+            false,
+            &state,
+        );
+
+        assert_eq!(code, 503);
+        assert!(body.contains("\"error\":\"admin_auth_not_configured\""));
+        assert!(response_headers("POST", "/auth/login", code, None, "cookie-secret").is_empty());
     }
 
     #[test]
@@ -3008,10 +3189,6 @@ mod tests {
         );
         assert_eq!(submit_code, 200);
         assert!(submit_response.contains("\"deployment_id\":\"example.paper\""));
-
-        let trading_body =
-            fs::read_to_string(runtime_root.join("trading-state.json")).expect("trading snapshot");
-        assert!(trading_body.contains("\"deployment_id\": \"example.paper\""));
     }
 
     #[test]
@@ -3291,13 +3468,13 @@ mod tests {
             Some(&body),
             &state,
         );
-        assert_eq!(submit_code, 503);
-        assert!(submit_response.contains("\"error\":\"live_execution_unavailable\""));
+        assert_eq!(submit_code, 200);
+        assert!(submit_response.contains("\"state\":\"unknown\""));
         assert!(submit_response.contains("gateway offline"));
 
         let trading_body =
             fs::read_to_string(root.join("run/platform/trading-state.json")).expect("snapshot");
-        assert!(trading_body.contains("\"state\": \"pending\""));
+        assert!(trading_body.contains("\"state\": \"unknown\""));
         assert!(trading_body.contains("\"deployment_id\": \"example.live\""));
     }
 

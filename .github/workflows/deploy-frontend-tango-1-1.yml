@@ -32,6 +32,27 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
+      - name: Validate deploy provenance
+        env:
+          INPUT_GIT_REF: ${{ github.event.inputs.git_ref }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "frontend deploy must dispatch the workflow from main; got ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          if [ "${INPUT_GIT_REF}" != "main" ]; then
+            echo "frontend deploy must use git_ref=main; got ${INPUT_GIT_REF}" >&2
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin main
+          checked_out_sha="$(git rev-parse HEAD)"
+          main_sha="$(git rev-parse origin/main)"
+          if [ "${checked_out_sha}" != "${main_sha}" ]; then
+            echo "checked-out deploy SHA ${checked_out_sha} does not match origin/main ${main_sha}" >&2
+            exit 1
+          fi
+
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -47,17 +68,27 @@ jobs:
           tar -C ploy-frontend/dist -czf ploy-frontend-dist.tar.gz .
 
       - name: Configure SSH for deploy
+        env:
+          TANGO_1_1_KNOWN_HOSTS: ${{ secrets.TANGO_1_1_KNOWN_HOSTS }}
         run: |
+          set -euo pipefail
           install -m 700 -d ~/.ssh
+          if [ -z "${TANGO_1_1_KNOWN_HOSTS}" ]; then
+            echo "TANGO_1_1_KNOWN_HOSTS secret is required for pinned SSH host verification" >&2
+            exit 1
+          fi
+          printf '%s\n' "${TANGO_1_1_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
           printf '%s\n' '${{ secrets.TANGO_1_1_SSH_KEY }}' > ~/.ssh/tango_1_1_key
           chmod 600 ~/.ssh/tango_1_1_key
           cat > ~/.ssh/config <<EOF
           Host tango-1-1
             HostName ${DEPLOY_HOST}
+            HostKeyAlias tango-1-1
             User root
             IdentityFile ~/.ssh/tango_1_1_key
-            StrictHostKeyChecking no
-            UserKnownHostsFile /dev/null
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
             ServerAliveInterval 30
             ServerAliveCountMax 20
             ConnectTimeout 30
@@ -79,6 +110,13 @@ jobs:
           ssh tango-1-1 DEPLOY_ROOT="${DEPLOY_ROOT}" /bin/bash <<'EOF'
             set -euo pipefail
 
+            [ -r "${DEPLOY_ROOT}/.env" ] || { echo "missing readable ${DEPLOY_ROOT}/.env" >&2; exit 2; }
+            set -a
+            . "${DEPLOY_ROOT}/.env"
+            set +a
+            api_token="${PLOY_ADMIN_TOKEN:-${PLOY_API_ADMIN_TOKEN:-${PLOY_API_KEY:-}}}"
+            [ -n "${api_token}" ] || { echo "ployd admin token is not configured on host" >&2; exit 2; }
+
             mkdir -p "${DEPLOY_ROOT}/tmp" "${DEPLOY_ROOT}/frontend.next"
             rm -rf "${DEPLOY_ROOT}/frontend.next"
             mkdir -p "${DEPLOY_ROOT}/frontend.next"
@@ -98,7 +136,9 @@ jobs:
 
             curl -fsS --retry 5 --retry-all-errors --retry-delay 1 http://127.0.0.1/ >/dev/null
             curl -fsS --retry 5 --retry-all-errors --retry-delay 1 http://127.0.0.1/parity >/dev/null
-            curl -fsS --retry 5 --retry-all-errors --retry-delay 1 http://127.0.0.1/api/system/status >/dev/null
+            curl -fsS --retry 5 --retry-all-errors --retry-delay 1 \
+              -H "Authorization: Bearer ${api_token}" \
+              http://127.0.0.1/api/system/status >/dev/null
           EOF
 
       - name: Deployment summary

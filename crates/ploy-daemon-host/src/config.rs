@@ -1,6 +1,18 @@
 use secrecy::SecretString;
 use std::path::{Path, PathBuf};
 
+fn select_admin_token(
+    admin_token: Option<String>,
+    api_admin_token: Option<String>,
+    api_key: Option<String>,
+) -> Option<SecretString> {
+    [admin_token, api_admin_token, api_key]
+        .into_iter()
+        .flatten()
+        .find(|value| !value.trim().is_empty())
+        .map(SecretString::from)
+}
+
 #[derive(Debug, Clone)]
 pub struct PlatformConfig {
     pub listen_addr: String,
@@ -96,15 +108,11 @@ impl PlatformConfig {
         if let Ok(value) = std::env::var("PLOY_LISTEN_ADDR") {
             config.listen_addr = value;
         }
-        if let Ok(value) = std::env::var("PLOY_ADMIN_TOKEN") {
-            if !value.trim().is_empty() {
-                config.admin_token = Some(SecretString::from(value));
-            }
-        } else if let Ok(value) = std::env::var("PLOY_API_ADMIN_TOKEN") {
-            if !value.trim().is_empty() {
-                config.admin_token = Some(SecretString::from(value));
-            }
-        }
+        config.admin_token = select_admin_token(
+            std::env::var("PLOY_ADMIN_TOKEN").ok(),
+            std::env::var("PLOY_API_ADMIN_TOKEN").ok(),
+            std::env::var("PLOY_API_KEY").ok(),
+        );
         if let Ok(value) = std::env::var("PLOY_OPERATOR_TOKEN") {
             if !value.trim().is_empty() {
                 config.operator_token = Some(SecretString::from(value));
@@ -281,5 +289,20 @@ mod tests {
         assert_eq!(config.live_reconcile_stale_after_ms, 15_000);
         assert_eq!(config.venue_stale_after_ms, 15_000);
         assert!(!config.circuit_breaker_enabled);
+    }
+
+    #[test]
+    fn ploy_api_key_is_admin_compatibility_alias() {
+        let token = super::select_admin_token(None, None, Some("compat-token".to_string()))
+            .expect("PLOY_API_KEY alias");
+        assert_eq!(token.expose_secret(), "compat-token");
+
+        let preferred = super::select_admin_token(
+            Some("admin-token".to_string()),
+            Some("api-admin-token".to_string()),
+            Some("compat-token".to_string()),
+        )
+        .expect("preferred admin token");
+        assert_eq!(preferred.expose_secret(), "admin-token");
     }
 }

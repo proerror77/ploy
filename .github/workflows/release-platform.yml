@@ -42,6 +42,29 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref }}
 
+      - name: Validate deploy provenance
+        if: ${{ inputs.deploy }}
+        env:
+          INPUT_GIT_REF: ${{ github.event.inputs.git_ref }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "deploy=true must dispatch the workflow from main; got ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          if [ "${INPUT_GIT_REF}" != "main" ]; then
+            echo "deploy=true must use git_ref=main; got ${INPUT_GIT_REF}" >&2
+            exit 1
+          fi
+          git fetch --no-tags --depth=1 origin main
+          checked_out_sha="$(git rev-parse HEAD)"
+          main_sha="$(git rev-parse origin/main)"
+          if [ "${checked_out_sha}" != "${main_sha}" ]; then
+            echo "checked-out deploy SHA ${checked_out_sha} does not match origin/main ${main_sha}" >&2
+            exit 1
+          fi
+          echo "Deploy provenance verified: git_ref=main sha=${checked_out_sha}"
+
       - name: Set reproducible build environment
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
 
@@ -217,7 +240,13 @@ jobs:
             $SUDO systemctl status ploy-platform-watchdog.timer --no-pager
             $SUDO systemctl status ploy-maintenance.timer --no-pager
             curl -fsS http://127.0.0.1:8081/health
-            curl -N --max-time 2 http://127.0.0.1:8081/api/events/stream || true
+            set -a
+            . "${DEPLOY_ROOT}/.env"
+            set +a
+            api_token="${PLOY_ADMIN_TOKEN:-${PLOY_API_ADMIN_TOKEN:-${PLOY_API_KEY:-}}}"
+            test -n "${api_token}"
+            curl -N --max-time 2 -H "Authorization: Bearer ${api_token}" \
+              http://127.0.0.1:8081/api/events/stream || true
             # Verify the deployed operator client path: ployctl system status
             # Verify the deployed operator client path: ployctl system metrics
             # Verify the deployed operator client path: ployctl system alerts
