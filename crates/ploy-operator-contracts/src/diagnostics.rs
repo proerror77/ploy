@@ -52,7 +52,7 @@ pub struct DeploymentDiagnosticsReport {
     pub generated_at: String,
     pub deployment_id: String,
     pub bundle_id: String,
-    pub runtime_mode: String,
+    pub runtime_mode: crate::DeploymentRuntimeMode,
     pub account_id: String,
     pub desired_state: String,
     pub observed_state: String,

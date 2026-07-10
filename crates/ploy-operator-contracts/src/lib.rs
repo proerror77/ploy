@@ -10,8 +10,8 @@ pub mod trading;
 
 pub use audit::AuditLogEntry;
 pub use deployments::{
-    DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DeploymentStateSummary,
-    DeploymentSummary, DesiredState, ObservedState,
+    DeploymentApplyRequest, DeploymentControlRequest, DeploymentRuntimeMode, DeploymentState,
+    DeploymentStateSummary, DeploymentSummary, DesiredState, ObservedState,
 };
 pub use diagnostics::{
     AgentRunCreateRequest, AgentRunCreateResponse, AgentRunRecord, AgentToolCallRecord,

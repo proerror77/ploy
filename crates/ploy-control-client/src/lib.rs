@@ -486,7 +486,7 @@ mod tests {
             runtime_root.join("trading-state.json"),
             serde_json::to_string(&vec![TradingStateSnapshot {
                 deployment_id: "example.paper".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                 ..TradingStateSnapshot::default()
             }])
             .expect("trading json"),
@@ -624,7 +624,7 @@ mod tests {
             .apply_deployment(&DeploymentApplyRequest {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                 account_id: "acct-paper".to_string(),
                 max_gross_exposure: Some(rust_decimal::Decimal::new(500, 2)),
                 deployment_state: DeploymentState::Enabled,

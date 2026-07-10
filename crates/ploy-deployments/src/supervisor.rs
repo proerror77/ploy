@@ -63,14 +63,14 @@ impl WorkerSupervisor {
 mod tests {
     use super::WorkerSupervisor;
     use crate::protocol::WorkerLaunchSpec;
-    use ploy_operator_contracts::{DesiredState, ObservedState};
+    use ploy_operator_contracts::{DeploymentRuntimeMode, DesiredState, ObservedState};
     use std::path::PathBuf;
 
     fn test_launch_spec() -> WorkerLaunchSpec {
         WorkerLaunchSpec {
             deployment_id: "openclaw.default".to_string(),
             bundle_id: "openclaw".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: DeploymentRuntimeMode::Paper,
             desired_state: DesiredState::Running,
             command: PathBuf::from("/bin/sh"),
             args: vec!["-lc".to_string(), "sleep 30".to_string()],

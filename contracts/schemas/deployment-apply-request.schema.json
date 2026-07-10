@@ -39,10 +39,17 @@
       "pattern": "^-?[0-9]+(\\.[0-9]+)?$"
     },
     "runtime_mode": {
-      "type": "string"
+      "$ref": "#/definitions/DeploymentRuntimeMode"
     }
   },
   "definitions": {
+    "DeploymentRuntimeMode": {
+      "type": "string",
+      "enum": [
+        "paper",
+        "live"
+      ]
+    },
     "DeploymentState": {
       "type": "string",
       "enum": [

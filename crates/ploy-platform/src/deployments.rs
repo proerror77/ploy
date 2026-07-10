@@ -1,4 +1,6 @@
-use ploy_operator_contracts::{DeploymentState, DeploymentSummary, DesiredState, ObservedState};
+use ploy_operator_contracts::{
+    DeploymentRuntimeMode, DeploymentState, DeploymentSummary, DesiredState, ObservedState,
+};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -8,8 +10,7 @@ pub struct DeploymentRecord {
     pub deployment_id: String,
     #[serde(default)]
     pub bundle_id: String,
-    #[serde(default)]
-    pub runtime_mode: String,
+    pub runtime_mode: DeploymentRuntimeMode,
     #[serde(default = "default_account_id")]
     pub account_id: String,
     #[serde(default)]
@@ -111,7 +112,9 @@ impl DeploymentRegistry {
 #[cfg(test)]
 mod tests {
     use super::{DeploymentRecord, DeploymentRegistry};
-    use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
+    use ploy_operator_contracts::{
+        DeploymentRuntimeMode, DeploymentState, DesiredState, ObservedState,
+    };
     use rust_decimal::Decimal;
 
     #[test]
@@ -120,7 +123,7 @@ mod tests {
         registry.upsert(DeploymentRecord {
             deployment_id: "openclaw.default".to_string(),
             bundle_id: "openclaw".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: DeploymentRuntimeMode::Paper,
             account_id: "acct-main".to_string(),
             max_gross_exposure: Some(Decimal::new(500, 2)),
             deployment_state: DeploymentState::Enabled,
@@ -130,7 +133,7 @@ mod tests {
 
         let record = registry.get("openclaw.default").expect("record");
         assert_eq!(record.bundle_id, "openclaw");
-        assert_eq!(record.runtime_mode, "paper");
+        assert_eq!(record.runtime_mode, DeploymentRuntimeMode::Paper);
         assert_eq!(record.account_id, "acct-main");
         assert_eq!(record.max_gross_exposure, Some(Decimal::new(500, 2)));
     }
@@ -141,7 +144,7 @@ mod tests {
         registry.upsert(DeploymentRecord {
             deployment_id: "openclaw.default".to_string(),
             bundle_id: "openclaw".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: DeploymentRuntimeMode::Paper,
             account_id: "acct-main".to_string(),
             max_gross_exposure: Some(Decimal::new(500, 2)),
             deployment_state: DeploymentState::Enabled,

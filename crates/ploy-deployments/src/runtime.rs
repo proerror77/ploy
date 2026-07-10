@@ -295,7 +295,7 @@ mod tests {
     use crate::protocol::WorkerStatus;
     #[cfg(target_os = "linux")]
     use chrono::Utc;
-    use ploy_operator_contracts::{DesiredState, ObservedState};
+    use ploy_operator_contracts::{DeploymentRuntimeMode, DesiredState, ObservedState};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -311,7 +311,7 @@ mod tests {
         WorkerLaunchSpec {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: DeploymentRuntimeMode::Paper,
             desired_state: DesiredState::Running,
             command: PathBuf::from("/bin/sleep"),
             args: vec!["30".to_string()],

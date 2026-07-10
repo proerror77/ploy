@@ -182,7 +182,7 @@ fn state_name<T: std::fmt::Debug>(value: &T) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_dashboard, render_event_line, DashboardSnapshot};
+    use super::{DashboardSnapshot, render_dashboard, render_event_line};
     use chrono::Utc;
     use ploy_operator_contracts::{
         ActiveAlert, AlertKind, AlertSeverity, DeploymentSnapshotEvent, DeploymentState,
@@ -249,7 +249,7 @@ mod tests {
             }],
             trading: vec![TradingStateSnapshot {
                 deployment_id: "example.paper".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                 ..TradingStateSnapshot::default()
             }],
             recent_events: vec![
@@ -284,7 +284,7 @@ mod tests {
                 OperatorEvent::TradingSnapshot(TradingSnapshotEvent {
                     trading: vec![TradingStateSnapshot {
                         deployment_id: "example.paper".to_string(),
-                        runtime_mode: "paper".to_string(),
+                        runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                         ..TradingStateSnapshot::default()
                     }],
                 }),

@@ -1,6 +1,8 @@
 use chrono::Duration;
 use ploy_deployments::{WorkerLaunchSpec, WorkerSupervisor};
-use ploy_operator_contracts::{DesiredState, ObservedState};
+use ploy_operator_contracts::{
+    DeploymentRuntimeMode, DeploymentState, DesiredState, ObservedState,
+};
 use ploy_platform::{ControlPlane, DeploymentRecord};
 use std::path::{Path, PathBuf};
 
@@ -32,8 +34,9 @@ pub fn build_worker_launch_spec(
         record.deployment_id.clone(),
         "--foreground".to_string(),
     ];
-    if record.runtime_mode == "paper" {
-        args.push("--dry-run".to_string());
+    match record.runtime_mode {
+        DeploymentRuntimeMode::Paper => args.push("--dry-run".to_string()),
+        DeploymentRuntimeMode::Live => {}
     }
 
     WorkerLaunchSpec {
@@ -84,6 +87,21 @@ pub fn tick_workers(
     let records = control_plane.deployments.records();
 
     for record in records {
+        if record.deployment_state == DeploymentState::Archived {
+            control_plane
+                .system
+                .clear_source(&format!("worker:{}", record.deployment_id));
+            if let Some(status) = supervisor.stop(&record.deployment_id) {
+                control_plane
+                    .deployments
+                    .set_observed_state(&record.deployment_id, status.observed_state);
+            } else {
+                control_plane
+                    .deployments
+                    .set_observed_state(&record.deployment_id, ObservedState::Stopped);
+            }
+            continue;
+        }
         match record.desired_state {
             DesiredState::Running => {
                 let status = supervisor
@@ -156,7 +174,7 @@ pub fn refresh_source_health(control_plane: &mut ControlPlane, listen_addr: &str
         let worker_stale = control_plane
             .system
             .source_is_stale(&format!("worker:{}", record.deployment_id));
-        let live_source_stale = record.runtime_mode == "live"
+        let live_source_stale = record.runtime_mode == DeploymentRuntimeMode::Live
             && (control_plane.system.source_is_stale("live_reconcile")
                 || control_plane.system.source_is_stale("venue:polymarket"));
 
@@ -189,7 +207,7 @@ pub fn refresh_source_health(control_plane: &mut ControlPlane, listen_addr: &str
 
 #[cfg(test)]
 mod tests {
-    use super::{refresh_source_health, tick_workers, WorkerTickConfig};
+    use super::{WorkerTickConfig, refresh_source_health, tick_workers};
     use ploy_deployments::WorkerSupervisor;
     use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
     use ploy_platform::{ControlPlane, DeploymentRecord};
@@ -212,10 +230,8 @@ mod tests {
     }
 
     fn test_working_directory() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "ploy-platform-runtime-workdir-{}",
-            test_id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ploy-platform-runtime-workdir-{}", test_id()));
         fs::create_dir_all(&path).expect("create test working directory");
         path
     }
@@ -255,7 +271,7 @@ mod tests {
         control_plane.deployments.upsert(DeploymentRecord {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
             account_id: "acct-paper".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,
@@ -274,7 +290,7 @@ mod tests {
         control_plane.deployments.upsert(DeploymentRecord {
             deployment_id: "example.live".to_string(),
             bundle_id: "example".to_string(),
-            runtime_mode: "live".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
             account_id: "acct-live".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,
@@ -299,7 +315,7 @@ mod tests {
             &DeploymentRecord {
                 deployment_id: "pm5d.v2.paper".to_string(),
                 bundle_id: "02-pm5d.v2-dryrun".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                 account_id: "acct-paper".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
@@ -309,14 +325,16 @@ mod tests {
             &config,
         );
 
-        assert!(spec
-            .command
+        assert!(
+            spec.command
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("ploy-platform-runtime-test-runner-")));
-        assert!(spec
-            .args
-            .contains(&"config/strategies/02-pm5d.v2-dryrun.toml".to_string()));
+                .is_some_and(|name| name.starts_with("ploy-platform-runtime-test-runner-"))
+        );
+        assert!(
+            spec.args
+                .contains(&"config/strategies/02-pm5d.v2-dryrun.toml".to_string())
+        );
         let deployment_id_arg = spec
             .args
             .windows(2)
@@ -334,7 +352,7 @@ mod tests {
         control_plane.deployments.upsert(DeploymentRecord {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
             account_id: "acct-paper".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,
@@ -347,6 +365,33 @@ mod tests {
         let second_pid = wait_for_worker_pid(&mut control_plane, &mut supervisor, &config);
 
         assert_eq!(first_pid, second_pid);
+    }
+
+    #[test]
+    fn archived_worker_is_stopped() {
+        let mut control_plane = ControlPlane::default();
+        let mut supervisor = WorkerSupervisor::default();
+        let config = config();
+        control_plane.deployments.upsert(DeploymentRecord {
+            deployment_id: "example.paper".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+            account_id: "acct-paper".to_string(),
+            max_gross_exposure: Some(dec!(5)),
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Running,
+            observed_state: ObservedState::Starting,
+        });
+        let pid = wait_for_worker_pid(&mut control_plane, &mut supervisor, &config);
+
+        control_plane
+            .deployments
+            .set_deployment_state("example.paper", DeploymentState::Archived);
+        tick_workers(&mut control_plane, &mut supervisor, &config);
+
+        let status = supervisor.status("example.paper").expect("worker status");
+        assert_eq!(status.observed_state, ObservedState::Stopped);
+        assert_eq!(status.pid, None, "archived worker {pid} must be terminated");
     }
 
     fn wait_for_worker_pid(
@@ -376,7 +421,7 @@ mod tests {
         control_plane.deployments.upsert(DeploymentRecord {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
             account_id: "acct-paper".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,

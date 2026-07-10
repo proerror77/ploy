@@ -412,7 +412,7 @@ mod tests {
     fn restore_trading_runtime_preserves_persisted_position_exposure() {
         let runtime = restore_trading_runtime(TradingStateSnapshot {
             deployment_id: "dep-1".to_string(),
-            runtime_mode: "live".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
             positions: vec![PositionSnapshotResponse {
                 token_id: "token-1".to_string(),
                 net_qty: dec!(4),

@@ -1,14 +1,21 @@
 use ploy_operator_contracts::{
-    DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState,
+    DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState, ObservedState,
 };
 use ploy_platform::{DeploymentRecord, DeploymentRegistry};
 use ploy_trading::{IntentPurpose, OrderRecord, TradingIntent};
 use rust_decimal::Decimal;
 use std::io;
 
-use crate::{intent_allowed_while_draining, intent_counts_toward_exposure, observed_state_for_desired};
+use crate::{
+    intent_allowed_while_draining, intent_counts_toward_exposure, observed_state_for_desired,
+};
 
 pub fn build_deployment_record(request: DeploymentApplyRequest) -> DeploymentRecord {
+    let desired_state = if request.deployment_state == DeploymentState::Archived {
+        DesiredState::Stopped
+    } else {
+        request.desired_state
+    };
     DeploymentRecord {
         deployment_id: request.deployment_id,
         bundle_id: request.bundle_id,
@@ -16,21 +23,52 @@ pub fn build_deployment_record(request: DeploymentApplyRequest) -> DeploymentRec
         account_id: request.account_id,
         max_gross_exposure: request.max_gross_exposure,
         deployment_state: request.deployment_state,
-        desired_state: request.desired_state,
-        observed_state: observed_state_for_desired(request.desired_state),
+        desired_state,
+        observed_state: observed_state_for_desired(desired_state),
     }
 }
 
 pub fn apply_deployment(
     registry: &mut DeploymentRegistry,
     request: DeploymentApplyRequest,
-) -> DeploymentRecord {
+) -> io::Result<DeploymentRecord> {
+    if let Some(existing) = registry.get(&request.deployment_id) {
+        let execution_spec_changed = existing.bundle_id != request.bundle_id
+            || existing.runtime_mode != request.runtime_mode
+            || existing.account_id != request.account_id;
+        if existing.desired_state == DesiredState::Running && execution_spec_changed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "deployment `{}` must be paused or stopped before changing bundle_id, runtime_mode, or account_id",
+                    request.deployment_id
+                ),
+            ));
+        }
+        let cap_increased_or_removed = match (
+            existing.max_gross_exposure,
+            request.max_gross_exposure,
+        ) {
+            (Some(_), None) => true,
+            (Some(current), Some(proposed)) => proposed > current,
+            (None, None | Some(_)) => false,
+        };
+        if existing.desired_state == DesiredState::Running && cap_increased_or_removed {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "deployment `{}` must be paused or stopped before increasing or removing max_gross_exposure",
+                    request.deployment_id
+                ),
+            ));
+        }
+    }
     let record = build_deployment_record(request);
     registry.upsert(record.clone());
-    registry
+    Ok(registry
         .get(&record.deployment_id)
         .cloned()
-        .expect("deployment persisted")
+        .expect("deployment persisted"))
 }
 
 pub fn control_deployment(
@@ -42,12 +80,16 @@ pub fn control_deployment(
         return Ok(None);
     };
 
-    if let Some(deployment_state) = request.deployment_state {
-        registry.set_deployment_state(deployment_id, deployment_state);
-    }
     if let Some(desired_state) = request.desired_state {
         registry.set_desired_state(deployment_id, desired_state);
         registry.set_observed_state(deployment_id, observed_state_for_desired(desired_state));
+    }
+    if let Some(deployment_state) = request.deployment_state {
+        registry.set_deployment_state(deployment_id, deployment_state);
+        if deployment_state == DeploymentState::Archived {
+            registry.set_desired_state(deployment_id, DesiredState::Stopped);
+            registry.set_observed_state(deployment_id, ObservedState::Stopped);
+        }
     }
 
     if request.deployment_state.is_none() && request.desired_state.is_none() {
@@ -139,12 +181,14 @@ pub fn enforce_order_replacement_exposure(
         return Ok(());
     }
 
-    let current_reservation =
-        (order.requested_qty - order.filled_qty).max(Decimal::ZERO) * order.limit_price.unwrap_or(Decimal::ONE);
-    let replacement_reservation =
-        (request.quantity - order.filled_qty).max(Decimal::ZERO)
-            * request.limit_price.unwrap_or(order.limit_price.unwrap_or(Decimal::ONE));
-    let next_total_exposure = current_total_exposure - current_reservation + replacement_reservation;
+    let current_reservation = (order.requested_qty - order.filled_qty).max(Decimal::ZERO)
+        * order.limit_price.unwrap_or(Decimal::ONE);
+    let replacement_reservation = (request.quantity - order.filled_qty).max(Decimal::ZERO)
+        * request
+            .limit_price
+            .unwrap_or(order.limit_price.unwrap_or(Decimal::ONE));
+    let next_total_exposure =
+        current_total_exposure - current_reservation + replacement_reservation;
 
     if next_total_exposure > max_gross_exposure {
         return Err(io::Error::new(
@@ -213,14 +257,17 @@ mod tests {
             DeploymentApplyRequest {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                 account_id: "acct-paper".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
             },
         );
-        assert_eq!(record.observed_state, ObservedState::Starting);
+        assert_eq!(
+            record.expect("apply").observed_state,
+            ObservedState::Starting
+        );
 
         let updated = control_deployment(
             &mut registry,
@@ -240,7 +287,7 @@ mod tests {
         let deployment = ploy_platform::DeploymentRecord {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
             account_id: "acct-paper".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,
@@ -267,12 +314,12 @@ mod tests {
     #[test]
     fn max_exposure_update_rejects_too_low_limits() {
         let mut registry = DeploymentRegistry::default();
-        apply_deployment(
+        let _ = apply_deployment(
             &mut registry,
             DeploymentApplyRequest {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                 account_id: "acct-paper".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
@@ -280,12 +327,156 @@ mod tests {
             },
         );
 
-        assert!(set_deployment_max_gross_exposure(
+        assert!(
+            set_deployment_max_gross_exposure(
             &mut registry,
             "example.paper",
             Some(dec!(2)),
             Some(dec!(3)),
         )
-        .is_err());
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn running_deployment_rejects_execution_spec_change() {
+        let mut registry = DeploymentRegistry::default();
+        apply_deployment(
+            &mut registry,
+            DeploymentApplyRequest {
+                deployment_id: "example.paper".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+                account_id: "acct-paper".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            },
+        )
+        .expect("initial apply");
+
+        let error = apply_deployment(
+            &mut registry,
+            DeploymentApplyRequest {
+                deployment_id: "example.paper".to_string(),
+                bundle_id: "replacement".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+                account_id: "acct-live".to_string(),
+                max_gross_exposure: Some(dec!(4)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            },
+        )
+        .expect_err("running execution spec drift must be rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let persisted = registry.get("example.paper").expect("persisted deployment");
+        assert_eq!(persisted.bundle_id, "example");
+        assert_eq!(
+            persisted.runtime_mode,
+            ploy_operator_contracts::DeploymentRuntimeMode::Paper
+        );
+        assert_eq!(persisted.account_id, "acct-paper");
+    }
+
+    #[test]
+    fn running_deployment_permits_identical_reapply_and_cap_reduction() {
+        let mut registry = DeploymentRegistry::default();
+        let request = DeploymentApplyRequest {
+            deployment_id: "example.paper".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+            account_id: "acct-paper".to_string(),
+            max_gross_exposure: Some(dec!(5)),
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Running,
+        };
+        apply_deployment(&mut registry, request.clone()).expect("initial apply");
+        apply_deployment(&mut registry, request.clone()).expect("identical reapply");
+
+        let reduced = apply_deployment(
+            &mut registry,
+            DeploymentApplyRequest {
+                max_gross_exposure: Some(dec!(4)),
+                ..request
+            },
+        )
+        .expect("safe cap reduction");
+
+        assert_eq!(reduced.max_gross_exposure, Some(dec!(4)));
+    }
+
+    #[test]
+    fn running_deployment_rejects_cap_increase_and_removal() {
+        let mut registry = DeploymentRegistry::default();
+        let request = DeploymentApplyRequest {
+            deployment_id: "example.paper".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+            account_id: "acct-paper".to_string(),
+            max_gross_exposure: Some(dec!(5)),
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Running,
+        };
+        apply_deployment(&mut registry, request.clone()).expect("initial apply");
+
+        let increase = apply_deployment(
+            &mut registry,
+            DeploymentApplyRequest {
+                max_gross_exposure: Some(dec!(6)),
+                ..request.clone()
+            },
+        )
+        .expect_err("running cap increase must be rejected");
+        assert_eq!(increase.kind(), std::io::ErrorKind::InvalidInput);
+
+        let removal = apply_deployment(
+            &mut registry,
+            DeploymentApplyRequest {
+                max_gross_exposure: None,
+                ..request
+            },
+        )
+        .expect_err("running cap removal must be rejected");
+        assert_eq!(removal.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            registry
+                .get("example.paper")
+                .expect("persisted deployment")
+                .max_gross_exposure,
+            Some(dec!(5))
+        );
+    }
+
+    #[test]
+    fn archive_forces_stopped_desired_state() {
+        let mut registry = DeploymentRegistry::default();
+        apply_deployment(
+            &mut registry,
+            DeploymentApplyRequest {
+                deployment_id: "example.paper".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+                account_id: "acct-paper".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            },
+        )
+        .expect("initial apply");
+
+        let archived = control_deployment(
+            &mut registry,
+            "example.paper",
+            DeploymentControlRequest {
+                desired_state: Some(DesiredState::Running),
+                deployment_state: Some(DeploymentState::Archived),
+            },
+        )
+        .expect("archive")
+        .expect("deployment");
+
+        assert_eq!(archived.desired_state, DesiredState::Stopped);
+        assert_eq!(archived.observed_state, ObservedState::Stopped);
     }
 }

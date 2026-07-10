@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use ploy_operator_contracts::{DesiredState, ObservedState};
+use ploy_operator_contracts::{DeploymentRuntimeMode, DesiredState, ObservedState};
 use serde::{Deserialize, Serialize};
 
 use std::path::PathBuf;
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub struct WorkerLaunchSpec {
     pub deployment_id: String,
     pub bundle_id: String,
-    pub runtime_mode: String,
+    pub runtime_mode: DeploymentRuntimeMode,
     pub desired_state: DesiredState,
     pub command: PathBuf,
     pub args: Vec<String>,

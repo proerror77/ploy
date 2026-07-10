@@ -130,7 +130,7 @@ pub struct RiskSnapshotResponse {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TradingStateSnapshot {
     pub deployment_id: String,
-    pub runtime_mode: String,
+    pub runtime_mode: crate::DeploymentRuntimeMode,
     pub intents: Vec<TradingIntentSnapshot>,
     pub orders: Vec<OrderSnapshot>,
     pub fills: Vec<FillSnapshot>,
@@ -326,7 +326,7 @@ mod tests {
         let timestamp = Utc::now();
         let value = serde_json::to_value(TradingStateSnapshot {
             deployment_id: "example.paper".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: crate::DeploymentRuntimeMode::Paper,
             intents: vec![TradingIntentSnapshot {
                 intent_id: "intent-1".to_string(),
                 market_id: "market-1".to_string(),

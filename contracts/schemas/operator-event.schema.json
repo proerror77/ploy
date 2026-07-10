@@ -279,6 +279,13 @@
         }
       }
     },
+    "DeploymentRuntimeMode": {
+      "type": "string",
+      "enum": [
+        "paper",
+        "live"
+      ]
+    },
     "DeploymentSnapshotEvent": {
       "type": "object",
       "required": [
@@ -1324,7 +1331,7 @@
           "$ref": "#/definitions/RiskSnapshotResponse"
         },
         "runtime_mode": {
-          "type": "string"
+          "$ref": "#/definitions/DeploymentRuntimeMode"
         }
       }
     }

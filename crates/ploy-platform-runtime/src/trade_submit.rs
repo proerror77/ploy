@@ -2,7 +2,7 @@ use crate::{io_error_from_execution_error, order_state_wire};
 use ploy_connectivity::{
     ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
 };
-use ploy_operator_contracts::PaperIntentResponse;
+use ploy_operator_contracts::{DeploymentRuntimeMode, PaperIntentResponse};
 use ploy_platform::DeploymentRecord;
 use ploy_trading::{TradingIntent, TradingRuntime};
 use std::io;
@@ -28,7 +28,7 @@ pub fn submit_paper_intent(
     intent: TradingIntent,
     idempotency_key: Option<&str>,
 ) -> io::Result<PaperIntentResponse> {
-    if deployment.runtime_mode != "paper" {
+    if deployment.runtime_mode != DeploymentRuntimeMode::Paper {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "only paper deployments are supported by the local trading runtime",
@@ -165,7 +165,7 @@ mod tests {
         DeploymentRecord {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
             account_id: "acct-paper".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,
@@ -191,8 +191,8 @@ mod tests {
     #[test]
     fn paper_submit_acknowledges() {
         let mut runtime = TradingRuntime::default();
-        let response = submit_paper_intent(&mut runtime, &paper_deployment(), intent(), None)
-            .expect("submit");
+        let response =
+            submit_paper_intent(&mut runtime, &paper_deployment(), intent(), None).expect("submit");
         assert_eq!(response.state, "acknowledged");
         assert!(runtime.order(&response.order_id).is_some());
     }
@@ -209,12 +209,8 @@ mod tests {
         .expect("first submit");
         let mut retry = intent();
         retry.intent_id = "intent-2".to_string();
-        let second = submit_paper_intent(
-            &mut runtime,
-            &paper_deployment(),
-            retry,
-            Some("request-1"),
-        )
+        let second =
+            submit_paper_intent(&mut runtime, &paper_deployment(), retry, Some("request-1"))
         .expect("idempotent retry");
 
         assert_eq!(second, first);
@@ -225,19 +221,9 @@ mod tests {
     fn live_submit_does_not_resubmit_identical_idempotent_replay() {
         let mut runtime = TradingRuntime::default();
         let gateway = CountingGateway::default();
-        let first = submit_live_intent(
-            &mut runtime,
-            &gateway,
-            intent(),
-            Some("request-1"),
-        )
+        let first = submit_live_intent(&mut runtime, &gateway, intent(), Some("request-1"))
         .expect("first submit");
-        let second = submit_live_intent(
-            &mut runtime,
-            &gateway,
-            intent(),
-            Some("request-1"),
-        )
+        let second = submit_live_intent(&mut runtime, &gateway, intent(), Some("request-1"))
         .expect("idempotent replay");
 
         assert_eq!(second, first);
@@ -270,7 +256,8 @@ mod tests {
     #[test]
     fn live_submit_rejection_is_recorded() {
         let mut runtime = TradingRuntime::default();
-        let gateway = StaticExecutionGateway::failed(ExecutionError::Transport("offline".to_string()));
+        let gateway =
+            StaticExecutionGateway::failed(ExecutionError::Transport("offline".to_string()));
         let error = submit_live_intent(&mut runtime, &gateway, intent(), None).expect_err("error");
         assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
     }

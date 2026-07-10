@@ -47,10 +47,17 @@
       "$ref": "#/definitions/RiskSnapshotResponse"
     },
     "runtime_mode": {
-      "type": "string"
+      "$ref": "#/definitions/DeploymentRuntimeMode"
     }
   },
   "definitions": {
+    "DeploymentRuntimeMode": {
+      "type": "string",
+      "enum": [
+        "paper",
+        "live"
+      ]
+    },
     "FillSnapshot": {
       "type": "object",
       "required": [

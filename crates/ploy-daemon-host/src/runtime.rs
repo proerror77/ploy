@@ -2,34 +2,32 @@ use crate::config::PlatformConfig;
 use crate::events::EventBroker;
 use crate::http::publish_snapshot_events;
 use chrono::{DateTime, Utc};
-use ploy_platform_runtime::{
-    apply_loaded_registry_state,
-    apply_deployment as apply_deployment_record, control_deployment as control_deployment_record,
-    LiveHealthConfig, mark_live_runtime_degraded as mark_runtime_degraded_state,
-    mark_runtime_healthy as mark_runtime_healthy_state,
-    WorkerTickConfig, refresh_source_health as refresh_platform_source_health,
-    tick_workers as tick_platform_workers,
-    reconcile_live_fills as reconcile_runtime_live_fills,
-    cancel_order as cancel_runtime_order, replace_order as replace_runtime_order,
-    enforce_exposure_limit as enforce_intent_exposure_limit,
-    ensure_intent_allowed, set_deployment_max_gross_exposure as set_record_max_gross_exposure,
-    load_proposal_store, load_registry_records, load_trading_runtimes,
-    order_state_wire, ProposalStore,
-    submit_live_intent as submit_live_runtime_intent,
-    ReconcileStatus, build_trading_state_snapshot, submit_paper_intent as submit_paper_runtime_intent,
-    write_json,
-};
-use ploy_connectivity::{
-    LiveExecutionGateway, PolymarketExecutionGateway,
-};
+use ploy_connectivity::{LiveExecutionGateway, PolymarketExecutionGateway};
 use ploy_deployments::WorkerSupervisor;
 use ploy_operator_contracts::{
-    ActiveAlert, DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState,
-    ObservedState, OrderControlResponse, OrderReplaceRequest, PaperIntentResponse,
-    PlatformMetrics, ProposalActionKind, ProposalCreateRequest, ProposalDecisionRequest,
-    SafetyProposal, TradingStateSnapshot,
+    ActiveAlert, DeploymentApplyRequest, DeploymentControlRequest, DeploymentRuntimeMode,
+    DeploymentState, DesiredState, ObservedState, OrderControlResponse, OrderReplaceRequest,
+    PaperIntentResponse, PlatformMetrics, ProposalActionKind, ProposalCreateRequest,
+    ProposalDecisionRequest, SafetyProposal, TradingStateSnapshot,
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
+use ploy_platform_runtime::{
+    LiveHealthConfig, ProposalStore, ReconcileStatus, WorkerTickConfig,
+    apply_deployment as apply_deployment_record, apply_loaded_registry_state,
+    build_trading_state_snapshot, cancel_order as cancel_runtime_order,
+    control_deployment as control_deployment_record,
+    enforce_exposure_limit as enforce_intent_exposure_limit, ensure_intent_allowed,
+    load_proposal_store, load_registry_records, load_trading_runtimes,
+    mark_live_runtime_degraded as mark_runtime_degraded_state,
+    mark_runtime_healthy as mark_runtime_healthy_state, order_state_wire,
+    reconcile_live_fills as reconcile_runtime_live_fills,
+    refresh_source_health as refresh_platform_source_health,
+    replace_order as replace_runtime_order,
+    set_deployment_max_gross_exposure as set_record_max_gross_exposure,
+    submit_live_intent as submit_live_runtime_intent,
+    submit_paper_intent as submit_paper_runtime_intent, tick_workers as tick_platform_workers,
+    write_json,
+};
 use ploy_trading::{TradingIntent, TradingRuntime};
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
@@ -166,7 +164,7 @@ impl PloyDaemon {
         let total_deployments = records.len();
         let live_deployments = records
             .iter()
-            .filter(|record| record.runtime_mode == "live")
+            .filter(|record| record.runtime_mode == DeploymentRuntimeMode::Live)
             .count();
         let degraded_deployments = records
             .iter()
@@ -205,7 +203,22 @@ impl PloyDaemon {
         &mut self,
         request: DeploymentApplyRequest,
     ) -> io::Result<DeploymentRecord> {
-        let record = apply_deployment_record(&mut self.control_plane.deployments, request);
+        if request.deployment_state == DeploymentState::Archived {
+            self.ensure_deployment_flat_for_archive(&request.deployment_id)?;
+        }
+        if let Some(limit) = request.max_gross_exposure {
+            let current = self.account_total_exposure(&request.account_id);
+            if current > limit {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "current account exposure {current} exceeds proposed limit {limit} for `{}`",
+                        request.deployment_id
+                    ),
+                ));
+            }
+        }
+        let record = apply_deployment_record(&mut self.control_plane.deployments, request)?;
         self.persist_registry()?;
         self.write_runtime_snapshots()?;
         Ok(record)
@@ -297,11 +310,32 @@ impl PloyDaemon {
         deployment_id: &str,
         request: DeploymentControlRequest,
     ) -> io::Result<Option<DeploymentRecord>> {
+        if request.deployment_state == Some(DeploymentState::Archived) {
+            self.ensure_deployment_flat_for_archive(deployment_id)?;
+        }
         let record =
             control_deployment_record(&mut self.control_plane.deployments, deployment_id, request)?;
         self.persist_registry()?;
         self.write_runtime_snapshots()?;
         Ok(record)
+    }
+
+    fn ensure_deployment_flat_for_archive(&self, deployment_id: &str) -> io::Result<()> {
+        let risk = self
+            .trading
+            .get(deployment_id)
+            .map(|runtime| runtime.snapshot(&BTreeMap::new()).risk)
+            .unwrap_or_default();
+        if risk.active_orders > 0 || risk.open_positions > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "deployment `{deployment_id}` cannot be archived with {} active orders or {} open positions",
+                    risk.active_orders, risk.open_positions
+                ),
+            ));
+        }
+        Ok(())
     }
 
     pub fn submit_intent(&mut self, intent: TradingIntent) -> io::Result<PaperIntentResponse> {
@@ -342,13 +376,11 @@ impl PloyDaemon {
             self.account_total_exposure(&deployment.account_id),
         )?;
 
-        match deployment.runtime_mode.as_str() {
-            "paper" => self.submit_paper_intent_idempotent(intent, idempotency_key),
-            "live" => self.submit_live_intent(intent, idempotency_key),
-            runtime_mode => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("unsupported runtime mode: {runtime_mode}"),
-            )),
+        match deployment.runtime_mode {
+            DeploymentRuntimeMode::Paper => {
+                self.submit_paper_intent_idempotent(intent, idempotency_key)
+            }
+            DeploymentRuntimeMode::Live => self.submit_live_intent(intent, idempotency_key),
         }
     }
 
@@ -370,7 +402,7 @@ impl PloyDaemon {
             .get(&intent.deployment_id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "deployment not found"))?;
 
-        if deployment.runtime_mode != "paper" {
+        if deployment.runtime_mode != DeploymentRuntimeMode::Paper {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "only paper deployments are supported by the local trading runtime",
@@ -496,11 +528,7 @@ impl PloyDaemon {
     fn mark_runtime_healthy(&mut self) {
         let health_config = self.live_health_config();
         let latest_trade_time = self.latest_trade_time();
-        mark_runtime_healthy_state(
-            &mut self.control_plane,
-            &health_config,
-            latest_trade_time,
-        );
+        mark_runtime_healthy_state(&mut self.control_plane, &health_config, latest_trade_time);
     }
 
     fn mark_live_runtime_degraded(&mut self, err: io::Error) {
@@ -721,11 +749,11 @@ mod tests {
         ExecutionRequest, LiveExecutionGateway, ReplaceOutcome, ReplaceRequest,
         StaticExecutionGateway,
     };
-    use ploy_platform_runtime::live_reconcile_backoff_ms;
     use ploy_operator_contracts::{
-        DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState,
-        ObservedState,
+        DeploymentApplyRequest, DeploymentControlRequest, DeploymentRuntimeMode, DeploymentState,
+        DesiredState, ObservedState,
     };
+    use ploy_platform_runtime::live_reconcile_backoff_ms;
     use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
     use rust_decimal_macros::dec;
     use std::fs;
@@ -743,15 +771,13 @@ mod tests {
         let bin_dir = root.join("bin");
         std::fs::create_dir_all(&bin_dir).expect("create bin dir");
         let runner = bin_dir.join("ploy-runner");
-        std::fs::write(
-            &runner,
-            "#!/bin/sh\nsleep 30\n",
-        )
-        .expect("write fake runner");
+        std::fs::write(&runner, "#!/bin/sh\nsleep 30\n").expect("write fake runner");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&runner).expect("runner metadata").permissions();
+            let mut perms = std::fs::metadata(&runner)
+                .expect("runner metadata")
+                .permissions();
             perms.set_mode(0o755);
             std::fs::set_permissions(&runner, perms).expect("set runner permissions");
         }
@@ -1041,7 +1067,11 @@ mod tests {
         let mismatch = daemon
             .submit_intent_idempotent(make_intent("intent-3", dec!(1)), Some("request-1"))
             .expect_err("mismatched payload must reject");
-        assert!(mismatch.to_string().contains("idempotency key payload mismatch"));
+        assert!(
+            mismatch
+                .to_string()
+                .contains("idempotency key payload mismatch")
+        );
     }
 
     #[test]
@@ -1225,11 +1255,13 @@ mod tests {
         assert_eq!(trading_state[0].orders.len(), 1);
         assert_eq!(trading_state[0].orders[0].state, "pending");
         assert!(trading_state[0].orders[0].rejection_reason.is_none());
-        assert!(trading_state[0].orders[0]
+        assert!(
+            trading_state[0].orders[0]
             .last_error
             .as_deref()
             .expect("last_error")
-            .contains("gateway offline"));
+                .contains("gateway offline")
+        );
     }
 
     #[test]
@@ -1463,9 +1495,11 @@ mod tests {
             .expect_err("replace should fail");
 
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert!(error
+        assert!(
+            error
             .to_string()
-            .contains("cannot be below filled quantity"));
+                .contains("cannot be below filled quantity")
+        );
     }
 
     #[test]
@@ -1489,7 +1523,7 @@ mod tests {
                 .apply_deployment(DeploymentApplyRequest {
                     deployment_id: deployment_id.to_string(),
                     bundle_id: "example".to_string(),
-                    runtime_mode: "paper".to_string(),
+                    runtime_mode: DeploymentRuntimeMode::Paper,
                     account_id: "acct-shared".to_string(),
                     max_gross_exposure: Some(dec!(2.5)),
                     deployment_state: DeploymentState::Enabled,
@@ -1551,7 +1585,7 @@ mod tests {
             .apply_deployment(DeploymentApplyRequest {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Paper,
                 account_id: "acct-paper".to_string(),
                 max_gross_exposure: Some(dec!(1.5)),
                 deployment_state: DeploymentState::Enabled,
@@ -1608,7 +1642,7 @@ mod tests {
             .apply_deployment(DeploymentApplyRequest {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Paper,
                 account_id: "acct-paper".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
@@ -1649,13 +1683,150 @@ mod tests {
             )
             .expect("resume deployment");
 
-        let resumed = daemon.supervisor.status("example.paper").expect("resumed status");
+        let resumed = daemon
+            .supervisor
+            .status("example.paper")
+            .expect("resumed status");
         assert!(matches!(
             resumed.observed_state,
             ObservedState::Starting | ObservedState::Running
         ));
         assert!(resumed.pid.is_some());
         assert_ne!(resumed.pid, Some(initial_pid));
+    }
+
+    #[test]
+    fn daemon_rejects_archive_with_active_orders() {
+        let root = temp_dir("archive-active-orders");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        daemon
+            .apply_deployment(DeploymentApplyRequest {
+                deployment_id: "example.paper".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Paper,
+                account_id: "acct-paper".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            })
+            .expect("apply deployment");
+        daemon
+            .submit_paper_intent(TradingIntent {
+                intent_id: "intent-active".to_string(),
+                deployment_id: "example.paper".to_string(),
+                market_id: "market-1".to_string(),
+                token_id: "yes-token".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(1),
+                limit_price: Some(dec!(0.5)),
+                purpose: IntentPurpose::Entry,
+                created_at: chrono::Utc::now(),
+            })
+            .expect("submit intent");
+
+        let error = daemon
+            .control_deployment(
+                "example.paper",
+                DeploymentControlRequest {
+                    desired_state: None,
+                    deployment_state: Some(DeploymentState::Archived),
+                },
+            )
+            .expect_err("active order must block archive");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(
+            daemon.inspect_deployment("example.paper").expect("deployment").deployment_state,
+            DeploymentState::Enabled
+        );
+    }
+
+    #[test]
+    fn daemon_rejects_cap_reduction_below_account_exposure() {
+        let root = temp_dir("cap-below-account-exposure");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+
+        for (deployment_id, quantity) in [("first.paper", dec!(1)), ("second.paper", dec!(2))] {
+            daemon
+                .apply_deployment(DeploymentApplyRequest {
+                    deployment_id: deployment_id.to_string(),
+                    bundle_id: "example".to_string(),
+                    runtime_mode: DeploymentRuntimeMode::Paper,
+                    account_id: "acct-shared".to_string(),
+                    max_gross_exposure: Some(dec!(5)),
+                    deployment_state: DeploymentState::Enabled,
+                    desired_state: DesiredState::Running,
+                })
+                .expect("apply deployment");
+            let intent_id = format!("intent-{deployment_id}");
+            daemon
+                .submit_paper_intent(TradingIntent {
+                    intent_id: intent_id.clone(),
+                    deployment_id: deployment_id.to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: format!("token-{deployment_id}"),
+                    side: TradeSide::Buy,
+                    quantity,
+                    limit_price: Some(dec!(0.5)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: chrono::Utc::now(),
+                })
+                .expect("submit intent");
+            daemon.record_fill(
+                deployment_id,
+                FillRecord {
+                    fill_id: format!("fill-{deployment_id}"),
+                    order_id: format!("order-{intent_id}"),
+                    token_id: format!("token-{deployment_id}"),
+                    side: TradeSide::Buy,
+                    quantity,
+                    price: dec!(0.5),
+                    fee: dec!(0),
+                    timestamp: chrono::Utc::now(),
+                },
+            );
+        }
+
+        let error = daemon
+            .apply_deployment(DeploymentApplyRequest {
+                deployment_id: "first.paper".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Paper,
+                account_id: "acct-shared".to_string(),
+                max_gross_exposure: Some(dec!(0.75)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            })
+            .expect_err("account exposure must block cap reduction");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert_eq!(
+            daemon
+                .inspect_deployment("first.paper")
+                .expect("deployment")
+                .max_gross_exposure,
+            Some(dec!(5))
+        );
     }
 
     #[test]
@@ -1952,12 +2123,14 @@ mod tests {
             .expect("submit live intent");
 
         daemon.write_runtime_snapshots().expect("degraded snapshot");
-        assert!(daemon
+        assert!(
+            daemon
             .control_plane
             .system
             .status()
             .status
-            .starts_with("degraded@"));
+                .starts_with("degraded@")
+        );
         assert_eq!(daemon.control_plane.system.status().error_count_1h, 1);
         assert_eq!(
             daemon
@@ -1970,12 +2143,14 @@ mod tests {
         daemon
             .write_runtime_snapshots()
             .expect("recovering snapshot");
-        assert!(daemon
+        assert!(
+            daemon
             .control_plane
             .system
             .status()
             .status
-            .starts_with("recovering@"));
+                .starts_with("recovering@")
+        );
         assert_eq!(
             daemon
                 .inspect_deployment("example.live")
@@ -1985,12 +2160,14 @@ mod tests {
         );
 
         daemon.write_runtime_snapshots().expect("running snapshot");
-        assert!(daemon
+        assert!(
+            daemon
             .control_plane
             .system
             .status()
             .status
-            .starts_with("running@"));
+                .starts_with("running@")
+        );
     }
 
     #[test]
@@ -2121,28 +2298,38 @@ mod tests {
         assert_eq!(metrics.stale_sources, 2);
         assert_eq!(metrics.active_alerts, 2);
         assert_eq!(metrics.live_reconcile_failures, 1);
-        assert!(metrics
+        assert!(
+            metrics
             .heartbeats
             .iter()
-            .any(|status| status.source_id == "live_reconcile"));
-        assert!(metrics
+                .any(|status| status.source_id == "live_reconcile")
+        );
+        assert!(
+            metrics
             .heartbeats
             .iter()
-            .any(|status| status.source_id == "venue:polymarket"));
+                .any(|status| status.source_id == "venue:polymarket")
+        );
 
         let alerts = daemon.active_alerts();
         assert_eq!(alerts.len(), 2);
-        assert!(alerts
+        assert!(
+            alerts
             .iter()
-            .any(|alert| alert.source_id == "live_reconcile"));
-        assert!(alerts
+                .any(|alert| alert.source_id == "live_reconcile")
+        );
+        assert!(
+            alerts
             .iter()
-            .any(|alert| alert.source_id == "venue:polymarket"));
-        assert!(daemon
+                .any(|alert| alert.source_id == "venue:polymarket")
+        );
+        assert!(
+            daemon
             .control_plane
             .system
             .status()
             .status
-            .starts_with("degraded@"));
+                .starts_with("degraded@")
+        );
     }
 }

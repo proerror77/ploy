@@ -1,6 +1,6 @@
-use crate::{build_worker_launch_spec, WorkerTickConfig};
+use crate::{WorkerTickConfig, build_worker_launch_spec};
 use ploy_deployments::WorkerSupervisor;
-use ploy_operator_contracts::DesiredState;
+use ploy_operator_contracts::{DeploymentState, DesiredState};
 use ploy_platform::{DeploymentRecord, DeploymentRegistry};
 use ploy_trading::TradingRuntime;
 use std::collections::BTreeMap;
@@ -19,7 +19,11 @@ pub fn apply_loaded_registry_state(
         registry.upsert(record);
         trading.entry(deployment_id.clone()).or_default();
 
-        if desired_state == DesiredState::Running {
+        if desired_state == DesiredState::Running
+            && registry
+                .get(&deployment_id)
+                .is_some_and(|record| record.deployment_state != DeploymentState::Archived)
+        {
             if supervisor.status(&deployment_id).is_none() {
                 supervisor.start(build_worker_launch_spec(
                     registry.get(&deployment_id).expect("record inserted"),
@@ -61,10 +65,8 @@ mod tests {
     }
 
     fn test_working_directory() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "ploy-platform-bootstrap-workdir-{}",
-            test_id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ploy-platform-bootstrap-workdir-{}", test_id()));
         fs::create_dir_all(&path).expect("create test working directory");
         path
     }
@@ -107,7 +109,7 @@ mod tests {
             vec![DeploymentRecord {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                 account_id: "acct-paper".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
@@ -135,7 +137,7 @@ mod tests {
         let records = vec![DeploymentRecord {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
             account_id: "acct-paper".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,
@@ -160,6 +162,35 @@ mod tests {
         );
 
         assert_eq!(first_pid, second_pid);
+    }
+
+    #[test]
+    fn archived_running_record_is_not_bootstrapped() {
+        let mut registry = DeploymentRegistry::default();
+        let mut supervisor = WorkerSupervisor::default();
+        let mut trading = BTreeMap::<String, TradingRuntime>::new();
+        let config = config();
+
+        apply_loaded_registry_state(
+            vec![DeploymentRecord {
+                deployment_id: "example.archived".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+                account_id: "acct-paper".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Archived,
+                desired_state: DesiredState::Running,
+                observed_state: ObservedState::Stopped,
+            }],
+            &mut registry,
+            &mut supervisor,
+            &mut trading,
+            &config,
+        );
+
+        assert!(registry.get("example.archived").is_some());
+        assert!(trading.contains_key("example.archived"));
+        assert!(supervisor.status("example.archived").is_none());
     }
 
     fn wait_for_worker_pid(

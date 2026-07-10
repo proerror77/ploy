@@ -195,7 +195,7 @@ mod tests {
         let value = serde_json::to_value(OperatorEvent::TradingSnapshot(TradingSnapshotEvent {
             trading: vec![TradingStateSnapshot {
                 deployment_id: "example.paper".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: crate::DeploymentRuntimeMode::Paper,
                 ..TradingStateSnapshot::default()
             }],
         }))

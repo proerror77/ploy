@@ -2,7 +2,7 @@ use crate::{build_order_control_response, io_error_from_execution_error, order_s
 use ploy_connectivity::{
     CancellationOutcome, CancellationRequest, LiveExecutionGateway, ReplaceOutcome, ReplaceRequest,
 };
-use ploy_operator_contracts::{OrderControlResponse, OrderReplaceRequest};
+use ploy_operator_contracts::{DeploymentRuntimeMode, OrderControlResponse, OrderReplaceRequest};
 use ploy_platform::DeploymentRecord;
 use ploy_trading::{OrderState, TradingRuntime};
 use std::io;
@@ -32,9 +32,9 @@ pub fn cancel_order(
         ));
     }
 
-    match deployment.runtime_mode.as_str() {
-        "paper" => {}
-        "live" => {
+    match deployment.runtime_mode {
+        DeploymentRuntimeMode::Paper => {}
+        DeploymentRuntimeMode::Live => {
             if let Some(venue_order_id) = order.venue_order_id.clone() {
                 let cancel_result = gateway.cancel(&CancellationRequest {
                     order_id: order_id.to_string(),
@@ -51,12 +51,6 @@ pub fn cancel_order(
                     Err(err) => return Err(io_error_from_execution_error(err)),
                 }
             }
-        }
-        runtime_mode => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("unsupported runtime mode: {runtime_mode}"),
-            ));
         }
     }
 
@@ -115,8 +109,8 @@ pub fn replace_order(
         current_total_exposure,
     )?;
 
-    match deployment.runtime_mode.as_str() {
-        "live" => {
+    match deployment.runtime_mode {
+        DeploymentRuntimeMode::Live => {
         let venue_order_id = order.venue_order_id.clone().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -152,7 +146,9 @@ pub fn replace_order(
                         request.limit_price,
                         venue_order_id,
                     )
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
+                        .ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::NotFound, "order not found")
+                        })?;
                 Ok(build_order_control_response(
                     deployment_id.to_string(),
                     updated,
@@ -174,7 +170,7 @@ pub fn replace_order(
             }
         }
         }
-        "paper" => {
+        DeploymentRuntimeMode::Paper => {
         let next_revision = order.revision + 1;
         let venue_order_id = format!("paper-{order_id}-r{next_revision}");
         let updated = runtime
@@ -190,10 +186,6 @@ pub fn replace_order(
             updated,
         ))
         }
-        runtime_mode => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("unsupported runtime mode: {runtime_mode}"),
-        )),
     }
 }
 
@@ -254,7 +246,7 @@ mod tests {
         DeploymentRecord {
             deployment_id: "example.live".to_string(),
             bundle_id: "example".to_string(),
-            runtime_mode: "live".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
             account_id: "acct-live".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,
@@ -265,7 +257,8 @@ mod tests {
 
     fn seeded_runtime() -> TradingRuntime {
         let mut runtime = TradingRuntime::default();
-        runtime.submit_intent(
+        runtime
+            .submit_intent(
             TradingIntent {
                 intent_id: "intent-1".to_string(),
                 deployment_id: "example.live".to_string(),
@@ -448,57 +441,6 @@ mod tests {
         .expect_err("replacement would flip short position");
 
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert_eq!(gateway.replacements.load(Ordering::SeqCst), 0);
-        assert_eq!(runtime.snapshot(&std::collections::BTreeMap::new()), before);
-    }
-
-    #[test]
-    fn cancel_rejects_unknown_runtime_mode_without_side_effects() {
-        let mut runtime = seeded_runtime();
-        let before = runtime.snapshot(&std::collections::BTreeMap::new());
-        let gateway = CountingControlGateway::default();
-        let mut deployment = live_deployment();
-        deployment.runtime_mode = "mystery".to_string();
-
-        let error = cancel_order(
-            &mut runtime,
-            &gateway,
-            &deployment,
-            "example.live",
-            "order-1",
-        )
-        .expect_err("unknown runtime mode");
-
-        assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert_eq!(gateway.cancellations.load(Ordering::SeqCst), 0);
-        assert_eq!(gateway.replacements.load(Ordering::SeqCst), 0);
-        assert_eq!(runtime.snapshot(&std::collections::BTreeMap::new()), before);
-    }
-
-    #[test]
-    fn replace_rejects_unknown_runtime_mode_without_side_effects() {
-        let mut runtime = seeded_runtime();
-        let before = runtime.snapshot(&std::collections::BTreeMap::new());
-        let gateway = CountingControlGateway::default();
-        let mut deployment = live_deployment();
-        deployment.runtime_mode = "mystery".to_string();
-
-        let error = replace_order(
-            &mut runtime,
-            &gateway,
-            &deployment,
-            "example.live",
-            "order-1",
-            OrderReplaceRequest {
-                quantity: dec!(2),
-                limit_price: Some(dec!(0.47)),
-            },
-            dec!(2),
-        )
-        .expect_err("unknown runtime mode");
-
-        assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert_eq!(gateway.cancellations.load(Ordering::SeqCst), 0);
         assert_eq!(gateway.replacements.load(Ordering::SeqCst), 0);
         assert_eq!(runtime.snapshot(&std::collections::BTreeMap::new()), before);
     }
