@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use ploy_research::{
-    ResearchSnapshotBuildOptions, build_research_snapshot_from_database, write_research_snapshot,
+    build_research_snapshot_from_database, write_research_snapshot, ResearchSnapshotBuildOptions,
 };
 use sqlx::postgres::PgPoolOptions;
 

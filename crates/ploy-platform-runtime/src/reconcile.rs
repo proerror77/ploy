@@ -98,21 +98,21 @@ mod tests {
         let mut runtime = TradingRuntime::default();
         runtime
             .submit_intent(
-            TradingIntent {
-                intent_id: "intent-1".to_string(),
-                deployment_id: "example.live".to_string(),
-                market_id: "market-1".to_string(),
-                token_id: "token-1".to_string(),
-                side: TradeSide::Buy,
-                quantity: dec!(2),
-                limit_price: Some(dec!(0.45)),
-                purpose: IntentPurpose::Entry,
-                created_at: chrono::Utc::now(),
-            },
-            "order-1",
-            None,
-        )
-        .expect("valid intent");
+                TradingIntent {
+                    intent_id: "intent-1".to_string(),
+                    deployment_id: "example.live".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(2),
+                    limit_price: Some(dec!(0.45)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: chrono::Utc::now(),
+                },
+                "order-1",
+                None,
+            )
+            .expect("valid intent");
         runtime.acknowledge_order("order-1", "venue-1");
         runtime.mark_order_unknown("order-1", "final persistence lost");
 

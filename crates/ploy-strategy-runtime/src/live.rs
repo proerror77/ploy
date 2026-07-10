@@ -156,18 +156,20 @@ mod execution {
             })
             .await
             {
-                Ok(Ok(response)) if response.deployment_id != intent.deployment_id => ExecutionReport {
-                    order_id: String::new(),
-                    fill: None,
-                    rejected: false,
-                    rejection_reason: Some(format!(
-                        "idempotent replay is owned by deployment `{}`",
-                        response.deployment_id
-                    )),
-                    slippage: None,
-                    market_impact: None,
-                    price_basis: None,
-                },
+                Ok(Ok(response)) if response.deployment_id != intent.deployment_id => {
+                    ExecutionReport {
+                        order_id: String::new(),
+                        fill: None,
+                        rejected: false,
+                        rejection_reason: Some(format!(
+                            "idempotent replay is owned by deployment `{}`",
+                            response.deployment_id
+                        )),
+                        slippage: None,
+                        market_impact: None,
+                        price_basis: None,
+                    }
+                }
                 Ok(Ok(response)) if response.state == "rejected" => ExecutionReport {
                     order_id: response.order_id,
                     fill: None,
@@ -181,17 +183,30 @@ mod execution {
                     order_id: String::new(),
                     fill: None,
                     rejected: false,
-                    rejection_reason: response.last_error.or(Some("submission outcome unknown".to_string())),
+                    rejection_reason: response
+                        .last_error
+                        .or(Some("submission outcome unknown".to_string())),
                     slippage: None,
                     market_impact: None,
                     price_basis: None,
                 },
-                Ok(Ok(response)) if matches!(response.state.as_str(), "acknowledged" | "partially_filled" | "filled") => {
+                Ok(Ok(response))
+                    if matches!(
+                        response.state.as_str(),
+                        "acknowledged" | "partially_filled" | "filled"
+                    ) =>
+                {
                     let Some(venue_order_id) = response.venue_order_id else {
                         return ExecutionReport {
-                            order_id: String::new(), fill: None, rejected: false,
-                            rejection_reason: Some("acknowledged response missing venue_order_id".to_string()),
-                            slippage: None, market_impact: None, price_basis: None,
+                            order_id: String::new(),
+                            fill: None,
+                            rejected: false,
+                            rejection_reason: Some(
+                                "acknowledged response missing venue_order_id".to_string(),
+                            ),
+                            slippage: None,
+                            market_impact: None,
+                            price_basis: None,
                         };
                     };
                     self.canonical_to_local_order
@@ -210,7 +225,10 @@ mod execution {
                     order_id: String::new(),
                     fill: None,
                     rejected: false,
-                    rejection_reason: Some(format!("unsupported control-plane submit state `{}`", response.state)),
+                    rejection_reason: Some(format!(
+                        "unsupported control-plane submit state `{}`",
+                        response.state
+                    )),
                     slippage: None,
                     market_impact: None,
                     price_basis: None,
@@ -249,11 +267,10 @@ mod execution {
         ) -> Result<Vec<FillRecord>, String> {
             let client = self.client.clone();
             let deployment_id = self.deployment_id.clone();
-            let snapshot = tokio::task::spawn_blocking(move || {
-                client.inspect_trading_state(&deployment_id)
-            })
-            .await
-            .map_err(|error| format!("control-plane reconcile task failed: {error}"))??;
+            let snapshot =
+                tokio::task::spawn_blocking(move || client.inspect_trading_state(&deployment_id))
+                    .await
+                    .map_err(|error| format!("control-plane reconcile task failed: {error}"))??;
             self.last_reconcile_attempted = true;
             snapshot
                 .fills
@@ -322,7 +339,11 @@ mod execution {
             }
         }
 
-        async fn submit_response(deployment_id: &str, state: &str, venue_order_id: Option<&str>) -> (LiveExecutor, ExecutionReport) {
+        async fn submit_response(
+            deployment_id: &str,
+            state: &str,
+            venue_order_id: Option<&str>,
+        ) -> (LiveExecutor, ExecutionReport) {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let addr = listener.local_addr().unwrap();
             let body = serde_json::json!({
@@ -333,32 +354,49 @@ mod execution {
                 "venue_order_id": venue_order_id,
                 "rejection_reason": null,
                 "last_error": null
-            }).to_string();
+            })
+            .to_string();
             thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = [0_u8; 4096];
                 let _ = stream.read(&mut request).unwrap();
-                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
             });
             let mut client = ControlPlaneClient::default();
             client.control_plane_addr = addr.to_string();
             let mut executor = LiveExecutor::new(client, ExecutionPolicy::default(), "deployment");
-            let report = executor.submit(&buy_intent(Decimal::ONE, Decimal::new(40, 2)), "local-1").await;
+            let report = executor
+                .submit(&buy_intent(Decimal::ONE, Decimal::new(40, 2)), "local-1")
+                .await;
             (executor, report)
         }
 
         #[tokio::test]
         async fn cross_deployment_replay_does_not_create_local_order_mapping() {
-            let (executor, report) = submit_response("other.live", "acknowledged", Some("venue-1")).await;
-            assert_eq!(report.submit_outcome(), ploy_strategy_bundles::SubmitOutcome::Unknown);
+            let (executor, report) =
+                submit_response("other.live", "acknowledged", Some("venue-1")).await;
+            assert_eq!(
+                report.submit_outcome(),
+                ploy_strategy_bundles::SubmitOutcome::Unknown
+            );
             assert!(executor.canonical_to_local_order.is_empty());
         }
 
         #[tokio::test]
         async fn unsupported_submit_states_fail_closed_without_venue_mapping() {
             for state in ["pending", "acknowleged", "future_state"] {
-                let (executor, report) = submit_response("deployment", state, Some("venue-1")).await;
-                assert_eq!(report.submit_outcome(), ploy_strategy_bundles::SubmitOutcome::Unknown);
+                let (executor, report) =
+                    submit_response("deployment", state, Some("venue-1")).await;
+                assert_eq!(
+                    report.submit_outcome(),
+                    ploy_strategy_bundles::SubmitOutcome::Unknown
+                );
                 assert!(report.order_id.is_empty());
                 assert!(executor.canonical_to_local_order.is_empty());
             }
@@ -502,7 +540,9 @@ async fn run_live_or_dry_run(
         },
         None => {
             if database_unavailable_is_fatal(runtime_config.mode, false) {
-                error!("DATABASE_URL not set for live runtime; refusing to start without persistence");
+                error!(
+                    "DATABASE_URL not set for live runtime; refusing to start without persistence"
+                );
                 std::process::exit(1);
             }
             info!("DATABASE_URL not set — running without DB persistence");
@@ -607,17 +647,13 @@ async fn run_live_or_dry_run(
         #[cfg(feature = "live-execution")]
         {
             let client = ploy_control_client::ControlPlaneClient::default();
-            let trading = restore_live_trading_runtime(&client, &deployment_id).unwrap_or_else(
-                |error| {
+            let trading =
+                restore_live_trading_runtime(&client, &deployment_id).unwrap_or_else(|error| {
                     error!(%error, %deployment_id, "Live restore failed; refusing to start empty");
                     std::process::exit(1);
-                },
-            );
-            let executor = build_live_executor(
-                client,
-                config.live_execution_policy(),
-                &deployment_id,
-            );
+                });
+            let executor =
+                build_live_executor(client, config.live_execution_policy(), &deployment_id);
             let mut runtime = ploy_strategy_bundles::StrategyRuntime::new_with_trading(
                 strategy,
                 feed,

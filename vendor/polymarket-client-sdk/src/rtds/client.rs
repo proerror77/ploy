@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use futures::future;
 use futures::Stream;
 use futures::StreamExt as _;
+use futures::future;
 
 use super::subscription::{SimpleParser, SubscriptionManager, TopicType};
 use super::types::request::Subscription;
@@ -197,9 +197,9 @@ impl<S: State> Client<S> {
             future::ready(match msg_result {
                 Ok(msg) => match msg.as_crypto_price() {
                     Some(price) => {
-                        let matches_request = requested_symbols.as_ref().is_none_or(|symbols| {
-                            symbols.contains(&price.symbol.to_lowercase())
-                        });
+                        let matches_request = requested_symbols
+                            .as_ref()
+                            .is_none_or(|symbols| symbols.contains(&price.symbol.to_lowercase()));
                         matches_request.then_some(Ok(price))
                     }
                     None => None,

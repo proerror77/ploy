@@ -1,8 +1,8 @@
 use crate::fills::FillRecord;
 use crate::intents::TradeSide;
 use crate::pnl::PnlSnapshot;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::Signed;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

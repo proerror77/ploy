@@ -14,12 +14,12 @@ pub use deployments::{
     DeploymentStateSummary, DeploymentSummary, DesiredState, ObservedState,
 };
 pub use diagnostics::{
-    AgentRunCreateRequest, AgentRunCreateResponse, AgentRunRecord, AgentToolCallRecord,
-    DeploymentDiagnosticsMetrics, DeploymentDiagnosticsReport, DiagnosticsEvidence,
-    DiagnosticsFinding, OversightRecommendedAction, OversightReport, OversightSignal,
-    OversightSnapshotEvent, PlatformDiagnosticsReport, ProposalActionKind, ProposalCreateRequest,
-    ProposalDecisionRequest, ProposalSnapshotEvent, ProposalStatus, SafetyProposal,
-    compute_oversight_report,
+    compute_oversight_report, AgentRunCreateRequest, AgentRunCreateResponse, AgentRunRecord,
+    AgentToolCallRecord, DeploymentDiagnosticsMetrics, DeploymentDiagnosticsReport,
+    DiagnosticsEvidence, DiagnosticsFinding, OversightRecommendedAction, OversightReport,
+    OversightSignal, OversightSnapshotEvent, PlatformDiagnosticsReport, ProposalActionKind,
+    ProposalCreateRequest, ProposalDecisionRequest, ProposalSnapshotEvent, ProposalStatus,
+    SafetyProposal,
 };
 pub use errors::ControlPlaneErrorResponse;
 pub use events::{

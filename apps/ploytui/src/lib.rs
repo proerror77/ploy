@@ -182,7 +182,7 @@ fn state_name<T: std::fmt::Debug>(value: &T) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DashboardSnapshot, render_dashboard, render_event_line};
+    use super::{render_dashboard, render_event_line, DashboardSnapshot};
     use chrono::Utc;
     use ploy_operator_contracts::{
         ActiveAlert, AlertKind, AlertSeverity, DeploymentSnapshotEvent, DeploymentState,

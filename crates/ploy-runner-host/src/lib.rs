@@ -16,7 +16,9 @@ fn print_usage_for(program: &str) {
     #[cfg(feature = "ops")]
     eprintln!("  collect-markets           Discover Polymarket markets into the local DB catalog");
     #[cfg(feature = "ops")]
-    eprintln!("  collect-quotes            Collect orderbook quotes from Polymarket CLOB WebSocket");
+    eprintln!(
+        "  collect-quotes            Collect orderbook quotes from Polymarket CLOB WebSocket"
+    );
     #[cfg(feature = "ops")]
     eprintln!("  collect-pm-trades         Collect public Polymarket trade prints from Data API");
     #[cfg(feature = "ops")]

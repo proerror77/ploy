@@ -611,7 +611,10 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
     let candidate_section = hosted
         .split("- name: Download candidate strategy replay artifact")
         .nth(1)
-        .and_then(|tail| tail.split("- name: Download full-depth execution surface artifact").next())
+        .and_then(|tail| {
+            tail.split("- name: Download full-depth execution surface artifact")
+                .next()
+        })
         .unwrap_or("");
     if candidate_section.contains("--strip-prefix") {
         offenders.push(
@@ -1325,10 +1328,9 @@ fn optimize_workflow_builds_and_runs_in_one_job() {
 fn deployed_research_tools_do_not_ship_legacy_factor_research_binary() {
     let deploy = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
     let acr = workflow_contents(".github/workflows/build-push-acr.yml");
-    let dockerfile = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("Dockerfile.research"),
-    )
-    .expect("read Dockerfile.research");
+    let dockerfile =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Dockerfile.research"))
+            .expect("read Dockerfile.research");
     let cargo = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/ploy-research/Cargo.toml"),
     )
@@ -1366,8 +1368,7 @@ fn deployed_research_tools_do_not_ship_legacy_factor_research_binary() {
     }
     if !deploy.contains("rm -f ${DEPLOY_ROOT}/bin/factor-research") {
         offenders.push(
-            "deploy-tango-1-1.yml: must remove stale factor-research binary on deploy"
-                .to_string(),
+            "deploy-tango-1-1.yml: must remove stale factor-research binary on deploy".to_string(),
         );
     }
     if !acr.contains("--example run_backtest") {

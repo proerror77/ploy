@@ -288,8 +288,8 @@ fn kill_pid(pid: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::DeploymentRuntime;
     use super::process_alive;
+    use super::DeploymentRuntime;
     use crate::protocol::WorkerLaunchSpec;
     #[cfg(target_os = "linux")]
     use crate::protocol::WorkerStatus;

@@ -12,22 +12,21 @@ use ploy_operator_contracts::{
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
 use ploy_platform_runtime::{
-    LiveHealthConfig, PreparedLiveIntent, ProposalStore, ReconcileStatus, WorkerTickConfig,
     apply_deployment as apply_deployment_record, apply_loaded_registry_state,
     build_trading_state_snapshot, cancel_order as cancel_runtime_order,
     control_deployment as control_deployment_record,
     enforce_exposure_limit as enforce_intent_exposure_limit, ensure_intent_allowed,
-    load_proposal_store, load_registry_records, load_trading_runtimes,
-    mark_live_runtime_degraded as mark_runtime_degraded_state,
+    finish_live_intent as finish_live_runtime_intent, load_proposal_store, load_registry_records,
+    load_trading_runtimes, mark_live_runtime_degraded as mark_runtime_degraded_state,
     mark_runtime_healthy as mark_runtime_healthy_state, order_state_wire,
+    prepare_live_intent as prepare_live_runtime_intent,
     reconcile_live_fills as reconcile_runtime_live_fills,
     refresh_source_health as refresh_platform_source_health,
     replace_order as replace_runtime_order,
-    finish_live_intent as finish_live_runtime_intent,
-    prepare_live_intent as prepare_live_runtime_intent,
     set_deployment_max_gross_exposure as set_record_max_gross_exposure,
     submit_paper_intent as submit_paper_runtime_intent, tick_workers as tick_platform_workers,
-    write_json,
+    write_json, LiveHealthConfig, PreparedLiveIntent, ProposalStore, ReconcileStatus,
+    WorkerTickConfig,
 };
 use ploy_trading::{TradingIntent, TradingRuntime};
 use rust_decimal::Decimal;
@@ -550,7 +549,10 @@ impl PloyDaemon {
                 self.trading
                     .get_mut(&deployment_id)
                     .expect("prepared live runtime")
-                    .mark_order_unknown(&response.order_id, format!("final persistence failed: {error}"));
+                    .mark_order_unknown(
+                        &response.order_id,
+                        format!("final persistence failed: {error}"),
+                    );
                 response.state = "unknown".to_string();
                 response.venue_order_id = None;
                 response.last_error = Some(format!("final persistence failed: {error}"));
@@ -585,9 +587,7 @@ impl PloyDaemon {
         #[cfg(test)]
         {
             self.trading_state_write_attempts += 1;
-            if self.fail_trading_state_write_on_attempt
-                == Some(self.trading_state_write_attempts)
-            {
+            if self.fail_trading_state_write_on_attempt == Some(self.trading_state_write_attempts) {
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     "injected trading-state persistence failure",
@@ -868,8 +868,8 @@ mod tests {
     use std::fs;
     use std::io::ErrorKind;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -917,7 +917,10 @@ mod tests {
             })
         }
 
-        fn cancel(&self, _request: &CancellationRequest) -> Result<CancellationOutcome, ExecutionError> {
+        fn cancel(
+            &self,
+            _request: &CancellationRequest,
+        ) -> Result<CancellationOutcome, ExecutionError> {
             Ok(CancellationOutcome::Canceled)
         }
 
@@ -925,7 +928,10 @@ mod tests {
             unreachable!()
         }
 
-        fn reconcile_fills(&self, _tracked_orders: &[ploy_connectivity::TrackedOrder]) -> Result<Vec<FillRecord>, ExecutionError> {
+        fn reconcile_fills(
+            &self,
+            _tracked_orders: &[ploy_connectivity::TrackedOrder],
+        ) -> Result<Vec<FillRecord>, ExecutionError> {
             Ok(Vec::new())
         }
     }
@@ -1237,11 +1243,9 @@ mod tests {
         let mismatch = daemon
             .submit_intent_idempotent(make_intent("intent-3", dec!(1)), Some("request-1"))
             .expect_err("mismatched payload must reject");
-        assert!(
-            mismatch
-                .to_string()
-                .contains("idempotency key payload mismatch")
-        );
+        assert!(mismatch
+            .to_string()
+            .contains("idempotency key payload mismatch"));
     }
 
     #[test]
@@ -1282,7 +1286,9 @@ mod tests {
         };
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
-            Box::new(CountingAckGateway { submits: submits.clone() }),
+            Box::new(CountingAckGateway {
+                submits: submits.clone(),
+            }),
         )
         .expect("boot");
         let first = daemon
@@ -1294,7 +1300,10 @@ mod tests {
         assert_eq!(replay.order_id, first.order_id);
         assert_eq!(replay.deployment_id, "a.live");
         assert!(daemon
-            .submit_intent_idempotent(make_intent("b.live", "intent-mismatch", dec!(2)), Some("key-1"))
+            .submit_intent_idempotent(
+                make_intent("b.live", "intent-mismatch", dec!(2)),
+                Some("key-1")
+            )
             .expect_err("mismatch")
             .to_string()
             .contains("payload mismatch"));
@@ -1303,14 +1312,21 @@ mod tests {
             .expect("different account may reuse key");
         assert_eq!(submits.load(Ordering::SeqCst), 2);
 
-        daemon.write_runtime_snapshots().expect("persist before restart");
+        daemon
+            .write_runtime_snapshots()
+            .expect("persist before restart");
         let mut restored = PloyDaemon::boot_with_live_execution(
             &config,
-            Box::new(CountingAckGateway { submits: submits.clone() }),
+            Box::new(CountingAckGateway {
+                submits: submits.clone(),
+            }),
         )
         .expect("restore");
         let restored_replay = restored
-            .submit_intent_idempotent(make_intent("b.live", "intent-after-restart", dec!(1)), Some("key-1"))
+            .submit_intent_idempotent(
+                make_intent("b.live", "intent-after-restart", dec!(1)),
+                Some("key-1"),
+            )
             .expect("restored replay");
         assert_eq!(restored_replay.order_id, first.order_id);
         assert_eq!(submits.load(Ordering::SeqCst), 2);
@@ -1427,7 +1443,9 @@ mod tests {
             .expect("unknown response");
 
         assert_eq!(response.state, "unknown");
-        let deployment = daemon.inspect_deployment("example.live").expect("deployment");
+        let deployment = daemon
+            .inspect_deployment("example.live")
+            .expect("deployment");
         assert_eq!(deployment.desired_state, DesiredState::Paused);
         assert_eq!(deployment.observed_state, ObservedState::Degraded);
     }
@@ -1452,9 +1470,11 @@ mod tests {
             ..PlatformConfig::default()
         };
         let submits = Arc::new(AtomicUsize::new(0));
-        let gateway = CountingAckGateway { submits: submits.clone() };
-        let mut daemon = PloyDaemon::boot_with_live_execution(&config, Box::new(gateway.clone()))
-            .expect("boot");
+        let gateway = CountingAckGateway {
+            submits: submits.clone(),
+        };
+        let mut daemon =
+            PloyDaemon::boot_with_live_execution(&config, Box::new(gateway.clone())).expect("boot");
         daemon.fail_trading_state_write_on_attempt = Some(2);
         let intent = TradingIntent {
             intent_id: "intent-1".to_string(),
@@ -1472,7 +1492,9 @@ mod tests {
             .expect("unknown response");
         assert_eq!(response.state, "unknown");
         assert_eq!(submits.load(Ordering::SeqCst), 1);
-        let deployment = daemon.inspect_deployment("example.live").expect("deployment");
+        let deployment = daemon
+            .inspect_deployment("example.live")
+            .expect("deployment");
         assert_eq!(deployment.desired_state, DesiredState::Paused);
         assert_eq!(deployment.observed_state, ObservedState::Degraded);
         let persisted: serde_json::Value = serde_json::from_slice(
@@ -1605,13 +1627,11 @@ mod tests {
         assert_eq!(trading_state[0].orders.len(), 1);
         assert_eq!(trading_state[0].orders[0].state, "unknown");
         assert!(trading_state[0].orders[0].rejection_reason.is_none());
-        assert!(
-            trading_state[0].orders[0]
+        assert!(trading_state[0].orders[0]
             .last_error
             .as_deref()
             .expect("last_error")
-                .contains("gateway offline")
-        );
+            .contains("gateway offline"));
     }
 
     #[test]
@@ -1845,11 +1865,9 @@ mod tests {
             .expect_err("replace should fail");
 
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert!(
-            error
+        assert!(error
             .to_string()
-                .contains("cannot be below filled quantity")
-        );
+            .contains("cannot be below filled quantity"));
     }
 
     #[test]
@@ -2015,13 +2033,11 @@ mod tests {
                 },
             )
             .expect("pause deployment");
-        assert!(
-            daemon
-                .supervisor
-                .status("example.paper")
-                .and_then(|status| status.pid)
-                .is_none()
-        );
+        assert!(daemon
+            .supervisor
+            .status("example.paper")
+            .and_then(|status| status.pid)
+            .is_none());
 
         daemon
             .control_deployment(
@@ -2096,7 +2112,10 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
         assert_eq!(
-            daemon.inspect_deployment("example.paper").expect("deployment").deployment_state,
+            daemon
+                .inspect_deployment("example.paper")
+                .expect("deployment")
+                .deployment_state,
             DeploymentState::Enabled
         );
     }
@@ -2473,14 +2492,12 @@ mod tests {
             .expect("submit live intent");
 
         daemon.write_runtime_snapshots().expect("degraded snapshot");
-        assert!(
-            daemon
+        assert!(daemon
             .control_plane
             .system
             .status()
             .status
-                .starts_with("degraded@")
-        );
+            .starts_with("degraded@"));
         assert_eq!(daemon.control_plane.system.status().error_count_1h, 1);
         assert_eq!(
             daemon
@@ -2493,14 +2510,12 @@ mod tests {
         daemon
             .write_runtime_snapshots()
             .expect("recovering snapshot");
-        assert!(
-            daemon
+        assert!(daemon
             .control_plane
             .system
             .status()
             .status
-                .starts_with("recovering@")
-        );
+            .starts_with("recovering@"));
         assert_eq!(
             daemon
                 .inspect_deployment("example.live")
@@ -2510,14 +2525,12 @@ mod tests {
         );
 
         daemon.write_runtime_snapshots().expect("running snapshot");
-        assert!(
-            daemon
+        assert!(daemon
             .control_plane
             .system
             .status()
             .status
-                .starts_with("running@")
-        );
+            .starts_with("running@"));
     }
 
     #[test]
@@ -2648,38 +2661,28 @@ mod tests {
         assert_eq!(metrics.stale_sources, 2);
         assert_eq!(metrics.active_alerts, 2);
         assert_eq!(metrics.live_reconcile_failures, 1);
-        assert!(
-            metrics
+        assert!(metrics
             .heartbeats
             .iter()
-                .any(|status| status.source_id == "live_reconcile")
-        );
-        assert!(
-            metrics
+            .any(|status| status.source_id == "live_reconcile"));
+        assert!(metrics
             .heartbeats
             .iter()
-                .any(|status| status.source_id == "venue:polymarket")
-        );
+            .any(|status| status.source_id == "venue:polymarket"));
 
         let alerts = daemon.active_alerts();
         assert_eq!(alerts.len(), 2);
-        assert!(
-            alerts
+        assert!(alerts
             .iter()
-                .any(|alert| alert.source_id == "live_reconcile")
-        );
-        assert!(
-            alerts
+            .any(|alert| alert.source_id == "live_reconcile"));
+        assert!(alerts
             .iter()
-                .any(|alert| alert.source_id == "venue:polymarket")
-        );
-        assert!(
-            daemon
+            .any(|alert| alert.source_id == "venue:polymarket"));
+        assert!(daemon
             .control_plane
             .system
             .status()
             .status
-                .starts_with("degraded@")
-        );
+            .starts_with("degraded@"));
     }
 }

@@ -45,14 +45,12 @@ pub fn apply_deployment(
                 ),
             ));
         }
-        let cap_increased_or_removed = match (
-            existing.max_gross_exposure,
-            request.max_gross_exposure,
-        ) {
-            (Some(_), None) => true,
-            (Some(current), Some(proposed)) => proposed > current,
-            (None, None | Some(_)) => false,
-        };
+        let cap_increased_or_removed =
+            match (existing.max_gross_exposure, request.max_gross_exposure) {
+                (Some(_), None) => true,
+                (Some(current), Some(proposed)) => proposed > current,
+                (None, None | Some(_)) => false,
+            };
         if existing.desired_state == DesiredState::Running && cap_increased_or_removed {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -327,15 +325,13 @@ mod tests {
             },
         );
 
-        assert!(
-            set_deployment_max_gross_exposure(
+        assert!(set_deployment_max_gross_exposure(
             &mut registry,
             "example.paper",
             Some(dec!(2)),
             Some(dec!(3)),
         )
-            .is_err()
-        );
+        .is_err());
     }
 
     #[test]

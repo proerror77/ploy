@@ -111,80 +111,80 @@ pub fn replace_order(
 
     match deployment.runtime_mode {
         DeploymentRuntimeMode::Live => {
-        let venue_order_id = order.venue_order_id.clone().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("order `{order_id}` has no live venue order to replace"),
-            )
-        })?;
-        let side = runtime
-            .intent(&order.intent_id)
-            .map(|intent| intent.side)
-            .ok_or_else(|| {
+            let venue_order_id = order.venue_order_id.clone().ok_or_else(|| {
                 io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!(
-                        "intent `{}` for order `{order_id}` was not found",
-                        order.intent_id
-                    ),
+                    io::ErrorKind::InvalidInput,
+                    format!("order `{order_id}` has no live venue order to replace"),
                 )
             })?;
-
-        match gateway.replace(&ReplaceRequest {
-            order_id: order_id.to_string(),
-            venue_order_id,
-            token_id: order.token_id.clone(),
-            side,
-            quantity: request.quantity,
-            limit_price: request.limit_price,
-        }) {
-            Ok(ReplaceOutcome::Replaced { venue_order_id }) => {
-                let updated = runtime
-                    .replace_order(
-                        order_id,
-                        request.quantity,
-                        request.limit_price,
-                        venue_order_id,
+            let side = runtime
+                .intent(&order.intent_id)
+                .map(|intent| intent.side)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!(
+                            "intent `{}` for order `{order_id}` was not found",
+                            order.intent_id
+                        ),
                     )
+                })?;
+
+            match gateway.replace(&ReplaceRequest {
+                order_id: order_id.to_string(),
+                venue_order_id,
+                token_id: order.token_id.clone(),
+                side,
+                quantity: request.quantity,
+                limit_price: request.limit_price,
+            }) {
+                Ok(ReplaceOutcome::Replaced { venue_order_id }) => {
+                    let updated = runtime
+                        .replace_order(
+                            order_id,
+                            request.quantity,
+                            request.limit_price,
+                            venue_order_id,
+                        )
                         .ok_or_else(|| {
                             io::Error::new(io::ErrorKind::NotFound, "order not found")
                         })?;
-                Ok(build_order_control_response(
-                    deployment_id.to_string(),
-                    updated,
-                ))
+                    Ok(build_order_control_response(
+                        deployment_id.to_string(),
+                        updated,
+                    ))
+                }
+                Ok(ReplaceOutcome::Rejected { reason }) => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("live replace rejected: {reason}"),
+                )),
+                Ok(ReplaceOutcome::PartialFailure { reason }) => {
+                    let message = format!("live replace partially failed after cancel: {reason}");
+                    let _ = runtime.cancel_order(order_id);
+                    let _ = runtime.record_order_error(order_id, message.clone());
+                    Err(io::Error::other(message))
+                }
+                Err(err) => {
+                    let _ = runtime.record_order_error(order_id, err.to_string());
+                    Err(io_error_from_execution_error(err))
+                }
             }
-            Ok(ReplaceOutcome::Rejected { reason }) => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("live replace rejected: {reason}"),
-            )),
-            Ok(ReplaceOutcome::PartialFailure { reason }) => {
-                let message = format!("live replace partially failed after cancel: {reason}");
-                let _ = runtime.cancel_order(order_id);
-                let _ = runtime.record_order_error(order_id, message.clone());
-                Err(io::Error::other(message))
-            }
-            Err(err) => {
-                let _ = runtime.record_order_error(order_id, err.to_string());
-                Err(io_error_from_execution_error(err))
-            }
-        }
         }
         DeploymentRuntimeMode::Paper => {
-        let next_revision = order.revision + 1;
-        let venue_order_id = format!("paper-{order_id}-r{next_revision}");
-        let updated = runtime
-            .replace_order(
-                order_id,
-                request.quantity,
-                request.limit_price,
-                venue_order_id,
-            )
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
-        Ok(build_order_control_response(
-            deployment_id.to_string(),
-            updated,
-        ))
+            let next_revision = order.revision + 1;
+            let venue_order_id = format!("paper-{order_id}-r{next_revision}");
+            let updated = runtime
+                .replace_order(
+                    order_id,
+                    request.quantity,
+                    request.limit_price,
+                    venue_order_id,
+                )
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
+            Ok(build_order_control_response(
+                deployment_id.to_string(),
+                updated,
+            ))
         }
     }
 }
@@ -259,21 +259,21 @@ mod tests {
         let mut runtime = TradingRuntime::default();
         runtime
             .submit_intent(
-            TradingIntent {
-                intent_id: "intent-1".to_string(),
-                deployment_id: "example.live".to_string(),
-                market_id: "market-1".to_string(),
-                token_id: "token-1".to_string(),
-                side: TradeSide::Buy,
-                quantity: dec!(2),
-                limit_price: Some(dec!(0.45)),
-                purpose: IntentPurpose::Entry,
-                created_at: chrono::Utc::now(),
-            },
-            "order-1",
-            None,
-        )
-        .expect("valid intent");
+                TradingIntent {
+                    intent_id: "intent-1".to_string(),
+                    deployment_id: "example.live".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(2),
+                    limit_price: Some(dec!(0.45)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: chrono::Utc::now(),
+                },
+                "order-1",
+                None,
+            )
+            .expect("valid intent");
         runtime.acknowledge_order("order-1", "venue-1");
         runtime
     }

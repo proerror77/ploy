@@ -10233,9 +10233,10 @@ mod tests {
             .windows
             .iter()
             .any(|row| row.model == "q_final_logit_blend"));
-        assert!(report.aggregates.iter().any(|row| {
-            row.model == "q_final_logit_blend" && row.windows >= 1
-        }));
+        assert!(report
+            .aggregates
+            .iter()
+            .any(|row| { row.model == "q_final_logit_blend" && row.windows >= 1 }));
         let text = format_settlement_probability_walk_forward_report(&report);
         assert!(text.contains("train_window=12h test_window=12h step=12h"));
     }
@@ -10424,7 +10425,9 @@ mod tests {
         assert!(deribit_required.gates.iter().any(|gate| {
             gate.gate == "deribit_vol_surface"
                 && !gate.passed
-                && gate.evidence.contains("require_deribit=true include_deribit=false")
+                && gate
+                    .evidence
+                    .contains("require_deribit=true include_deribit=false")
         }));
 
         let text = format_settlement_probability_promotion_gate_report(&deribit_required);

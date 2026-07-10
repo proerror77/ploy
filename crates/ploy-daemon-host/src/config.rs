@@ -80,7 +80,10 @@ impl PlatformConfig {
         if Self::path_uses_default(&self.status_file, "run/platform/system-status.json") {
             self.status_file = self.runtime_root.join("system-status.json");
         }
-        if Self::path_uses_default(&self.deployment_status_file, "run/platform/deployments.json") {
+        if Self::path_uses_default(
+            &self.deployment_status_file,
+            "run/platform/deployments.json",
+        ) {
             self.deployment_status_file = self.runtime_root.join("deployments.json");
         }
         if Self::path_uses_default(&self.trading_state_file, "run/platform/trading-state.json") {
@@ -208,7 +211,8 @@ impl PlatformConfig {
             }
         }
         if let Ok(value) = std::env::var("PLOY_CIRCUIT_BREAKER_ENABLED") {
-            config.circuit_breaker_enabled = matches!(value.as_str(), "1" | "true" | "TRUE" | "True");
+            config.circuit_breaker_enabled =
+                matches!(value.as_str(), "1" | "true" | "TRUE" | "True");
         }
 
         config.normalize_derived_paths();

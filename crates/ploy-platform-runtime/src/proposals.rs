@@ -32,10 +32,8 @@ impl ProposalStore {
     }
 
     pub fn create(&mut self, request: ProposalCreateRequest) -> io::Result<SafetyProposal> {
-        if matches!(
-            request.action_kind,
-            ProposalActionKind::ReduceMaxExposure
-        ) && request.proposed_max_gross_exposure.is_none()
+        if matches!(request.action_kind, ProposalActionKind::ReduceMaxExposure)
+            && request.proposed_max_gross_exposure.is_none()
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

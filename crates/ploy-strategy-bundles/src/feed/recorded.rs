@@ -330,8 +330,8 @@ mod tests {
                 ts: now + Duration::seconds(1),
                 bid_size: None,
                 ask_size: None,
-            bid_levels: Vec::new(),
-            ask_levels: Vec::new(),
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
             },
             MarketUpdate::SportsState {
                 game_id: "19439".into(),

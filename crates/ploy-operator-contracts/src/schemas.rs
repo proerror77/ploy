@@ -4,7 +4,7 @@ use crate::{
     DryRunPerformanceReport, OperatorEvent, PaperIntentRequest, PaperIntentResponse,
     SystemControlResponse, SystemStatus, TradingStateSnapshot,
 };
-use schemars::{JsonSchema, schema::RootSchema};
+use schemars::{schema::RootSchema, JsonSchema};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy)]

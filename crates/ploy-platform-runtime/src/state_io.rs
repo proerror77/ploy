@@ -1,4 +1,4 @@
-use crate::{ProposalStore, restore_trading_runtime};
+use crate::{restore_trading_runtime, ProposalStore};
 use ploy_operator_contracts::TradingStateSnapshot;
 use ploy_platform::DeploymentRecord;
 use ploy_trading::TradingRuntime;
@@ -33,8 +33,8 @@ pub fn load_trading_runtimes(
         return Ok(BTreeMap::new());
     }
 
-    let snapshots: Vec<TradingStateSnapshot> =
-        serde_json::from_str(&raw).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let snapshots: Vec<TradingStateSnapshot> = serde_json::from_str(&raw)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
     let mut runtimes = BTreeMap::new();
     for snapshot in snapshots {

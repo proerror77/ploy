@@ -12,8 +12,8 @@ pub mod factors_new;
 pub mod factors_v2;
 #[cfg(any(feature = "ml", feature = "rl"))]
 pub mod model;
-pub mod replay;
 pub mod orderbook;
+pub mod replay;
 pub mod research_os;
 pub mod research_snapshot;
 pub mod signal;

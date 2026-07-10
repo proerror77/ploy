@@ -1,8 +1,8 @@
 use ploy_operator_contracts::{
     ActiveAlert, AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest,
     DeploymentControlRequest, DeploymentState, DeploymentSummary, DesiredState, OperatorEvent,
-    OrderControlResponse, OrderReplaceRequest, PlatformMetrics, SystemStatus, TradingStateSnapshot,
-    PaperIntentRequest, PaperIntentResponse,
+    OrderControlResponse, OrderReplaceRequest, PaperIntentRequest, PaperIntentResponse,
+    PlatformMetrics, SystemStatus, TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -862,9 +862,7 @@ mod tests {
             let mut request = [0_u8; 1024];
             let bytes = stream.read(&mut request).expect("read request");
             let request = String::from_utf8_lossy(&request[..bytes]);
-            assert!(
-                request.starts_with("POST /api/deployments/example.live/orders/order-1/cancel")
-            );
+            assert!(request.starts_with("POST /api/deployments/example.live/orders/order-1/cancel"));
 
             let body = serde_json::to_string(&OrderControlResponse {
                 deployment_id: "example.live".to_string(),

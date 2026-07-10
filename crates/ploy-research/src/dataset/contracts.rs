@@ -189,7 +189,10 @@ impl DatasetBuildManifest {
         }
 
         if self.split_policy != DatasetSplitPolicy::default() {
-            return Err("manifest split policy does not match the canonical first-slice contract".to_string());
+            return Err(
+                "manifest split policy does not match the canonical first-slice contract"
+                    .to_string(),
+            );
         }
 
         if !self
@@ -335,7 +338,9 @@ mod tests {
             },
         };
 
-        manifest.validate_contract().expect("manifest must validate");
+        manifest
+            .validate_contract()
+            .expect("manifest must validate");
 
         let json = serde_json::to_string_pretty(&manifest).expect("manifest serializes");
         let reparsed: DatasetBuildManifest =

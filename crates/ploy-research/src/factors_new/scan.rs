@@ -1,4 +1,4 @@
-use crate::factors::{FactorObservation, spearman_ic};
+use crate::factors::{spearman_ic, FactorObservation};
 use crate::factors_new::registry::{FactorMeta, FactorRegistry};
 use ploy_operator_contracts::Regime;
 

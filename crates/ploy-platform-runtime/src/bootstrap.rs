@@ -1,4 +1,4 @@
-use crate::{WorkerTickConfig, build_worker_launch_spec};
+use crate::{build_worker_launch_spec, WorkerTickConfig};
 use ploy_deployments::WorkerSupervisor;
 use ploy_operator_contracts::{DeploymentState, DesiredState};
 use ploy_platform::{DeploymentRecord, DeploymentRegistry};

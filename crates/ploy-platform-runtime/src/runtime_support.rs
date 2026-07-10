@@ -359,8 +359,8 @@ mod tests {
     };
     use ploy_operator_contracts::{
         DeploymentState, DesiredState, FillSnapshot, IntentPurpose, ObservedState, OrderSnapshot,
-        PnlSnapshotResponse, PositionSnapshotResponse, RiskSnapshotResponse,
-        TradingIntentSnapshot, TradingStateSnapshot,
+        PnlSnapshotResponse, PositionSnapshotResponse, RiskSnapshotResponse, TradingIntentSnapshot,
+        TradingStateSnapshot,
     };
     use ploy_trading::{OrderRecord, OrderState, TradeSide};
     use rust_decimal::Decimal;

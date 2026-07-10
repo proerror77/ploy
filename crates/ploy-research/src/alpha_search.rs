@@ -5,8 +5,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::autofactor::{
-    AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr, LlmPriorSpec,
     autofactor_runtime_contract_catalog, autofactor_target_horizon, factor_expr_hash,
+    AutoFactorDecision, AutoFactorOptions, AutoFactorReport, FactorExpr, LlmPriorSpec,
 };
 
 const ALPHA_SEARCH_ARTIFACT_VERSION: &str = "alpha_search_artifacts_v1";
@@ -1828,7 +1828,11 @@ fn normalized_positive(value: f64) -> f64 {
 }
 
 fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 fn ratio_usize(numerator: usize, denominator: usize) -> f64 {
@@ -2272,22 +2276,18 @@ mod tests {
         )
         .expect("write artifacts");
         assert_eq!(summary.candidate_count, 1);
-        assert!(
-            tmp.join("full_depth_settlement_executable_pnl/search-space.json")
-                .exists()
-        );
-        assert!(
-            tmp.join("full_depth_settlement_executable_pnl/tree-trace.json")
-                .exists()
-        );
-        assert!(
-            tmp.join("full_depth_settlement_executable_pnl/mcts-expansion-plan.json")
-                .exists()
-        );
-        assert!(
-            tmp.join("full_depth_settlement_executable_pnl/mcts-state.json")
-                .exists()
-        );
+        assert!(tmp
+            .join("full_depth_settlement_executable_pnl/search-space.json")
+            .exists());
+        assert!(tmp
+            .join("full_depth_settlement_executable_pnl/tree-trace.json")
+            .exists());
+        assert!(tmp
+            .join("full_depth_settlement_executable_pnl/mcts-expansion-plan.json")
+            .exists());
+        assert!(tmp
+            .join("full_depth_settlement_executable_pnl/mcts-state.json")
+            .exists());
         let registry_preview =
             tmp.join("full_depth_settlement_executable_pnl/factor-registry-preview.json");
         assert!(registry_preview.exists());
@@ -2430,11 +2430,9 @@ mod tests {
             runtime_contract_for_report(&report, "dsl-hash", &serde_json::json!({}), "5m");
         assert_eq!(contract["runtime_score"], "");
         let blockers = contract["blockers"].as_array().expect("blockers");
-        assert!(
-            blockers
-                .iter()
-                .any(|item| item.as_str() == Some("runtime_contract_unmapped_factor"))
-        );
+        assert!(blockers
+            .iter()
+            .any(|item| item.as_str() == Some("runtime_contract_unmapped_factor")));
     }
 
     #[test]
@@ -2480,11 +2478,9 @@ mod tests {
             "5m",
         );
         let blockers = contract["blockers"].as_array().expect("blockers");
-        assert!(
-            blockers
-                .iter()
-                .any(|item| item.as_str() == Some("runtime_input_not_supplied:iv_change_1m"))
-        );
+        assert!(blockers
+            .iter()
+            .any(|item| item.as_str() == Some("runtime_input_not_supplied:iv_change_1m")));
     }
 
     #[test]
@@ -2494,11 +2490,9 @@ mod tests {
             runtime_contract_for_report(&unsupported, "dsl-hash", &serde_json::json!({}), "5m");
         assert_eq!(contract["runtime_score"], "");
         let blockers = contract["blockers"].as_array().expect("blockers");
-        assert!(
-            blockers
-                .iter()
-                .any(|item| item.as_str() == Some("runtime_contract_unmapped_factor"))
-        );
+        assert!(blockers
+            .iter()
+            .any(|item| item.as_str() == Some("runtime_contract_unmapped_factor")));
         assert!(blockers.iter().any(|item| {
             item.as_str() == Some("runtime_contract_unsupported_predictive_suffix")
         }));
@@ -2883,12 +2877,10 @@ mod tests {
         );
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
-        assert!(
-            !plan
-                .selected_nodes
-                .iter()
-                .any(|node| node.factor_name == "mcts_spread_adjusted_external_move_near_strike")
-        );
+        assert!(!plan
+            .selected_nodes
+            .iter()
+            .any(|node| node.factor_name == "mcts_spread_adjusted_external_move_near_strike"));
         assert_eq!(
             plan.selected_nodes
                 .first()
@@ -2943,11 +2935,10 @@ mod tests {
         );
         let plan = mcts_expansion_plan("full_depth_settlement_executable_pnl", &metrics, &state);
 
-        assert!(
-            plan.selected_nodes
-                .iter()
-                .all(|node| !node.factor_name.contains("spread_adjusted_external_move"))
-        );
+        assert!(plan
+            .selected_nodes
+            .iter()
+            .all(|node| !node.factor_name.contains("spread_adjusted_external_move")));
         assert_eq!(
             plan.selected_nodes
                 .first()
@@ -3007,13 +2998,11 @@ mod tests {
                 metrics: serde_json::Value::Null,
             }],
         };
-        assert!(
-            matching_runtime_avoidance(
-                &selected_gate_variant,
-                &runtime_avoidances(None, Some(&selected_gate_prior))
-            )
-            .is_some()
-        );
+        assert!(matching_runtime_avoidance(
+            &selected_gate_variant,
+            &runtime_avoidances(None, Some(&selected_gate_prior))
+        )
+        .is_some());
     }
 
     #[test]

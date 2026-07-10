@@ -207,7 +207,7 @@ pub fn refresh_source_health(control_plane: &mut ControlPlane, listen_addr: &str
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkerTickConfig, refresh_source_health, tick_workers};
+    use super::{refresh_source_health, tick_workers, WorkerTickConfig};
     use ploy_deployments::WorkerSupervisor;
     use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
     use ploy_platform::{ControlPlane, DeploymentRecord};
@@ -325,16 +325,14 @@ mod tests {
             &config,
         );
 
-        assert!(
-            spec.command
+        assert!(spec
+            .command
             .file_name()
             .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("ploy-platform-runtime-test-runner-"))
-        );
-        assert!(
-            spec.args
-                .contains(&"config/strategies/02-pm5d.v2-dryrun.toml".to_string())
-        );
+            .is_some_and(|name| name.starts_with("ploy-platform-runtime-test-runner-")));
+        assert!(spec
+            .args
+            .contains(&"config/strategies/02-pm5d.v2-dryrun.toml".to_string()));
         let deployment_id_arg = spec
             .args
             .windows(2)

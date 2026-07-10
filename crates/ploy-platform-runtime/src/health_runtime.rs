@@ -116,7 +116,7 @@ pub fn mark_live_runtime_degraded(
 #[cfg(test)]
 mod tests {
     use super::{
-        LiveHealthConfig, mark_live_runtime_degraded, mark_runtime_healthy, next_live_reconcile_at,
+        mark_live_runtime_degraded, mark_runtime_healthy, next_live_reconcile_at, LiveHealthConfig,
     };
     use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
     use ploy_platform::{ControlPlane, DeploymentRecord};

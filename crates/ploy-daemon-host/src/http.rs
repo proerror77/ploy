@@ -1,15 +1,15 @@
 use crate::events::EventBroker;
-use crate::runtime::{PloyDaemon, next_paper_intent_id};
+use crate::runtime::{next_paper_intent_id, PloyDaemon};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use ploy_operator_contracts::{
-    AgentRunCreateRequest, AgentRunCreateResponse, AgentRunRecord, AlertSnapshotEvent,
-    AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
-    DeploymentDiagnosticsReport, DeploymentSnapshotEvent, DiagnosticsEvidence, DiagnosticsFinding,
-    DryRunPerformanceReport, IntentPurpose, MetricsSnapshotEvent, OperatorEvent,
-    OrderReplaceRequest, OversightSnapshotEvent, PaperIntentRequest, PlatformDiagnosticsReport,
-    ProposalCreateRequest, ProposalDecisionRequest, ProposalSnapshotEvent, StatusUpdate,
-    SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent, compute_oversight_report,
+    compute_oversight_report, AgentRunCreateRequest, AgentRunCreateResponse, AgentRunRecord,
+    AlertSnapshotEvent, AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest,
+    DeploymentControlRequest, DeploymentDiagnosticsReport, DeploymentSnapshotEvent,
+    DiagnosticsEvidence, DiagnosticsFinding, DryRunPerformanceReport, IntentPurpose,
+    MetricsSnapshotEvent, OperatorEvent, OrderReplaceRequest, OversightSnapshotEvent,
+    PaperIntentRequest, PlatformDiagnosticsReport, ProposalCreateRequest, ProposalDecisionRequest,
+    ProposalSnapshotEvent, StatusUpdate, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
 };
 use ploy_trading::{TradeSide, TradingIntent};
 use secrecy::{ExposeSecret, SecretString};
@@ -502,21 +502,24 @@ pub fn handle_api_request(
 
             match PloyDaemon::boot(config) {
                 Ok(mut daemon) => {
-                    let response = daemon.submit_intent_idempotent(TradingIntent {
-                        intent_id: request
-                            .idempotency_key
-                            .as_deref()
-                            .map(|key| format!("request-{key}"))
-                            .unwrap_or_else(|| next_paper_intent_id(deployment_id)),
-                        deployment_id: deployment_id.to_string(),
-                        market_id: request.market_id,
-                        token_id: request.token_id,
-                        side,
-                        quantity: request.quantity,
-                        limit_price: request.limit_price,
-                        purpose: intent_purpose_from_wire(request.purpose),
-                        created_at: chrono::Utc::now(),
-                    }, request.idempotency_key.as_deref());
+                    let response = daemon.submit_intent_idempotent(
+                        TradingIntent {
+                            intent_id: request
+                                .idempotency_key
+                                .as_deref()
+                                .map(|key| format!("request-{key}"))
+                                .unwrap_or_else(|| next_paper_intent_id(deployment_id)),
+                            deployment_id: deployment_id.to_string(),
+                            market_id: request.market_id,
+                            token_id: request.token_id,
+                            side,
+                            quantity: request.quantity,
+                            limit_price: request.limit_price,
+                            purpose: intent_purpose_from_wire(request.purpose),
+                            created_at: chrono::Utc::now(),
+                        },
+                        request.idempotency_key.as_deref(),
+                    );
                     match response {
                         Ok(response) => (
                             200,
@@ -2053,7 +2056,11 @@ fn handle_runtime_request(
                 || request.budget_usd <= 0.0
                 || request.budget_usd > 1.0
             {
-                return json_error(400, "agent_run_limits_exceeded", Some("max_turns must be 1..=30 and budget_usd must be (0, 1]".to_string()));
+                return json_error(
+                    400,
+                    "agent_run_limits_exceeded",
+                    Some("max_turns must be 1..=30 and budget_usd must be (0, 1]".to_string()),
+                );
             }
             match queue_agent_run_request(state, request) {
                 Ok(response) => (
@@ -2344,21 +2351,24 @@ fn handle_runtime_request(
 
             match state.daemon.lock() {
                 Ok(mut daemon) => {
-                    let response = daemon.submit_intent_idempotent(TradingIntent {
-                        intent_id: request
-                            .idempotency_key
-                            .as_deref()
-                            .map(|key| format!("request-{key}"))
-                            .unwrap_or_else(|| next_paper_intent_id(deployment_id)),
-                        deployment_id: deployment_id.to_string(),
-                        market_id: request.market_id,
-                        token_id: request.token_id,
-                        side,
-                        quantity: request.quantity,
-                        limit_price: request.limit_price,
-                        purpose: intent_purpose_from_wire(request.purpose),
-                        created_at: chrono::Utc::now(),
-                    }, request.idempotency_key.as_deref());
+                    let response = daemon.submit_intent_idempotent(
+                        TradingIntent {
+                            intent_id: request
+                                .idempotency_key
+                                .as_deref()
+                                .map(|key| format!("request-{key}"))
+                                .unwrap_or_else(|| next_paper_intent_id(deployment_id)),
+                            deployment_id: deployment_id.to_string(),
+                            market_id: request.market_id,
+                            token_id: request.token_id,
+                            side,
+                            quantity: request.quantity,
+                            limit_price: request.limit_price,
+                            purpose: intent_purpose_from_wire(request.purpose),
+                            created_at: chrono::Utc::now(),
+                        },
+                        request.idempotency_key.as_deref(),
+                    );
                     publish_snapshot_events(&daemon, &state.events);
                     match response {
                         Ok(response) => (
@@ -2550,11 +2560,10 @@ fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        ADMIN_SESSION_COOKIE_NAME, AppState, AuthLevel, RateLimiter, admin_session_cookie,
-        access_allowed, append_audit_entry, content_length, handle_api_request,
-        handle_authenticated_runtime_request, handle_runtime_request, header_end_offset,
-        client_ip, rate_limit_key, request_auth_level, response_headers, route_request,
-        snapshot_events,
+        access_allowed, admin_session_cookie, append_audit_entry, client_ip, content_length,
+        handle_api_request, handle_authenticated_runtime_request, handle_runtime_request,
+        header_end_offset, rate_limit_key, request_auth_level, response_headers, route_request,
+        snapshot_events, AppState, AuthLevel, RateLimiter, ADMIN_SESSION_COOKIE_NAME,
     };
     use crate::events::EventBroker;
     use chrono::{Duration, Utc};
@@ -2947,13 +2956,11 @@ mod tests {
             Some("secret-token"),
             "cookie-secret",
         );
-        assert!(
-            login_headers
-                .iter()
-                .any(|(name, value)| name == "Set-Cookie"
-                    && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=v1."))
-                    && !value.contains("secret-token"))
-        );
+        assert!(login_headers
+            .iter()
+            .any(|(name, value)| name == "Set-Cookie"
+                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=v1."))
+                && !value.contains("secret-token")));
 
         let logout_headers = response_headers(
             "POST",
@@ -2962,13 +2969,11 @@ mod tests {
             Some("secret-token"),
             "cookie-secret",
         );
-        assert!(
-            logout_headers
-                .iter()
-                .any(|(name, value)| name == "Set-Cookie"
-                    && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
-                    && value.contains("Max-Age=0"))
-        );
+        assert!(logout_headers
+            .iter()
+            .any(|(name, value)| name == "Set-Cookie"
+                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
+                && value.contains("Max-Age=0")));
     }
 
     #[test]
@@ -3306,16 +3311,12 @@ mod tests {
         assert_eq!(alerts_code, 200);
         let alerts: Vec<ploy_operator_contracts::ActiveAlert> =
             serde_json::from_str(&alerts_body).expect("alerts json");
-        assert!(
-            alerts
-                .iter()
-                .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale)
-        );
-        assert!(
-            alerts
-                .iter()
-                .any(|alert| alert.source_id.contains("live_reconcile"))
-        );
+        assert!(alerts
+            .iter()
+            .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale));
+        assert!(alerts
+            .iter()
+            .any(|alert| alert.source_id.contains("live_reconcile")));
     }
 
     #[test]
@@ -3848,33 +3849,29 @@ mod tests {
         fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
         fs::write(&registry_file, "[]").expect("registry");
         let valid_run = serde_json::json!({
-                "run_id": "run-nullable",
-                "cycle_kind": "research_oversight",
-                "status": "started",
-                "started_at": Utc::now(),
-                "finished_at": null,
-                "session_id": null,
-                "model": "sonnet",
-                "platform_status": null,
-                "deployment_count": 0,
-                "oversight_signal_count": 0,
-                "oversight_playbook_count": 0,
-                "total_cost_usd": null,
-                "tool_calls": [],
-                "research_reports": 0,
-                "oversight_alerts": 0,
-                "operator_recommendations": 0,
-                "failure_reason": null,
-                "runtime_context": null,
-                "output_summary": null,
-                "evaluation": null
-            })
-            .to_string();
-        fs::write(
-            &agent_runs_file,
-            format!("{{broken json\n{valid_run}\n"),
-        )
-        .expect("agent runs");
+            "run_id": "run-nullable",
+            "cycle_kind": "research_oversight",
+            "status": "started",
+            "started_at": Utc::now(),
+            "finished_at": null,
+            "session_id": null,
+            "model": "sonnet",
+            "platform_status": null,
+            "deployment_count": 0,
+            "oversight_signal_count": 0,
+            "oversight_playbook_count": 0,
+            "total_cost_usd": null,
+            "tool_calls": [],
+            "research_reports": 0,
+            "oversight_alerts": 0,
+            "operator_recommendations": 0,
+            "failure_reason": null,
+            "runtime_context": null,
+            "output_summary": null,
+            "evaluation": null
+        })
+        .to_string();
+        fs::write(&agent_runs_file, format!("{{broken json\n{valid_run}\n")).expect("agent runs");
 
         let config = crate::config::PlatformConfig {
             registry_file,
@@ -4015,7 +4012,8 @@ mod tests {
             "target_evidence":"diagnostic", "symbols":["BTCUSDT"], "max_turns":31,
             "budget_usd":1.0, "run_packet":"packet", "run_contract":"contract"
         }).to_string();
-        let (status_code, body) = handle_runtime_request("POST", "/api/agent/runs", Some(&over_limit), &state);
+        let (status_code, body) =
+            handle_runtime_request("POST", "/api/agent/runs", Some(&over_limit), &state);
         assert_eq!(status_code, 400);
         assert!(body.contains("agent_run_limits_exceeded"));
 
@@ -4029,7 +4027,8 @@ mod tests {
                 "autonomy_mode":"research_until_blocked", "target_evidence":"diagnostic",
                 "symbols":["BTCUSDT"], "max_turns":max_turns, "budget_usd":budget_usd,
                 "run_packet":"packet", "run_contract":"contract"
-            }).to_string();
+            })
+            .to_string();
             let (status_code, body) =
                 handle_runtime_request("POST", "/api/agent/runs", Some(&invalid), &state);
             assert_eq!(status_code, 400);

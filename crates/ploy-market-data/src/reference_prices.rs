@@ -128,10 +128,10 @@ pub async fn latest_reference_price(
 #[cfg(test)]
 mod tests {
     use super::{
-        ReferenceAssetClass, ReferencePriceKey, ReferencePriceSnapshot, ReferencePriceSource,
         infer_pyth_asset_class, latest_reference_price, market_symbol_to_binance_symbol,
         market_symbol_to_chainlink_symbol, new_reference_price_registry, pyth_symbol,
-        upsert_reference_price,
+        upsert_reference_price, ReferenceAssetClass, ReferencePriceKey, ReferencePriceSnapshot,
+        ReferencePriceSource,
     };
     use chrono::{TimeZone, Utc};
     use rust_decimal_macros::dec;

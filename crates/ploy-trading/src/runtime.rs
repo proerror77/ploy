@@ -184,13 +184,11 @@ impl TradingRuntime {
             ));
         }
         if matches!(intent.purpose, IntentPurpose::Reduce | IntentPurpose::Exit)
-            && !self
-                .positions
-                .can_reduce(
-                    &intent.token_id,
-                    intent.side,
-                    intent.quantity + self.reserved_reduction_qty(&intent, None),
-                )
+            && !self.positions.can_reduce(
+                &intent.token_id,
+                intent.side,
+                intent.quantity + self.reserved_reduction_qty(&intent, None),
+            )
         {
             return Err(TradingRuntimeError::InvalidIntent(
                 "reduce or exit must decrease an existing position without flipping it",
@@ -255,14 +253,20 @@ impl TradingRuntime {
             .filter(|order| {
                 matches!(
                     order.state,
-                    OrderState::Pending | OrderState::Unknown | OrderState::Acknowledged | OrderState::PartiallyFilled
+                    OrderState::Pending
+                        | OrderState::Unknown
+                        | OrderState::Acknowledged
+                        | OrderState::PartiallyFilled
                 ) && order.token_id == intent.token_id
                     && excluded_order_id != Some(order.order_id.as_str())
             })
             .filter(|order| {
                 self.intent(&order.intent_id).is_some_and(|existing| {
                     existing.side == intent.side
-                        && matches!(existing.purpose, IntentPurpose::Reduce | IntentPurpose::Exit)
+                        && matches!(
+                            existing.purpose,
+                            IntentPurpose::Reduce | IntentPurpose::Exit
+                        )
                 })
             })
             .map(|order| (order.requested_qty - order.filled_qty).max(Decimal::ZERO))
@@ -367,7 +371,10 @@ impl TradingRuntime {
             .filter(|order| {
                 matches!(
                     order.state,
-                    OrderState::Pending | OrderState::Unknown | OrderState::Acknowledged | OrderState::PartiallyFilled
+                    OrderState::Pending
+                        | OrderState::Unknown
+                        | OrderState::Acknowledged
+                        | OrderState::PartiallyFilled
                 )
             })
             .filter(|order| {
@@ -402,9 +409,7 @@ impl TradingRuntime {
         if fill.fill_id.trim().is_empty() || self.fills.contains(&fill.fill_id) {
             return false;
         }
-        if fill.quantity <= Decimal::ZERO
-            || fill.price <= Decimal::ZERO
-            || fill.fee < Decimal::ZERO
+        if fill.quantity <= Decimal::ZERO || fill.price <= Decimal::ZERO || fill.fee < Decimal::ZERO
         {
             return false;
         }
@@ -629,21 +634,23 @@ mod tests {
     fn cancel_active_entry_orders_for_market_releases_expired_event_reserve() {
         let mut runtime = TradingRuntime::default();
         let opened_at = Utc::now();
-        runtime.submit_intent(
-            TradingIntent {
-                intent_id: "entry-expired".to_string(),
-                deployment_id: "example.replay".to_string(),
-                market_id: "expired-event".to_string(),
-                token_id: "token-expired".to_string(),
-                side: TradeSide::Buy,
-                quantity: dec!(10),
-                limit_price: Some(dec!(0.60)),
-                purpose: IntentPurpose::Entry,
-                created_at: opened_at,
-            },
-            "order-expired",
-            None,
-        ).expect("valid intent");
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "entry-expired".to_string(),
+                    deployment_id: "example.replay".to_string(),
+                    market_id: "expired-event".to_string(),
+                    token_id: "token-expired".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(10),
+                    limit_price: Some(dec!(0.60)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: opened_at,
+                },
+                "order-expired",
+                None,
+            )
+            .expect("valid intent");
         runtime.acknowledge_order("order-expired", "venue-expired");
         assert!(runtime.record_fill(FillRecord {
             fill_id: "fill-expired-partial".to_string(),
@@ -656,21 +663,23 @@ mod tests {
             timestamp: opened_at,
         }));
 
-        runtime.submit_intent(
-            TradingIntent {
-                intent_id: "entry-live".to_string(),
-                deployment_id: "example.replay".to_string(),
-                market_id: "live-event".to_string(),
-                token_id: "token-live".to_string(),
-                side: TradeSide::Buy,
-                quantity: dec!(2),
-                limit_price: Some(dec!(0.50)),
-                purpose: IntentPurpose::Entry,
-                created_at: opened_at,
-            },
-            "order-live",
-            None,
-        ).expect("valid intent");
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "entry-live".to_string(),
+                    deployment_id: "example.replay".to_string(),
+                    market_id: "live-event".to_string(),
+                    token_id: "token-live".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(2),
+                    limit_price: Some(dec!(0.50)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: opened_at,
+                },
+                "order-live",
+                None,
+            )
+            .expect("valid intent");
         runtime.acknowledge_order("order-live", "venue-live");
 
         let before = runtime.snapshot(&BTreeMap::new()).risk;
@@ -682,10 +691,7 @@ mod tests {
             1
         );
         assert_eq!(
-            runtime
-                .order("order-expired")
-                .expect("expired order")
-                .state,
+            runtime.order("order-expired").expect("expired order").state,
             OrderState::Canceled
         );
         assert_eq!(
@@ -730,21 +736,23 @@ mod tests {
     #[test]
     fn closed_position_intents_are_pruned_from_lookup() {
         let mut runtime = TradingRuntime::default();
-        runtime.submit_intent(
-            TradingIntent {
-                intent_id: "intent-1".to_string(),
-                deployment_id: "dep-1".to_string(),
-                market_id: "market-1".to_string(),
-                token_id: "token-1".to_string(),
-                side: TradeSide::Buy,
-                quantity: dec!(1),
-                limit_price: Some(dec!(0.40)),
-                purpose: IntentPurpose::Entry,
-                created_at: Utc::now(),
-            },
-            "order-1",
-            None,
-        ).expect("valid intent");
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "intent-1".to_string(),
+                    deployment_id: "dep-1".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(1),
+                    limit_price: Some(dec!(0.40)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: Utc::now(),
+                },
+                "order-1",
+                None,
+            )
+            .expect("valid intent");
         runtime.acknowledge_order("order-1", "venue-1");
         assert!(runtime.intent("intent-1").is_some());
 
@@ -760,21 +768,23 @@ mod tests {
         });
         assert!(runtime.intent("intent-1").is_some());
 
-        runtime.submit_intent(
-            TradingIntent {
-                intent_id: "intent-exit".to_string(),
-                deployment_id: "dep-1".to_string(),
-                market_id: "market-1".to_string(),
-                token_id: "token-1".to_string(),
-                side: TradeSide::Sell,
-                quantity: dec!(1),
-                limit_price: Some(dec!(0.60)),
-                purpose: IntentPurpose::Exit,
-                created_at: Utc::now(),
-            },
-            "order-exit",
-            None,
-        ).expect("valid intent");
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "intent-exit".to_string(),
+                    deployment_id: "dep-1".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Sell,
+                    quantity: dec!(1),
+                    limit_price: Some(dec!(0.60)),
+                    purpose: IntentPurpose::Exit,
+                    created_at: Utc::now(),
+                },
+                "order-exit",
+                None,
+            )
+            .expect("valid intent");
         runtime.acknowledge_order("order-exit", "venue-exit");
         runtime.record_fill(FillRecord {
             fill_id: "fill-2".to_string(),
@@ -793,21 +803,23 @@ mod tests {
     #[test]
     fn price_improved_buy_fill_can_exceed_requested_shares_within_notional_cap() {
         let mut runtime = TradingRuntime::default();
-        runtime.submit_intent(
-            TradingIntent {
-                intent_id: "intent-buy".to_string(),
-                deployment_id: "dep-1".to_string(),
-                market_id: "market-1".to_string(),
-                token_id: "token-1".to_string(),
-                side: TradeSide::Buy,
-                quantity: dec!(28.30),
-                limit_price: Some(dec!(0.53)),
-                purpose: IntentPurpose::Entry,
-                created_at: Utc::now(),
-            },
-            "order-buy",
-            None,
-        ).expect("valid intent");
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "intent-buy".to_string(),
+                    deployment_id: "dep-1".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(28.30),
+                    limit_price: Some(dec!(0.53)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: Utc::now(),
+                },
+                "order-buy",
+                None,
+            )
+            .expect("valid intent");
         runtime.acknowledge_order("order-buy", "venue-buy");
 
         let recorded = runtime.record_fill(FillRecord {
@@ -833,21 +845,23 @@ mod tests {
     #[test]
     fn price_improved_buy_overfill_still_rejects_above_notional_cap() {
         let mut runtime = TradingRuntime::default();
-        runtime.submit_intent(
-            TradingIntent {
-                intent_id: "intent-buy".to_string(),
-                deployment_id: "dep-1".to_string(),
-                market_id: "market-1".to_string(),
-                token_id: "token-1".to_string(),
-                side: TradeSide::Buy,
-                quantity: dec!(28.30),
-                limit_price: Some(dec!(0.53)),
-                purpose: IntentPurpose::Entry,
-                created_at: Utc::now(),
-            },
-            "order-buy",
-            None,
-        ).expect("valid intent");
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "intent-buy".to_string(),
+                    deployment_id: "dep-1".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(28.30),
+                    limit_price: Some(dec!(0.53)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: Utc::now(),
+                },
+                "order-buy",
+                None,
+            )
+            .expect("valid intent");
         runtime.acknowledge_order("order-buy", "venue-buy");
 
         let recorded = runtime.record_fill(FillRecord {
@@ -1012,22 +1026,23 @@ mod tests {
         let mut runtime = TradingRuntime::default();
         let before = runtime.snapshot(&BTreeMap::new());
 
-        runtime.submit_intent(
-            TradingIntent {
-                intent_id: "cancel-1".to_string(),
-                deployment_id: "dep-1".to_string(),
-                market_id: "market-1".to_string(),
-                token_id: "token-1".to_string(),
-                side: TradeSide::Sell,
-                quantity: dec!(1),
-                limit_price: Some(dec!(0.40)),
-                purpose: IntentPurpose::Cancel,
-                created_at: Utc::now(),
-            },
-            "order-cancel",
-            None,
-        )
-        .expect_err("cancel cannot submit");
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "cancel-1".to_string(),
+                    deployment_id: "dep-1".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Sell,
+                    quantity: dec!(1),
+                    limit_price: Some(dec!(0.40)),
+                    purpose: IntentPurpose::Cancel,
+                    created_at: Utc::now(),
+                },
+                "order-cancel",
+                None,
+            )
+            .expect_err("cancel cannot submit");
 
         assert_eq!(runtime.snapshot(&BTreeMap::new()), before);
     }
@@ -1035,21 +1050,23 @@ mod tests {
     #[test]
     fn exit_cannot_increase_or_flip_position() {
         let mut runtime = TradingRuntime::default();
-        runtime.submit_intent(
-            TradingIntent {
-                intent_id: "entry-1".to_string(),
-                deployment_id: "dep-1".to_string(),
-                market_id: "market-1".to_string(),
-                token_id: "token-1".to_string(),
-                side: TradeSide::Buy,
-                quantity: dec!(2),
-                limit_price: Some(dec!(0.40)),
-                purpose: IntentPurpose::Entry,
-                created_at: Utc::now(),
-            },
-            "order-entry",
-            None,
-        ).expect("valid intent");
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "entry-1".to_string(),
+                    deployment_id: "dep-1".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(2),
+                    limit_price: Some(dec!(0.40)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: Utc::now(),
+                },
+                "order-entry",
+                None,
+            )
+            .expect("valid intent");
         assert!(runtime.record_fill(FillRecord {
             fill_id: "fill-entry".to_string(),
             order_id: "order-entry".to_string(),
@@ -1066,22 +1083,23 @@ mod tests {
             ("exit-increase", "order-increase", TradeSide::Buy, dec!(1)),
             ("exit-flip", "order-flip", TradeSide::Sell, dec!(3)),
         ] {
-            runtime.submit_intent(
-                TradingIntent {
-                    intent_id: intent_id.to_string(),
-                    deployment_id: "dep-1".to_string(),
-                    market_id: "market-1".to_string(),
-                    token_id: "token-1".to_string(),
-                    side,
-                    quantity,
-                    limit_price: Some(dec!(0.40)),
-                    purpose: IntentPurpose::Exit,
-                    created_at: Utc::now(),
-                },
-                order_id,
-                None,
-            )
-            .expect_err("invalid exit");
+            runtime
+                .submit_intent(
+                    TradingIntent {
+                        intent_id: intent_id.to_string(),
+                        deployment_id: "dep-1".to_string(),
+                        market_id: "market-1".to_string(),
+                        token_id: "token-1".to_string(),
+                        side,
+                        quantity,
+                        limit_price: Some(dec!(0.40)),
+                        purpose: IntentPurpose::Exit,
+                        created_at: Utc::now(),
+                    },
+                    order_id,
+                    None,
+                )
+                .expect_err("invalid exit");
             assert_eq!(runtime.snapshot(&BTreeMap::new()), before);
         }
     }
@@ -1158,21 +1176,23 @@ mod tests {
     #[test]
     fn fill_token_side_and_numeric_invariants_are_enforced() {
         let mut runtime = TradingRuntime::default();
-        runtime.submit_intent(
-            TradingIntent {
-                intent_id: "intent-1".to_string(),
-                deployment_id: "dep-1".to_string(),
-                market_id: "market-1".to_string(),
-                token_id: "token-1".to_string(),
-                side: TradeSide::Buy,
-                quantity: dec!(2),
-                limit_price: Some(dec!(0.40)),
-                purpose: IntentPurpose::Entry,
-                created_at: Utc::now(),
-            },
-            "order-1",
-            None,
-        ).expect("valid intent");
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "intent-1".to_string(),
+                    deployment_id: "dep-1".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(2),
+                    limit_price: Some(dec!(0.40)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: Utc::now(),
+                },
+                "order-1",
+                None,
+            )
+            .expect("valid intent");
         let before = runtime.snapshot(&BTreeMap::new());
         let valid = FillRecord {
             fill_id: String::new(),

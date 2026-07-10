@@ -181,8 +181,7 @@ mod tests {
     use super::{submit_live_intent, submit_paper_intent};
     use ploy_connectivity::{
         CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
-        ExecutionRequest, LiveExecutionGateway, ReplaceOutcome, ReplaceRequest,
-        TrackedOrder,
+        ExecutionRequest, LiveExecutionGateway, ReplaceOutcome, ReplaceRequest, TrackedOrder,
     };
     use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
     use ploy_platform::DeploymentRecord;
@@ -305,7 +304,7 @@ mod tests {
         retry.intent_id = "intent-2".to_string();
         let second =
             submit_paper_intent(&mut runtime, &paper_deployment(), retry, Some("request-1"))
-        .expect("idempotent retry");
+                .expect("idempotent retry");
 
         assert_eq!(second, first);
         assert_eq!(runtime.orders().orders().count(), 1);
@@ -316,9 +315,9 @@ mod tests {
         let mut runtime = TradingRuntime::default();
         let gateway = CountingGateway::default();
         let first = submit_live_intent(&mut runtime, &gateway, intent(), Some("request-1"))
-        .expect("first submit");
+            .expect("first submit");
         let second = submit_live_intent(&mut runtime, &gateway, intent(), Some("request-1"))
-        .expect("idempotent replay");
+            .expect("idempotent replay");
 
         assert_eq!(second, first);
         assert_eq!(gateway.submits.load(Ordering::SeqCst), 1);
@@ -356,13 +355,9 @@ mod tests {
         let snapshot = runtime.snapshot(&Default::default());
         let mut restored = TradingRuntime::restore(snapshot);
         let replay_gateway = CountingGateway::default();
-        let replay = submit_live_intent(
-            &mut restored,
-            &replay_gateway,
-            intent(),
-            Some("request-1"),
-        )
-            .expect("durable replay");
+        let replay =
+            submit_live_intent(&mut restored, &replay_gateway, intent(), Some("request-1"))
+                .expect("durable replay");
 
         assert_eq!(first.state, "unknown");
         assert_eq!(replay.order_id, first.order_id);

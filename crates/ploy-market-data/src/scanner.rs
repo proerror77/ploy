@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use ploy_market_contracts::MarketUpdate;
-use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::gamma::types::request::MarketsRequest;
+use polymarket_client_sdk::gamma::Client as GammaClient;
 use polymarket_client_sdk::types::U256;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -21,12 +21,12 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::discovery::crypto::DiscoveredCryptoMarket;
 use crate::discovery::crypto::discover_crypto_markets;
+use crate::discovery::crypto::DiscoveredCryptoMarket;
 use crate::discovery::sports::discover_sports_markets;
 use crate::discovery::upsert_market_catalog;
 use crate::feeds::spawn_quote_feed_until;
-use crate::reference_prices::{ReferencePriceRegistry, new_reference_price_registry};
+use crate::reference_prices::{new_reference_price_registry, ReferencePriceRegistry};
 
 const SCAN_INTERVAL_SECS: u64 = 30;
 const SPORTS_DISCOVERY_REFRESH_SECS: i64 = 300;
@@ -783,19 +783,17 @@ mod tests {
     use polymarket_client_sdk::ToQueryParams;
 
     use super::{
-        CRYPTO_DISCOVERY_PAGE_LIMIT, CRYPTO_MARKET_CATEGORY, MarketDiscoveryCollectorConfig,
         crypto_markets_request, extend_quote_feed_stop_at, parse_token_id, quote_feed_deadline,
-        should_refresh_sports_catalog,
+        should_refresh_sports_catalog, MarketDiscoveryCollectorConfig, CRYPTO_DISCOVERY_PAGE_LIMIT,
+        CRYPTO_MARKET_CATEGORY,
     };
 
     #[test]
     fn token_id_parser_accepts_decimal_strings() {
-        assert!(
-            parse_token_id(
-                "27239049953613250678046988034203198692578441444398010699401021233149338414941"
-            )
-            .is_some()
-        );
+        assert!(parse_token_id(
+            "27239049953613250678046988034203198692578441444398010699401021233149338414941"
+        )
+        .is_some());
         assert!(parse_token_id("not-a-token").is_none());
     }
 

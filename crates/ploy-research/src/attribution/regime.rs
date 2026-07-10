@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use crate::backtest::engine::SimulatedFill;
 use ploy_operator_contracts::Regime;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Default)]
 pub struct RegimePnl {
@@ -11,7 +11,11 @@ pub struct RegimePnl {
 
 impl RegimePnl {
     pub fn win_rate(&self) -> f64 {
-        if self.trade_count == 0 { 0.0 } else { self.win_count as f64 / self.trade_count as f64 }
+        if self.trade_count == 0 {
+            0.0
+        } else {
+            self.win_count as f64 / self.trade_count as f64
+        }
     }
 }
 
@@ -21,7 +25,9 @@ pub fn regime_pnl(fills: &[SimulatedFill]) -> BTreeMap<Regime, RegimePnl> {
         let e = map.entry(f.regime).or_default();
         e.trade_count += 1;
         e.total_pnl += f.pnl;
-        if f.pnl > 0.0 { e.win_count += 1; }
+        if f.pnl > 0.0 {
+            e.win_count += 1;
+        }
     }
     map
 }
@@ -30,13 +36,17 @@ pub fn regime_pnl(fills: &[SimulatedFill]) -> BTreeMap<Regime, RegimePnl> {
 mod tests {
     use super::*;
     use crate::backtest::engine::SimulatedFill;
-    use ploy_operator_contracts::Regime;
     use crate::signal::traits::Signal;
+    use ploy_operator_contracts::Regime;
 
     fn fill(regime: Regime, pnl: f64) -> SimulatedFill {
         SimulatedFill {
-            event_id: "e".into(), regime, signal: Signal::Buy,
-            entry_price: 0.5, settled_up: pnl > 0.0, pnl,
+            event_id: "e".into(),
+            regime,
+            signal: Signal::Buy,
+            entry_price: 0.5,
+            settled_up: pnl > 0.0,
+            pnl,
         }
     }
 

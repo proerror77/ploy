@@ -154,8 +154,10 @@ impl OrderLedger {
         error: impl Into<String>,
     ) -> Option<&OrderRecord> {
         let record = self.orders.get_mut(order_id)?;
-        if !matches!(record.state, OrderState::Filled | OrderState::Canceled | OrderState::Rejected)
-        {
+        if !matches!(
+            record.state,
+            OrderState::Filled | OrderState::Canceled | OrderState::Rejected
+        ) {
             record.state = OrderState::Unknown;
             record.last_error = Some(error.into());
         }
@@ -194,7 +196,10 @@ impl OrderLedger {
             .filter(|record| {
                 matches!(
                     record.state,
-                    OrderState::Pending | OrderState::Unknown | OrderState::Acknowledged | OrderState::PartiallyFilled
+                    OrderState::Pending
+                        | OrderState::Unknown
+                        | OrderState::Acknowledged
+                        | OrderState::PartiallyFilled
                 )
             })
             .count()

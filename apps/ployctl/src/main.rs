@@ -210,7 +210,7 @@ fn execute(command: Command, client: &ControlPlaneClient) -> Result<String, Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, execute};
+    use super::{execute, Command};
     use ployctl::client::ControlPlaneClient;
     use std::fs;
     use std::path::PathBuf;
