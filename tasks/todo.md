@@ -25,7 +25,7 @@ Plan: docs/superpowers/plans/2026-07-10-comprehensive-safety-hardening.md
 - [x] Task 4: Make API/workflow security fail closed.
 - [x] Task 5: Align the frontend with canonical routes and visible errors.
 - [x] Task 6: Bound Sidecar execution, queue replay, and self-mod approvals.
-- [ ] Task 7: Enforce CI/audit/format gates and complete final review.
+- [x] Task 7: Enforce CI/audit/format gates and complete final review.
 
 ## Baseline
 
@@ -49,7 +49,14 @@ Plan: docs/superpowers/plans/2026-07-10-comprehensive-safety-hardening.md
   clean and the largest JavaScript chunk is 228.36 kB.
 - Task 6 complete in `22f04d5a`: final review approved; Sidecar contracts,
   self-tests, build, and production audit all pass with zero vulnerabilities.
-- Task 7 pending implementation and final branch review.
+- Task 7 complete in `34923ade` and `29b5eade`: final task review approved.
+  Rust formatting, generated contracts, CI safety gates, workflow scans, and
+  the rustls-webpki update are verified. `actionlint` is not installed locally;
+  YAML parsing, embedded shell syntax, and workflow regressions passed.
+- Raw cargo audit has one no-fix advisory, `RUSTSEC-2023-0071`, reachable only
+  through the workspace-disabled `sqlx-mysql` feature; CI retains one explicit
+  documented exception and no rustls/webpki exceptions.
+- All implementation tasks complete; final whole-branch review pending.
 
 
 # Current Session - Codex CLI Sidecar Engine (2026-07-09)
