@@ -1,3 +1,44 @@
+# Current Session - Comprehensive Safety Hardening (2026-07-10)
+
+Evidence stage: implementation hardening. The repository-wide review found
+live-execution, authentication, operator-contract, Sidecar durability, and CI
+gaps that must be closed before any live deployment is resumed.
+
+Plan: docs/superpowers/plans/2026-07-10-comprehensive-safety-hardening.md
+
+## Files / Ownership
+
+- Task 1: crates/ploy-trading, trading contracts, ID generation.
+- Task 2: deployment contracts, registry lifecycle, worker supervisor/tick.
+- Task 3: control client, canonical live submission, recording and restore.
+- Task 4: daemon auth/rate limiting and deployment workflows.
+- Task 5: ploy-frontend canonical API/UI paths.
+- Task 6: ploy-sidecar, OpenClaw heartbeat, agent-run admission.
+- Task 7: CI, dependency locks, formatting, final evidence.
+- Integrator only: this tasks/todo.md section and cross-task conflict resolution.
+
+## Tasks
+
+- [ ] Task 1: Enforce trading-domain invariants and collision-proof IDs.
+- [ ] Task 2: Type deployment modes and close lifecycle/spec drift.
+- [ ] Task 3: Centralize live submission, ambiguity handling, and restore.
+- [ ] Task 4: Make API/workflow security fail closed.
+- [ ] Task 5: Align the frontend with canonical routes and visible errors.
+- [ ] Task 6: Bound Sidecar execution, queue replay, and self-mod approvals.
+- [ ] Task 7: Enforce CI/audit/format gates and complete final review.
+
+## Baseline
+
+- Rust control/runtime baseline: 129 passed across 13 suites.
+- Frontend contracts, lint, and production build passed; main chunk was 802.53 kB.
+- Sidecar contracts and build passed.
+- No local PostgreSQL or live/remote action was used.
+
+## Review
+
+- Pending implementation and per-task review.
+
+
 # Current Session - Codex CLI Sidecar Engine (2026-07-09)
 
 Evidence stage: `diagnostic` sidecar runtime migration. Replace the old
