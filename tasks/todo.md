@@ -23,7 +23,7 @@ Plan: docs/superpowers/plans/2026-07-10-comprehensive-safety-hardening.md
 - [x] Task 2: Type deployment modes and close lifecycle/spec drift.
 - [x] Task 3: Centralize live submission, ambiguity handling, and restore.
 - [x] Task 4: Make API/workflow security fail closed.
-- [ ] Task 5: Align the frontend with canonical routes and visible errors.
+- [x] Task 5: Align the frontend with canonical routes and visible errors.
 - [ ] Task 6: Bound Sidecar execution, queue replay, and self-mod approvals.
 - [ ] Task 7: Enforce CI/audit/format gates and complete final review.
 
@@ -45,7 +45,9 @@ Plan: docs/superpowers/plans/2026-07-10-comprehensive-safety-hardening.md
   non-blocking contract naming/report-history observations remain.
 - Task 4 complete in `f5a89a24`: final spec/quality review approved; local
   `actionlint` remains unavailable, while YAML/bash/negative checks passed.
-- Tasks 5-7 pending implementation and per-task review.
+- Task 5 complete in `469bca2f`: final review approved; production audit is
+  clean and the largest JavaScript chunk is 228.36 kB.
+- Tasks 6-7 pending implementation and per-task review.
 
 
 # Current Session - Codex CLI Sidecar Engine (2026-07-09)
