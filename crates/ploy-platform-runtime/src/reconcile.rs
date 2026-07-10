@@ -108,7 +108,9 @@ mod tests {
                 created_at: chrono::Utc::now(),
             },
             "order-1",
-        );
+            None,
+        )
+        .expect("valid intent");
         runtime.acknowledge_order("order-1", "venue-1");
 
         let fill = FillRecord {

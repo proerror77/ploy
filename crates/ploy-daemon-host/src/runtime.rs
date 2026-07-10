@@ -14,7 +14,7 @@ use ploy_platform_runtime::{
     enforce_exposure_limit as enforce_intent_exposure_limit,
     ensure_intent_allowed, set_deployment_max_gross_exposure as set_record_max_gross_exposure,
     load_proposal_store, load_registry_records, load_trading_runtimes,
-    ProposalStore,
+    order_state_wire, ProposalStore,
     submit_live_intent as submit_live_runtime_intent,
     ReconcileStatus, build_trading_state_snapshot, submit_paper_intent as submit_paper_runtime_intent,
     write_json,
@@ -305,6 +305,30 @@ impl PloyDaemon {
     }
 
     pub fn submit_intent(&mut self, intent: TradingIntent) -> io::Result<PaperIntentResponse> {
+        self.submit_intent_idempotent(intent, None)
+    }
+
+    pub fn submit_intent_idempotent(
+        &mut self,
+        intent: TradingIntent,
+        idempotency_key: Option<&str>,
+    ) -> io::Result<PaperIntentResponse> {
+        if let Some(runtime) = self.trading.get(&intent.deployment_id) {
+            if let Some(order) = runtime
+                .idempotent_order(&intent, idempotency_key)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?
+            {
+                return Ok(PaperIntentResponse {
+                    deployment_id: intent.deployment_id,
+                    intent_id: order.intent_id.clone(),
+                    order_id: order.order_id.clone(),
+                    state: order_state_wire(order.state),
+                    venue_order_id: order.venue_order_id.clone(),
+                    rejection_reason: order.rejection_reason.clone(),
+                    last_error: order.last_error.clone(),
+                });
+            }
+        }
         let deployment = self
             .control_plane
             .deployments
@@ -319,8 +343,8 @@ impl PloyDaemon {
         )?;
 
         match deployment.runtime_mode.as_str() {
-            "paper" => self.submit_paper_intent(intent),
-            "live" => self.submit_live_intent(intent),
+            "paper" => self.submit_paper_intent_idempotent(intent, idempotency_key),
+            "live" => self.submit_live_intent(intent, idempotency_key),
             runtime_mode => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported runtime mode: {runtime_mode}"),
@@ -331,6 +355,14 @@ impl PloyDaemon {
     pub fn submit_paper_intent(
         &mut self,
         intent: TradingIntent,
+    ) -> io::Result<PaperIntentResponse> {
+        self.submit_paper_intent_idempotent(intent, None)
+    }
+
+    fn submit_paper_intent_idempotent(
+        &mut self,
+        intent: TradingIntent,
+        idempotency_key: Option<&str>,
     ) -> io::Result<PaperIntentResponse> {
         let deployment = self
             .control_plane
@@ -355,7 +387,7 @@ impl PloyDaemon {
             .trading
             .entry(intent.deployment_id.clone())
             .or_default();
-        submit_paper_runtime_intent(runtime, deployment, intent)
+        submit_paper_runtime_intent(runtime, deployment, intent, idempotency_key)
     }
 
     pub fn cancel_order(
@@ -408,12 +440,21 @@ impl PloyDaemon {
         )
     }
 
-    fn submit_live_intent(&mut self, intent: TradingIntent) -> io::Result<PaperIntentResponse> {
+    fn submit_live_intent(
+        &mut self,
+        intent: TradingIntent,
+        idempotency_key: Option<&str>,
+    ) -> io::Result<PaperIntentResponse> {
         let runtime = self
             .trading
             .entry(intent.deployment_id.clone())
             .or_default();
-        submit_live_runtime_intent(runtime, self.live_execution.as_ref(), intent)
+        submit_live_runtime_intent(
+            runtime,
+            self.live_execution.as_ref(),
+            intent,
+            idempotency_key,
+        )
     }
 
     pub fn reconcile_live_fills(&mut self) -> io::Result<ReconcileStatus> {
@@ -940,6 +981,70 @@ mod tests {
     }
 
     #[test]
+    fn idempotent_replay_precedes_current_state_gate_and_rejects_payload_mismatch() {
+        let root = temp_dir("idempotent-state-gate");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([{
+                "deployment_id": "example.paper",
+                "bundle_id": "example",
+                "runtime_mode": "paper",
+                "desired_state": "running",
+                "observed_state": "running"
+            }])
+            .to_string(),
+        )
+        .expect("write registry");
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            tick_interval_ms: 5,
+            ..PlatformConfig::default()
+        };
+        let make_intent = |intent_id: &str, quantity| TradingIntent {
+            intent_id: intent_id.to_string(),
+            deployment_id: "example.paper".to_string(),
+            market_id: "market-1".to_string(),
+            token_id: "yes-token".to_string(),
+            side: TradeSide::Buy,
+            quantity,
+            limit_price: Some(dec!(0.40)),
+            purpose: IntentPurpose::Entry,
+            created_at: chrono::Utc::now(),
+        };
+
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        let first = daemon
+            .submit_intent_idempotent(make_intent("intent-1", dec!(2)), Some("request-1"))
+            .expect("first submit");
+        daemon
+            .control_deployment(
+                "example.paper",
+                DeploymentControlRequest {
+                    desired_state: Some(DesiredState::Paused),
+                    deployment_state: None,
+                },
+            )
+            .expect("pause deployment");
+
+        let replay = daemon
+            .submit_intent_idempotent(make_intent("intent-2", dec!(2)), Some("request-1"))
+            .expect("replay bypasses current state gate");
+        assert_eq!(replay, first);
+
+        let mismatch = daemon
+            .submit_intent_idempotent(make_intent("intent-3", dec!(1)), Some("request-1"))
+            .expect_err("mismatched payload must reject");
+        assert!(mismatch.to_string().contains("idempotency key payload mismatch"));
+    }
+
+    #[test]
     fn daemon_routes_live_intent_into_acknowledged_order_snapshot() {
         let root = temp_dir("live-intent-ack");
         let runtime_root = root.join("run/platform");
@@ -1047,7 +1152,7 @@ mod tests {
                 side: TradeSide::Sell,
                 quantity: dec!(2),
                 limit_price: Some(dec!(0.55)),
-                purpose: IntentPurpose::Reduce,
+                purpose: IntentPurpose::Entry,
                 created_at: chrono::Utc::now(),
             })
             .expect("submit live intent");
@@ -1386,7 +1491,7 @@ mod tests {
                     bundle_id: "example".to_string(),
                     runtime_mode: "paper".to_string(),
                     account_id: "acct-shared".to_string(),
-                    max_gross_exposure: Some(dec!(5)),
+                    max_gross_exposure: Some(dec!(2.5)),
                     deployment_state: DeploymentState::Enabled,
                     desired_state: DesiredState::Running,
                 })
@@ -1401,7 +1506,7 @@ mod tests {
                 token_id: "yes-token".to_string(),
                 side: TradeSide::Buy,
                 quantity: dec!(4),
-                limit_price: Some(dec!(1)),
+                limit_price: Some(dec!(0.5)),
                 purpose: IntentPurpose::Entry,
                 created_at: chrono::Utc::now(),
             })
@@ -1415,7 +1520,7 @@ mod tests {
                 token_id: "no-token".to_string(),
                 side: TradeSide::Buy,
                 quantity: dec!(2),
-                limit_price: Some(dec!(1)),
+                limit_price: Some(dec!(0.5)),
                 purpose: IntentPurpose::Entry,
                 created_at: chrono::Utc::now(),
             })

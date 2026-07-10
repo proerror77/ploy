@@ -488,7 +488,7 @@ pub fn handle_api_request(
 
             match PloyDaemon::boot(config) {
                 Ok(mut daemon) => {
-                    let response = daemon.submit_intent(TradingIntent {
+                    let response = daemon.submit_intent_idempotent(TradingIntent {
                         intent_id: next_paper_intent_id(deployment_id),
                         deployment_id: deployment_id.to_string(),
                         market_id: request.market_id,
@@ -498,7 +498,7 @@ pub fn handle_api_request(
                         limit_price: request.limit_price,
                         purpose: intent_purpose_from_wire(request.purpose),
                         created_at: chrono::Utc::now(),
-                    });
+                    }, request.idempotency_key.as_deref());
                     match daemon.write_runtime_snapshots() {
                         Ok(()) => {}
                         Err(err) => {
@@ -2304,7 +2304,7 @@ fn handle_runtime_request(
 
             match state.daemon.lock() {
                 Ok(mut daemon) => {
-                    let response = daemon.submit_intent(TradingIntent {
+                    let response = daemon.submit_intent_idempotent(TradingIntent {
                         intent_id: next_paper_intent_id(deployment_id),
                         deployment_id: deployment_id.to_string(),
                         market_id: request.market_id,
@@ -2314,7 +2314,7 @@ fn handle_runtime_request(
                         limit_price: request.limit_price,
                         purpose: intent_purpose_from_wire(request.purpose),
                         created_at: chrono::Utc::now(),
-                    });
+                    }, request.idempotency_key.as_deref());
                     match daemon.write_runtime_snapshots() {
                         Ok(()) => {
                             publish_snapshot_events(&daemon, &state.events);
@@ -2995,11 +2995,12 @@ mod tests {
         };
 
         let body = serde_json::to_string(&PaperIntentRequest {
+            idempotency_key: None,
             market_id: "market-1".to_string(),
             token_id: "token-1".to_string(),
             side: "buy".to_string(),
             quantity: rust_decimal::Decimal::ONE,
-            limit_price: Some(rust_decimal::Decimal::ONE),
+            limit_price: Some(rust_decimal::Decimal::new(5, 1)),
             purpose: ploy_operator_contracts::IntentPurpose::Entry,
         })
         .expect("request json");
@@ -3210,11 +3211,12 @@ mod tests {
         });
 
         let body = serde_json::to_string(&PaperIntentRequest {
+            idempotency_key: None,
             market_id: "market-1".to_string(),
             token_id: "token-1".to_string(),
             side: "buy".to_string(),
             quantity: rust_decimal::Decimal::ONE,
-            limit_price: Some(rust_decimal::Decimal::ONE),
+            limit_price: Some(rust_decimal::Decimal::new(5, 1)),
             purpose: ploy_operator_contracts::IntentPurpose::Entry,
         })
         .expect("request json");
@@ -3278,11 +3280,12 @@ mod tests {
         });
 
         let body = serde_json::to_string(&PaperIntentRequest {
+            idempotency_key: None,
             market_id: "market-1".to_string(),
             token_id: "token-1".to_string(),
             side: "buy".to_string(),
             quantity: rust_decimal::Decimal::ONE,
-            limit_price: Some(rust_decimal::Decimal::ONE),
+            limit_price: Some(rust_decimal::Decimal::new(5, 1)),
             purpose: ploy_operator_contracts::IntentPurpose::Entry,
         })
         .expect("request json");
@@ -3345,11 +3348,12 @@ mod tests {
         });
 
         let submit_body = serde_json::to_string(&PaperIntentRequest {
+            idempotency_key: None,
             market_id: "market-1".to_string(),
             token_id: "token-1".to_string(),
             side: "buy".to_string(),
             quantity: rust_decimal::Decimal::ONE,
-            limit_price: Some(rust_decimal::Decimal::ONE),
+            limit_price: Some(rust_decimal::Decimal::new(5, 1)),
             purpose: ploy_operator_contracts::IntentPurpose::Entry,
         })
         .expect("request json");
@@ -3428,6 +3432,7 @@ mod tests {
         });
 
         let submit_body = serde_json::to_string(&PaperIntentRequest {
+            idempotency_key: None,
             market_id: "market-1".to_string(),
             token_id: "token-1".to_string(),
             side: "buy".to_string(),
@@ -3516,7 +3521,7 @@ mod tests {
                 token_id: "token-1".to_string(),
                 side: TradeSide::Buy,
                 quantity: rust_decimal::Decimal::ONE,
-                limit_price: Some(rust_decimal::Decimal::ONE),
+                limit_price: Some(rust_decimal::Decimal::new(5, 1)),
                 purpose: TradingIntentPurpose::Entry,
                 created_at: chrono::Utc::now(),
             })

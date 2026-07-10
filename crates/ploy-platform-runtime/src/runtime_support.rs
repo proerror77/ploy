@@ -11,6 +11,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileStatus {
@@ -323,11 +324,7 @@ pub fn io_error_from_execution_error(err: ExecutionError) -> io::Error {
 }
 
 pub fn next_paper_intent_id(deployment_id: &str) -> String {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time")
-        .as_millis();
-    format!("{deployment_id}-{unique}")
+    format!("{deployment_id}-{}", Uuid::new_v4())
 }
 
 pub fn write_json<T>(path: &Path, value: &T) -> io::Result<()>

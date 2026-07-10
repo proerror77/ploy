@@ -21,7 +21,9 @@ fn sample_intent() -> TradingIntent {
 fn submitting_and_filling_an_intent_updates_runtime_snapshot() {
     let mut runtime = TradingRuntime::default();
     let intent = sample_intent();
-    runtime.submit_intent(intent.clone(), "order-1");
+    runtime
+        .submit_intent(intent.clone(), "order-1", None)
+        .expect("valid intent");
     runtime.acknowledge_order("order-1", "venue-1");
     runtime.record_fill(FillRecord {
         fill_id: "fill-1".to_string(),
@@ -57,7 +59,9 @@ fn submitting_and_filling_an_intent_updates_runtime_snapshot() {
 fn risk_snapshot_only_counts_active_intents() {
     let mut runtime = TradingRuntime::default();
     let intent = sample_intent();
-    runtime.submit_intent(intent, "order-1");
+    runtime
+        .submit_intent(intent, "order-1", None)
+        .expect("valid intent");
 
     let active = runtime.snapshot(&BTreeMap::new());
     assert_eq!(active.risk.pending_intents, 1);
@@ -73,7 +77,9 @@ fn risk_snapshot_only_counts_active_intents() {
 fn recording_the_same_fill_twice_is_idempotent() {
     let mut runtime = TradingRuntime::default();
     let intent = sample_intent();
-    runtime.submit_intent(intent, "order-1");
+    runtime
+        .submit_intent(intent, "order-1", None)
+        .expect("valid intent");
     runtime.acknowledge_order("order-1", "venue-1");
 
     let fill = FillRecord {
@@ -100,7 +106,9 @@ fn recording_the_same_fill_twice_is_idempotent() {
 fn canceling_an_active_order_removes_it_from_risk() {
     let mut runtime = TradingRuntime::default();
     let intent = sample_intent();
-    runtime.submit_intent(intent, "order-1");
+    runtime
+        .submit_intent(intent, "order-1", None)
+        .expect("valid intent");
     runtime.acknowledge_order("order-1", "venue-1");
 
     let before_cancel = runtime.snapshot(&BTreeMap::new());

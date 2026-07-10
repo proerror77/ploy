@@ -1,4 +1,5 @@
 use crate::fills::FillRecord;
+use crate::intents::TradeSide;
 use crate::pnl::PnlSnapshot;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::Signed;
@@ -78,6 +79,11 @@ impl PositionLedger {
             .get(token_id)
             .map(|position| position.net_qty)
             .unwrap_or(Decimal::ZERO)
+    }
+
+    pub fn can_reduce(&self, token_id: &str, side: TradeSide, quantity: Decimal) -> bool {
+        let current = self.net_qty(token_id);
+        !current.is_zero() && current.signum() != side.sign() && quantity <= current.abs()
     }
 
     pub fn positions(&self) -> impl Iterator<Item = &PositionSnapshot> {

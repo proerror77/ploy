@@ -27,6 +27,8 @@ pub struct TradingIntentSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PaperIntentRequest {
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
     pub market_id: String,
     pub token_id: String,
     pub side: String,
@@ -408,6 +410,7 @@ mod tests {
     #[test]
     fn paper_intent_contract_uses_stable_wire_keys() {
         let request = serde_json::to_value(PaperIntentRequest {
+            idempotency_key: Some("request-1".to_string()),
             market_id: "market-1".to_string(),
             token_id: "token-1".to_string(),
             side: "buy".to_string(),
@@ -419,6 +422,7 @@ mod tests {
         assert_eq!(
             request,
             json!({
+                "idempotency_key": "request-1",
                 "market_id": "market-1",
                 "token_id": "token-1",
                 "side": "buy",

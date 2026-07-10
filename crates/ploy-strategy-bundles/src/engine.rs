@@ -273,7 +273,15 @@ where
                 }
 
                 // Intent accepted (possibly with fill)
-                self.trading.submit_intent(intent.clone(), order_id.clone());
+                if let Err(err) =
+                    self.trading
+                        .submit_intent(intent.clone(), order_id.clone(), None)
+                {
+                    let reason = err.to_string();
+                    warn!(order_id = %order_id, reason = %reason, "Ignoring invalid intent");
+                    self.strategy.on_reject(&intent, &reason);
+                    continue;
+                }
                 if !report.order_id.is_empty() && report.order_id != order_id {
                     self.trading
                         .acknowledge_order(&order_id, report.order_id.clone());
@@ -659,8 +667,16 @@ where
                 continue;
             }
 
-            self.trading
-                .submit_intent(retry_intent.clone(), retry_order_id.clone());
+            if let Err(err) = self.trading.submit_intent(
+                retry_intent.clone(),
+                retry_order_id.clone(),
+                None,
+            ) {
+                let reason = err.to_string();
+                warn!(order_id = %retry_order_id, reason = %reason, "Ignoring invalid retry intent");
+                self.strategy.on_reject(&retry_intent, &reason);
+                continue;
+            }
             if !report.order_id.is_empty() && report.order_id != retry_order_id {
                 self.trading
                     .acknowledge_order(&retry_order_id, report.order_id.clone());
@@ -1780,7 +1796,9 @@ mod tests {
                 created_at: now,
             },
             "restored-order",
-        );
+            None,
+        )
+        .expect("valid restored intent");
         trading.acknowledge_order("restored-order", "venue-restored");
 
         let feed = SingleUpdateFeed {
@@ -1835,7 +1853,9 @@ mod tests {
                 created_at: now,
             },
             "restored-order",
-        );
+            None,
+        )
+        .expect("valid restored intent");
         trading.acknowledge_order("restored-order", "venue-restored");
 
         let submissions = Arc::new(Mutex::new(Vec::new()));

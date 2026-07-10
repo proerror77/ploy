@@ -17,6 +17,7 @@ rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ploy-trading.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 rust_decimal.workspace = true

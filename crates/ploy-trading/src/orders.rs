@@ -180,6 +180,10 @@ impl OrderLedger {
         self.orders.get(order_id)
     }
 
+    pub fn contains(&self, order_id: &str) -> bool {
+        self.orders.contains_key(order_id)
+    }
+
     pub fn orders(&self) -> impl Iterator<Item = &OrderRecord> {
         self.orders.values()
     }
