@@ -31,7 +31,7 @@ export interface PaperIntentResponse { deployment_id: string; intent_id: string;
 
 export interface FillSnapshot { fee: string; fill_id: string; order_id: string; price: string; quantity: string; side: string; timestamp: string; token_id: string; }
 
-export interface OrderSnapshot { filled_qty: string; intent_id: string; last_error?: string | null; limit_price?: string | null; order_id: string; rejection_reason?: string | null; requested_qty: string; revision?: number; state: string; token_id: string; venue_order_history?: string[]; venue_order_id?: string | null; }
+export interface OrderSnapshot { filled_qty: string; idempotency_key?: string | null; intent_id: string; last_error?: string | null; limit_price?: string | null; order_id: string; rejection_reason?: string | null; requested_qty: string; revision?: number; state: string; token_id: string; venue_order_history?: string[]; venue_order_id?: string | null; }
 
 export interface PnlSnapshotResponse { net_pnl: string; realized_pnl: string; total_fees: string; unrealized_pnl: string; }
 

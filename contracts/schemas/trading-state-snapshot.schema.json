@@ -126,6 +126,13 @@
           "type": "string",
           "pattern": "^-?[0-9]+(\\.[0-9]+)?$"
         },
+        "idempotency_key": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "intent_id": {
           "type": "string"
         },
