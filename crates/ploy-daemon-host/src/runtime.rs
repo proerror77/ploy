@@ -237,6 +237,9 @@ impl PloyDaemon {
             .trading
             .get(&deployment_id)
             .map(|runtime| runtime.snapshot(&BTreeMap::new()));
+        let runtime_mode_changed = existing
+            .as_ref()
+            .is_some_and(|current| current.runtime_mode != request.runtime_mode);
         if existing.as_ref().is_some_and(|current| {
             current.runtime_mode != request.runtime_mode || current.account_id != request.account_id
         }) {
@@ -258,9 +261,13 @@ impl PloyDaemon {
             }
         }
         let record = apply_deployment_record(&mut self.control_plane.deployments, request)?;
-        if existing.is_none() && record.runtime_mode == DeploymentRuntimeMode::Live {
+        let new_live_deployment =
+            existing.is_none() && record.runtime_mode == DeploymentRuntimeMode::Live;
+        if new_live_deployment {
             self.trading
                 .insert(record.deployment_id.clone(), TradingRuntime::default());
+        }
+        if new_live_deployment || runtime_mode_changed {
             if let Err(error) = self.persist_trading_state() {
                 return Err(self.rollback_failed_apply(
                     &deployment_id,
@@ -1064,7 +1071,7 @@ mod tests {
     };
     use ploy_operator_contracts::{
         DeploymentApplyRequest, DeploymentControlRequest, DeploymentRuntimeMode, DeploymentState,
-        DesiredState, ObservedState,
+        DesiredState, ObservedState, PaperIntentResponse,
     };
     use ploy_platform::DeploymentRecord;
     use ploy_platform_runtime::live_reconcile_backoff_ms;
@@ -1139,6 +1146,50 @@ mod tests {
             }],
             ..TradingRuntimeSnapshot::default()
         })
+    }
+
+    fn create_flat_idempotent_paper_history(
+        daemon: &mut PloyDaemon,
+        deployment_id: &str,
+    ) -> (TradingIntent, PaperIntentResponse) {
+        daemon
+            .apply_deployment(DeploymentApplyRequest {
+                deployment_id: deployment_id.to_string(),
+                bundle_id: "old-paper".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Paper,
+                account_id: "acct-mode".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            })
+            .expect("apply paper");
+        let intent = TradingIntent {
+            intent_id: format!("intent-{deployment_id}"),
+            deployment_id: deployment_id.to_string(),
+            market_id: "market-1".to_string(),
+            token_id: "token-1".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(1),
+            limit_price: Some(dec!(0.5)),
+            purpose: IntentPurpose::Entry,
+            created_at: chrono::Utc::now(),
+        };
+        let response = daemon
+            .submit_intent_idempotent(intent.clone(), Some("mode-stable-key"))
+            .expect("submit idempotent paper intent");
+        daemon
+            .cancel_order(deployment_id, &response.order_id)
+            .expect("cancel to flat terminal history");
+        daemon
+            .control_deployment(
+                deployment_id,
+                DeploymentControlRequest {
+                    desired_state: Some(DesiredState::Paused),
+                    deployment_state: None,
+                },
+            )
+            .expect("pause flat deployment");
+        (intent, response)
     }
 
     #[derive(Debug, Default, Clone)]
@@ -1627,6 +1678,162 @@ mod tests {
             .apply_deployment(request)
             .expect("idempotent client retry");
         assert_eq!(daemon.control_plane.deployments.records().len(), 1);
+    }
+
+    #[test]
+    fn paper_to_live_core_snapshot_stays_aligned_when_derived_status_write_fails() {
+        let root = temp_dir("paper-live-derived-failure");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        let (_intent, _response) =
+            create_flat_idempotent_paper_history(&mut daemon, "aligned.mode");
+        daemon.fail_status_write_on_attempt = Some(daemon.status_write_attempts + 1);
+
+        let applied = daemon
+            .apply_deployment(DeploymentApplyRequest {
+                deployment_id: "aligned.mode".to_string(),
+                bundle_id: "new-live".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Live,
+                account_id: "acct-mode".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            })
+            .expect("durable mode change accepted despite derived failure");
+        assert_eq!(applied.runtime_mode, DeploymentRuntimeMode::Live);
+        let registry: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config.registry_file).expect("registry"))
+                .expect("registry json");
+        let snapshots: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config.trading_state_file).expect("snapshot"))
+                .expect("snapshot json");
+        assert_eq!(registry[0]["runtime_mode"], "live");
+        assert_eq!(snapshots[0]["runtime_mode"], "live");
+
+        let mut restarted = PloyDaemon::boot(&config).expect("restart aligned live");
+        assert!(restarted.trading.contains_key("aligned.mode"));
+        let record = restarted
+            .inspect_deployment("aligned.mode")
+            .expect("record");
+        assert_eq!(record.runtime_mode, DeploymentRuntimeMode::Live);
+        assert_eq!(record.desired_state, DesiredState::Running);
+        restarted.supervisor.stop("aligned.mode");
+        daemon.supervisor.stop("aligned.mode");
+    }
+
+    #[test]
+    fn paper_to_live_core_ledger_failure_restores_paper_memory_and_disk() {
+        let root = temp_dir("paper-live-core-failure");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        create_flat_idempotent_paper_history(&mut daemon, "rollback.mode");
+        daemon.fail_trading_state_write_on_attempt = Some(daemon.trading_state_write_attempts + 1);
+
+        daemon
+            .apply_deployment(DeploymentApplyRequest {
+                deployment_id: "rollback.mode".to_string(),
+                bundle_id: "new-live".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Live,
+                account_id: "acct-mode".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            })
+            .expect_err("core ledger write must fail mode change");
+        assert_eq!(
+            daemon
+                .inspect_deployment("rollback.mode")
+                .expect("record")
+                .runtime_mode,
+            DeploymentRuntimeMode::Paper
+        );
+        let registry: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config.registry_file).expect("registry"))
+                .expect("registry json");
+        let snapshots: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config.trading_state_file).expect("snapshot"))
+                .expect("snapshot json");
+        assert_eq!(registry[0]["runtime_mode"], "paper");
+        assert_eq!(snapshots[0]["runtime_mode"], "paper");
+        let restarted = PloyDaemon::boot(&config).expect("restart paper");
+        assert_eq!(
+            restarted
+                .inspect_deployment("rollback.mode")
+                .expect("record")
+                .runtime_mode,
+            DeploymentRuntimeMode::Paper
+        );
+    }
+
+    #[test]
+    fn live_to_paper_persists_aligned_snapshot_and_idempotency_history() {
+        let root = temp_dir("live-paper-history");
+        let runtime_root = root.join("run/platform");
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        let (intent, original_response) =
+            create_flat_idempotent_paper_history(&mut daemon, "history.mode");
+        daemon
+            .apply_deployment(DeploymentApplyRequest {
+                deployment_id: "history.mode".to_string(),
+                bundle_id: "live-bundle".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Live,
+                account_id: "acct-mode".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Paused,
+            })
+            .expect("paper to live");
+        daemon
+            .apply_deployment(DeploymentApplyRequest {
+                deployment_id: "history.mode".to_string(),
+                bundle_id: "paper-bundle".to_string(),
+                runtime_mode: DeploymentRuntimeMode::Paper,
+                account_id: "acct-mode".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Paused,
+            })
+            .expect("live to paper");
+        let snapshots: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config.trading_state_file).expect("snapshot"))
+                .expect("snapshot json");
+        assert_eq!(snapshots[0]["runtime_mode"], "paper");
+        assert_eq!(snapshots[0]["orders"][0]["state"], "canceled");
+        assert_eq!(
+            snapshots[0]["orders"][0]["idempotency_key"],
+            "mode-stable-key"
+        );
+
+        let mut restarted = PloyDaemon::boot(&config).expect("restart paper");
+        let replay = restarted
+            .submit_intent_idempotent(intent, Some("mode-stable-key"))
+            .expect("idempotency history restored");
+        assert_eq!(replay.order_id, original_response.order_id);
+        assert_eq!(replay.state, "canceled");
     }
 
     #[test]
