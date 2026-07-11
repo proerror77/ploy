@@ -9,15 +9,15 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
+export type DeploymentRuntimeMode = "paper" | "live";
+
 export type DeploymentState = "enabled" | "draining" | "disabled" | "archived";
 
 export type DesiredState = "running" | "paused" | "stopped";
 
 export type ObservedState = "starting" | "running" | "degraded" | "paused" | "stopped" | "failed";
 
-export interface DeploymentSummary { account_id?: string; deployment_id: string; deployment_state?: DeploymentState; desired_state: DesiredState; max_gross_exposure?: string | null; observed_state: ObservedState; }
-
-export type DeploymentRuntimeMode = "paper" | "live";
+export interface DeploymentSummary { account_id?: string; deployment_id: string; deployment_state?: DeploymentState; desired_state: DesiredState; max_gross_exposure?: string | null; observed_state: ObservedState; runtime_mode?: DeploymentRuntimeMode; }
 
 export interface DeploymentApplyRequest { account_id?: string; bundle_id: string; deployment_id: string; deployment_state?: DeploymentState; desired_state: DesiredState; max_gross_exposure?: string | null; runtime_mode: DeploymentRuntimeMode; }
 

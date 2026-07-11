@@ -30,13 +30,6 @@ fn release_platform_workflow_builds_new_workspace_binaries() {
         "scripts/install-platform-service.sh",
         "scripts/ploy_maintenance.sh",
         "scripts/ploy_platform_watchdog.sh",
-        "systemctl status ploy-platform-watchdog.timer",
-        "systemctl status ploy-maintenance.timer",
-        "systemctl status ployd",
-        "curl -fsS http://127.0.0.1:8081/health",
-        "api/events/stream",
-        "ployctl system status",
-        "ployctl trading status",
         "ploytui",
     ] {
         if !content.contains(needle) {
@@ -49,6 +42,12 @@ fn release_platform_workflow_builds_new_workspace_binaries() {
     if content.contains("target/release/ploy") {
         offenders
             .push("release-platform.yml: still references legacy target/release/ploy".to_string());
+    }
+    if content.contains("uses: appleboy/") || content.contains("environment: production") {
+        offenders.push(
+            "release-platform.yml must remain build-only; named host workflows own deployment"
+                .to_string(),
+        );
     }
 
     assert!(

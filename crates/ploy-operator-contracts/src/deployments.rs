@@ -61,6 +61,8 @@ pub enum ObservedState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeploymentSummary {
     pub deployment_id: String,
+    #[serde(default)]
+    pub runtime_mode: DeploymentRuntimeMode,
     #[serde(default = "default_account_id")]
     pub account_id: String,
     #[serde(default)]
@@ -124,6 +126,7 @@ mod tests {
     fn deployment_summary_uses_stable_wire_keys() {
         let summary = DeploymentSummary {
             deployment_id: "openclaw.default".to_string(),
+            runtime_mode: DeploymentRuntimeMode::Paper,
             account_id: "acct-main".to_string(),
             max_gross_exposure: Some(Decimal::new(250, 2)),
             deployment_state: DeploymentState::Enabled,
@@ -136,6 +139,7 @@ mod tests {
             value,
             json!({
                 "deployment_id": "openclaw.default",
+                "runtime_mode": "paper",
                 "account_id": "acct-main",
                 "max_gross_exposure": "2.50",
                 "deployment_state": "enabled",

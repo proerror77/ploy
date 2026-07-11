@@ -762,9 +762,10 @@ venue = "sportsbook"
     }
 
     #[test]
-    fn threelayer_live_config_matches_dryrun_except_runtime_mode() {
+    fn threelayer_live_config_matches_promoted_dryrun_with_bounded_risk_reductions() {
         let config_dir = strategy_config_dir();
-        let dryrun_path = config_dir.join("02-pm5d-threelayer.unified.toml");
+        let dryrun_path =
+            config_dir.join("02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml");
         let live_path = config_dir.join("02-pm5d-threelayer.live.toml");
 
         let dryrun_body = std::fs::read_to_string(&dryrun_path).unwrap();
@@ -786,11 +787,51 @@ venue = "sportsbook"
             Some("live")
         );
 
-        dryrun
+        let dryrun_runtime = dryrun
             .get_mut("runtime")
             .and_then(toml::Value::as_table_mut)
+            .unwrap();
+        dryrun_runtime.insert("mode".to_string(), toml::Value::String("live".to_string()));
+        for recording_key in [
+            "record_market_updates_to",
+            "record_market_updates_max_records",
+            "record_market_updates_max_bytes",
+        ] {
+            dryrun_runtime.remove(recording_key);
+        }
+
+        let live_strategy = live
+            .get("strategy")
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        let dryrun_strategy = dryrun
+            .get_mut("strategy")
+            .and_then(toml::Value::as_table_mut)
+            .unwrap();
+        assert!(
+            dryrun_strategy["stake_usd"].as_float().unwrap()
+                >= live_strategy["stake_usd"].as_float().unwrap()
+        );
+        assert!(
+            dryrun_strategy["max_positions"].as_integer().unwrap()
+                >= live_strategy["max_positions"].as_integer().unwrap()
+        );
+        assert_eq!(dryrun_strategy["max_daily_trades"].as_integer(), Some(0));
+        assert!(live_strategy["max_daily_trades"].as_integer().unwrap() > 0);
+        let dryrun_windows = dryrun_strategy["allowed_window_secs"].as_array().unwrap();
+        assert!(live_strategy["allowed_window_secs"]
+            .as_array()
             .unwrap()
-            .insert("mode".to_string(), toml::Value::String("live".to_string()));
+            .iter()
+            .all(|window| dryrun_windows.contains(window)));
+        for risk_key in [
+            "stake_usd",
+            "max_positions",
+            "max_daily_trades",
+            "allowed_window_secs",
+        ] {
+            dryrun_strategy.insert(risk_key.to_string(), live_strategy[risk_key].clone());
+        }
         assert_eq!(dryrun, live);
     }
 

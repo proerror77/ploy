@@ -31,6 +31,8 @@ pub struct PlatformConfig {
     pub audit_log_file: PathBuf,
     pub agent_runs_file: PathBuf,
     pub proposals_file: PathBuf,
+    pub release_sha: Option<String>,
+    pub live_approval_file: Option<PathBuf>,
     pub tick_interval_ms: u64,
     pub request_rate_limit_per_minute: u32,
     pub live_reconcile_backoff_base_ms: u64,
@@ -60,6 +62,8 @@ impl Default for PlatformConfig {
             audit_log_file: runtime_root.join("audit-log.jsonl"),
             agent_runs_file: PathBuf::from("run/sidecar/agent-runs.jsonl"),
             proposals_file: runtime_root.join("proposals.json"),
+            release_sha: None,
+            live_approval_file: None,
             runtime_root,
             tick_interval_ms: 1_000,
             request_rate_limit_per_minute: 240,
@@ -181,6 +185,16 @@ impl PlatformConfig {
             config.proposals_file = PathBuf::from(value);
         } else {
             config.proposals_file = config.runtime_root.join("proposals.json");
+        }
+        if let Ok(value) = std::env::var("PLOY_RELEASE_SHA") {
+            if !value.trim().is_empty() {
+                config.release_sha = Some(value);
+            }
+        }
+        if let Ok(value) = std::env::var("PLOY_LIVE_APPROVAL_FILE") {
+            if !value.trim().is_empty() {
+                config.live_approval_file = Some(PathBuf::from(value));
+            }
         }
         if let Ok(value) = std::env::var("PLOY_TICK_INTERVAL_MS") {
             if let Ok(parsed) = value.parse() {

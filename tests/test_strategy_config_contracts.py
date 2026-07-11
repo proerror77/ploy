@@ -1,6 +1,7 @@
 from pathlib import Path
 from decimal import Decimal
 import json
+import subprocess
 import tomllib
 import unittest
 
@@ -40,6 +41,9 @@ class StrategyConfigContractTests(unittest.TestCase):
         )["strategy"]
 
         self.assertEqual(strategy["allowed_window_secs"], [300])
+        self.assertEqual(strategy["three_layer_strategy_profile"], "settlement_probability")
+        self.assertEqual(strategy["max_positions"], 1)
+        self.assertEqual(strategy["max_daily_trades"], 10)
 
     def test_live_gate_requires_and_normalizes_wallet(self) -> None:
         script = (ROOT / "scripts" / "drills" / "pm5d_threelayer_live_gate.sh").read_text()
@@ -50,9 +54,35 @@ class StrategyConfigContractTests(unittest.TestCase):
         self.assertIn("does not match execution principal", script)
         self.assertIn("mktemp", script)
         self.assertIn('deployments apply "$RENDERED_MANIFEST"', script)
-        self.assertIn("go-live is blocked while readiness warnings are active", script)
-        self.assertIn("venue:venue:polymarket:healthy", script)
-        self.assertIn('deployments pause "$DEPLOYMENT_ID"', script)
+        self.assertIn("Only the protected live-approval workflow may resume", script)
+        self.assertNotIn("--go-live", script)
+        self.assertNotIn('deployments resume "$DEPLOYMENT_ID"', script)
+
+    def test_live_gate_manifest_config_parity_fixture_executes(self) -> None:
+        script = (ROOT / "scripts" / "drills" / "pm5d_threelayer_live_gate.sh").read_text()
+        start_marker = "python3 - \"$MANIFEST\" \"$DRYRUN_CONFIG\" \"$LIVE_CONFIG\" <<'PY'\n"
+        start = script.index(start_marker) + len(start_marker)
+        parity_program = script[start : script.index("\nPY\n", start)]
+
+        completed = subprocess.run(
+            [
+                "python3",
+                "-",
+                str(DEPLOYMENT_DIR / "pm5d.threelayer.live.json"),
+                str(
+                    STRATEGY_DIR
+                    / "02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"
+                ),
+                str(STRATEGY_DIR / "02-pm5d-threelayer.live.toml"),
+            ],
+            input=parity_program,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("manifest/config gate: paused apply only", completed.stdout)
 
     def test_paper_manifests_use_paper_namespace(self) -> None:
         manifests = [

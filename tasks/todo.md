@@ -22837,3 +22837,73 @@ gates are touched.
   to the root instead of silently stopping at 64 hops. Cycle/max-hop defensive
   stops increment `backpropagation_truncated_count`, and artifact generation
   emits a warning when the count is non-zero.
+
+# Aliyun Dual-Host Runtime Boundary (2026-07-11)
+
+## Goal
+
+Make the deployable host contract explicit and fail closed: `tango-1-1` owns
+data collection, research, replay, and dry-run evidence; `ploy-trade-1` owns the
+paused trading control plane and may enter live only through a separate,
+evidence-bound human approval gate.
+
+Current evidence stage: deployment/runtime safety plumbing. This slice does not
+claim `dry_run_candidate` or `live_candidate` research evidence and must not
+resume live trading.
+
+## Files / Ownership
+
+- `.github/workflows/deploy-tango-1-1.yml`
+  - Owner: research-host bundle boundary and postflight assertions.
+- `.github/workflows/deploy-trade.yml`
+  - Owner: immutable CI-built trade release, systemd guardrails, paused
+    postflight, and deployment receipt.
+- `.github/workflows/approve-live-trade.yml`
+  - Owner: exact-main-SHA, artifact/evidence, and protected human approval gate.
+- `scripts/ci/` and `tests/`
+  - Owner: static workflow contract tests for host separation and fail-closed
+    live admission.
+- `docs/runbooks/`
+  - Owner: operator-facing dual-host and rollback contract.
+
+## Tasks
+
+- [x] Remove live strategy/config surfaces from the Tango release bundle and
+      assert that the research host cannot start a live deployment.
+- [x] Replace the legacy trade config copy with a checksum-verified immutable
+      SHA release built in CI, atomically switched on `ploy-trade-1`.
+- [x] Install and verify systemd restart/memory/OOM guardrails and prove no
+      on-host Rust build is running.
+- [x] Keep the deployed live manifest paused and verify control-plane, venue,
+      reconcile, and release-receipt state after deploy.
+- [x] Add a separate protected live-approval workflow bound to exact `main`
+      SHA and auditable replay/dry-run/parity evidence.
+- [x] Add workflow-contract tests, actionlint, shell checks, focused repo tests,
+      and an independent review before PR.
+
+## Review
+
+- Tango artifacts now exclude live configs, manifests, gate scripts, and
+  signing keys. Both SSH and Cloud Assistant paths stop `ployd`, atomically
+  rewrite every persisted live record to paused before restart, remove all
+  generic live surfaces, and archive residual live records after restart.
+- The trade host installs a root-owned, checksum-verified immutable SHA release,
+  atomically switches `current`, preserves rollback state, and enforces the
+  required restart, memory, and OOM systemd guardrails. Deployment always ends
+  with the live record paused and a postflight readback.
+- Live apply-running and resume now require a short-lived root-owned approval
+  receipt bound to deployment, exact main/release SHA, account, exposure cap,
+  live config hash, and expiry. The protected approval workflow additionally
+  validates exact replay, dry-run, and strict recorded-parity evidence and
+  automatically pauses on any failure.
+- Local verification: 337 focused Rust tests and 31 workflow/platform tests
+  passed; the locked workspace check completed with 0 errors and 12 existing
+  warnings; 21 Python contract tests, actionlint, shell syntax/ShellCheck,
+  frontend/Sidecar generated-contract checks, and `git diff --check` passed.
+- Final independent review found no remaining P0/P1. Its last runtime-path
+  finding (a missing `tomllib` import inside the gate heredoc) is now covered by
+  a fixture test that extracts and executes the exact embedded Python program.
+- Current research evidence remains negative and is intentionally not promoted:
+  the latest replay had one losing trade and `promotion_ready=false`. This
+  slice therefore changes safety plumbing only and does not deploy or resume
+  live trading.

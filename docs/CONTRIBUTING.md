@@ -99,13 +99,11 @@ A separate release/deploy path can still build release artifacts, but the defaul
 
 ### Deployment Pipelines
 
-The default platform deployment workflow is `.github/workflows/release-platform.yml`.
-Legacy single-binary workflows remain in `.github/workflows/`, but they are not
-the default release path for the workspace runtime.
-
-For build-only release verification without touching a remote host, dispatch
-`release-platform.yml` with `deploy=false`. The deploy workflows keep
-`deploy=true` as their default for the established operator path.
+Named host workflows own deployment: `deploy-tango-1-1.yml` for the
+research/data/dry-run host and `deploy-trade.yml` for the immutable paused trade
+control plane. `approve-live-trade.yml` is the only live resume path and uses a
+protected human environment. `release-platform.yml` is build-only portable
+artifact verification and cannot mutate a host.
 
 ## Running Tests
 

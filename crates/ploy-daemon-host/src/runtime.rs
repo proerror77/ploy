@@ -33,6 +33,8 @@ use ploy_platform_runtime::{
 };
 use ploy_trading::{TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
 use rust_decimal::Decimal;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
@@ -42,6 +44,17 @@ use std::thread;
 use std::time::Duration;
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Deserialize)]
+struct LiveApprovalReceipt {
+    deployment_id: String,
+    deploy_sha: String,
+    account_id: String,
+    max_gross_exposure: String,
+    live_config_sha256: String,
+    expires_at: DateTime<Utc>,
+    ready_for_human_live_approval: bool,
+}
 
 pub use ploy_platform_runtime::next_paper_intent_id;
 
@@ -253,6 +266,17 @@ impl PloyDaemon {
         &mut self,
         request: DeploymentApplyRequest,
     ) -> io::Result<DeploymentRecord> {
+        if request.runtime_mode == DeploymentRuntimeMode::Live
+            && request.desired_state == DesiredState::Running
+            && request.deployment_state != DeploymentState::Archived
+        {
+            self.ensure_live_record_resume_approved(
+                &request.deployment_id,
+                &request.account_id,
+                request.max_gross_exposure,
+                &request.bundle_id,
+            )?;
+        }
         let existing = self
             .control_plane
             .deployments
@@ -471,6 +495,9 @@ impl PloyDaemon {
         deployment_id: &str,
         request: DeploymentControlRequest,
     ) -> io::Result<Option<DeploymentRecord>> {
+        if request.desired_state == Some(DesiredState::Running) {
+            self.ensure_live_resume_approved(deployment_id)?;
+        }
         if request.deployment_state == Some(DeploymentState::Archived) {
             self.ensure_deployment_flat_for_archive(deployment_id)?;
         }
@@ -479,6 +506,98 @@ impl PloyDaemon {
         self.persist_registry()?;
         self.write_runtime_snapshots()?;
         Ok(record)
+    }
+
+    fn ensure_live_resume_approved(&self, deployment_id: &str) -> io::Result<()> {
+        let Some(record) = self.control_plane.deployments.get(deployment_id) else {
+            return Ok(());
+        };
+        if record.runtime_mode != DeploymentRuntimeMode::Live {
+            return Ok(());
+        }
+        self.ensure_live_record_resume_approved(
+            deployment_id,
+            &record.account_id,
+            record.max_gross_exposure,
+            &record.bundle_id,
+        )
+    }
+
+    fn ensure_live_record_resume_approved(
+        &self,
+        deployment_id: &str,
+        account_id: &str,
+        max_gross_exposure: Option<Decimal>,
+        bundle_id: &str,
+    ) -> io::Result<()> {
+        let Some(receipt_path) = self.config.live_approval_file.as_ref() else {
+            #[cfg(test)]
+            return Ok(());
+            #[cfg(not(test))]
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "live resume requires PLOY_LIVE_APPROVAL_FILE",
+            ));
+        };
+        let release_sha = self.config.release_sha.as_deref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "live resume requires PLOY_RELEASE_SHA when approval enforcement is configured",
+            )
+        })?;
+        let raw = fs::read(receipt_path).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("live resume approval receipt is unavailable: {error}"),
+            )
+        })?;
+        let receipt: LiveApprovalReceipt = serde_json::from_slice(&raw).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("live resume approval receipt is invalid: {error}"),
+            )
+        })?;
+        let mut config_path = self.config.strategy_config_root.join(bundle_id);
+        if config_path.extension().is_none() {
+            config_path.set_extension("toml");
+        }
+        let config_bytes = fs::read(&config_path).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("live strategy config cannot be hashed: {error}"),
+            )
+        })?;
+        let config_sha256 = format!("{:x}", Sha256::digest(&config_bytes));
+        let receipt_cap = receipt
+            .max_gross_exposure
+            .parse::<Decimal>()
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("live approval exposure cap is invalid: {error}"),
+                )
+            })?;
+        let expected_cap = max_gross_exposure.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "live deployment has no exposure cap",
+            )
+        })?;
+        let approved = receipt.ready_for_human_live_approval
+            && receipt.deployment_id == deployment_id
+            && receipt.deploy_sha == release_sha
+            && receipt.account_id == account_id
+            && receipt_cap == expected_cap
+            && receipt.live_config_sha256 == config_sha256
+            && receipt.expires_at > Utc::now()
+            && receipt.expires_at <= Utc::now() + chrono::Duration::minutes(20);
+        if !approved {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "live resume approval receipt does not match deployment, release, config, cap, or expiry",
+            ));
+        }
+        Ok(())
     }
 
     fn ensure_deployment_flat_for_archive(&self, deployment_id: &str) -> io::Result<()> {
@@ -1187,6 +1306,7 @@ mod tests {
         TradingIntent, TradingRuntime, TradingRuntimeSnapshot,
     };
     use rust_decimal_macros::dec;
+    use sha2::{Digest, Sha256};
     use std::collections::BTreeMap;
     use std::fs;
     use std::io::ErrorKind;
@@ -1230,6 +1350,97 @@ mod tests {
             deployment_state: DeploymentState::Enabled,
             desired_state: DesiredState::Paused,
         }
+    }
+
+    #[test]
+    fn configured_live_resume_requires_matching_unexpired_approval_receipt() {
+        let root = temp_dir("live-approval-receipt");
+        let runtime_root = root.join("run/platform");
+        let strategy_root = root.join("config/strategies");
+        let approval_file = root.join("data/live-approvals/pending.json");
+        fs::create_dir_all(&strategy_root).expect("strategy root");
+        fs::create_dir_all(approval_file.parent().expect("approval parent"))
+            .expect("approval root");
+        let live_config = strategy_root.join("example.toml");
+        fs::write(&live_config, "[runtime]\nmode = \"live\"\n").expect("live config");
+        let config_sha256 = format!(
+            "{:x}",
+            Sha256::digest(fs::read(&live_config).expect("config bytes"))
+        );
+        let config = PlatformConfig {
+            registry_file: root.join("data/state/deployments.json"),
+            strategy_config_root: strategy_root,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            release_sha: Some("a".repeat(40)),
+            live_approval_file: Some(approval_file.clone()),
+            ..PlatformConfig::default()
+        };
+        let mut daemon = PloyDaemon::boot(&config).expect("boot");
+        let mut running_apply = paused_live_request("example.live", LIVE_WALLET);
+        running_apply.desired_state = DesiredState::Running;
+        let error = daemon
+            .apply_deployment(running_apply)
+            .expect_err("live running apply without approval must fail");
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        daemon
+            .apply_deployment(paused_live_request("example.live", LIVE_WALLET))
+            .expect("apply paused live");
+
+        let resume = DeploymentControlRequest {
+            desired_state: Some(DesiredState::Running),
+            deployment_state: None,
+        };
+        let error = daemon
+            .control_deployment("example.live", resume.clone())
+            .expect_err("missing approval must fail");
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(
+            daemon
+                .inspect_deployment("example.live")
+                .expect("deployment")
+                .desired_state,
+            DesiredState::Paused
+        );
+
+        fs::write(
+            &approval_file,
+            serde_json::json!({
+                "deployment_id": "example.live",
+                "deploy_sha": "a".repeat(40),
+                "account_id": LIVE_WALLET,
+                "max_gross_exposure": "5",
+                "live_config_sha256": config_sha256,
+                "expires_at": chrono::Utc::now() + chrono::Duration::minutes(5),
+                "ready_for_human_live_approval": true
+            })
+            .to_string(),
+        )
+        .expect("approval receipt");
+        daemon
+            .control_deployment("example.live", resume.clone())
+            .expect("matching approval resumes");
+        daemon
+            .control_deployment(
+                "example.live",
+                DeploymentControlRequest {
+                    desired_state: Some(DesiredState::Paused),
+                    deployment_state: None,
+                },
+            )
+            .expect("pause");
+
+        fs::write(
+            &live_config,
+            "[runtime]\nmode = \"live\"\nthrottle_hz = 20\n",
+        )
+        .expect("mutate config");
+        let error = daemon
+            .control_deployment("example.live", resume)
+            .expect_err("config drift must fail");
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
     }
 
     fn order_runtime(deployment_id: &str, state: OrderState) -> TradingRuntime {

@@ -115,6 +115,7 @@ mod tests {
             serde_json::to_value(OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
                 deployments: vec![DeploymentSummary {
                     deployment_id: "example.paper".to_string(),
+                    runtime_mode: crate::deployments::DeploymentRuntimeMode::Paper,
                     account_id: "acct-paper".to_string(),
                     max_gross_exposure: Some(Decimal::new(500, 2)),
                     deployment_state: DeploymentState::Enabled,
@@ -131,6 +132,7 @@ mod tests {
                 "data": {
                     "deployments": [{
                         "deployment_id": "example.paper",
+                        "runtime_mode": "paper",
                         "account_id": "acct-paper",
                         "max_gross_exposure": "5.00",
                         "deployment_state": "enabled",

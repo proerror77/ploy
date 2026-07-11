@@ -18,7 +18,7 @@ on:
       runtime_score:
         description: "Exact runtime score expected by promotion evaluator"
         required: true
-        default: "autofactor_formula:auto_settlement_full_depth_settlement_edge_x_near_strike"
+        default: "autofactor_formula:mut_auto_settlement_model_full_depth_settlement_edge_x_capacity_spread_adjusted"
       strategy_profile:
         description: "Expected strategy profile"
         required: true

@@ -173,16 +173,25 @@ jobs:
           cp "target/${PLATFORM_TARGET}/release/examples/persist_research_trace" dist/bin/persist-research-trace
           cp "target/${PLATFORM_TARGET}/release/examples/research_trace_plan" dist/bin/research-trace-plan
           cp config/strategies/02-pm5d.unified.toml dist/config/strategies/02-pm5d.unified.toml
-          cp config/strategies/02-pm5d.live.toml dist/config/strategies/02-pm5d.live.toml
           cp config/strategies/02-pm5d-threelayer.unified.toml dist/config/strategies/02-pm5d-threelayer.unified.toml
-          cp config/strategies/02-pm5d-threelayer.live.toml dist/config/strategies/02-pm5d-threelayer.live.toml
           cp config/strategies/02-pm5d-threelayer.obi-soft-dryrun.toml dist/config/strategies/02-pm5d-threelayer.obi-soft-dryrun.toml
           cp config/strategies/02-pm5d-threelayer.obi-hard-dryrun.toml dist/config/strategies/02-pm5d-threelayer.obi-hard-dryrun.toml
           cp config/strategies/02-pm5d-threelayer.champion-dryrun.toml dist/config/strategies/02-pm5d-threelayer.champion-dryrun.toml
           cp config/strategies/02-pm5d-threelayer.continuation-soft-dryrun.toml dist/config/strategies/02-pm5d-threelayer.continuation-soft-dryrun.toml
           cp config/strategies/02-pm5d-threelayer.repricing-momentum-dryrun.toml dist/config/strategies/02-pm5d-threelayer.repricing-momentum-dryrun.toml
           cp config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml dist/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml
-          cp config/deployments/*.json dist/config/deployments/
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import shutil
+
+          destination = pathlib.Path("dist/config/deployments")
+          for source in pathlib.Path("config/deployments").glob("*.json"):
+              payload = json.loads(source.read_text(encoding="utf-8"))
+              if payload.get("runtime_mode") == "live":
+                  continue
+              shutil.copy2(source, destination / source.name)
+          PY
           cp scripts/binance_aggtrade_collector.py dist/scripts/binance_aggtrade_collector.py
           cp scripts/binance_price_collector.py dist/scripts/binance_price_collector.py
           cp scripts/binance_lob_collector.py dist/scripts/binance_lob_collector.py
@@ -200,7 +209,9 @@ jobs:
           cp scripts/fix_deribit_partitions.sql dist/scripts/fix_deribit_partitions.sql
           cp scripts/fix_clob_trade_partitions.sql dist/scripts/fix_clob_trade_partitions.sql
           cp scripts/repair_strategy_track_record_official_settlement.sql dist/scripts/repair_strategy_track_record_official_settlement.sql
-          cp scripts/drills/*.sh dist/scripts/drills/
+          find scripts/drills -maxdepth 1 -type f -name '*.sh' \
+            ! -name 'pm5d_threelayer_live_gate.sh' \
+            -exec cp {} dist/scripts/drills/ \;
           for migration in ${DEPLOY_MIGRATIONS}; do
             migration="$(printf '%s' "${migration}" | xargs)"
             [ -n "${migration}" ] || continue
@@ -227,22 +238,26 @@ jobs:
             -C dist -cf - . | gzip -n > "${DEPLOY_BUNDLE_NAME}"
           sha256sum "${DEPLOY_BUNDLE_NAME}" > "${DEPLOY_BUNDLE_NAME}.sha256"
 
-      - name: Verify live deployment remains paused in bundle
+      - name: Verify research bundle has no live authority
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json
           from pathlib import Path
 
-          manifest = Path("dist/config/deployments/pm5d.threelayer.live.json")
-          data = json.loads(manifest.read_text(encoding="utf-8"))
-          if data.get("deployment_id") != "pm5d.threelayer.live":
-              raise SystemExit(f"unexpected live deployment manifest: {data.get('deployment_id')}")
-          if data.get("runtime_mode") != "live":
-              raise SystemExit("pm5d.threelayer.live manifest is not runtime_mode=live")
-          if data.get("desired_state") != "paused":
-              raise SystemExit("pm5d.threelayer.live must remain desired_state=paused")
-          print("pm5d.threelayer.live bundle manifest remains paused")
+          for manifest in Path("dist/config/deployments").glob("*.json"):
+              data = json.loads(manifest.read_text(encoding="utf-8"))
+              if data.get("runtime_mode") == "live":
+                  raise SystemExit(f"research host bundle contains a live deployment: {manifest}")
+          forbidden = [
+              Path("dist/config/strategies/02-pm5d.live.toml"),
+              Path("dist/config/strategies/02-pm5d-threelayer.live.toml"),
+              Path("dist/scripts/drills/pm5d_threelayer_live_gate.sh"),
+          ]
+          present = [str(path) for path in forbidden if path.exists()]
+          if present:
+              raise SystemExit(f"research host bundle contains live authority: {present}")
+          print("research host bundle contains data/research/dry-run surfaces only")
           PY
 
       - name: Validate OSS deploy secrets
@@ -434,19 +449,19 @@ jobs:
               fi
             }
 
-            require_pm5d_live_paused() {
-              local live_status
-              local live_line
-              live_status="\$(${DEPLOY_ROOT}/bin/ployctl deployments inspect pm5d.threelayer.live 2>&1)"
-              echo "\${live_status}"
-              live_line="\$(printf '%s\n' "\${live_status}" | awk '\$1 == "pm5d.threelayer.live" { print; exit }')"
-              case "\${live_line}" in
-                *"desired=Paused"*"observed=Paused"*) ;;
-                *)
-                  echo "pm5d.threelayer.live must remain desired=Paused observed=Paused after deploy" >&2
-                  exit 1
-                  ;;
-              esac
+            require_research_host_has_no_live() {
+              local deployments
+              if grep -Eq '^[[:space:]]*(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=' ${DEPLOY_ROOT}/.env; then
+                echo "research host must not retain a live signing key" >&2
+                exit 1
+              fi
+              deployments="\$(${DEPLOY_ROOT}/bin/ployctl deployments list 2>&1)"
+              echo "\${deployments}"
+              if printf '%s\n' "\${deployments}" | awk \
+                '/mode=Live/ && !/lifecycle=Archived desired=Stopped observed=Stopped/ { found=1 } END { exit !found }'; then
+                echo "research host still has a non-archived live deployment" >&2
+                exit 1
+              fi
             }
 
             service_exists() {
@@ -487,6 +502,23 @@ jobs:
             sha256sum -c "${DEPLOY_BUNDLE_NAME}.sha256"
             tar -xzf "${DEPLOY_BUNDLE_NAME}"
 
+            # Revoke runtime authority before replacing any research-host files.
+            if [ -f ${DEPLOY_ROOT}/.env ]; then
+              set -a
+              # shellcheck disable=SC1091
+              . ${DEPLOY_ROOT}/.env
+              set +a
+            fi
+            if service_exists ployd.service; then
+              if [ -x ${DEPLOY_ROOT}/bin/ployctl ]; then
+                ${DEPLOY_ROOT}/bin/ployctl deployments pause pm5d.threelayer.live >/dev/null 2>&1 || true
+              fi
+              systemctl stop ployd.service
+            fi
+            if [ -f ${DEPLOY_ROOT}/data/state/deployments.json ]; then
+              python3 -c 'import json,pathlib,sys; path=pathlib.Path(sys.argv[1]); records=json.loads(path.read_text(encoding="utf-8")); [record.update(desired_state="paused", observed_state="paused") for record in records if record.get("runtime_mode") == "live"]; temporary=path.with_suffix(".tmp"); temporary.write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8"); temporary.replace(path)' ${DEPLOY_ROOT}/data/state/deployments.json
+            fi
+
             # Install artifacts into the live runtime root used by systemd.
             install -m 0755 ./bin/ployd ${DEPLOY_ROOT}/bin/ployd
             install -m 0755 ./bin/ploy-runner ${DEPLOY_ROOT}/bin/ploy-runner
@@ -495,9 +527,7 @@ jobs:
             install -m 0755 ./bin/persist-research-trace ${DEPLOY_ROOT}/bin/persist-research-trace
             install -m 0755 ./bin/research-trace-plan ${DEPLOY_ROOT}/bin/research-trace-plan
             install -m 0644 ./config/strategies/02-pm5d.unified.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.unified.toml
-            install -m 0644 ./config/strategies/02-pm5d.live.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d.live.toml
             install -m 0644 ./config/strategies/02-pm5d-threelayer.unified.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.unified.toml
-            install -m 0644 ./config/strategies/02-pm5d-threelayer.live.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.live.toml
             install -m 0644 ./config/strategies/02-pm5d-threelayer.obi-soft-dryrun.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.obi-soft-dryrun.toml
             install -m 0644 ./config/strategies/02-pm5d-threelayer.obi-hard-dryrun.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.obi-hard-dryrun.toml
             install -m 0644 ./config/strategies/02-pm5d-threelayer.champion-dryrun.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.champion-dryrun.toml
@@ -505,6 +535,12 @@ jobs:
             install -m 0644 ./config/strategies/02-pm5d-threelayer.repricing-momentum-dryrun.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.repricing-momentum-dryrun.toml
             install -m 0644 ./config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml ${DEPLOY_ROOT}/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml
             install -m 0644 ./config/deployments/*.json ${DEPLOY_ROOT}/config/deployments/
+            find ${DEPLOY_ROOT}/config/strategies -maxdepth 1 -type f -iname '*live*.toml' -delete
+            python3 -c 'import json,pathlib,sys; [path.unlink() for path in pathlib.Path(sys.argv[1]).glob("*.json") if json.loads(path.read_text()).get("runtime_mode") == "live"]' ${DEPLOY_ROOT}/config/deployments
+            rm -f ${DEPLOY_ROOT}/scripts/drills/pm5d_threelayer_live_gate.sh
+            if [ -f ${DEPLOY_ROOT}/.env ]; then
+              sed -i -E '/^[[:space:]]*(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=/d' ${DEPLOY_ROOT}/.env
+            fi
             install -m 0755 ./scripts/binance_aggtrade_collector.py ${DEPLOY_ROOT}/scripts/binance_aggtrade_collector.py
             install -m 0755 ./scripts/binance_price_collector.py ${DEPLOY_ROOT}/scripts/binance_price_collector.py
             install -m 0755 ./scripts/binance_lob_collector.py ${DEPLOY_ROOT}/scripts/binance_lob_collector.py
@@ -601,6 +637,13 @@ jobs:
             systemctl restart ploy-pm-trade-collector.service
             if service_exists ployd.service; then
               systemctl restart ployd.service
+              existing_live_ids="\$(${DEPLOY_ROOT}/bin/ployctl deployments list 2>/dev/null \
+                | awk '/mode=Live/ && !/lifecycle=Archived/ {print \$1}' || true)"
+              while IFS= read -r live_id; do
+                [ -n "\${live_id}" ] || continue
+                ${DEPLOY_ROOT}/bin/ployctl deployments pause "\${live_id}"
+                ${DEPLOY_ROOT}/bin/ployctl deployments archive "\${live_id}"
+              done <<< "\${existing_live_ids}"
             fi
 
             DEPLOY_VERIFY_SINCE=\$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -628,7 +671,7 @@ jobs:
               curl -fsS http://127.0.0.1:8081/health
               curl -fsS http://127.0.0.1:8081/api/reports/dry-run | ${DEPLOY_ROOT}/scripts/check_dryrun_report_contract.py
               ${DEPLOY_ROOT}/bin/ployctl deployments list
-              require_pm5d_live_paused
+              require_research_host_has_no_live
             fi
 
             wait_for_recent_rows \

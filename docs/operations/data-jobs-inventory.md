@@ -17,7 +17,8 @@ collection behavior.
 | `scripts/export_parquet.sh` | canonical export helper | data/export host | Keep as the explicit Parquet export entrypoint until replaced by Rust datactl. |
 | `.github/workflows/backtest.yml` | canonical CI backtest lane | CI/backtest host | Should remain separated from trade-host deploy assumptions. |
 | `.github/workflows/optimize.yml` | canonical snapshot optimization lane | CI/backtest host | Requires a retained complete sampled research snapshot artifact. |
-| `.github/workflows/deploy-trade.yml` | canonical trade-host deploy lane | trade host | Should own trading artifacts only. |
+| `.github/workflows/deploy-trade.yml` | canonical trade-host deploy lane | ploy-trade-1 | Owns the immutable `ployd`/`ployctl`/runner bundle and stages the live deployment paused. |
+| `.github/workflows/approve-live-trade.yml` | canonical live admission lane | protected human approval | The only workflow allowed to resume live after exact-SHA replay, dry-run drawdown, and strict parity evidence pass. |
 
 ## Compatibility Or Transitional Live Collection
 
@@ -27,7 +28,7 @@ collection behavior.
 | `scripts/binance_aggtrade_collector.py` | compatibility collector | data host | Deployed by `deploy-tango-1-1.yml`; retire only after Rust feed/persistence replacement. |
 | `scripts/binance_lob_collector.py` | compatibility collector | data host | Critical L2 source today; do not delete without live replacement and freshness evidence. |
 | `scripts/polymarket_quote_collector.py` | compatibility collector | data host | Prefer `collect-quotes`/market-data long term. |
-| `.github/workflows/deploy-tango-1-1.yml` | transitional combined data/runtime deploy | tango-1-1 | Still bundles data collectors plus research artifacts; split after host-role cleanup. |
+| `.github/workflows/deploy-tango-1-1.yml` | canonical research/data deploy | tango-1-1 | Bundles collectors, research tools, replay, and dry-run surfaces; removes live manifests, signing keys, and live gate authority. |
 
 ## One-Shot Backfill / Repair Jobs
 
@@ -60,7 +61,8 @@ collection behavior.
 
 | Surface | Status | Owner | Notes |
 | --- | --- | --- | --- |
-| `scripts/install-platform-service.sh` | canonical platform release installer | release-platform | Active `release-platform.yml` bundle/install/execute path; now also owns host-support maintenance/watchdog unit installation; guarded by `tests/platform_release_workflow.rs`; do not archive. |
+| `.github/workflows/release-platform.yml` | build-only portable bundle | CI | Produces a checksumed bootstrap artifact only. It cannot deploy; named Tango/trade workflows own host mutation. |
+| `scripts/install-platform-service.sh` | portable bootstrap installer | release-platform bundle | Kept for non-host-specific bootstrap artifacts; not an Aliyun deployment authority. |
 
 ## Removed Legacy Assets
 

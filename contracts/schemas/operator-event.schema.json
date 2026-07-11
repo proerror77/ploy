@@ -345,6 +345,14 @@
         },
         "observed_state": {
           "$ref": "#/definitions/ObservedState"
+        },
+        "runtime_mode": {
+          "default": "paper",
+          "allOf": [
+            {
+              "$ref": "#/definitions/DeploymentRuntimeMode"
+            }
+          ]
         }
       }
     },
