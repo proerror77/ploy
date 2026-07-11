@@ -7,6 +7,7 @@ enum Command {
     SystemAlerts,
     SystemAudit,
     TradingStatus,
+    TradingPrincipal,
     TradingInspect(String),
     TradingCancel(String, String),
     TradingReplace(
@@ -44,6 +45,9 @@ impl Command {
             }
             [_bin, trading, status] if trading == "trading" && status == "status" => {
                 Ok(Self::TradingStatus)
+            }
+            [_bin, trading, principal] if trading == "trading" && principal == "principal" => {
+                Ok(Self::TradingPrincipal)
             }
             [_bin, trading, inspect, deployment_id]
                 if trading == "trading" && inspect == "inspect" =>
@@ -128,7 +132,7 @@ impl Command {
             {
                 Ok(Self::DeploymentsArchive(deployment_id.clone()))
             }
-            _ => Err("usage: ployctl system status | ployctl system metrics | ployctl system alerts | ployctl system audit | ployctl trading status | ployctl trading inspect <deployment-id> | ployctl trading cancel <deployment-id> <order-id> | ployctl trading replace <deployment-id> <order-id> <quantity> <limit-price|-> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id> | ployctl deployments drain <deployment-id> | ployctl deployments enable <deployment-id> | ployctl deployments disable <deployment-id> | ployctl deployments archive <deployment-id>".to_string()),
+            _ => Err("usage: ployctl system status | ployctl system metrics | ployctl system alerts | ployctl system audit | ployctl trading status | ployctl trading principal | ployctl trading inspect <deployment-id> | ployctl trading cancel <deployment-id> <order-id> | ployctl trading replace <deployment-id> <order-id> <quantity> <limit-price|-> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id> | ployctl deployments drain <deployment-id> | ployctl deployments enable <deployment-id> | ployctl deployments disable <deployment-id> | ployctl deployments archive <deployment-id>".to_string()),
         }
     }
 }
@@ -154,6 +158,8 @@ fn execute(command: Command, client: &ControlPlaneClient) -> Result<String, Stri
         Command::SystemAlerts => system::render_system_alerts(client),
         Command::SystemAudit => system::render_audit_log(client),
         Command::TradingStatus => trading::render_trading_state(client),
+        Command::TradingPrincipal => ploy_connectivity::polymarket_execution_principal_from_env()
+            .map_err(|error| error.to_string()),
         Command::TradingInspect(deployment_id) => {
             trading::render_one_trading_state(client, &deployment_id)
         }
@@ -257,6 +263,13 @@ mod tests {
         let command =
             Command::parse(&["ployctl", "trading", "status"].map(str::to_string)).expect("command");
         assert_eq!(command, Command::TradingStatus);
+    }
+
+    #[test]
+    fn parses_trading_principal_command() {
+        let command = Command::parse(&["ployctl", "trading", "principal"].map(str::to_string))
+            .expect("command");
+        assert_eq!(command, Command::TradingPrincipal);
     }
 
     #[test]

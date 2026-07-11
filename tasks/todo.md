@@ -1,3 +1,49 @@
+# Current Session - Live Admission And Account Guards (2026-07-11)
+
+Evidence stage: `implementation hardening`. Implement Slice 1 from the approved
+local-trading-readiness plan. Live remains paused; this session performs no
+remote, cloud, wallet, database, or venue mutation.
+
+## Files / Ownership
+
+- Task 1: shared live intent risk classification, venue freshness, worker auth.
+- Task 2: canonical live wallet/account cap and paper namespace.
+- Integrator: this tracker, per-task review, final branch verification.
+
+## Tasks
+
+- [x] Create isolated `fix/live-admission-account-guards` worktree from local main.
+- [x] Prove focused baseline suites are green.
+- [x] Task 1: fail closed on live admission health and complete review.
+- [x] Task 2: enforce canonical live wallet/cap scope and complete review.
+- [x] Run Slice 1 verification.
+- [ ] Complete whole-branch review and land through PR/CI.
+
+## Review
+
+- Baseline: 133 tests passed across `ploy-platform`, `ploy-platform-runtime`,
+  and `ploy-daemon-host`; no local PostgreSQL or external call was used.
+- Task 1 completed in `037b0c5d`: 146 core tests, 12 control-client tests,
+  11 strategy-runtime tests, and the locked workspace check passed. Independent
+  re-review approved with no Critical, Important, or Minor findings.
+- Task 2 now enforces canonical `0x` live wallet scope, `paper:` account
+  namespaces, bounded account exposure, durable quarantine, and fresh venue
+  health before live admission. No live path is enabled by this slice.
+- First independent review found and the implementation now closes archived
+  live re-enable bypass, per-deployment shared-cap drift, boot/no-op venue
+  freshness forgery, invalid apply HTTP status, and incomplete go-live
+  postflight. Go-live postflight failure now pauses the deployment.
+- Verification: `173` core tests passed across `ploy-platform`,
+  `ploy-connectivity`, `ploy-platform-runtime`, and `ploy-daemon-host`; all `87` daemon-host tests
+  passed after updating the shared deployment fixtures; the nine strategy
+  config contract tests and `26` ployctl tests passed; locked workspace check
+  passed with warnings only; shell syntax and `git diff --check` passed.
+- Final independent re-review approved with no Critical, Important, or Minor
+  findings after the execution principal was cryptographically bound to the
+  live manifest account.
+
+---
+
 # Current Session - Comprehensive Safety Hardening (2026-07-10)
 
 Evidence stage: implementation hardening. The repository-wide review found

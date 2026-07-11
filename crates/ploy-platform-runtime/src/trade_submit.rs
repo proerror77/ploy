@@ -196,6 +196,10 @@ mod tests {
     }
 
     impl LiveExecutionGateway for CountingGateway {
+        fn probe(&self) -> Result<(), ExecutionError> {
+            Ok(())
+        }
+
         fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
             self.submits.fetch_add(1, Ordering::SeqCst);
             Ok(ExecutionOutcome::Acknowledged {
@@ -230,6 +234,10 @@ mod tests {
     }
 
     impl LiveExecutionGateway for TransportGateway {
+        fn probe(&self) -> Result<(), ExecutionError> {
+            Ok(())
+        }
+
         fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
             self.submits.fetch_add(1, Ordering::SeqCst);
             Err(ExecutionError::Transport("offline".to_string()))

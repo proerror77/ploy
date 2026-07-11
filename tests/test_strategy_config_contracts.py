@@ -11,6 +11,65 @@ DEPLOYMENT_DIR = ROOT / "config" / "deployments"
 
 
 class StrategyConfigContractTests(unittest.TestCase):
+    def test_live_manifest_is_paused_and_unrendered(self) -> None:
+        deployment = json.loads(
+            (DEPLOYMENT_DIR / "pm5d.threelayer.live.json").read_text()
+        )
+
+        self.assertEqual(deployment["runtime_mode"], "live")
+        self.assertEqual(deployment["desired_state"], "paused")
+        self.assertEqual(deployment["account_id"], "live-wallet-must-be-rendered")
+        self.assertEqual(Decimal(deployment["max_gross_exposure"]), Decimal("5.0"))
+
+    def test_live_fixed_stake_does_not_exceed_cap(self) -> None:
+        strategy = tomllib.loads(
+            (STRATEGY_DIR / "02-pm5d-threelayer.live.toml").read_text()
+        )["strategy"]
+        deployment = json.loads(
+            (DEPLOYMENT_DIR / "pm5d.threelayer.live.json").read_text()
+        )
+
+        stake = Decimal(str(strategy["stake_usd"]))
+        cap = Decimal(deployment["max_gross_exposure"])
+        self.assertEqual(stake, Decimal("5.0"))
+        self.assertLessEqual(stake, cap)
+
+    def test_live_profile_declares_exactly_pm5d_window(self) -> None:
+        strategy = tomllib.loads(
+            (STRATEGY_DIR / "02-pm5d-threelayer.live.toml").read_text()
+        )["strategy"]
+
+        self.assertEqual(strategy["allowed_window_secs"], [300])
+
+    def test_live_gate_requires_and_normalizes_wallet(self) -> None:
+        script = (ROOT / "scripts" / "drills" / "pm5d_threelayer_live_gate.sh").read_text()
+
+        self.assertIn("PLOY_LIVE_ACCOUNT_ID", script)
+        self.assertIn("NORMALIZED_LIVE_ACCOUNT_ID", script)
+        self.assertIn("trading principal", script)
+        self.assertIn("does not match execution principal", script)
+        self.assertIn("mktemp", script)
+        self.assertIn('deployments apply "$RENDERED_MANIFEST"', script)
+        self.assertIn("go-live is blocked while readiness warnings are active", script)
+        self.assertIn("venue:venue:polymarket:healthy", script)
+        self.assertIn('deployments pause "$DEPLOYMENT_ID"', script)
+
+    def test_paper_manifests_use_paper_namespace(self) -> None:
+        manifests = [
+            json.loads(path.read_text())
+            for path in sorted(DEPLOYMENT_DIR.glob("*.json"))
+        ]
+        paper_manifests = [
+            manifest for manifest in manifests if manifest["runtime_mode"] == "paper"
+        ]
+
+        self.assertTrue(paper_manifests)
+        for manifest in paper_manifests:
+            self.assertTrue(
+                manifest["account_id"].startswith("paper:"),
+                manifest["deployment_id"],
+            )
+
     def test_pm5d_threelayer_recording_sources_are_explicit_and_bounded(self) -> None:
         dryrun_configs = sorted(STRATEGY_DIR.glob("02-pm5d-threelayer.*-dryrun.toml"))
         self.assertGreaterEqual(len(dryrun_configs), 4)

@@ -36,11 +36,6 @@ pub fn mark_runtime_healthy(
         "live_reconcile",
         Duration::milliseconds(config.live_reconcile_stale_after_ms as i64),
     );
-    control_plane.system.note_source_heartbeat(
-        "venue:polymarket",
-        "venue",
-        Duration::milliseconds(config.venue_stale_after_ms as i64),
-    );
     control_plane.system.note_trade(latest_trade_time);
 
     if control_plane.system.is_degraded() {
@@ -55,17 +50,14 @@ pub fn mark_runtime_healthy(
     } else {
         control_plane.system.mark_running(&config.listen_addr);
     }
+}
 
-    for record in control_plane.deployments.records() {
-        if record.runtime_mode == DeploymentRuntimeMode::Live
-            && record.desired_state == DesiredState::Running
-            && record.observed_state == ObservedState::Degraded
-        {
-            control_plane
-                .deployments
-                .set_observed_state(&record.deployment_id, ObservedState::Running);
-        }
-    }
+pub fn mark_venue_healthy(control_plane: &mut ControlPlane, config: &LiveHealthConfig) {
+    control_plane.system.note_source_heartbeat(
+        "venue:polymarket",
+        "venue",
+        Duration::milliseconds(config.venue_stale_after_ms as i64),
+    );
 }
 
 pub fn mark_live_runtime_degraded(
@@ -116,8 +108,10 @@ pub fn mark_live_runtime_degraded(
 #[cfg(test)]
 mod tests {
     use super::{
-        mark_live_runtime_degraded, mark_runtime_healthy, next_live_reconcile_at, LiveHealthConfig,
+        mark_live_runtime_degraded, mark_runtime_healthy, mark_venue_healthy,
+        next_live_reconcile_at, LiveHealthConfig,
     };
+    use chrono::Utc;
     use ploy_operator_contracts::{DeploymentState, DesiredState, ObservedState};
     use ploy_platform::{ControlPlane, DeploymentRecord};
     use rust_decimal_macros::dec;
@@ -147,6 +141,7 @@ mod tests {
             observed_state: ObservedState::Degraded,
         });
 
+        mark_venue_healthy(&mut control_plane, &config());
         mark_runtime_healthy(&mut control_plane, &config(), None);
         assert_eq!(
             control_plane.system.status().status,
@@ -168,6 +163,17 @@ mod tests {
         assert!(next_attempt_at.is_some());
         assert_eq!(last_error.as_deref(), Some("gateway offline"));
         assert_eq!(control_plane.system.status().live_reconcile_failures, 1);
+    }
+
+    #[test]
+    fn local_runtime_health_does_not_forge_venue_freshness() {
+        let mut control_plane = ControlPlane::default();
+
+        mark_runtime_healthy(&mut control_plane, &config(), None);
+
+        assert!(!control_plane
+            .system
+            .source_is_fresh_at("venue:polymarket", Utc::now()));
     }
 
     #[test]

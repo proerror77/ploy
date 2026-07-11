@@ -21,7 +21,7 @@ use ploy_platform_runtime::{
     enforce_exposure_limit as enforce_intent_exposure_limit, ensure_intent_allowed,
     finish_live_intent as finish_live_runtime_intent, load_proposal_store, load_registry_records,
     load_trading_runtimes, mark_live_runtime_degraded as mark_runtime_degraded_state,
-    mark_runtime_healthy as mark_runtime_healthy_state, order_state_wire,
+    mark_runtime_healthy as mark_runtime_healthy_state, mark_venue_healthy, order_state_wire,
     prepare_live_intent as prepare_live_runtime_intent,
     reconcile_live_fills as reconcile_runtime_live_fills,
     refresh_source_health as refresh_platform_source_health,
@@ -123,7 +123,10 @@ impl PloyDaemon {
         };
         daemon.load_registry_records_only()?;
         daemon.load_trading_snapshots()?;
-        daemon.load_registry()?;
+        let quarantined = daemon.load_registry()?;
+        if quarantined {
+            daemon.persist_registry()?;
+        }
         daemon.load_proposals()?;
         if daemon.config.trading_state_file.exists() {
             daemon
@@ -131,8 +134,16 @@ impl PloyDaemon {
                 .system
                 .mark_recovering(&daemon.config.listen_addr);
         }
-        daemon.tick();
+        if !quarantined {
+            daemon.tick();
+        }
         daemon.mark_runtime_healthy();
+        if daemon.has_live_deployments() {
+            match daemon.probe_live_venue() {
+                Ok(()) => daemon.mark_venue_healthy(),
+                Err(error) => daemon.mark_live_runtime_degraded(error),
+            }
+        }
 
         Ok(daemon)
     }
@@ -147,10 +158,22 @@ impl PloyDaemon {
         }
         self.control_plane.system.set_database_connected(true);
         self.tick();
-        match self.reconcile_live_fills() {
-            Ok(ReconcileStatus::Applied(_) | ReconcileStatus::Noop) => self.mark_runtime_healthy(),
-            Ok(ReconcileStatus::BackoffActive) => {}
-            Err(err) => self.mark_live_runtime_degraded(err),
+        if self.has_live_deployments() {
+            match self.probe_live_venue() {
+                Ok(()) => {
+                    self.mark_venue_healthy();
+                    match self.reconcile_live_fills() {
+                        Ok(ReconcileStatus::Applied(_) | ReconcileStatus::Noop) => {
+                            self.mark_runtime_healthy()
+                        }
+                        Ok(ReconcileStatus::BackoffActive) => {}
+                        Err(err) => self.mark_live_runtime_degraded(err),
+                    }
+                }
+                Err(err) => self.mark_live_runtime_degraded(err),
+            }
+        } else {
+            self.mark_runtime_healthy();
         }
         self.refresh_source_health();
         if self.config.circuit_breaker_enabled {
@@ -835,6 +858,23 @@ impl PloyDaemon {
         Ok(result)
     }
 
+    fn has_live_deployments(&self) -> bool {
+        self.control_plane
+            .deployments
+            .records()
+            .into_iter()
+            .any(|record| {
+                record.runtime_mode == DeploymentRuntimeMode::Live
+                    && record.deployment_state != DeploymentState::Archived
+            })
+    }
+
+    fn probe_live_venue(&self) -> io::Result<()> {
+        self.live_execution
+            .probe()
+            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))
+    }
+
     fn latest_trade_time(&self) -> Option<DateTime<Utc>> {
         self.trading
             .values()
@@ -846,6 +886,11 @@ impl PloyDaemon {
         let health_config = self.live_health_config();
         let latest_trade_time = self.latest_trade_time();
         mark_runtime_healthy_state(&mut self.control_plane, &health_config, latest_trade_time);
+    }
+
+    fn mark_venue_healthy(&mut self) {
+        let health_config = self.live_health_config();
+        mark_venue_healthy(&mut self.control_plane, &health_config);
     }
 
     fn mark_live_runtime_degraded(&mut self, err: io::Error) {
@@ -898,7 +943,7 @@ impl PloyDaemon {
             .sum()
     }
 
-    fn load_registry(&mut self) -> io::Result<()> {
+    fn load_registry(&mut self) -> io::Result<bool> {
         let records = load_registry_records(&self.config.registry_file)?;
         let worker_tick_config = WorkerTickConfig {
             listen_addr: self.config.listen_addr.clone(),
@@ -908,7 +953,7 @@ impl PloyDaemon {
             working_directory: deployment_working_directory(&self.config),
             canonical_live_ledgers: self.trading.keys().cloned().collect(),
         };
-        apply_loaded_registry_state(
+        let quarantined = apply_loaded_registry_state(
             records,
             &mut self.control_plane.deployments,
             &mut self.supervisor,
@@ -916,7 +961,7 @@ impl PloyDaemon {
             &worker_tick_config,
         );
 
-        Ok(())
+        Ok(quarantined)
     }
 
     fn load_registry_records_only(&mut self) -> io::Result<()> {
@@ -997,33 +1042,34 @@ impl PloyDaemon {
         deployment_id: &str,
         max_gross_exposure: Option<Decimal>,
     ) -> io::Result<()> {
-        // Validate against current exposure BEFORE mutating the registry so that
-        // a failed check never leaves a partially-applied limit in memory.
-        if let Some(limit) = max_gross_exposure {
-            if let Some(runtime) = self.trading.get(deployment_id) {
-                let current = runtime.snapshot(&BTreeMap::new()).risk.total_gross_exposure;
-                if current > limit {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "current exposure {} exceeds proposed limit {} for `{}`",
-                            current, limit, deployment_id
-                        ),
-                    ));
-                }
-            }
-        }
+        let target = self.inspect_deployment(deployment_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("deployment `{deployment_id}` was not found"),
+            )
+        })?;
+        let current_exposure = if target.runtime_mode == DeploymentRuntimeMode::Live {
+            Some(self.account_total_exposure(&target.account_id))
+        } else {
+            self.trading
+                .get(deployment_id)
+                .map(|runtime| runtime.snapshot(&BTreeMap::new()).risk.total_gross_exposure)
+        };
+        let prior_records = self.control_plane.deployments.records();
 
         let record = set_record_max_gross_exposure(
             &mut self.control_plane.deployments,
             deployment_id,
             max_gross_exposure,
-            self.trading
-                .get(deployment_id)
-                .map(|runtime| runtime.snapshot(&BTreeMap::new()).risk.total_gross_exposure),
+            current_exposure,
         )?;
 
-        self.persist_registry()?;
+        if let Err(error) = self.persist_registry() {
+            for prior in prior_records {
+                self.control_plane.deployments.upsert(prior);
+            }
+            return Err(error);
+        }
 
         if self.trading.contains_key(&record.deployment_id) {
             let _ = self.enforce_current_exposure_limit(&record);
@@ -1146,8 +1192,11 @@ mod tests {
     use std::io::ErrorKind;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Barrier, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    const LIVE_WALLET: &str = "0x1111111111111111111111111111111111111111";
+    const OTHER_LIVE_WALLET: &str = "0x2222222222222222222222222222222222222222";
 
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -1218,7 +1267,7 @@ mod tests {
                 deployment_id: deployment_id.to_string(),
                 bundle_id: "old-paper".to_string(),
                 runtime_mode: DeploymentRuntimeMode::Paper,
-                account_id: "acct-mode".to_string(),
+                account_id: "paper:test-mode".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -1269,6 +1318,10 @@ mod tests {
     }
 
     impl LiveExecutionGateway for CountingAckGateway {
+        fn probe(&self) -> Result<(), ExecutionError> {
+            Ok(())
+        }
+
         fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
             let attempt = self.submits.fetch_add(1, Ordering::SeqCst) + 1;
             Ok(ExecutionOutcome::Acknowledged {
@@ -1296,6 +1349,10 @@ mod tests {
     }
 
     impl LiveExecutionGateway for PendingPersistGateway {
+        fn probe(&self) -> Result<(), ExecutionError> {
+            Ok(())
+        }
+
         fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
             let snapshots: serde_json::Value = serde_json::from_slice(
                 &fs::read(&self.trading_state_file).expect("pending state persisted before submit"),
@@ -1325,6 +1382,10 @@ mod tests {
     }
 
     impl LiveExecutionGateway for FlakyReconcileGateway {
+        fn probe(&self) -> Result<(), ExecutionError> {
+            Ok(())
+        }
+
         fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
             Ok(ExecutionOutcome::Acknowledged {
                 venue_order_id: "venue-live-health-1".to_string(),
@@ -1359,7 +1420,7 @@ mod tests {
     }
 
     #[test]
-    fn boot_blocks_legacy_live_registry_without_canonical_ledger() {
+    fn boot_persists_unsafe_live_account_scope_quarantine() {
         let root = temp_dir("legacy-live-cutover");
         let runtime_root = root.join("run/platform");
         let registry_file = root.join("data/state/deployments.json");
@@ -1370,7 +1431,7 @@ mod tests {
                 "deployment_id": "legacy.live",
                 "bundle_id": "example",
                 "runtime_mode": "live",
-                "account_id": "acct-live",
+                "account_id": "legacy-live-wallet",
                 "max_gross_exposure": "5",
                 "deployment_state": "enabled",
                 "desired_state": "running",
@@ -1388,23 +1449,30 @@ mod tests {
             ..PlatformConfig::default()
         };
 
-        let mut daemon = PloyDaemon::boot(&config).expect("boot fail closed");
+        seed_empty_live_ledgers(&config);
+        let daemon = PloyDaemon::boot(&config).expect("boot fail closed");
         let deployment = daemon
             .inspect_deployment("legacy.live")
             .expect("deployment");
         assert_eq!(deployment.desired_state, DesiredState::Paused);
         assert_eq!(deployment.observed_state, ObservedState::Degraded);
-        assert!(!daemon.trading.contains_key("legacy.live"));
+        assert!(daemon.trading.contains_key("legacy.live"));
         assert!(daemon.supervisor.status("legacy.live").is_none());
-        daemon.write_runtime_snapshots().expect("write snapshots");
-        let snapshots: serde_json::Value = serde_json::from_slice(
-            &fs::read(&config.trading_state_file).expect("trading state snapshot"),
-        )
-        .expect("snapshot json");
-        assert_eq!(snapshots, serde_json::json!([]));
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config.registry_file).expect("quarantined registry"))
+                .expect("registry json");
+        assert_eq!(persisted[0]["desired_state"], "paused");
+        assert_eq!(persisted[0]["observed_state"], "degraded");
 
         let restarted = PloyDaemon::boot(&config).expect("restart fail closed");
-        assert!(!restarted.trading.contains_key("legacy.live"));
+        assert!(restarted.trading.contains_key("legacy.live"));
+        assert_eq!(
+            restarted
+                .inspect_deployment("legacy.live")
+                .expect("persisted quarantine")
+                .desired_state,
+            DesiredState::Paused
+        );
         assert!(restarted.supervisor.status("legacy.live").is_none());
     }
 
@@ -1419,7 +1487,8 @@ mod tests {
             &registry_file,
             serde_json::json!([{
                 "deployment_id":"mismatch.live", "bundle_id":"example",
-                "runtime_mode":"live", "account_id":"acct-live",
+                "runtime_mode":"live", "account_id": LIVE_WALLET,
+                "max_gross_exposure":"5",
                 "deployment_state":"enabled", "desired_state":"running",
                 "observed_state":"starting"
             }])
@@ -1439,7 +1508,7 @@ mod tests {
             deployment_id: "mismatch.live".to_string(),
             bundle_id: "example".to_string(),
             runtime_mode: DeploymentRuntimeMode::Paper,
-            account_id: "acct-live".to_string(),
+            account_id: "paper:test-mismatch".to_string(),
             max_gross_exposure: None,
             deployment_state: DeploymentState::Enabled,
             desired_state: DesiredState::Running,
@@ -1502,7 +1571,7 @@ mod tests {
         };
         let mut daemon = PloyDaemon::boot(&config).expect("boot");
         daemon
-            .apply_deployment(paused_live_request("new.live", "acct-live"))
+            .apply_deployment(paused_live_request("new.live", LIVE_WALLET))
             .expect("apply new live");
 
         assert!(daemon.trading.contains_key("new.live"));
@@ -1537,7 +1606,7 @@ mod tests {
         daemon.fail_trading_state_write_on_attempt = Some(1);
 
         daemon
-            .apply_deployment(paused_live_request("failed.live", "acct-live"))
+            .apply_deployment(paused_live_request("failed.live", LIVE_WALLET))
             .expect_err("injected ledger persistence failure");
         assert!(daemon.inspect_deployment("failed.live").is_none());
         assert!(!daemon.trading.contains_key("failed.live"));
@@ -1565,7 +1634,7 @@ mod tests {
         daemon.fail_registry_write_on_attempt = Some(daemon.registry_write_attempts + 1);
 
         daemon
-            .apply_deployment(paused_live_request("failed.live", "acct-live"))
+            .apply_deployment(paused_live_request("failed.live", LIVE_WALLET))
             .expect_err("injected registry persistence failure");
         assert!(daemon.inspect_deployment("failed.live").is_none());
         assert!(!daemon.trading.contains_key("failed.live"));
@@ -1596,7 +1665,7 @@ mod tests {
                 deployment_id: "existing.paper".to_string(),
                 bundle_id: "old-bundle".to_string(),
                 runtime_mode: DeploymentRuntimeMode::Paper,
-                account_id: "acct-old".to_string(),
+                account_id: "paper:test-old".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -1640,7 +1709,7 @@ mod tests {
                 deployment_id: "existing.paper".to_string(),
                 bundle_id: "new-bundle".to_string(),
                 runtime_mode: DeploymentRuntimeMode::Paper,
-                account_id: "acct-old".to_string(),
+                account_id: "paper:test-old".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Paused,
@@ -1679,7 +1748,7 @@ mod tests {
         };
         let mut daemon = PloyDaemon::boot(&config).expect("boot");
         daemon.fail_registry_write_on_attempt = Some(daemon.registry_write_attempts + 2);
-        let mut request = paused_live_request("accepted.live", "acct-live");
+        let mut request = paused_live_request("accepted.live", LIVE_WALLET);
         request.desired_state = DesiredState::Running;
 
         let applied = daemon
@@ -1723,7 +1792,7 @@ mod tests {
         };
         let mut daemon = PloyDaemon::boot(&config).expect("boot");
         daemon.fail_status_write_on_attempt = Some(1);
-        let mut request = paused_live_request("accepted.live", "acct-live");
+        let mut request = paused_live_request("accepted.live", LIVE_WALLET);
         request.desired_state = DesiredState::Running;
 
         daemon
@@ -1763,7 +1832,7 @@ mod tests {
                 deployment_id: "aligned.mode".to_string(),
                 bundle_id: "new-live".to_string(),
                 runtime_mode: DeploymentRuntimeMode::Live,
-                account_id: "acct-mode".to_string(),
+                account_id: LIVE_WALLET.to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -1811,7 +1880,7 @@ mod tests {
                 deployment_id: "rollback.mode".to_string(),
                 bundle_id: "new-live".to_string(),
                 runtime_mode: DeploymentRuntimeMode::Live,
-                account_id: "acct-mode".to_string(),
+                account_id: LIVE_WALLET.to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -1862,7 +1931,7 @@ mod tests {
                 deployment_id: "history.mode".to_string(),
                 bundle_id: "live-bundle".to_string(),
                 runtime_mode: DeploymentRuntimeMode::Live,
-                account_id: "acct-mode".to_string(),
+                account_id: LIVE_WALLET.to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Paused,
@@ -1873,7 +1942,7 @@ mod tests {
                 deployment_id: "history.mode".to_string(),
                 bundle_id: "paper-bundle".to_string(),
                 runtime_mode: DeploymentRuntimeMode::Paper,
-                account_id: "acct-mode".to_string(),
+                account_id: "paper:test-mode".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Paused,
@@ -1909,7 +1978,7 @@ mod tests {
                 "deployment_id": "legacy.paper",
                 "bundle_id": "example",
                 "runtime_mode": "paper",
-                "account_id": "acct-paper",
+                "account_id": "paper:test-legacy",
                 "max_gross_exposure": "5",
                 "deployment_state": "enabled",
                 "desired_state": "running",
@@ -1952,15 +2021,16 @@ mod tests {
             };
             let mut daemon = PloyDaemon::boot(&config).expect("boot");
             daemon
-                .apply_deployment(paused_live_request("reassign.live", "acct-old"))
+                .apply_deployment(paused_live_request("reassign.live", LIVE_WALLET))
                 .expect("apply");
             daemon.trading.insert(
                 "reassign.live".to_string(),
                 order_runtime("reassign.live", state),
             );
 
-            let mut request = paused_live_request("reassign.live", "acct-old");
+            let mut request = paused_live_request("reassign.live", LIVE_WALLET);
             request.runtime_mode = DeploymentRuntimeMode::Paper;
+            request.account_id = "paper:test-reassigned".to_string();
             let error = daemon
                 .apply_deployment(request)
                 .expect_err("nonterminal order blocks mode reassignment");
@@ -1989,7 +2059,7 @@ mod tests {
         };
         let mut daemon = PloyDaemon::boot(&config).expect("boot");
         daemon
-            .apply_deployment(paused_live_request("move.live", "acct-old"))
+            .apply_deployment(paused_live_request("move.live", LIVE_WALLET))
             .expect("apply");
         daemon.trading.insert(
             "move.live".to_string(),
@@ -2005,7 +2075,7 @@ mod tests {
         );
 
         let error = daemon
-            .apply_deployment(paused_live_request("move.live", "acct-new"))
+            .apply_deployment(paused_live_request("move.live", OTHER_LIVE_WALLET))
             .expect_err("position blocks account move");
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
         assert_eq!(
@@ -2013,7 +2083,7 @@ mod tests {
                 .inspect_deployment("move.live")
                 .expect("record")
                 .account_id,
-            "acct-old"
+            LIVE_WALLET
         );
     }
 
@@ -2031,18 +2101,19 @@ mod tests {
         };
         let mut daemon = PloyDaemon::boot(&config).expect("boot");
         daemon
-            .apply_deployment(paused_live_request("flat.live", "acct-old"))
+            .apply_deployment(paused_live_request("flat.live", LIVE_WALLET))
             .expect("apply");
         daemon.trading.insert(
             "flat.live".to_string(),
             order_runtime("flat.live", OrderState::Canceled),
         );
-        let mut request = paused_live_request("flat.live", "acct-new");
+        let mut request = paused_live_request("flat.live", LIVE_WALLET);
         request.runtime_mode = DeploymentRuntimeMode::Paper;
+        request.account_id = "paper:test-new".to_string();
 
         let updated = daemon.apply_deployment(request).expect("flat reassignment");
         assert_eq!(updated.runtime_mode, DeploymentRuntimeMode::Paper);
-        assert_eq!(updated.account_id, "acct-new");
+        assert_eq!(updated.account_id, "paper:test-new");
     }
 
     #[test]
@@ -2070,6 +2141,7 @@ mod tests {
                     "deployment_id": "example.paper",
                     "bundle_id": "example",
                     "runtime_mode": "paper",
+                    "account_id": "paper:test-restored",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -2120,6 +2192,7 @@ mod tests {
                     "deployment_id": "example.paper",
                     "bundle_id": "example",
                     "runtime_mode": "paper",
+                    "account_id": "paper:test-restored",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -2193,6 +2266,7 @@ mod tests {
                     "deployment_id": "example.paper",
                     "bundle_id": "example",
                     "runtime_mode": "paper",
+                    "account_id": "paper:test-restored",
                     "desired_state": "paused",
                     "observed_state": "paused"
                 }
@@ -2240,6 +2314,7 @@ mod tests {
                 "deployment_id": "example.paper",
                 "bundle_id": "example",
                 "runtime_mode": "paper",
+                "account_id": "paper:test-restored",
                 "desired_state": "running",
                 "observed_state": "running"
             }])
@@ -2303,9 +2378,9 @@ mod tests {
         fs::write(
             &registry_file,
             serde_json::json!([
-                {"deployment_id":"a.live","bundle_id":"a","runtime_mode":"live","account_id":"acct-1","desired_state":"running","observed_state":"running"},
-                {"deployment_id":"b.live","bundle_id":"b","runtime_mode":"live","account_id":"acct-1","desired_state":"running","observed_state":"running"},
-                {"deployment_id":"c.live","bundle_id":"c","runtime_mode":"live","account_id":"acct-2","desired_state":"running","observed_state":"running"}
+                {"deployment_id":"a.live","bundle_id":"a","runtime_mode":"live","account_id":LIVE_WALLET,"max_gross_exposure":"5","desired_state":"running","observed_state":"running"},
+                {"deployment_id":"b.live","bundle_id":"b","runtime_mode":"live","account_id":LIVE_WALLET,"max_gross_exposure":"5","desired_state":"running","observed_state":"running"},
+                {"deployment_id":"c.paper","bundle_id":"c","runtime_mode":"paper","account_id":"paper:test-other","max_gross_exposure":"5","desired_state":"running","observed_state":"running"}
             ])
             .to_string(),
         )
@@ -2355,9 +2430,9 @@ mod tests {
             .to_string()
             .contains("payload mismatch"));
         daemon
-            .submit_intent_idempotent(make_intent("c.live", "intent-c", dec!(1)), Some("key-1"))
+            .submit_intent_idempotent(make_intent("c.paper", "intent-c", dec!(1)), Some("key-1"))
             .expect("different account may reuse key");
-        assert_eq!(submits.load(Ordering::SeqCst), 2);
+        assert_eq!(submits.load(Ordering::SeqCst), 1);
 
         daemon
             .write_runtime_snapshots()
@@ -2376,7 +2451,7 @@ mod tests {
             )
             .expect("restored replay");
         assert_eq!(restored_replay.order_id, first.order_id);
-        assert_eq!(submits.load(Ordering::SeqCst), 2);
+        assert_eq!(submits.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -2392,6 +2467,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": LIVE_WALLET,
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -2455,7 +2532,8 @@ mod tests {
                 "deployment_id": "example.live",
                 "bundle_id": "example",
                 "runtime_mode": "live",
-                "account_id": "acct-live",
+                "account_id": LIVE_WALLET,
+                "max_gross_exposure": "5",
                 "deployment_state": "enabled",
                 "desired_state": "running",
                 "observed_state": "running"
@@ -2472,6 +2550,38 @@ mod tests {
             ..PlatformConfig::default()
         };
         seed_empty_live_ledgers(&config);
+        let mut blocked = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(
+                StaticExecutionGateway::acknowledged("unused").with_probe_result(Err(
+                    ExecutionError::Transport("venue unreachable".to_string()),
+                )),
+            ),
+        )
+        .expect("boot fail closed");
+        blocked
+            .control_plane
+            .deployments
+            .set_observed_state("example.live", ObservedState::Running);
+        let error = blocked
+            .submit_intent_idempotent_from(
+                TradingIntent {
+                    intent_id: "intent-stale-live".to_string(),
+                    deployment_id: "example.live".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(1),
+                    limit_price: Some(dec!(0.5)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: chrono::Utc::now(),
+                },
+                None,
+                IntentAdmissionSource::Worker,
+            )
+            .expect_err("unreachable venue must block live risk increase");
+        assert!(error.to_string().contains("fresh venue health"));
+
         let mut daemon = PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::acknowledged("venue-fresh-1")),
@@ -2515,6 +2625,8 @@ mod tests {
                 "deployment_id": "example.live",
                 "bundle_id": "example",
                 "runtime_mode": "live",
+                "account_id": LIVE_WALLET,
+                "max_gross_exposure": "5",
                 "desired_state": "running",
                 "observed_state": "running"
             }])
@@ -2567,7 +2679,7 @@ mod tests {
         fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
         fs::write(
             &registry_file,
-            serde_json::json!([{"deployment_id":"example.live","bundle_id":"example","runtime_mode":"live","account_id":"acct-1","desired_state":"running","observed_state":"running"}]).to_string(),
+            serde_json::json!([{"deployment_id":"example.live","bundle_id":"example","runtime_mode":"live","account_id":LIVE_WALLET,"max_gross_exposure":"5","desired_state":"running","observed_state":"running"}]).to_string(),
         )
         .expect("registry");
         let config = PlatformConfig {
@@ -2632,6 +2744,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": LIVE_WALLET,
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -2694,6 +2808,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": LIVE_WALLET,
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -2759,6 +2875,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": LIVE_WALLET,
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -2820,6 +2938,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": LIVE_WALLET,
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -2913,6 +3033,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": LIVE_WALLET,
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -3007,7 +3129,7 @@ mod tests {
                     deployment_id: deployment_id.to_string(),
                     bundle_id: "example".to_string(),
                     runtime_mode: DeploymentRuntimeMode::Paper,
-                    account_id: "acct-shared".to_string(),
+                    account_id: "paper:test-shared".to_string(),
                     max_gross_exposure: Some(dec!(2.5)),
                     deployment_state: DeploymentState::Enabled,
                     desired_state: DesiredState::Running,
@@ -3015,36 +3137,43 @@ mod tests {
                 .expect("apply deployment");
         }
 
-        daemon
-            .submit_intent(TradingIntent {
-                intent_id: "intent-account-a".to_string(),
-                deployment_id: "acct-a.paper".to_string(),
-                market_id: "market-1".to_string(),
-                token_id: "yes-token".to_string(),
-                side: TradeSide::Buy,
-                quantity: dec!(4),
-                limit_price: Some(dec!(0.5)),
-                purpose: IntentPurpose::Entry,
-                created_at: chrono::Utc::now(),
+        let daemon = Arc::new(Mutex::new(daemon));
+        let barrier = Arc::new(Barrier::new(3));
+        let submissions = [
+            ("acct-a.paper", "intent-account-a", "market-1", "yes-token"),
+            ("acct-b.paper", "intent-account-b", "market-2", "no-token"),
+        ]
+        .map(|(deployment_id, intent_id, market_id, token_id)| {
+            let daemon = daemon.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                daemon
+                    .lock()
+                    .expect("daemon lock")
+                    .submit_intent(TradingIntent {
+                        intent_id: intent_id.to_string(),
+                        deployment_id: deployment_id.to_string(),
+                        market_id: market_id.to_string(),
+                        token_id: token_id.to_string(),
+                        side: TradeSide::Buy,
+                        quantity: dec!(3),
+                        limit_price: Some(dec!(0.5)),
+                        purpose: IntentPurpose::Entry,
+                        created_at: chrono::Utc::now(),
+                    })
             })
-            .expect("submit first intent");
+        });
+        barrier.wait();
+        let results = submissions.map(|handle| handle.join().expect("submission thread"));
 
-        let error = daemon
-            .submit_intent(TradingIntent {
-                intent_id: "intent-account-b".to_string(),
-                deployment_id: "acct-b.paper".to_string(),
-                market_id: "market-2".to_string(),
-                token_id: "no-token".to_string(),
-                side: TradeSide::Buy,
-                quantity: dec!(2),
-                limit_price: Some(dec!(0.5)),
-                purpose: IntentPurpose::Entry,
-                created_at: chrono::Utc::now(),
-            })
-            .expect_err("second intent should exceed shared account exposure");
-
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let error = results
+            .into_iter()
+            .find_map(Result::err)
+            .expect("one submission must exceed the shared cap");
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("acct-shared"));
+        assert!(error.to_string().contains("paper:test-shared"));
         assert!(error.to_string().contains("max_gross_exposure"));
     }
 
@@ -3069,7 +3198,7 @@ mod tests {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
                 runtime_mode: DeploymentRuntimeMode::Paper,
-                account_id: "acct-paper".to_string(),
+                account_id: "paper:test-replace".to_string(),
                 max_gross_exposure: Some(dec!(1.5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -3101,7 +3230,7 @@ mod tests {
             .expect_err("replacement should exceed exposure limit");
 
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("acct-paper"));
+        assert!(error.to_string().contains("paper:test-replace"));
         assert!(error.to_string().contains("next_total=2.0"));
     }
 
@@ -3126,7 +3255,7 @@ mod tests {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
                 runtime_mode: DeploymentRuntimeMode::Paper,
-                account_id: "acct-paper".to_string(),
+                account_id: "paper:test-worker".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -3195,7 +3324,7 @@ mod tests {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
                 runtime_mode: DeploymentRuntimeMode::Paper,
-                account_id: "acct-paper".to_string(),
+                account_id: "paper:test-archive".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -3256,7 +3385,7 @@ mod tests {
                     deployment_id: deployment_id.to_string(),
                     bundle_id: "example".to_string(),
                     runtime_mode: DeploymentRuntimeMode::Paper,
-                    account_id: "acct-shared".to_string(),
+                    account_id: "paper:test-cap-shared".to_string(),
                     max_gross_exposure: Some(dec!(5)),
                     deployment_state: DeploymentState::Enabled,
                     desired_state: DesiredState::Running,
@@ -3296,7 +3425,7 @@ mod tests {
                 deployment_id: "first.paper".to_string(),
                 bundle_id: "example".to_string(),
                 runtime_mode: DeploymentRuntimeMode::Paper,
-                account_id: "acct-shared".to_string(),
+                account_id: "paper:test-cap-shared".to_string(),
                 max_gross_exposure: Some(dec!(0.75)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -3326,6 +3455,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": LIVE_WALLET,
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -3400,6 +3531,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": LIVE_WALLET,
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -3491,6 +3624,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": LIVE_WALLET,
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -3570,6 +3705,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": LIVE_WALLET,
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -3673,6 +3810,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": LIVE_WALLET,
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }
@@ -3736,6 +3875,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": LIVE_WALLET,
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "starting"
                 }

@@ -19,7 +19,8 @@ pub use deployment_control::{
     enforce_order_replacement_exposure, ensure_intent_allowed, set_deployment_max_gross_exposure,
 };
 pub use health_runtime::{
-    mark_live_runtime_degraded, mark_runtime_healthy, next_live_reconcile_at, LiveHealthConfig,
+    mark_live_runtime_degraded, mark_runtime_healthy, mark_venue_healthy, next_live_reconcile_at,
+    LiveHealthConfig,
 };
 pub use proposals::{ProposalExecutionPlan, ProposalStore};
 pub use reconcile::reconcile_live_fills;

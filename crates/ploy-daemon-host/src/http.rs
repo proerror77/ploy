@@ -456,6 +456,9 @@ pub fn handle_api_request(
                     200,
                     serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
                 ),
+                Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+                    (400, "{\"error\":\"apply_failed\"}".to_string())
+                }
                 Err(_) => (500, "{\"error\":\"apply_failed\"}".to_string()),
             }
         }
@@ -2292,6 +2295,9 @@ fn handle_runtime_request_from(
                             200,
                             serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
                         ),
+                        Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+                            json_error(400, "apply_failed", Some(err.to_string()))
+                        }
                         Err(err) => json_error(500, "apply_failed", Some(err.to_string())),
                     }
                 }
@@ -3362,10 +3368,28 @@ mod tests {
             ..crate::config::PlatformConfig::default()
         };
 
+        let invalid_body = serde_json::json!({
+            "deployment_id": "invalid.paper",
+            "bundle_id": "example",
+            "runtime_mode": "paper",
+            "account_id": "acct-invalid",
+            "desired_state": "running"
+        })
+        .to_string();
+        let (invalid_code, invalid_response) = handle_api_request(
+            "PUT",
+            "/api/deployments/invalid.paper",
+            Some(&invalid_body),
+            &config,
+        );
+        assert_eq!(invalid_code, 400);
+        assert!(invalid_response.contains("apply_failed"));
+
         let apply_body = serde_json::json!({
             "deployment_id": "example.paper",
             "bundle_id": "example",
             "runtime_mode": "paper",
+            "account_id": "paper:test-http-apply",
             "desired_state": "running"
         })
         .to_string();
@@ -3411,6 +3435,7 @@ mod tests {
                     "deployment_id": "example.paper",
                     "bundle_id": "example",
                     "runtime_mode": "paper",
+                    "account_id": "paper:test-http-submit",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -3609,6 +3634,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": "0x1111111111111111111111111111111111111111",
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -3681,6 +3708,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": "0x1111111111111111111111111111111111111111",
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -3756,6 +3785,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": "0x1111111111111111111111111111111111111111",
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -3843,6 +3874,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": "0x1111111111111111111111111111111111111111",
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -3937,6 +3970,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": "0x1111111111111111111111111111111111111111",
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -4332,6 +4367,7 @@ mod tests {
                     "deployment_id": "example.paper",
                     "bundle_id": "example",
                     "runtime_mode": "paper",
+                    "account_id": "paper:test-proposal",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -4456,6 +4492,7 @@ mod tests {
                     "deployment_id": "example.paper",
                     "bundle_id": "example",
                     "runtime_mode": "paper",
+                    "account_id": "paper:test-proposal-approval",
                     "desired_state": "running",
                     "observed_state": "running"
                 }

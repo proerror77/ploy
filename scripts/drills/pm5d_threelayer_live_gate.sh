@@ -4,6 +4,7 @@ set -euo pipefail
 HOST_ROOT="/opt/ploy"
 ADDR="http://127.0.0.1:8081"
 MANIFEST=""
+RENDERED_MANIFEST=""
 DRYRUN_CONFIG=""
 LIVE_CONFIG=""
 DEPLOYMENT_ID=""
@@ -49,6 +50,14 @@ fail() {
   printf '[fail] %s\n' "$1" >&2
   exit 1
 }
+
+cleanup() {
+  if [[ -n "$RENDERED_MANIFEST" ]]; then
+    rm -f "$RENDERED_MANIFEST"
+  fi
+}
+
+trap cleanup EXIT
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
@@ -178,13 +187,33 @@ DEPLOYMENT_ID="${DEPLOYMENT_ID:-$(extract_manifest_field deployment_id)}"
 
 source_env_file
 
+[[ -n "${PLOY_LIVE_ACCOUNT_ID:-}" ]] || fail "PLOY_LIVE_ACCOUNT_ID is required"
+NORMALIZED_LIVE_ACCOUNT_ID="$(python3 - "$PLOY_LIVE_ACCOUNT_ID" <<'PY'
+import re
+import sys
+
+raw = sys.argv[1].strip()
+if not re.fullmatch(r"0[xX][0-9a-fA-F]{40}", raw):
+    raise SystemExit("PLOY_LIVE_ACCOUNT_ID must be a 0x-prefixed 40-hex wallet address")
+normalized = "0x" + raw[2:].lower()
+if normalized == "0x" + "0" * 40:
+    raise SystemExit("PLOY_LIVE_ACCOUNT_ID cannot be the all-zero address")
+print(normalized)
+PY
+)"
+EXECUTION_PRINCIPAL="$(ployctl_capture trading principal)"
+[[ "$EXECUTION_PRINCIPAL" == "$NORMALIZED_LIVE_ACCOUNT_ID" ]] || fail \
+  "PLOY_LIVE_ACCOUNT_ID ${NORMALIZED_LIVE_ACCOUNT_ID} does not match execution principal ${EXECUTION_PRINCIPAL}"
+
 log_step "daemon baseline"
 [[ "$(systemctl is-active ployd)" == "active" ]] || fail "ployd.service is not active"
 curl -fsS "${ADDR}/health" >/dev/null
 STATUS_OUTPUT="$(ployctl_capture system status)"
+METRICS_OUTPUT="$(ployctl_capture system metrics)"
 ALERTS_OUTPUT="$(ployctl_capture system alerts)"
 TRADING_OUTPUT="$(ployctl_capture trading status)"
 printf '%s\n' "$STATUS_OUTPUT"
+printf '%s\n' "$METRICS_OUTPUT"
 printf '%s\n' "$ALERTS_OUTPUT"
 printf '%s\n' "$TRADING_OUTPUT"
 
@@ -242,6 +271,8 @@ if manifest.get("runtime_mode") != "live":
     raise SystemExit("manifest runtime_mode must be live")
 if manifest.get("desired_state") != "paused":
     raise SystemExit("manifest desired_state must stay paused; --go-live resumes explicitly")
+if manifest.get("account_id") != "live-wallet-must-be-rendered":
+    raise SystemExit("repository live manifest must retain its unrendered wallet sentinel")
 
 dryrun = dryrun_path.read_text(encoding="utf-8")
 live = live_path.read_text(encoding="utf-8")
@@ -267,6 +298,19 @@ else:
     print("manifest/config gate: paused apply only")
 PY
 
+RENDERED_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/ploy-live-manifest.XXXXXX.json")"
+python3 - "$MANIFEST" "$RENDERED_MANIFEST" "$NORMALIZED_LIVE_ACCOUNT_ID" <<'PY'
+import json
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1])
+destination = pathlib.Path(sys.argv[2])
+manifest = json.loads(source.read_text(encoding="utf-8"))
+manifest["account_id"] = sys.argv[3]
+destination.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+PY
+
 if [[ "$RUN_DRY_RUN_DRILL" -eq 1 && -x "${HOST_ROOT}/scripts/drills/live_dry_run.sh" ]]; then
   log_step "paper live-host drill"
   "${HOST_ROOT}/scripts/drills/live_dry_run.sh"
@@ -275,7 +319,7 @@ elif [[ "$RUN_DRY_RUN_DRILL" -eq 1 ]]; then
 fi
 
 log_step "apply paused live deployment"
-APPLY_OUTPUT="$(ployctl_capture deployments apply "$MANIFEST")"
+APPLY_OUTPUT="$(ployctl_capture deployments apply "$RENDERED_MANIFEST")"
 printf '%s\n' "$APPLY_OUTPUT"
 INSPECT_OUTPUT="$(ployctl_capture deployments inspect "$DEPLOYMENT_ID")"
 printf '%s\n' "$INSPECT_OUTPUT"
@@ -294,15 +338,28 @@ if [[ "$GO_LIVE" -ne 1 ]]; then
   exit 0
 fi
 
+[[ "$WARNINGS" -eq 0 ]] || fail "go-live is blocked while readiness warnings are active"
+
 log_step "resume live deployment"
 RESUME_OUTPUT="$(ployctl_capture deployments resume "$DEPLOYMENT_ID")"
 printf '%s\n' "$RESUME_OUTPUT"
-FINAL_INSPECT="$(ployctl_capture deployments inspect "$DEPLOYMENT_ID")"
+LIVE_READY=0
+for _ in {1..15}; do
+  FINAL_INSPECT="$(ployctl_capture deployments inspect "$DEPLOYMENT_ID")"
+  FINAL_METRICS="$(ployctl_capture system metrics)"
+  if [[ "$FINAL_INSPECT" == *"desired=Running"*"observed=Running"* ]] \
+    && [[ "$FINAL_METRICS" == *"venue:venue:polymarket:healthy"* ]]; then
+    LIVE_READY=1
+    break
+  fi
+  sleep 1
+done
 printf '%s\n' "$FINAL_INSPECT"
-case "$FINAL_INSPECT" in
-  *"desired=Running"*) ;;
-  *) fail "live deployment did not enter desired=Running" ;;
-esac
+printf '%s\n' "$FINAL_METRICS"
+if [[ "$LIVE_READY" -ne 1 ]]; then
+  ployctl_capture deployments pause "$DEPLOYMENT_ID" >&2 || true
+  fail "live deployment failed observed-running or fresh-venue postflight and was paused"
+fi
 
 log_step "result"
 printf 'LIVE: %s resume command accepted. Watch ployctl trading status and worker logs immediately.\n' "$DEPLOYMENT_ID"

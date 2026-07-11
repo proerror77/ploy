@@ -215,6 +215,10 @@ mod tests {
     }
 
     impl LiveExecutionGateway for CountingControlGateway {
+        fn probe(&self) -> Result<(), ExecutionError> {
+            Ok(())
+        }
+
         fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
             unreachable!("submit is not used by replacement tests")
         }

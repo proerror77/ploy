@@ -12,6 +12,101 @@ use crate::{
     runtime_support::{IntentAdmissionSource, IntentRiskEffect},
 };
 
+pub fn normalize_live_account_id(raw: &str) -> io::Result<String> {
+    let trimmed = raw.trim();
+    let Some(address) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "live account_id must be a 0x-prefixed wallet address",
+        ));
+    };
+    if address.len() != 40 || !address.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "live account_id must contain exactly 40 hexadecimal characters",
+        ));
+    }
+    if address.bytes().all(|byte| byte == b'0') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "live account_id cannot be the all-zero address",
+        ));
+    }
+    Ok(format!("0x{}", address.to_ascii_lowercase()))
+}
+
+pub fn validate_live_account_scope(
+    candidate: &DeploymentRecord,
+    existing: &[DeploymentRecord],
+) -> io::Result<()> {
+    if candidate.deployment_state == DeploymentState::Archived {
+        return Ok(());
+    }
+
+    if candidate.runtime_mode == DeploymentRuntimeMode::Paper {
+        if candidate
+            .account_id
+            .strip_prefix("paper:")
+            .is_none_or(str::is_empty)
+            || normalize_live_account_id(&candidate.account_id).is_ok()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "paper account_id must use the paper: namespace",
+            ));
+        }
+        return Ok(());
+    }
+
+    let wallet = normalize_live_account_id(&candidate.account_id)?;
+    if candidate.account_id != wallet {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("live account_id must use normalized wallet `{wallet}`"),
+        ));
+    }
+    let cap = candidate
+        .max_gross_exposure
+        .filter(|cap| *cap > Decimal::ZERO)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "non-archived live deployment requires positive max_gross_exposure",
+            )
+        })?;
+
+    for other in existing.iter().filter(|record| {
+        record.deployment_id != candidate.deployment_id
+            && record.runtime_mode == DeploymentRuntimeMode::Live
+            && record.deployment_state != DeploymentState::Archived
+    }) {
+        let other_wallet = normalize_live_account_id(&other.account_id)?;
+        let other_cap = other
+            .max_gross_exposure
+            .filter(|other_cap| *other_cap > Decimal::ZERO)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "non-archived live deployment `{}` requires positive max_gross_exposure",
+                        other.deployment_id
+                    ),
+                )
+            })?;
+        if other.account_id != other_wallet || other_wallet != wallet || other_cap != cap {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "all non-archived live deployments must use one normalized wallet and equal max_gross_exposure",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 pub fn build_deployment_record(request: DeploymentApplyRequest) -> DeploymentRecord {
     let desired_state = if request.deployment_state == DeploymentState::Archived {
         DesiredState::Stopped
@@ -64,6 +159,7 @@ pub fn apply_deployment(
         }
     }
     let record = build_deployment_record(request);
+    validate_live_account_scope(&record, &registry.records())?;
     registry.upsert(record.clone());
     Ok(registry
         .get(&record.deployment_id)
@@ -80,18 +176,6 @@ pub fn control_deployment(
         return Ok(None);
     };
 
-    if let Some(desired_state) = request.desired_state {
-        registry.set_desired_state(deployment_id, desired_state);
-        registry.set_observed_state(deployment_id, observed_state_for_desired(desired_state));
-    }
-    if let Some(deployment_state) = request.deployment_state {
-        registry.set_deployment_state(deployment_id, deployment_state);
-        if deployment_state == DeploymentState::Archived {
-            registry.set_desired_state(deployment_id, DesiredState::Stopped);
-            registry.set_observed_state(deployment_id, ObservedState::Stopped);
-        }
-    }
-
     if request.deployment_state.is_none() && request.desired_state.is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -99,7 +183,33 @@ pub fn control_deployment(
         ));
     }
 
-    Ok(registry.get(deployment_id).cloned().or(Some(existing)))
+    if existing.deployment_state == DeploymentState::Archived
+        && request.desired_state == Some(DesiredState::Running)
+        && request.deployment_state.is_none()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("deployment `{deployment_id}` must be enabled before it can run"),
+        ));
+    }
+
+    let mut candidate = existing;
+    if let Some(desired_state) = request.desired_state {
+        candidate.desired_state = desired_state;
+        candidate.observed_state = observed_state_for_desired(desired_state);
+    }
+    if let Some(deployment_state) = request.deployment_state {
+        candidate.deployment_state = deployment_state;
+    }
+    if candidate.deployment_state == DeploymentState::Archived {
+        candidate.desired_state = DesiredState::Stopped;
+        candidate.observed_state = ObservedState::Stopped;
+    }
+
+    validate_live_account_scope(&candidate, &registry.records())?;
+    registry.upsert(candidate.clone());
+
+    Ok(Some(candidate))
 }
 
 pub fn ensure_intent_allowed(
@@ -263,15 +373,65 @@ pub fn set_deployment_max_gross_exposure(
         }
     }
 
-    registry
-        .set_max_gross_exposure(deployment_id, max_gross_exposure)
-        .cloned()
-        .ok_or_else(|| {
+    let target = registry.get(deployment_id).cloned().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("deployment `{deployment_id}` was not found"),
+        )
+    })?;
+    if target.runtime_mode == DeploymentRuntimeMode::Live {
+        if target.deployment_state == DeploymentState::Archived {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "archived live deployment cannot change account exposure limits",
+            ));
+        }
+        let current = target.max_gross_exposure.ok_or_else(|| {
             io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("deployment `{deployment_id}` was not found"),
+                io::ErrorKind::InvalidInput,
+                "live deployment is missing its current max_gross_exposure",
             )
-        })
+        })?;
+        let proposed = max_gross_exposure
+            .filter(|limit| *limit > Decimal::ZERO)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "live max_gross_exposure reduction requires a positive limit",
+                )
+            })?;
+        if proposed >= current {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "live max_gross_exposure proposal must strictly reduce the current limit {current}"
+                ),
+            ));
+        }
+    }
+
+    let mut candidates = registry.records();
+    for candidate in &mut candidates {
+        if candidate.deployment_id == deployment_id
+            || (target.runtime_mode == DeploymentRuntimeMode::Live
+                && candidate.runtime_mode == DeploymentRuntimeMode::Live
+                && candidate.deployment_state != DeploymentState::Archived
+                && candidate.account_id == target.account_id)
+        {
+            candidate.max_gross_exposure = max_gross_exposure;
+        }
+    }
+    for candidate in &candidates {
+        validate_live_account_scope(candidate, &candidates)?;
+    }
+    for candidate in candidates {
+        registry.upsert(candidate);
+    }
+
+    Ok(registry
+        .get(deployment_id)
+        .cloned()
+        .expect("validated deployment persisted"))
 }
 
 #[cfg(test)]
@@ -299,7 +459,7 @@ mod tests {
             deployment_id: "example.live".to_string(),
             bundle_id: "example".to_string(),
             runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
-            account_id: "acct-live".to_string(),
+            account_id: "0x1111111111111111111111111111111111111111".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state,
             desired_state,
@@ -321,6 +481,223 @@ mod tests {
         }
     }
 
+    fn live_request(
+        deployment_id: &str,
+        account_id: &str,
+        max_gross_exposure: Option<rust_decimal::Decimal>,
+    ) -> DeploymentApplyRequest {
+        DeploymentApplyRequest {
+            deployment_id: deployment_id.to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+            account_id: account_id.to_string(),
+            max_gross_exposure,
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Paused,
+        }
+    }
+
+    #[test]
+    fn live_deployment_requires_normalized_nonzero_wallet() {
+        for account_id in [
+            "live-wallet-must-be-rendered",
+            "0x0000000000000000000000000000000000000000",
+            "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "0x111111111111111111111111111111111111111",
+        ] {
+            let mut registry = DeploymentRegistry::default();
+            let error = apply_deployment(
+                &mut registry,
+                live_request("invalid.live", account_id, Some(dec!(5))),
+            )
+            .expect_err("non-canonical live wallet must be rejected");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+
+        let mut registry = DeploymentRegistry::default();
+        apply_deployment(
+            &mut registry,
+            live_request(
+                "valid.live",
+                "0x1111111111111111111111111111111111111111",
+                Some(dec!(5)),
+            ),
+        )
+        .expect("normalized non-zero wallet");
+    }
+
+    #[test]
+    fn live_deployment_requires_positive_cap() {
+        for cap in [None, Some(dec!(0)), Some(dec!(-1))] {
+            let mut registry = DeploymentRegistry::default();
+            let error = apply_deployment(
+                &mut registry,
+                live_request(
+                    "invalid-cap.live",
+                    "0x1111111111111111111111111111111111111111",
+                    cap,
+                ),
+            )
+            .expect_err("live deployment cap must be positive");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[test]
+    fn paper_account_requires_paper_namespace() {
+        let mut registry = DeploymentRegistry::default();
+        let error = apply_deployment(
+            &mut registry,
+            DeploymentApplyRequest {
+                deployment_id: "invalid.paper".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+                account_id: "acct-paper".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            },
+        )
+        .expect_err("paper account alias must use the paper namespace");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        let error = apply_deployment(
+            &mut registry,
+            DeploymentApplyRequest {
+                deployment_id: "empty.paper".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+                account_id: "paper:".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            },
+        )
+        .expect_err("paper account namespace must not be empty");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        apply_deployment(
+            &mut registry,
+            DeploymentApplyRequest {
+                deployment_id: "valid.paper".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+                account_id: "paper:test-valid".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+            },
+        )
+        .expect("paper namespace");
+    }
+
+    #[test]
+    fn live_deployments_require_one_wallet_and_equal_cap() {
+        let wallet = "0x1111111111111111111111111111111111111111";
+        let other_wallet = "0x2222222222222222222222222222222222222222";
+        let mut registry = DeploymentRegistry::default();
+        apply_deployment(
+            &mut registry,
+            live_request("first.live", wallet, Some(dec!(5))),
+        )
+        .expect("first live deployment");
+
+        assert!(apply_deployment(
+            &mut registry,
+            live_request("other-wallet.live", other_wallet, Some(dec!(5))),
+        )
+        .is_err());
+        assert!(apply_deployment(
+            &mut registry,
+            live_request("other-cap.live", wallet, Some(dec!(6))),
+        )
+        .is_err());
+
+        let reapplied = apply_deployment(
+            &mut registry,
+            live_request("first.live", other_wallet, Some(dec!(6))),
+        )
+        .expect("reapply ignores the old record with the same deployment id");
+        assert_eq!(reapplied.account_id, other_wallet);
+        assert_eq!(reapplied.max_gross_exposure, Some(dec!(6)));
+    }
+
+    #[test]
+    fn archived_live_cannot_resume_or_enable_with_invalid_account_scope() {
+        let mut registry = DeploymentRegistry::default();
+        let mut request = live_request("legacy.live", "legacy-wallet", None);
+        request.deployment_state = DeploymentState::Archived;
+        apply_deployment(&mut registry, request).expect("archive legacy record");
+
+        let error = control_deployment(
+            &mut registry,
+            "legacy.live",
+            DeploymentControlRequest {
+                desired_state: Some(DesiredState::Running),
+                deployment_state: Some(DeploymentState::Enabled),
+            },
+        )
+        .expect_err("invalid archived live record must stay quarantined");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let record = registry.get("legacy.live").expect("legacy record");
+        assert_eq!(record.deployment_state, DeploymentState::Archived);
+        assert_eq!(record.desired_state, DesiredState::Stopped);
+    }
+
+    #[test]
+    fn live_cap_reduction_updates_the_shared_account_atomically() {
+        let wallet = "0x1111111111111111111111111111111111111111";
+        let mut registry = DeploymentRegistry::default();
+        apply_deployment(
+            &mut registry,
+            live_request("first.live", wallet, Some(dec!(5))),
+        )
+        .expect("first live deployment");
+        apply_deployment(
+            &mut registry,
+            live_request("second.live", wallet, Some(dec!(5))),
+        )
+        .expect("second live deployment");
+
+        set_deployment_max_gross_exposure(
+            &mut registry,
+            "first.live",
+            Some(dec!(4)),
+            Some(dec!(3)),
+        )
+        .expect("shared cap reduction");
+
+        assert!(registry.records().into_iter().all(|record| {
+            record.runtime_mode != ploy_operator_contracts::DeploymentRuntimeMode::Live
+                || record.max_gross_exposure == Some(dec!(4))
+        }));
+
+        let before = registry.records();
+        for invalid in [None, Some(dec!(4)), Some(dec!(100))] {
+            assert!(set_deployment_max_gross_exposure(
+                &mut registry,
+                "first.live",
+                invalid,
+                Some(dec!(3)),
+            )
+            .is_err());
+            assert_eq!(registry.records(), before);
+        }
+
+        let mut archived = live_request("archived.live", wallet, Some(dec!(100)));
+        archived.deployment_state = DeploymentState::Archived;
+        apply_deployment(&mut registry, archived).expect("archived live record");
+        let before = registry.records();
+        assert!(set_deployment_max_gross_exposure(
+            &mut registry,
+            "archived.live",
+            Some(dec!(50)),
+            Some(dec!(3)),
+        )
+        .is_err());
+        assert_eq!(registry.records(), before);
+    }
+
     #[test]
     fn apply_and_control_deployment_mutates_registry() {
         let mut registry = DeploymentRegistry::default();
@@ -330,7 +707,7 @@ mod tests {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
                 runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
-                account_id: "acct-paper".to_string(),
+                account_id: "paper:test-example".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -360,7 +737,7 @@ mod tests {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
             runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
-            account_id: "acct-paper".to_string(),
+            account_id: "paper:test-example".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,
             desired_state: DesiredState::Running,
@@ -493,7 +870,7 @@ mod tests {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
                 runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
-                account_id: "acct-paper".to_string(),
+                account_id: "paper:test-example".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -518,7 +895,7 @@ mod tests {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
                 runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
-                account_id: "acct-paper".to_string(),
+                account_id: "paper:test-example".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -532,7 +909,7 @@ mod tests {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "replacement".to_string(),
                 runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
-                account_id: "acct-live".to_string(),
+                account_id: "0x1111111111111111111111111111111111111111".to_string(),
                 max_gross_exposure: Some(dec!(4)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -547,7 +924,7 @@ mod tests {
             persisted.runtime_mode,
             ploy_operator_contracts::DeploymentRuntimeMode::Paper
         );
-        assert_eq!(persisted.account_id, "acct-paper");
+        assert_eq!(persisted.account_id, "paper:test-example");
     }
 
     #[test]
@@ -557,7 +934,7 @@ mod tests {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
             runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
-            account_id: "acct-paper".to_string(),
+            account_id: "paper:test-example".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,
             desired_state: DesiredState::Running,
@@ -584,7 +961,7 @@ mod tests {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
             runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
-            account_id: "acct-paper".to_string(),
+            account_id: "paper:test-example".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,
             desired_state: DesiredState::Running,
@@ -628,7 +1005,7 @@ mod tests {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
                 runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
-                account_id: "acct-paper".to_string(),
+                account_id: "paper:test-example".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
