@@ -22903,6 +22903,10 @@ resume live trading.
 - Final independent review found no remaining P0/P1. Its last runtime-path
   finding (a missing `tomllib` import inside the gate heredoc) is now covered by
   a fixture test that extracts and executes the exact embedded Python program.
+- PR CI exposed a pre-existing legacy-worker test setup race: the pidfile could
+  be checked before `/bin/sh` had exec'd into the expected worker identity. The
+  fixture now waits for an explicit child-ready file before exercising the
+  missing-ledger termination path, preserving the PID-reuse safety check.
 - Current research evidence remains negative and is intentionally not promoted:
   the latest replay had one losing trade and `promotion_ready=false`. This
   slice therefore changes safety plumbing only and does not deploy or resume
