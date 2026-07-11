@@ -553,39 +553,35 @@ mod tests {
     #[test]
     fn existing_pid_file_prevents_duplicate_spawn() {
         let pid_file = unique_pid_file("existing");
+        let env_file = pid_file.with_extension("env");
         let _ = std::fs::remove_file(&pid_file);
 
-        let first = DeploymentRuntime::new(WorkerLaunchSpec {
-            pid_file: pid_file.clone(),
-            ..shell_sleep_spec()
-        });
+        let spec = generated_shell_spec(pid_file.clone(), &env_file);
+        let mut first = DeploymentRuntime::new(spec.clone());
         let pid = first.boot_status().pid.expect("first pid");
 
-        let second = DeploymentRuntime::new(WorkerLaunchSpec {
-            pid_file: pid_file.clone(),
-            ..shell_sleep_spec()
-        });
+        let mut second = DeploymentRuntime::new(spec);
         assert_eq!(second.boot_status().pid, Some(pid));
 
+        second.stop();
+        first.refresh_status();
+        assert!(!process_alive(pid));
         let _ = std::fs::remove_file(pid_file);
+        let _ = std::fs::remove_file(env_file);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn inherited_pid_can_be_stopped_without_child_handle() {
         let pid_file = unique_pid_file("inherited");
+        let env_file = pid_file.with_extension("env");
         let _ = std::fs::remove_file(&pid_file);
 
-        let mut first = DeploymentRuntime::new(WorkerLaunchSpec {
-            pid_file: pid_file.clone(),
-            ..shell_sleep_spec()
-        });
+        let spec = generated_shell_spec(pid_file.clone(), &env_file);
+        let mut first = DeploymentRuntime::new(spec.clone());
         let pid = first.boot_status().pid.expect("first pid");
 
-        let mut inherited = DeploymentRuntime::new(WorkerLaunchSpec {
-            pid_file: pid_file.clone(),
-            ..shell_sleep_spec()
-        });
+        let mut inherited = DeploymentRuntime::new(spec);
         assert_eq!(inherited.boot_status().pid, Some(pid));
 
         let status = inherited.stop();
@@ -594,6 +590,7 @@ mod tests {
         assert!(!process_alive(pid));
 
         let _ = std::fs::remove_file(pid_file);
+        let _ = std::fs::remove_file(env_file);
     }
 
     #[cfg(target_os = "linux")]
