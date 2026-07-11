@@ -22907,6 +22907,10 @@ resume live trading.
   be checked before `/bin/sh` had exec'd into the expected worker identity. The
   fixture now waits for an explicit child-ready file before exercising the
   missing-ledger termination path, preserving the PID-reuse safety check.
+- A second CI run confirmed the failures were fixture synchronization, not
+  runtime behavior: the resume test accepted the first (stale-spec) launch
+  record before asserting on the second (current-spec) launch. It now waits for
+  both records before reading the resumed launch.
 - Current research evidence remains negative and is intentionally not promoted:
   the latest replay had one losing trade and `promotion_ready=false`. This
   slice therefore changes safety plumbing only and does not deploy or resume

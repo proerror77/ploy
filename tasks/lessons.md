@@ -366,3 +366,12 @@
   `allow_running=false`, `confirm=delete-strategy-runtime-evidence`, backup
   artifacts, and a passing post-reset clean-baseline gate before any fresh
   dry-run observation or strategy-quality claim.
+
+## 2026-07-11
+
+- Pattern: Process fixtures passed locally but failed on GitHub because they
+  inferred child readiness from `spawn()` or accepted the first log row while
+  asserting behavior from a later restart.
+- Rule: Synchronize worker-process fixtures on an explicit child-ready signal
+  and wait for the exact expected event count before assertions. Do not weaken
+  production PID identity checks or add arbitrary sleeps to mask fixture races.

@@ -620,6 +620,18 @@ mod tests {
             observed_state: ObservedState::Starting,
         });
         tick_workers(&mut control_plane, &mut supervisor, &config);
+        let initial_launched = (0..1000).any(|_| {
+            if fs::read_to_string(&launch_log).is_ok_and(|launches| launches.lines().count() >= 1) {
+                true
+            } else {
+                thread::sleep(StdDuration::from_millis(10));
+                false
+            }
+        });
+        assert!(
+            initial_launched,
+            "initial stale-spec launch was not recorded"
+        );
         supervisor.pause("resume.current").expect("pause worker");
 
         control_plane.deployments.upsert(DeploymentRecord {
@@ -637,7 +649,7 @@ mod tests {
         let launches = (0..1000)
             .find_map(|_| {
                 if let Ok(launches) = fs::read_to_string(&launch_log) {
-                    if launches.lines().count() >= 1 {
+                    if launches.lines().count() >= 2 {
                         return Some(launches);
                     }
                 }
