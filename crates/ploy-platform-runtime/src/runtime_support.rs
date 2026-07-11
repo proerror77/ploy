@@ -6,7 +6,9 @@ use ploy_operator_contracts::{
 };
 use ploy_platform::DeploymentRecord;
 use ploy_trading::{OrderState, TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot};
+use rust_decimal::Decimal;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -18,6 +20,27 @@ pub enum ReconcileStatus {
     Applied(usize),
     Noop,
     BackoffActive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntentRiskEffect {
+    Increase,
+    Reduce,
+    Control,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntentAdmissionSource {
+    Worker,
+    AuthenticatedOperator,
+    Emergency,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TokenExposureEnvelope {
+    pub settled_net_qty: Decimal,
+    pub worst_case_min_qty: Decimal,
+    pub worst_case_max_qty: Decimal,
 }
 
 pub fn next_proposal_id(target_deployment_id: &str) -> String {
@@ -299,7 +322,90 @@ pub fn intent_counts_toward_exposure(purpose: ploy_trading::IntentPurpose) -> bo
 }
 
 pub fn intent_allowed_while_draining(purpose: ploy_trading::IntentPurpose) -> bool {
-    !matches!(purpose, ploy_trading::IntentPurpose::Entry)
+    matches!(
+        purpose,
+        ploy_trading::IntentPurpose::Exit
+            | ploy_trading::IntentPurpose::Reduce
+            | ploy_trading::IntentPurpose::Cancel
+    )
+}
+
+pub fn account_token_exposure_envelope(
+    deployments: &[DeploymentRecord],
+    trading: &BTreeMap<String, TradingRuntime>,
+    account_id: &str,
+    token_id: &str,
+) -> TokenExposureEnvelope {
+    let mut settled_net_qty = Decimal::ZERO;
+    let mut open_sell_qty = Decimal::ZERO;
+    let mut open_buy_qty = Decimal::ZERO;
+
+    for deployment in deployments.iter().filter(|deployment| {
+        deployment.deployment_state != DeploymentState::Archived
+            && deployment
+                .account_id
+                .trim()
+                .eq_ignore_ascii_case(account_id.trim())
+    }) {
+        let Some(runtime) = trading.get(&deployment.deployment_id) else {
+            continue;
+        };
+        settled_net_qty += runtime.positions().net_qty(token_id);
+        for order in runtime.orders().orders().filter(|order| {
+            order.token_id == token_id
+                && matches!(
+                    order.state,
+                    OrderState::Pending
+                        | OrderState::Unknown
+                        | OrderState::Acknowledged
+                        | OrderState::PartiallyFilled
+                )
+        }) {
+            let remaining = (order.requested_qty - order.filled_qty).max(Decimal::ZERO);
+            match runtime.intent(&order.intent_id).map(|intent| intent.side) {
+                Some(TradeSide::Sell) => open_sell_qty += remaining,
+                Some(TradeSide::Buy) => open_buy_qty += remaining,
+                None => {
+                    open_sell_qty += remaining;
+                    open_buy_qty += remaining;
+                }
+            }
+        }
+    }
+
+    TokenExposureEnvelope {
+        settled_net_qty,
+        worst_case_min_qty: settled_net_qty - open_sell_qty,
+        worst_case_max_qty: settled_net_qty + open_buy_qty,
+    }
+}
+
+pub fn intent_risk_effect(
+    intent: &TradingIntent,
+    exposure: TokenExposureEnvelope,
+) -> IntentRiskEffect {
+    match intent.purpose {
+        ploy_trading::IntentPurpose::Entry => IntentRiskEffect::Increase,
+        ploy_trading::IntentPurpose::Reduce | ploy_trading::IntentPurpose::Exit => {
+            IntentRiskEffect::Reduce
+        }
+        ploy_trading::IntentPurpose::Cancel => IntentRiskEffect::Control,
+        ploy_trading::IntentPurpose::Hedge => {
+            let current_worst = exposure
+                .worst_case_min_qty
+                .abs()
+                .max(exposure.worst_case_max_qty.abs());
+            let signed_quantity = intent.signed_quantity();
+            let next_worst = (exposure.worst_case_min_qty + signed_quantity)
+                .abs()
+                .max((exposure.worst_case_max_qty + signed_quantity).abs());
+            if next_worst < current_worst {
+                IntentRiskEffect::Reduce
+            } else {
+                IntentRiskEffect::Increase
+            }
+        }
+    }
 }
 
 pub fn observed_state_for_desired(desired_state: DesiredState) -> ObservedState {
@@ -353,19 +459,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        build_order_control_response, live_reconcile_backoff_ms, observed_state_for_desired,
-        order_state_from_wire, order_state_wire, restore_trading_runtime, trade_side_from_wire,
-        trade_side_wire,
+        account_token_exposure_envelope, build_order_control_response, intent_risk_effect,
+        live_reconcile_backoff_ms, observed_state_for_desired, order_state_from_wire,
+        order_state_wire, restore_trading_runtime, trade_side_from_wire, trade_side_wire,
+        IntentRiskEffect,
     };
     use ploy_operator_contracts::{
         DeploymentState, DesiredState, FillSnapshot, IntentPurpose, ObservedState, OrderSnapshot,
         PnlSnapshotResponse, PositionSnapshotResponse, RiskSnapshotResponse, TradingIntentSnapshot,
         TradingStateSnapshot,
     };
-    use ploy_trading::{OrderRecord, OrderState, TradeSide};
+    use ploy_platform::DeploymentRecord;
+    use ploy_trading::{
+        IntentPurpose as TradingIntentPurpose, OrderRecord, OrderState, PositionSnapshot,
+        TradeSide, TradingIntent, TradingRuntime, TradingRuntimeSnapshot,
+    };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-    use std::io;
+    use std::{collections::BTreeMap, io};
 
     #[test]
     fn state_and_side_wire_formats_round_trip() {
@@ -392,6 +503,130 @@ mod tests {
         assert_eq!(live_reconcile_backoff_ms(1, 500, 8_000), 500);
         assert_eq!(live_reconcile_backoff_ms(2, 500, 8_000), 1_000);
         assert_eq!(live_reconcile_backoff_ms(10, 500, 8_000), 8_000);
+    }
+
+    #[test]
+    fn stacked_hedges_use_worst_case_active_and_unknown_order_exposure() {
+        let deployment = |deployment_id: &str, account_id: &str, state| DeploymentRecord {
+            deployment_id: deployment_id.to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+            account_id: account_id.to_string(),
+            max_gross_exposure: Some(dec!(20)),
+            deployment_state: state,
+            desired_state: DesiredState::Running,
+            observed_state: ObservedState::Running,
+        };
+        let intent = |deployment_id: &str, intent_id: &str, side, quantity| TradingIntent {
+            intent_id: intent_id.to_string(),
+            deployment_id: deployment_id.to_string(),
+            market_id: "market-1".to_string(),
+            token_id: "token-1".to_string(),
+            side,
+            quantity,
+            limit_price: Some(dec!(0.5)),
+            purpose: TradingIntentPurpose::Hedge,
+            created_at: chrono::Utc::now(),
+        };
+        let order = |deployment_id: &str,
+                     order_id: &str,
+                     intent_id: &str,
+                     requested_qty,
+                     filled_qty,
+                     state| OrderRecord {
+            order_id: order_id.to_string(),
+            intent_id: intent_id.to_string(),
+            deployment_id: deployment_id.to_string(),
+            token_id: "token-1".to_string(),
+            requested_qty,
+            limit_price: Some(dec!(0.5)),
+            venue_order_id: Some(format!("venue-{order_id}")),
+            venue_order_history: Vec::new(),
+            revision: 0,
+            state,
+            filled_qty,
+            rejection_reason: None,
+            last_error: None,
+            idempotency_key: None,
+        };
+        let deployments = vec![
+            deployment("a.live", " 0xAbC ", DeploymentState::Enabled),
+            deployment("b.live", "0xabc", DeploymentState::Enabled),
+            deployment("archived.live", "0xabc", DeploymentState::Archived),
+        ];
+        let mut trading = BTreeMap::new();
+        trading.insert(
+            "a.live".to_string(),
+            TradingRuntime::restore(TradingRuntimeSnapshot {
+                intents: vec![intent("a.live", "sell-ack", TradeSide::Sell, dec!(4))],
+                orders: vec![order(
+                    "a.live",
+                    "sell-ack-order",
+                    "sell-ack",
+                    dec!(4),
+                    dec!(1),
+                    OrderState::Acknowledged,
+                )],
+                positions: vec![PositionSnapshot {
+                    token_id: "token-1".to_string(),
+                    net_qty: dec!(5),
+                    avg_entry_price: dec!(0.5),
+                    realized_pnl: Decimal::ZERO,
+                }],
+                ..TradingRuntimeSnapshot::default()
+            }),
+        );
+        trading.insert(
+            "b.live".to_string(),
+            TradingRuntime::restore(TradingRuntimeSnapshot {
+                intents: vec![
+                    intent("b.live", "sell-unknown", TradeSide::Sell, dec!(8)),
+                    intent("b.live", "buy-ack", TradeSide::Buy, dec!(2)),
+                ],
+                orders: vec![
+                    order(
+                        "b.live",
+                        "sell-unknown-order",
+                        "sell-unknown",
+                        dec!(8),
+                        Decimal::ZERO,
+                        OrderState::Unknown,
+                    ),
+                    order(
+                        "b.live",
+                        "buy-ack-order",
+                        "buy-ack",
+                        dec!(2),
+                        Decimal::ZERO,
+                        OrderState::Acknowledged,
+                    ),
+                ],
+                ..TradingRuntimeSnapshot::default()
+            }),
+        );
+        trading.insert(
+            "archived.live".to_string(),
+            TradingRuntime::restore(TradingRuntimeSnapshot {
+                positions: vec![PositionSnapshot {
+                    token_id: "token-1".to_string(),
+                    net_qty: dec!(100),
+                    avg_entry_price: dec!(0.5),
+                    realized_pnl: Decimal::ZERO,
+                }],
+                ..TradingRuntimeSnapshot::default()
+            }),
+        );
+
+        let exposure = account_token_exposure_envelope(&deployments, &trading, "0xABC", "token-1");
+        assert_eq!(exposure.settled_net_qty, dec!(5));
+        assert_eq!(exposure.worst_case_min_qty, dec!(-6));
+        assert_eq!(exposure.worst_case_max_qty, dec!(7));
+
+        let next_hedge = intent("a.live", "next-sell", TradeSide::Sell, dec!(1));
+        assert_eq!(
+            intent_risk_effect(&next_hedge, exposure),
+            IntentRiskEffect::Increase
+        );
     }
 
     #[test]

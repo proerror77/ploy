@@ -152,7 +152,7 @@ mod execution {
             let deployment_id = intent.deployment_id.clone();
             let request = Self::request(intent, &intent.intent_id);
             match tokio::task::spawn_blocking(move || {
-                client.submit_intent(&deployment_id, &request)
+                client.submit_worker_intent(&deployment_id, &request)
             })
             .await
             {
@@ -323,6 +323,21 @@ mod execution {
                 },
                 "deployment",
             )
+        }
+
+        #[test]
+        fn build_live_executor_scopes_worker_credentials() {
+            let mut client = ControlPlaneClient::default();
+            client.admin_token = Some("admin-token".to_string());
+            client.operator_token = Some("operator-token".to_string());
+            client.sidecar_token = Some("sidecar-token".to_string());
+
+            let executor =
+                super::super::build_live_executor(client, ExecutionPolicy::default(), "deployment");
+
+            assert!(executor.client.admin_token.is_none());
+            assert!(executor.client.operator_token.is_none());
+            assert!(executor.client.sidecar_token.is_none());
         }
 
         fn buy_intent(quantity: Decimal, limit_price: Decimal) -> TradingIntent {
@@ -699,7 +714,7 @@ fn build_live_executor(
     policy: ploy_strategy_bundles::ExecutionPolicy,
     deployment_id: &str,
 ) -> execution::LiveExecutor {
-    execution::LiveExecutor::new(client, policy, deployment_id)
+    execution::LiveExecutor::new(client.worker_scoped(), policy, deployment_id)
 }
 
 #[cfg(all(test, feature = "live-execution"))]

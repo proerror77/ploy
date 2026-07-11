@@ -11,6 +11,9 @@ use ploy_operator_contracts::{
     ProposalDecisionRequest, SafetyProposal, TradingStateSnapshot,
 };
 use ploy_platform::{ControlPlane, DeploymentRecord};
+use ploy_platform_runtime::runtime_support::{
+    account_token_exposure_envelope, intent_risk_effect, IntentAdmissionSource,
+};
 use ploy_platform_runtime::{
     apply_deployment as apply_deployment_record, apply_loaded_registry_state,
     build_trading_state_snapshot, cancel_order as cancel_runtime_order,
@@ -504,7 +507,20 @@ impl PloyDaemon {
         intent: TradingIntent,
         idempotency_key: Option<&str>,
     ) -> io::Result<PaperIntentResponse> {
-        let deployment = self
+        self.submit_intent_idempotent_from(
+            intent,
+            idempotency_key,
+            IntentAdmissionSource::AuthenticatedOperator,
+        )
+    }
+
+    pub fn submit_intent_idempotent_from(
+        &mut self,
+        intent: TradingIntent,
+        idempotency_key: Option<&str>,
+        source: IntentAdmissionSource,
+    ) -> io::Result<PaperIntentResponse> {
+        let mut deployment = self
             .control_plane
             .deployments
             .get(&intent.deployment_id)
@@ -515,7 +531,50 @@ impl PloyDaemon {
         {
             return Ok(response);
         }
-        ensure_intent_allowed(&deployment, &intent)?;
+
+        self.refresh_source_health();
+        deployment = self
+            .control_plane
+            .deployments
+            .get(&intent.deployment_id)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "deployment not found"))?;
+        let deployments = self.control_plane.deployments.records();
+        if deployments.iter().any(|record| {
+            record.runtime_mode == DeploymentRuntimeMode::Live
+                && record.deployment_state != DeploymentState::Archived
+                && record
+                    .account_id
+                    .trim()
+                    .eq_ignore_ascii_case(deployment.account_id.trim())
+                && !self.trading.contains_key(&record.deployment_id)
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "account `{}` has a live deployment without canonical trading state",
+                    deployment.account_id
+                ),
+            ));
+        }
+        let exposure = account_token_exposure_envelope(
+            &deployments,
+            &self.trading,
+            &deployment.account_id,
+            &intent.token_id,
+        );
+        let risk_effect = intent_risk_effect(&intent, exposure);
+        let venue_health_fresh = self
+            .control_plane
+            .system
+            .source_is_fresh_at("venue:polymarket", Utc::now());
+        ensure_intent_allowed(
+            &deployment,
+            &intent,
+            risk_effect,
+            venue_health_fresh,
+            source,
+        )?;
         enforce_intent_exposure_limit(
             &deployment,
             &intent,
@@ -1074,7 +1133,9 @@ mod tests {
         DesiredState, ObservedState, PaperIntentResponse,
     };
     use ploy_platform::DeploymentRecord;
-    use ploy_platform_runtime::live_reconcile_backoff_ms;
+    use ploy_platform_runtime::{
+        live_reconcile_backoff_ms, runtime_support::IntentAdmissionSource,
+    };
     use ploy_trading::{
         FillRecord, IntentPurpose, OrderRecord, OrderState, PositionSnapshot, TradeSide,
         TradingIntent, TradingRuntime, TradingRuntimeSnapshot,
@@ -2380,6 +2441,66 @@ mod tests {
             trading_state[0].orders[0].venue_order_id.as_deref(),
             Some("venue-live-1")
         );
+    }
+
+    #[test]
+    fn fresh_running_live_allows_risk_increase() {
+        let root = temp_dir("fresh-running-live-intent");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([{
+                "deployment_id": "example.live",
+                "bundle_id": "example",
+                "runtime_mode": "live",
+                "account_id": "acct-live",
+                "deployment_state": "enabled",
+                "desired_state": "running",
+                "observed_state": "running"
+            }])
+            .to_string(),
+        )
+        .expect("write registry");
+        let config = PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..PlatformConfig::default()
+        };
+        seed_empty_live_ledgers(&config);
+        let mut daemon = PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("venue-fresh-1")),
+        )
+        .expect("boot");
+        daemon
+            .control_plane
+            .deployments
+            .set_observed_state("example.live", ObservedState::Running);
+
+        let response = daemon
+            .submit_intent_idempotent_from(
+                TradingIntent {
+                    intent_id: "intent-fresh-live".to_string(),
+                    deployment_id: "example.live".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(1),
+                    limit_price: Some(dec!(0.5)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: chrono::Utc::now(),
+                },
+                None,
+                IntentAdmissionSource::Worker,
+            )
+            .expect("fresh running live admission");
+
+        assert_eq!(response.state, "acknowledged");
     }
 
     #[test]

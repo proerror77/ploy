@@ -1,5 +1,6 @@
 use ploy_operator_contracts::{
-    DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DesiredState, ObservedState,
+    DeploymentApplyRequest, DeploymentControlRequest, DeploymentRuntimeMode, DeploymentState,
+    DesiredState, ObservedState,
 };
 use ploy_platform::{DeploymentRecord, DeploymentRegistry};
 use ploy_trading::{IntentPurpose, OrderRecord, TradingIntent};
@@ -7,7 +8,8 @@ use rust_decimal::Decimal;
 use std::io;
 
 use crate::{
-    intent_allowed_while_draining, intent_counts_toward_exposure, observed_state_for_desired,
+    intent_counts_toward_exposure, observed_state_for_desired,
+    runtime_support::{IntentAdmissionSource, IntentRiskEffect},
 };
 
 pub fn build_deployment_record(request: DeploymentApplyRequest) -> DeploymentRecord {
@@ -103,6 +105,9 @@ pub fn control_deployment(
 pub fn ensure_intent_allowed(
     deployment: &DeploymentRecord,
     intent: &TradingIntent,
+    risk_effect: IntentRiskEffect,
+    venue_health_fresh: bool,
+    source: IntentAdmissionSource,
 ) -> io::Result<()> {
     if deployment.deployment_state == DeploymentState::Disabled
         || deployment.deployment_state == DeploymentState::Archived
@@ -116,19 +121,55 @@ pub fn ensure_intent_allowed(
         ));
     }
 
-    if deployment.deployment_state == DeploymentState::Draining
-        && !intent_allowed_while_draining(intent.purpose)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "deployment is draining and only exit/reduce/hedge/cancel intents are allowed",
-        ));
+    if deployment.runtime_mode == DeploymentRuntimeMode::Paper {
+        if deployment.deployment_state == DeploymentState::Draining
+            && intent.purpose == IntentPurpose::Entry
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "deployment is draining and only exit/reduce/hedge/cancel intents are allowed",
+            ));
+        }
+        if deployment.desired_state != DesiredState::Running {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "deployment must be running before it can accept intents",
+            ));
+        }
+        return Ok(());
     }
 
-    if deployment.desired_state != DesiredState::Running {
+    if risk_effect == IntentRiskEffect::Increase {
+        if deployment.deployment_state != DeploymentState::Enabled
+            || deployment.desired_state != DesiredState::Running
+            || deployment.observed_state != ObservedState::Running
+            || !venue_health_fresh
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "live risk increase requires enabled, desired running, observed running, and fresh venue health",
+            ));
+        }
+        return Ok(());
+    }
+
+    let paused_or_failed = deployment.desired_state != DesiredState::Running
+        || matches!(
+            deployment.observed_state,
+            ObservedState::Paused | ObservedState::Stopped | ObservedState::Failed
+        );
+    if paused_or_failed {
+        if risk_effect == IntentRiskEffect::Reduce
+            && matches!(
+                source,
+                IntentAdmissionSource::AuthenticatedOperator | IntentAdmissionSource::Emergency
+            )
+        {
+            return Ok(());
+        }
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "deployment must be running before it can accept intents",
+            "paused, stopped, or failed live deployment accepts reduction only from an authenticated operator or emergency source",
         ));
     }
 
@@ -247,6 +288,39 @@ mod tests {
     use ploy_trading::{IntentPurpose, TradeSide, TradingIntent};
     use rust_decimal_macros::dec;
 
+    use crate::runtime_support::{IntentAdmissionSource, IntentRiskEffect};
+
+    fn live_deployment(
+        deployment_state: DeploymentState,
+        desired_state: DesiredState,
+        observed_state: ObservedState,
+    ) -> ploy_platform::DeploymentRecord {
+        ploy_platform::DeploymentRecord {
+            deployment_id: "example.live".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+            account_id: "acct-live".to_string(),
+            max_gross_exposure: Some(dec!(5)),
+            deployment_state,
+            desired_state,
+            observed_state,
+        }
+    }
+
+    fn live_intent(purpose: IntentPurpose) -> TradingIntent {
+        TradingIntent {
+            intent_id: format!("intent-{purpose:?}"),
+            deployment_id: "example.live".to_string(),
+            market_id: "market-1".to_string(),
+            token_id: "token-1".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(2),
+            limit_price: Some(dec!(1)),
+            purpose,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
     #[test]
     fn apply_and_control_deployment_mutates_registry() {
         let mut registry = DeploymentRegistry::default();
@@ -304,9 +378,110 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
 
-        ensure_intent_allowed(&deployment, &intent).expect("allowed");
+        ensure_intent_allowed(
+            &deployment,
+            &intent,
+            IntentRiskEffect::Increase,
+            false,
+            IntentAdmissionSource::Worker,
+        )
+        .expect("paper admission keeps existing lifecycle behavior");
         enforce_exposure_limit(&deployment, &intent, dec!(2)).expect("fits");
         assert!(enforce_exposure_limit(&deployment, &intent, dec!(4)).is_err());
+    }
+
+    #[test]
+    fn degraded_live_rejects_entry_and_increasing_hedge_but_allows_reduction() {
+        let deployment = live_deployment(
+            DeploymentState::Enabled,
+            DesiredState::Running,
+            ObservedState::Degraded,
+        );
+
+        for intent in [
+            live_intent(IntentPurpose::Entry),
+            live_intent(IntentPurpose::Hedge),
+        ] {
+            assert!(ensure_intent_allowed(
+                &deployment,
+                &intent,
+                IntentRiskEffect::Increase,
+                false,
+                IntentAdmissionSource::Worker,
+            )
+            .is_err());
+        }
+        ensure_intent_allowed(
+            &deployment,
+            &live_intent(IntentPurpose::Reduce),
+            IntentRiskEffect::Reduce,
+            false,
+            IntentAdmissionSource::Worker,
+        )
+        .expect("degraded live deployment must retain a reduction path");
+    }
+
+    #[test]
+    fn starting_live_rejects_risk_increase() {
+        let deployment = live_deployment(
+            DeploymentState::Enabled,
+            DesiredState::Running,
+            ObservedState::Starting,
+        );
+
+        assert!(ensure_intent_allowed(
+            &deployment,
+            &live_intent(IntentPurpose::Entry),
+            IntentRiskEffect::Increase,
+            true,
+            IntentAdmissionSource::Worker,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn draining_live_rejects_increasing_hedge() {
+        let deployment = live_deployment(
+            DeploymentState::Draining,
+            DesiredState::Running,
+            ObservedState::Running,
+        );
+
+        assert!(ensure_intent_allowed(
+            &deployment,
+            &live_intent(IntentPurpose::Hedge),
+            IntentRiskEffect::Increase,
+            true,
+            IntentAdmissionSource::Worker,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn paused_live_reduction_rejects_worker_but_accepts_operator() {
+        let deployment = live_deployment(
+            DeploymentState::Enabled,
+            DesiredState::Paused,
+            ObservedState::Paused,
+        );
+        let reduction = live_intent(IntentPurpose::Reduce);
+
+        assert!(ensure_intent_allowed(
+            &deployment,
+            &reduction,
+            IntentRiskEffect::Reduce,
+            false,
+            IntentAdmissionSource::Worker,
+        )
+        .is_err());
+        ensure_intent_allowed(
+            &deployment,
+            &reduction,
+            IntentRiskEffect::Reduce,
+            false,
+            IntentAdmissionSource::AuthenticatedOperator,
+        )
+        .expect("authenticated operator must retain a paused reduction path");
     }
 
     #[test]

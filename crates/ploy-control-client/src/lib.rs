@@ -238,6 +238,44 @@ impl ControlPlaneClient {
         )
     }
 
+    pub fn submit_worker_intent(
+        &self,
+        deployment_id: &str,
+        request: &PaperIntentRequest,
+    ) -> Result<PaperIntentResponse, String> {
+        let worker_token = std::env::var("PLOY_WORKER_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+            .ok_or_else(|| {
+                "PLOY_WORKER_TOKEN is required for worker intent submission".to_string()
+            })?;
+        self.submit_worker_intent_with_token(deployment_id, request, &worker_token)
+    }
+
+    fn submit_worker_intent_with_token(
+        &self,
+        deployment_id: &str,
+        request: &PaperIntentRequest,
+        worker_token: &str,
+    ) -> Result<PaperIntentResponse, String> {
+        self.send_json_with_headers(
+            "POST",
+            &format!("/api/deployments/{deployment_id}/intents"),
+            request,
+            &format!("x-ploy-worker-token: {worker_token}\r\n"),
+        )
+    }
+
+    pub fn worker_scoped(&self) -> Self {
+        Self {
+            control_plane_addr: self.control_plane_addr.clone(),
+            admin_token: None,
+            operator_token: None,
+            sidecar_token: None,
+            runtime_root: self.runtime_root.clone(),
+        }
+    }
+
     fn read_status_snapshot(&self) -> Result<SystemStatus, String> {
         match self.read_status_over_http() {
             Ok(status) => return Ok(status),
@@ -319,13 +357,27 @@ impl ControlPlaneClient {
         B: serde::Serialize,
         T: DeserializeOwned,
     {
+        self.send_json_with_headers(method, path, body, &self.authorization_headers())
+    }
+
+    fn send_json_with_headers<B, T>(
+        &self,
+        method: &str,
+        path: &str,
+        body: &B,
+        authorization_headers: &str,
+    ) -> Result<T, String>
+    where
+        B: serde::Serialize,
+        T: DeserializeOwned,
+    {
         let mut stream = TcpStream::connect(&self.control_plane_addr)
             .map_err(|err| format!("connect {}: {err}", self.control_plane_addr))?;
         let body = serde_json::to_string(body).map_err(|err| format!("serialize body: {err}"))?;
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             self.control_plane_addr,
-            self.authorization_headers(),
+            authorization_headers,
             body.len(),
             body
         );
@@ -455,7 +507,8 @@ mod tests {
             let bytes = stream.read(&mut request).expect("read request");
             let request = String::from_utf8_lossy(&request[..bytes]);
             assert!(request.starts_with("POST /api/deployments/example.live/intents"));
-            assert!(request.contains("Authorization: Bearer worker-token"));
+            assert!(request.contains("x-ploy-worker-token: worker-token"));
+            assert!(!request.contains("Authorization: Bearer"));
             assert!(request.contains("\"idempotency_key\":\"intent-1\""));
             let body = serde_json::json!({
                 "deployment_id": "example.live",
@@ -478,9 +531,18 @@ mod tests {
 
         let mut client = ControlPlaneClient::default();
         client.control_plane_addr = addr.to_string();
-        client.admin_token = Some("worker-token".to_string());
-        let response = client
-            .submit_intent(
+        client.admin_token = Some("admin-token".to_string());
+        client.operator_token = Some("operator-token".to_string());
+        client.sidecar_token = Some("sidecar-token".to_string());
+        let worker_client = client.worker_scoped();
+        assert_eq!(worker_client.control_plane_addr, client.control_plane_addr);
+        assert_eq!(worker_client.runtime_root, client.runtime_root);
+        assert!(worker_client.admin_token.is_none());
+        assert!(worker_client.operator_token.is_none());
+        assert!(worker_client.sidecar_token.is_none());
+
+        let response = worker_client
+            .submit_worker_intent_with_token(
                 "example.live",
                 &PaperIntentRequest {
                     idempotency_key: Some("intent-1".to_string()),
@@ -491,11 +553,25 @@ mod tests {
                     limit_price: Some(rust_decimal::Decimal::new(45, 2)),
                     purpose: IntentPurpose::Entry,
                 },
+                "worker-token",
             )
             .expect("submit intent");
 
         assert_eq!(response.state, "acknowledged");
         server.join().expect("server");
+    }
+
+    #[test]
+    fn worker_scope_clears_all_elevated_tokens() {
+        let mut client = ControlPlaneClient::default();
+        client.admin_token = Some("admin-token".to_string());
+        client.operator_token = Some("operator-token".to_string());
+        client.sidecar_token = Some("sidecar-token".to_string());
+
+        let worker_client = client.worker_scoped();
+        assert!(worker_client.admin_token.is_none());
+        assert!(worker_client.operator_token.is_none());
+        assert!(worker_client.sidecar_token.is_none());
     }
 
     #[test]

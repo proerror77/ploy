@@ -11,6 +11,7 @@ use ploy_operator_contracts::{
     PaperIntentRequest, PlatformDiagnosticsReport, ProposalCreateRequest, ProposalDecisionRequest,
     ProposalSnapshotEvent, StatusUpdate, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
 };
+use ploy_platform_runtime::runtime_support::IntentAdmissionSource;
 use ploy_trading::{TradeSide, TradingIntent};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
@@ -44,6 +45,7 @@ static REQUEST_RATE_LIMITER: OnceLock<Mutex<RateLimiter>> = OnceLock::new();
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthLevel {
     None,
+    Worker,
     Sidecar,
     Operator,
     Admin,
@@ -53,6 +55,7 @@ enum AuthLevel {
 enum RequiredAccess {
     Public,
     ReadOnly,
+    Intent,
     Operator,
     Admin,
 }
@@ -566,7 +569,7 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
     let path = raw_path.split('?').next().unwrap_or(raw_path);
     let peer_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
     let client_addr = Some(client_ip(peer_addr.as_deref(), &request));
-    let (configured_token, operator_token, sidecar_token, cookie_secret) =
+    let (configured_token, operator_token, worker_token, sidecar_token, cookie_secret) =
         match configured_auth(state) {
             Ok(auth) => auth,
             Err(response) => return write_json_response(stream, response),
@@ -578,6 +581,10 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
             .map(ExposeSecret::expose_secret)
             .map(|token| token.as_str()),
         operator_token
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .map(|token| token.as_str()),
+        worker_token
             .as_ref()
             .map(ExposeSecret::expose_secret)
             .map(|token| token.as_str()),
@@ -610,12 +617,14 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
             required_access,
             configured_token.is_some(),
             operator_token.is_some(),
+            worker_token.is_some(),
             sidecar_token.is_some(),
         ) {
             let response = auth_error_response(
                 required_access,
                 configured_token.is_some(),
                 operator_token.is_some(),
+                worker_token.is_some(),
                 sidecar_token.is_some(),
             );
             audit_request(
@@ -650,12 +659,14 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
             required_access,
             configured_token.is_some(),
             operator_token.is_some(),
+            worker_token.is_some(),
             sidecar_token.is_some(),
         ) {
             let response = auth_error_response(
                 required_access,
                 configured_token.is_some(),
                 operator_token.is_some(),
+                worker_token.is_some(),
                 sidecar_token.is_some(),
             );
             audit_request(
@@ -705,6 +716,7 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
         auth_level,
         configured_token.is_some(),
         operator_token.is_some(),
+        worker_token.is_some(),
         sidecar_token.is_some(),
         state,
     );
@@ -844,6 +856,7 @@ fn configured_auth(
         Option<SecretString>,
         Option<SecretString>,
         Option<SecretString>,
+        Option<SecretString>,
         SecretString,
     ),
     (u16, String),
@@ -855,6 +868,7 @@ fn configured_auth(
             (
                 daemon.config.admin_token.clone(),
                 daemon.config.operator_token.clone(),
+                daemon.config.worker_token.clone(),
                 daemon.config.sidecar_token.clone(),
                 daemon.config.auth_cookie_secret.clone(),
             )
@@ -964,6 +978,9 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
             RequiredAccess::ReadOnly
         }
         ("GET", _) if path.starts_with("/api/trading/diagnose/") => RequiredAccess::ReadOnly,
+        ("POST", _) if path.starts_with("/api/deployments/") && path.ends_with("/intents") => {
+            RequiredAccess::Intent
+        }
         _ => RequiredAccess::Operator,
     }
 }
@@ -971,6 +988,7 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
 fn auth_level_name(auth_level: AuthLevel) -> &'static str {
     match auth_level {
         AuthLevel::None => "none",
+        AuthLevel::Worker => "worker",
         AuthLevel::Sidecar => "sidecar",
         AuthLevel::Operator => "operator",
         AuthLevel::Admin => "admin",
@@ -981,6 +999,7 @@ fn required_access_name(required_access: RequiredAccess) -> &'static str {
     match required_access {
         RequiredAccess::Public => "public",
         RequiredAccess::ReadOnly => "read_only",
+        RequiredAccess::Intent => "intent",
         RequiredAccess::Operator => "operator",
         RequiredAccess::Admin => "admin",
     }
@@ -1718,6 +1737,7 @@ fn request_auth_level(
     request: &str,
     admin_token: Option<&str>,
     operator_token: Option<&str>,
+    worker_token: Option<&str>,
     sidecar_token: Option<&str>,
     cookie_secret: &str,
 ) -> AuthLevel {
@@ -1754,6 +1774,15 @@ fn request_auth_level(
         }
     }
 
+    if let Some(expected_token) = worker_token {
+        if extract_header(request, "x-ploy-worker-token")
+            .map(|token| token == expected_token)
+            .unwrap_or(false)
+        {
+            return AuthLevel::Worker;
+        }
+    }
+
     if let Some(expected_token) = sidecar_token {
         if extract_header(request, "x-ploy-sidecar-token")
             .map(|token| token == expected_token)
@@ -1771,6 +1800,7 @@ fn access_allowed(
     required_access: RequiredAccess,
     _admin_configured: bool,
     _operator_configured: bool,
+    _worker_configured: bool,
     _sidecar_configured: bool,
 ) -> bool {
     match required_access {
@@ -1778,6 +1808,10 @@ fn access_allowed(
         RequiredAccess::ReadOnly => matches!(
             auth_level,
             AuthLevel::Admin | AuthLevel::Operator | AuthLevel::Sidecar
+        ),
+        RequiredAccess::Intent => matches!(
+            auth_level,
+            AuthLevel::Admin | AuthLevel::Operator | AuthLevel::Worker
         ),
         RequiredAccess::Operator => matches!(auth_level, AuthLevel::Admin | AuthLevel::Operator),
         RequiredAccess::Admin => auth_level == AuthLevel::Admin,
@@ -1788,6 +1822,7 @@ fn auth_error_response(
     required_access: RequiredAccess,
     admin_configured: bool,
     operator_configured: bool,
+    worker_configured: bool,
     sidecar_configured: bool,
 ) -> (u16, String) {
     let message = match required_access {
@@ -1799,6 +1834,12 @@ fn auth_error_response(
         }
         RequiredAccess::ReadOnly => {
             "control-plane admin, operator, or sidecar token is required".to_string()
+        }
+        RequiredAccess::Intent if admin_configured || operator_configured || worker_configured => {
+            "control-plane worker, operator, or admin token is required".to_string()
+        }
+        RequiredAccess::Intent => {
+            "control-plane worker, operator, or admin authentication is not configured".to_string()
         }
         RequiredAccess::Operator if admin_configured || operator_configured => {
             "control-plane operator or admin token is required".to_string()
@@ -1868,6 +1909,16 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     output
 }
 
+fn intent_admission_source(auth_level: AuthLevel) -> Option<IntentAdmissionSource> {
+    match auth_level {
+        AuthLevel::Worker => Some(IntentAdmissionSource::Worker),
+        AuthLevel::Admin | AuthLevel::Operator => {
+            Some(IntentAdmissionSource::AuthenticatedOperator)
+        }
+        AuthLevel::None | AuthLevel::Sidecar => None,
+    }
+}
+
 fn handle_authenticated_runtime_request(
     method: &str,
     path: &str,
@@ -1875,6 +1926,7 @@ fn handle_authenticated_runtime_request(
     auth_level: AuthLevel,
     admin_configured: bool,
     operator_configured: bool,
+    worker_configured: bool,
     sidecar_configured: bool,
     state: &Arc<AppState>,
 ) -> (u16, String) {
@@ -1886,6 +1938,7 @@ fn handle_authenticated_runtime_request(
                 "authenticated": auth_level == AuthLevel::Admin,
                 "auth_required": true,
                 "operator_authenticated": auth_level == AuthLevel::Operator,
+                "worker_authenticated": auth_level == AuthLevel::Worker,
                 "sidecar_authenticated": auth_level == AuthLevel::Sidecar,
             })
             .to_string(),
@@ -1934,6 +1987,7 @@ fn handle_authenticated_runtime_request(
             required_access,
             admin_configured,
             operator_configured,
+            worker_configured,
             sidecar_configured,
         ) =>
         {
@@ -1941,10 +1995,17 @@ fn handle_authenticated_runtime_request(
                 required_access,
                 admin_configured,
                 operator_configured,
+                worker_configured,
                 sidecar_configured,
             )
         }
-        _ => handle_runtime_request(method, path, body, state),
+        _ => handle_runtime_request_from(
+            method,
+            path,
+            body,
+            intent_admission_source(auth_level),
+            state,
+        ),
     }
 }
 
@@ -1952,6 +2013,22 @@ fn handle_runtime_request(
     method: &str,
     path: &str,
     body: Option<&str>,
+    state: &Arc<AppState>,
+) -> (u16, String) {
+    handle_runtime_request_from(
+        method,
+        path,
+        body,
+        Some(IntentAdmissionSource::AuthenticatedOperator),
+        state,
+    )
+}
+
+fn handle_runtime_request_from(
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    intent_source: Option<IntentAdmissionSource>,
     state: &Arc<AppState>,
 ) -> (u16, String) {
     match (method, path) {
@@ -2348,10 +2425,19 @@ fn handle_runtime_request(
                 Ok(side) => side,
                 Err(error) => return json_error(400, &error.error, error.message),
             };
+            let Some(intent_source) = intent_source else {
+                return json_error(
+                    401,
+                    "unauthorized",
+                    Some(
+                        "intent admission requires worker, operator, or admin identity".to_string(),
+                    ),
+                );
+            };
 
             match state.daemon.lock() {
                 Ok(mut daemon) => {
-                    let response = daemon.submit_intent_idempotent(
+                    let response = daemon.submit_intent_idempotent_from(
                         TradingIntent {
                             intent_id: request
                                 .idempotency_key
@@ -2368,6 +2454,7 @@ fn handle_runtime_request(
                             created_at: chrono::Utc::now(),
                         },
                         request.idempotency_key.as_deref(),
+                        intent_source,
                     );
                     publish_snapshot_events(&daemon, &state.events);
                     match response {
@@ -2562,14 +2649,16 @@ mod tests {
     use super::{
         access_allowed, admin_session_cookie, append_audit_entry, client_ip, content_length,
         handle_api_request, handle_authenticated_runtime_request, handle_runtime_request,
-        header_end_offset, rate_limit_key, request_auth_level, response_headers, route_request,
-        snapshot_events, AppState, AuthLevel, RateLimiter, ADMIN_SESSION_COOKIE_NAME,
+        header_end_offset, intent_admission_source, rate_limit_key, request_auth_level,
+        required_access, response_headers, route_request, snapshot_events, AppState, AuthLevel,
+        RateLimiter, ADMIN_SESSION_COOKIE_NAME,
     };
     use crate::events::EventBroker;
     use chrono::{Duration, Utc};
     use ploy_connectivity::{CancellationOutcome, ReplaceOutcome, StaticExecutionGateway};
     use ploy_operator_contracts::AuditLogEntry;
     use ploy_operator_contracts::{OrderReplaceRequest, PaperIntentRequest};
+    use ploy_platform_runtime::runtime_support::IntentAdmissionSource;
     use ploy_trading::{IntentPurpose as TradingIntentPurpose, TradeSide, TradingIntent};
     use std::collections::VecDeque;
     use std::fs;
@@ -2722,6 +2811,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         ));
         for required in [
             super::RequiredAccess::ReadOnly,
@@ -2731,6 +2821,7 @@ mod tests {
             assert!(!access_allowed(
                 AuthLevel::None,
                 required,
+                false,
                 false,
                 false,
                 false,
@@ -2756,6 +2847,7 @@ mod tests {
             "/auth/session",
             None,
             AuthLevel::None,
+            false,
             false,
             false,
             false,
@@ -2836,6 +2928,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             &state,
         );
 
@@ -2866,6 +2959,7 @@ mod tests {
             Some("{\"desired_state\":\"paused\",\"deployment_state\":null}"),
             AuthLevel::None,
             true,
+            false,
             false,
             false,
             &state,
@@ -2899,6 +2993,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             &state,
         );
 
@@ -2927,6 +3022,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             &state,
         );
 
@@ -2942,7 +3038,14 @@ mod tests {
             "GET /api/events/stream HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nCookie: {cookie}; theme=dark\r\n\r\n"
         );
         assert_eq!(
-            request_auth_level(&request, Some("secret-token"), None, None, "cookie-secret"),
+            request_auth_level(
+                &request,
+                Some("secret-token"),
+                None,
+                None,
+                None,
+                "cookie-secret",
+            ),
             AuthLevel::Admin
         );
     }
@@ -2981,7 +3084,14 @@ mod tests {
         let cookie = admin_session_cookie("secret-token", "cookie-secret");
         let request = format!("GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n");
         assert_eq!(
-            request_auth_level(&request, Some("other-token"), None, None, "cookie-secret"),
+            request_auth_level(
+                &request,
+                Some("other-token"),
+                None,
+                None,
+                None,
+                "cookie-secret",
+            ),
             AuthLevel::None
         );
     }
@@ -2994,6 +3104,7 @@ mod tests {
             request_auth_level(
                 request,
                 Some("admin-secret"),
+                None,
                 None,
                 Some("sidecar-secret"),
                 "cookie-secret"
@@ -3023,6 +3134,7 @@ mod tests {
             AuthLevel::Sidecar,
             true,
             false,
+            false,
             true,
             &state,
         );
@@ -3034,6 +3146,7 @@ mod tests {
             Some("{\"desired_state\":\"paused\",\"deployment_state\":null}"),
             AuthLevel::Sidecar,
             true,
+            false,
             false,
             true,
             &state,
@@ -3050,6 +3163,7 @@ mod tests {
                 request,
                 Some("admin-secret"),
                 Some("operator-secret"),
+                None,
                 Some("sidecar-secret"),
                 "cookie-secret"
             ),
@@ -3079,6 +3193,7 @@ mod tests {
             AuthLevel::Operator,
             true,
             true,
+            false,
             true,
             &state,
         );
@@ -3092,11 +3207,141 @@ mod tests {
             AuthLevel::Operator,
             true,
             true,
+            false,
             true,
             &state,
         );
         assert_eq!(audit_code, 401);
         assert!(audit_body.contains("\"error\":\"unauthorized\""));
+    }
+
+    #[test]
+    fn worker_token_cannot_access_operator_or_admin_endpoints() {
+        let request = "POST /api/deployments/example.live/intents HTTP/1.1\r\nx-ploy-worker-token: worker-secret\r\n\r\n";
+        let auth_level = request_auth_level(
+            request,
+            Some("admin-secret"),
+            Some("operator-secret"),
+            Some("worker-secret"),
+            Some("sidecar-secret"),
+            "cookie-secret",
+        );
+        assert_eq!(auth_level, AuthLevel::Worker);
+        assert!(access_allowed(
+            auth_level,
+            required_access("POST", "/api/deployments/example.live/intents"),
+            true,
+            true,
+            true,
+            true,
+        ));
+        assert!(!access_allowed(
+            auth_level,
+            required_access("POST", "/api/deployments/example.live/control"),
+            true,
+            true,
+            true,
+            true,
+        ));
+        assert!(!access_allowed(
+            auth_level,
+            required_access("GET", "/api/audit/logs"),
+            true,
+            true,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn intent_json_cannot_spoof_admission_source() {
+        let request: PaperIntentRequest = serde_json::from_value(serde_json::json!({
+            "market_id": "market-1",
+            "token_id": "token-1",
+            "side": "sell",
+            "quantity": "1",
+            "limit_price": "0.5",
+            "purpose": "reduce",
+            "admission_source": "authenticated_operator"
+        }))
+        .expect("intent request accepts only its public trading fields");
+
+        assert_eq!(
+            request.purpose,
+            ploy_operator_contracts::IntentPurpose::Reduce
+        );
+        assert_eq!(
+            intent_admission_source(AuthLevel::Worker),
+            Some(IntentAdmissionSource::Worker),
+        );
+    }
+
+    #[test]
+    fn unauthenticated_and_sidecar_cannot_become_operator_source() {
+        assert_eq!(intent_admission_source(AuthLevel::None), None);
+        assert_eq!(intent_admission_source(AuthLevel::Sidecar), None);
+        assert_eq!(
+            intent_admission_source(AuthLevel::Operator),
+            Some(IntentAdmissionSource::AuthenticatedOperator),
+        );
+        assert_eq!(
+            intent_admission_source(AuthLevel::Admin),
+            Some(IntentAdmissionSource::AuthenticatedOperator),
+        );
+    }
+
+    #[test]
+    fn worker_only_auth_configuration_is_recognized() {
+        let config = crate::config::PlatformConfig {
+            worker_token: Some("worker-secret".to_string().into()),
+            ..crate::config::PlatformConfig::default()
+        };
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("unused")),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+        let body = serde_json::json!({
+            "market_id": "market-1",
+            "token_id": "token-1",
+            "side": "buy",
+            "quantity": "1",
+            "limit_price": "0.5",
+            "purpose": "entry"
+        })
+        .to_string();
+
+        let (missing_code, missing_body) = handle_authenticated_runtime_request(
+            "POST",
+            "/api/deployments/missing.live/intents",
+            Some(&body),
+            AuthLevel::None,
+            false,
+            false,
+            true,
+            false,
+            &state,
+        );
+        assert_eq!(missing_code, 401);
+        assert!(missing_body.contains("worker, operator, or admin token is required"));
+
+        let (worker_code, worker_body) = handle_authenticated_runtime_request(
+            "POST",
+            "/api/deployments/missing.live/intents",
+            Some(&body),
+            AuthLevel::Worker,
+            false,
+            false,
+            true,
+            false,
+            &state,
+        );
+        assert_eq!(worker_code, 404);
+        assert!(worker_body.contains("deployment_not_found"));
     }
 
     #[test]
@@ -3382,11 +3627,15 @@ mod tests {
         };
 
         crate::runtime::seed_empty_live_ledgers(&config);
-        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+        let mut daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::acknowledged("venue-live-http-1")),
         )
         .expect("boot daemon");
+        daemon.control_plane.deployments.set_observed_state(
+            "example.live",
+            ploy_operator_contracts::ObservedState::Running,
+        );
         let state = Arc::new(AppState {
             daemon: Arc::new(Mutex::new(daemon)),
             events: Arc::new(EventBroker::default()),
@@ -3450,13 +3699,17 @@ mod tests {
         };
 
         crate::runtime::seed_empty_live_ledgers(&config);
-        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+        let mut daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::failed(
                 ploy_connectivity::ExecutionError::Transport("gateway offline".to_string()),
             )),
         )
         .expect("boot daemon");
+        daemon.control_plane.deployments.set_observed_state(
+            "example.live",
+            ploy_operator_contracts::ObservedState::Running,
+        );
         let state = Arc::new(AppState {
             daemon: Arc::new(Mutex::new(daemon)),
             events: Arc::new(EventBroker::default()),
@@ -3523,9 +3776,13 @@ mod tests {
         let gateway = StaticExecutionGateway::acknowledged("venue-live-http-cancel-1")
             .with_cancel_result(Ok(CancellationOutcome::Canceled));
         crate::runtime::seed_empty_live_ledgers(&config);
-        let daemon =
+        let mut daemon =
             crate::runtime::PloyDaemon::boot_with_live_execution(&config, Box::new(gateway))
                 .expect("boot daemon");
+        daemon.control_plane.deployments.set_observed_state(
+            "example.live",
+            ploy_operator_contracts::ObservedState::Running,
+        );
         let state = Arc::new(AppState {
             daemon: Arc::new(Mutex::new(daemon)),
             events: Arc::new(EventBroker::default()),
@@ -3608,9 +3865,13 @@ mod tests {
                 venue_order_id: "venue-live-http-replace-2".to_string(),
             }));
         crate::runtime::seed_empty_live_ledgers(&config);
-        let daemon =
+        let mut daemon =
             crate::runtime::PloyDaemon::boot_with_live_execution(&config, Box::new(gateway))
                 .expect("boot daemon");
+        daemon.control_plane.deployments.set_observed_state(
+            "example.live",
+            ploy_operator_contracts::ObservedState::Running,
+        );
         let state = Arc::new(AppState {
             daemon: Arc::new(Mutex::new(daemon)),
             events: Arc::new(EventBroker::default()),
@@ -3699,6 +3960,10 @@ mod tests {
             Box::new(StaticExecutionGateway::acknowledged("venue-live-http-2")),
         )
         .expect("boot daemon");
+        daemon.control_plane.deployments.set_observed_state(
+            "example.live",
+            ploy_operator_contracts::ObservedState::Running,
+        );
         daemon
             .submit_intent(TradingIntent {
                 intent_id: "intent-live-http-2".to_string(),
