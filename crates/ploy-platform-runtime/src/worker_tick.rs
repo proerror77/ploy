@@ -621,6 +621,7 @@ mod tests {
         });
         tick_workers(&mut control_plane, &mut supervisor, &config);
         let initial_launched = (0..1000).any(|_| {
+            tick_workers(&mut control_plane, &mut supervisor, &config);
             if fs::read_to_string(&launch_log).is_ok_and(|launches| launches.lines().count() >= 1) {
                 true
             } else {
@@ -648,6 +649,7 @@ mod tests {
 
         let launches = (0..1000)
             .find_map(|_| {
+                tick_workers(&mut control_plane, &mut supervisor, &config);
                 if let Ok(launches) = fs::read_to_string(&launch_log) {
                     if launches.lines().count() >= 2 {
                         return Some(launches);
@@ -661,5 +663,6 @@ mod tests {
         assert!(resumed.contains("config/strategies/new-paper.toml"));
         assert!(resumed.contains("--dry-run"));
         assert!(!resumed.contains("old-live"));
+        supervisor.stop("resume.current");
     }
 }
