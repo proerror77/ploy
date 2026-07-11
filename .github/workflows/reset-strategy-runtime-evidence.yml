@@ -158,6 +158,7 @@ jobs:
             "${EXECUTE}" "${CONFIRM}" "${DEPLOY_ROOT}" \
             "${remote_dir}/reset_strategy_runtime_evidence.py" "${remote_backup}"
           printf '%s\n' "${remote_env} /bin/bash -s" > artifacts/reset-strategy-runtime-evidence/argv.txt
+          # shellcheck disable=SC2029
           ssh tango-1-1 "${remote_env} /bin/bash -s" <<'REMOTE'
           set -euo pipefail
 
@@ -251,6 +252,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/reset-strategy-runtime-evidence
           printf -v remote_env 'DEPLOY_ROOT=%q' "${DEPLOY_ROOT}"
+          # shellcheck disable=SC2029
           ssh tango-1-1 "${remote_env} /bin/bash -s" <<'REMOTE' \
             > artifacts/reset-strategy-runtime-evidence/post-reset-dryrun-report.json
           set -euo pipefail

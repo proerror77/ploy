@@ -95,17 +95,16 @@ jobs:
       - name: Reject retired routes, insecure SSH, and reset bypasses
         run: |
           set -euo pipefail
-          command -v rg >/dev/null 2>&1 || {
-            echo "required scanner rg is unavailable" >&2
-            exit 1
-          }
-
           run_forbidden_scan() {
             label="$1"
             pattern="$2"
             shift 2
             set +e
-            rg -n -- "${pattern}" "$@"
+            if command -v rg >/dev/null 2>&1; then
+              rg -n -- "${pattern}" "$@"
+            else
+              grep -R -n -E -- "${pattern}" "$@"
+            fi
             scan_status=$?
             set -e
             case "${scan_status}" in

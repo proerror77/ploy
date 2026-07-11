@@ -41,6 +41,10 @@ remote, cloud, wallet, database, or venue mutation.
 - Final independent re-review approved with no Critical, Important, or Minor
   findings after the execution principal was cryptographically bound to the
   live manifest account.
+- PR #741 initial CI exposed two workflow portability findings: Ubuntu lacked
+  `rg`, and two intentional local-to-remote SSH expansions lacked ShellCheck
+  annotations. The safety scan now falls back to `grep -R -E`; actionlint 1.7.7
+  and both local forbidden-pattern scans pass.
 
 ---
 
