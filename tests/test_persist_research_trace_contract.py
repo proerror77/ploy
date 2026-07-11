@@ -355,9 +355,12 @@ class PersistResearchTraceContractTest(unittest.TestCase):
         cargo = CARGO.read_text(encoding="utf-8")
         self.assertNotIn('name = "factor_research"', cargo)
         deploy = TANGO_DEPLOY.read_text(encoding="utf-8")
+        deploy_helper = (
+            ROOT / "scripts" / "ci" / "deploy_tango_cloud_assist.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("--example factor_research", deploy)
         self.assertNotIn("examples/factor_research", deploy)
-        self.assertIn("rm -f ${DEPLOY_ROOT}/bin/factor-research", deploy)
+        self.assertIn('rm -f "${{DEPLOY_ROOT}}/bin/factor-research"', deploy_helper)
 
 
 if __name__ == "__main__":

@@ -375,3 +375,6 @@
 - Rule: Synchronize worker-process fixtures on an explicit child-ready signal
   and wait for the exact expected event count before assertions. Do not weaken
   production PID identity checks or add arbitrary sleeps to mask fixture races.
+  Retry the runtime tick while waiting for a spawned fixture under CI load, and
+  explicitly stop the final child before the test returns so parallel suites do
+  not accumulate orphan workers and starve later spawns.
