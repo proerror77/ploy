@@ -45,6 +45,10 @@ remote, cloud, wallet, database, or venue mutation.
   `rg`, and two intentional local-to-remote SSH expansions lacked ShellCheck
   annotations. The safety scan now falls back to `grep -R -E`; actionlint 1.7.7
   and both local forbidden-pattern scans pass.
+- The live/default runner matrix then caught dry-run/live config drift after
+  the live risk reduction. The canonical ThreeLayer dry-run now uses the same
+  `$5` fixed stake and 5-minute-only window as live, preserving the strict
+  config-parity gate instead of weakening it.
 
 ---
 
