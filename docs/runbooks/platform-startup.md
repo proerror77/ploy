@@ -23,7 +23,9 @@ live-host acceptance is documented separately in:
 cargo run -p new-ployd
 ```
 
-If you want the control plane protected, export `PLOY_ADMIN_TOKEN` first.
+Export `PLOY_ADMIN_TOKEN`, `PLOY_API_ADMIN_TOKEN`, or `PLOY_API_KEY` before
+starting the daemon. Protected control-plane routes fail closed when no token is
+configured.
 Optionally set `PLOY_OPERATOR_TOKEN` for write-capable operator automation, or
 `PLOY_SIDECAR_AUTH_TOKEN` for read-only sidecar/agent access. `ployctl`
 automatically prefers admin credentials, then operator credentials, then the
@@ -47,7 +49,7 @@ cargo run -p ployctl -- system audit
 cargo run -p ployctl -- trading status
 cargo run -p ployctl -- deployments list
 cargo run -p ploytui
-curl -N http://127.0.0.1:8081/api/events/stream
+curl -N -H "Authorization: Bearer ${PLOY_ADMIN_TOKEN:-${PLOY_API_ADMIN_TOKEN:-${PLOY_API_KEY}}}" http://127.0.0.1:8081/api/events/stream
 ```
 
 3. Run the smoke test:
@@ -72,7 +74,7 @@ ployctl deployments list
 ployctl deployments inspect example.paper
 ployctl trading cancel example.live <order-id>
 ploytui
-curl -N http://127.0.0.1:8081/api/events/stream
+curl -N -H "Authorization: Bearer ${PLOY_ADMIN_TOKEN:-${PLOY_API_ADMIN_TOKEN:-${PLOY_API_KEY}}}" http://127.0.0.1:8081/api/events/stream
 ployctl deployments pause example.paper
 ployctl deployments resume example.paper
 ployctl deployments stop example.paper

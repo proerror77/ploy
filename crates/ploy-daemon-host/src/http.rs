@@ -1,16 +1,17 @@
 use crate::events::EventBroker;
-use crate::runtime::{PloyDaemon, next_paper_intent_id};
+use crate::runtime::{next_paper_intent_id, PloyDaemon};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use ploy_operator_contracts::{
-    AgentRunCreateRequest, AgentRunCreateResponse, AgentRunRecord, AlertSnapshotEvent,
-    AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
-    DeploymentDiagnosticsReport, DeploymentSnapshotEvent, DiagnosticsEvidence, DiagnosticsFinding,
-    DryRunPerformanceReport, IntentPurpose, MetricsSnapshotEvent, OperatorEvent,
-    OrderReplaceRequest, OversightSnapshotEvent, PaperIntentRequest, PlatformDiagnosticsReport,
-    ProposalCreateRequest, ProposalDecisionRequest, ProposalSnapshotEvent, StatusUpdate,
-    SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent, compute_oversight_report,
+    compute_oversight_report, AgentRunCreateRequest, AgentRunCreateResponse, AgentRunRecord,
+    AlertSnapshotEvent, AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest,
+    DeploymentControlRequest, DeploymentDiagnosticsReport, DeploymentSnapshotEvent,
+    DiagnosticsEvidence, DiagnosticsFinding, DryRunPerformanceReport, IntentPurpose,
+    MetricsSnapshotEvent, OperatorEvent, OrderReplaceRequest, OversightSnapshotEvent,
+    PaperIntentRequest, PlatformDiagnosticsReport, ProposalCreateRequest, ProposalDecisionRequest,
+    ProposalSnapshotEvent, StatusUpdate, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
 };
+use ploy_platform_runtime::runtime_support::IntentAdmissionSource;
 use ploy_trading::{TradeSide, TradingIntent};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
@@ -44,6 +45,7 @@ static REQUEST_RATE_LIMITER: OnceLock<Mutex<RateLimiter>> = OnceLock::new();
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthLevel {
     None,
+    Worker,
     Sidecar,
     Operator,
     Admin,
@@ -53,6 +55,7 @@ enum AuthLevel {
 enum RequiredAccess {
     Public,
     ReadOnly,
+    Intent,
     Operator,
     Admin,
 }
@@ -60,20 +63,34 @@ enum RequiredAccess {
 #[derive(Debug, Default)]
 struct RateLimiter {
     requests: BTreeMap<String, VecDeque<Instant>>,
+    last_pruned: Option<Instant>,
 }
 
 impl RateLimiter {
     fn allow(&mut self, key: &str, limit_per_minute: u32) -> bool {
+        let now = Instant::now();
+        if self
+            .last_pruned
+            .is_none_or(|last_pruned| now.duration_since(last_pruned) >= Duration::from_secs(1))
+        {
+            let cutoff = now - Duration::from_secs(60);
+            self.requests.retain(|_, bucket| {
+                while matches!(bucket.front(), Some(timestamp) if *timestamp < cutoff) {
+                    bucket.pop_front();
+                }
+                !bucket.is_empty()
+            });
+            self.last_pruned = Some(now);
+        }
         if limit_per_minute == 0 {
             return true;
         }
-
-        let now = Instant::now();
-        let cutoff = now - Duration::from_secs(60);
-        let bucket = self.requests.entry(key.to_string()).or_default();
-        while matches!(bucket.front(), Some(timestamp) if *timestamp < cutoff) {
-            bucket.pop_front();
+        // ponytail: bounded in-memory limiter; move to a shared limiter if 10k active clients/minute is legitimate.
+        if !self.requests.contains_key(key) && self.requests.len() >= 10_000 {
+            return false;
         }
+
+        let bucket = self.requests.entry(key.to_string()).or_default();
         if bucket.len() >= limit_per_minute as usize {
             return false;
         }
@@ -439,6 +456,9 @@ pub fn handle_api_request(
                     200,
                     serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
                 ),
+                Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+                    (400, "{\"error\":\"apply_failed\"}".to_string())
+                }
                 Err(_) => (500, "{\"error\":\"apply_failed\"}".to_string()),
             }
         }
@@ -488,23 +508,24 @@ pub fn handle_api_request(
 
             match PloyDaemon::boot(config) {
                 Ok(mut daemon) => {
-                    let response = daemon.submit_intent(TradingIntent {
-                        intent_id: next_paper_intent_id(deployment_id),
-                        deployment_id: deployment_id.to_string(),
-                        market_id: request.market_id,
-                        token_id: request.token_id,
-                        side,
-                        quantity: request.quantity,
-                        limit_price: request.limit_price,
-                        purpose: intent_purpose_from_wire(request.purpose),
-                        created_at: chrono::Utc::now(),
-                    });
-                    match daemon.write_runtime_snapshots() {
-                        Ok(()) => {}
-                        Err(err) => {
-                            return json_error(500, "snapshot_write_failed", Some(err.to_string()));
-                        }
-                    }
+                    let response = daemon.submit_intent_idempotent(
+                        TradingIntent {
+                            intent_id: request
+                                .idempotency_key
+                                .as_deref()
+                                .map(|key| format!("request-{key}"))
+                                .unwrap_or_else(|| next_paper_intent_id(deployment_id)),
+                            deployment_id: deployment_id.to_string(),
+                            market_id: request.market_id,
+                            token_id: request.token_id,
+                            side,
+                            quantity: request.quantity,
+                            limit_price: request.limit_price,
+                            purpose: intent_purpose_from_wire(request.purpose),
+                            created_at: chrono::Utc::now(),
+                        },
+                        request.idempotency_key.as_deref(),
+                    );
                     match response {
                         Ok(response) => (
                             200,
@@ -549,8 +570,9 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
     let method = request_line.next().unwrap_or("GET");
     let raw_path = request_line.next().unwrap_or("/");
     let path = raw_path.split('?').next().unwrap_or(raw_path);
-    let client_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
-    let (configured_token, operator_token, sidecar_token, cookie_secret) =
+    let peer_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
+    let client_addr = Some(client_ip(peer_addr.as_deref(), &request));
+    let (configured_token, operator_token, worker_token, sidecar_token, cookie_secret) =
         match configured_auth(state) {
             Ok(auth) => auth,
             Err(response) => return write_json_response(stream, response),
@@ -562,6 +584,10 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
             .map(ExposeSecret::expose_secret)
             .map(|token| token.as_str()),
         operator_token
+            .as_ref()
+            .map(ExposeSecret::expose_secret)
+            .map(|token| token.as_str()),
+        worker_token
             .as_ref()
             .map(ExposeSecret::expose_secret)
             .map(|token| token.as_str()),
@@ -594,12 +620,14 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
             required_access,
             configured_token.is_some(),
             operator_token.is_some(),
+            worker_token.is_some(),
             sidecar_token.is_some(),
         ) {
             let response = auth_error_response(
                 required_access,
                 configured_token.is_some(),
                 operator_token.is_some(),
+                worker_token.is_some(),
                 sidecar_token.is_some(),
             );
             audit_request(
@@ -634,12 +662,14 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
             required_access,
             configured_token.is_some(),
             operator_token.is_some(),
+            worker_token.is_some(),
             sidecar_token.is_some(),
         ) {
             let response = auth_error_response(
                 required_access,
                 configured_token.is_some(),
                 operator_token.is_some(),
+                worker_token.is_some(),
                 sidecar_token.is_some(),
             );
             audit_request(
@@ -689,6 +719,7 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
         auth_level,
         configured_token.is_some(),
         operator_token.is_some(),
+        worker_token.is_some(),
         sidecar_token.is_some(),
         state,
     );
@@ -828,6 +859,7 @@ fn configured_auth(
         Option<SecretString>,
         Option<SecretString>,
         Option<SecretString>,
+        Option<SecretString>,
         SecretString,
     ),
     (u16, String),
@@ -839,6 +871,7 @@ fn configured_auth(
             (
                 daemon.config.admin_token.clone(),
                 daemon.config.operator_token.clone(),
+                daemon.config.worker_token.clone(),
                 daemon.config.sidecar_token.clone(),
                 daemon.config.auth_cookie_secret.clone(),
             )
@@ -872,17 +905,11 @@ fn rate_limit_response(
         Ok(limit) => limit,
         Err(response) => return Some(response),
     };
-    let key = format!(
-        "{}|{}|{}|{}",
-        client_addr.unwrap_or("unknown"),
-        auth_level_name(auth_level),
-        method,
-        path
-    );
-    let allowed = request_rate_limiter()
-        .lock()
-        .map(|mut limiter| limiter.allow(&key, limit))
-        .unwrap_or(true);
+    let key = rate_limit_key(client_addr, auth_level, method, path);
+    let allowed = match request_rate_limiter().lock() {
+        Ok(mut limiter) => limiter.allow(&key, limit),
+        Err(_) => return Some(json_error(503, "rate_limiter_lock_poisoned", None)),
+    };
     if allowed {
         None
     } else {
@@ -895,6 +922,35 @@ fn rate_limit_response(
             )),
         ))
     }
+}
+
+fn rate_limit_key(
+    client_addr: Option<&str>,
+    auth_level: AuthLevel,
+    _method: &str,
+    _path: &str,
+) -> String {
+    let client_ip = client_addr
+        .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+        .map(|address| address.ip().to_string())
+        .unwrap_or_else(|| client_addr.unwrap_or("unknown").to_string());
+    format!("{client_ip}|{}", auth_level_name(auth_level))
+}
+
+fn client_ip(peer_addr: Option<&str>, request: &str) -> String {
+    let peer_ip = peer_addr
+        .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+        .map(|address| address.ip());
+    if peer_ip.is_some_and(|ip| ip.is_loopback()) {
+        if let Some(real_ip) = extract_header(request, "X-Real-IP")
+            .and_then(|value| value.parse::<std::net::IpAddr>().ok())
+        {
+            return real_ip.to_string();
+        }
+    }
+    peer_ip
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| peer_addr.unwrap_or("unknown").to_string())
 }
 
 fn required_access(method: &str, path: &str) -> RequiredAccess {
@@ -925,6 +981,9 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
             RequiredAccess::ReadOnly
         }
         ("GET", _) if path.starts_with("/api/trading/diagnose/") => RequiredAccess::ReadOnly,
+        ("POST", _) if path.starts_with("/api/deployments/") && path.ends_with("/intents") => {
+            RequiredAccess::Intent
+        }
         _ => RequiredAccess::Operator,
     }
 }
@@ -932,6 +991,7 @@ fn required_access(method: &str, path: &str) -> RequiredAccess {
 fn auth_level_name(auth_level: AuthLevel) -> &'static str {
     match auth_level {
         AuthLevel::None => "none",
+        AuthLevel::Worker => "worker",
         AuthLevel::Sidecar => "sidecar",
         AuthLevel::Operator => "operator",
         AuthLevel::Admin => "admin",
@@ -942,6 +1002,7 @@ fn required_access_name(required_access: RequiredAccess) -> &'static str {
     match required_access {
         RequiredAccess::Public => "public",
         RequiredAccess::ReadOnly => "read_only",
+        RequiredAccess::Intent => "intent",
         RequiredAccess::Operator => "operator",
         RequiredAccess::Admin => "admin",
     }
@@ -1679,6 +1740,7 @@ fn request_auth_level(
     request: &str,
     admin_token: Option<&str>,
     operator_token: Option<&str>,
+    worker_token: Option<&str>,
     sidecar_token: Option<&str>,
     cookie_secret: &str,
 ) -> AuthLevel {
@@ -1715,6 +1777,15 @@ fn request_auth_level(
         }
     }
 
+    if let Some(expected_token) = worker_token {
+        if extract_header(request, "x-ploy-worker-token")
+            .map(|token| token == expected_token)
+            .unwrap_or(false)
+        {
+            return AuthLevel::Worker;
+        }
+    }
+
     if let Some(expected_token) = sidecar_token {
         if extract_header(request, "x-ploy-sidecar-token")
             .map(|token| token == expected_token)
@@ -1730,19 +1801,20 @@ fn request_auth_level(
 fn access_allowed(
     auth_level: AuthLevel,
     required_access: RequiredAccess,
-    admin_configured: bool,
-    operator_configured: bool,
-    sidecar_configured: bool,
+    _admin_configured: bool,
+    _operator_configured: bool,
+    _worker_configured: bool,
+    _sidecar_configured: bool,
 ) -> bool {
-    if !admin_configured && !operator_configured && !sidecar_configured {
-        return true;
-    }
-
     match required_access {
         RequiredAccess::Public => true,
         RequiredAccess::ReadOnly => matches!(
             auth_level,
             AuthLevel::Admin | AuthLevel::Operator | AuthLevel::Sidecar
+        ),
+        RequiredAccess::Intent => matches!(
+            auth_level,
+            AuthLevel::Admin | AuthLevel::Operator | AuthLevel::Worker
         ),
         RequiredAccess::Operator => matches!(auth_level, AuthLevel::Admin | AuthLevel::Operator),
         RequiredAccess::Admin => auth_level == AuthLevel::Admin,
@@ -1753,6 +1825,7 @@ fn auth_error_response(
     required_access: RequiredAccess,
     admin_configured: bool,
     operator_configured: bool,
+    worker_configured: bool,
     sidecar_configured: bool,
 ) -> (u16, String) {
     let message = match required_access {
@@ -1764,6 +1837,12 @@ fn auth_error_response(
         }
         RequiredAccess::ReadOnly => {
             "control-plane admin, operator, or sidecar token is required".to_string()
+        }
+        RequiredAccess::Intent if admin_configured || operator_configured || worker_configured => {
+            "control-plane worker, operator, or admin token is required".to_string()
+        }
+        RequiredAccess::Intent => {
+            "control-plane worker, operator, or admin authentication is not configured".to_string()
         }
         RequiredAccess::Operator if admin_configured || operator_configured => {
             "control-plane operator or admin token is required".to_string()
@@ -1833,6 +1912,16 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     output
 }
 
+fn intent_admission_source(auth_level: AuthLevel) -> Option<IntentAdmissionSource> {
+    match auth_level {
+        AuthLevel::Worker => Some(IntentAdmissionSource::Worker),
+        AuthLevel::Admin | AuthLevel::Operator => {
+            Some(IntentAdmissionSource::AuthenticatedOperator)
+        }
+        AuthLevel::None | AuthLevel::Sidecar => None,
+    }
+}
+
 fn handle_authenticated_runtime_request(
     method: &str,
     path: &str,
@@ -1840,6 +1929,7 @@ fn handle_authenticated_runtime_request(
     auth_level: AuthLevel,
     admin_configured: bool,
     operator_configured: bool,
+    worker_configured: bool,
     sidecar_configured: bool,
     state: &Arc<AppState>,
 ) -> (u16, String) {
@@ -1849,8 +1939,9 @@ fn handle_authenticated_runtime_request(
             200,
             serde_json::json!({
                 "authenticated": auth_level == AuthLevel::Admin,
-                "auth_required": admin_configured || operator_configured || sidecar_configured,
+                "auth_required": true,
                 "operator_authenticated": auth_level == AuthLevel::Operator,
+                "worker_authenticated": auth_level == AuthLevel::Worker,
                 "sidecar_authenticated": auth_level == AuthLevel::Sidecar,
             })
             .to_string(),
@@ -1868,7 +1959,7 @@ fn handle_authenticated_runtime_request(
                         .map(str::to_string)
                 });
             if !admin_configured {
-                return (200, serde_json::json!({ "success": true }).to_string());
+                return json_error(503, "admin_auth_not_configured", None);
             }
 
             match state.daemon.lock() {
@@ -1888,7 +1979,7 @@ fn handle_authenticated_runtime_request(
                             "admin token did not match configured control-plane token".to_string(),
                         ),
                     ),
-                    None => (200, serde_json::json!({ "success": true }).to_string()),
+                    None => json_error(503, "admin_auth_not_configured", None),
                 },
                 Err(_) => json_error(503, "daemon_lock_poisoned", None),
             }
@@ -1899,6 +1990,7 @@ fn handle_authenticated_runtime_request(
             required_access,
             admin_configured,
             operator_configured,
+            worker_configured,
             sidecar_configured,
         ) =>
         {
@@ -1906,10 +1998,17 @@ fn handle_authenticated_runtime_request(
                 required_access,
                 admin_configured,
                 operator_configured,
+                worker_configured,
                 sidecar_configured,
             )
         }
-        _ => handle_runtime_request(method, path, body, state),
+        _ => handle_runtime_request_from(
+            method,
+            path,
+            body,
+            intent_admission_source(auth_level),
+            state,
+        ),
     }
 }
 
@@ -1917,6 +2016,22 @@ fn handle_runtime_request(
     method: &str,
     path: &str,
     body: Option<&str>,
+    state: &Arc<AppState>,
+) -> (u16, String) {
+    handle_runtime_request_from(
+        method,
+        path,
+        body,
+        Some(IntentAdmissionSource::AuthenticatedOperator),
+        state,
+    )
+}
+
+fn handle_runtime_request_from(
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    intent_source: Option<IntentAdmissionSource>,
     state: &Arc<AppState>,
 ) -> (u16, String) {
     match (method, path) {
@@ -2015,6 +2130,18 @@ fn handle_runtime_request(
                 Ok(request) => request,
                 Err(err) => return json_error(400, "invalid_json", Some(err.to_string())),
             };
+            if request.max_turns == 0
+                || request.max_turns > 30
+                || !request.budget_usd.is_finite()
+                || request.budget_usd <= 0.0
+                || request.budget_usd > 1.0
+            {
+                return json_error(
+                    400,
+                    "agent_run_limits_exceeded",
+                    Some("max_turns must be 1..=30 and budget_usd must be (0, 1]".to_string()),
+                );
+            }
             match queue_agent_run_request(state, request) {
                 Ok(response) => (
                     202,
@@ -2168,6 +2295,9 @@ fn handle_runtime_request(
                             200,
                             serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_string()),
                         ),
+                        Err(err) if err.kind() == io::ErrorKind::InvalidInput => {
+                            json_error(400, "apply_failed", Some(err.to_string()))
+                        }
                         Err(err) => json_error(500, "apply_failed", Some(err.to_string())),
                     }
                 }
@@ -2301,28 +2431,38 @@ fn handle_runtime_request(
                 Ok(side) => side,
                 Err(error) => return json_error(400, &error.error, error.message),
             };
+            let Some(intent_source) = intent_source else {
+                return json_error(
+                    401,
+                    "unauthorized",
+                    Some(
+                        "intent admission requires worker, operator, or admin identity".to_string(),
+                    ),
+                );
+            };
 
             match state.daemon.lock() {
                 Ok(mut daemon) => {
-                    let response = daemon.submit_intent(TradingIntent {
-                        intent_id: next_paper_intent_id(deployment_id),
-                        deployment_id: deployment_id.to_string(),
-                        market_id: request.market_id,
-                        token_id: request.token_id,
-                        side,
-                        quantity: request.quantity,
-                        limit_price: request.limit_price,
-                        purpose: intent_purpose_from_wire(request.purpose),
-                        created_at: chrono::Utc::now(),
-                    });
-                    match daemon.write_runtime_snapshots() {
-                        Ok(()) => {
-                            publish_snapshot_events(&daemon, &state.events);
-                        }
-                        Err(err) => {
-                            return json_error(500, "snapshot_write_failed", Some(err.to_string()));
-                        }
-                    }
+                    let response = daemon.submit_intent_idempotent_from(
+                        TradingIntent {
+                            intent_id: request
+                                .idempotency_key
+                                .as_deref()
+                                .map(|key| format!("request-{key}"))
+                                .unwrap_or_else(|| next_paper_intent_id(deployment_id)),
+                            deployment_id: deployment_id.to_string(),
+                            market_id: request.market_id,
+                            token_id: request.token_id,
+                            side,
+                            quantity: request.quantity,
+                            limit_price: request.limit_price,
+                            purpose: intent_purpose_from_wire(request.purpose),
+                            created_at: chrono::Utc::now(),
+                        },
+                        request.idempotency_key.as_deref(),
+                        intent_source,
+                    );
+                    publish_snapshot_events(&daemon, &state.events);
                     match response {
                         Ok(response) => (
                             200,
@@ -2513,21 +2653,24 @@ fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        ADMIN_SESSION_COOKIE_NAME, AppState, AuthLevel, RateLimiter, admin_session_cookie,
-        append_audit_entry, content_length, handle_api_request,
-        handle_authenticated_runtime_request, handle_runtime_request, header_end_offset,
-        request_auth_level, response_headers, route_request, snapshot_events,
+        access_allowed, admin_session_cookie, append_audit_entry, client_ip, content_length,
+        handle_api_request, handle_authenticated_runtime_request, handle_runtime_request,
+        header_end_offset, intent_admission_source, rate_limit_key, request_auth_level,
+        required_access, response_headers, route_request, snapshot_events, AppState, AuthLevel,
+        RateLimiter, ADMIN_SESSION_COOKIE_NAME,
     };
     use crate::events::EventBroker;
     use chrono::{Duration, Utc};
     use ploy_connectivity::{CancellationOutcome, ReplaceOutcome, StaticExecutionGateway};
     use ploy_operator_contracts::AuditLogEntry;
     use ploy_operator_contracts::{OrderReplaceRequest, PaperIntentRequest};
+    use ploy_platform_runtime::runtime_support::IntentAdmissionSource;
     use ploy_trading::{IntentPurpose as TradingIntentPurpose, TradeSide, TradingIntent};
+    use std::collections::VecDeque;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -2604,6 +2747,125 @@ mod tests {
     }
 
     #[test]
+    fn same_ip_different_ports_share_rate_limit() {
+        let mut limiter = RateLimiter::default();
+        let first = rate_limit_key(
+            Some("127.0.0.1:41000"),
+            AuthLevel::None,
+            "GET",
+            "/api/deployments",
+        );
+        let second = rate_limit_key(
+            Some("127.0.0.1:42000"),
+            AuthLevel::None,
+            "GET",
+            "/api/deployments",
+        );
+
+        assert!(limiter.allow(&first, 1));
+        assert!(!limiter.allow(&second, 1));
+    }
+
+    #[test]
+    fn different_paths_share_rate_limit() {
+        let mut limiter = RateLimiter::default();
+        let first = rate_limit_key(
+            Some("127.0.0.1:41000"),
+            AuthLevel::Admin,
+            "GET",
+            "/api/deployments",
+        );
+        let second = rate_limit_key(
+            Some("127.0.0.1:41000"),
+            AuthLevel::Admin,
+            "POST",
+            "/api/proposals",
+        );
+
+        assert!(limiter.allow(&first, 1));
+        assert!(!limiter.allow(&second, 1));
+    }
+
+    #[test]
+    fn trusted_loopback_proxy_uses_real_client_ip() {
+        let request = "GET /auth/login HTTP/1.1\r\nX-Real-IP: 203.0.113.9\r\n\r\n";
+
+        assert_eq!(client_ip(Some("127.0.0.1:41000"), request), "203.0.113.9");
+        assert_eq!(
+            client_ip(Some("198.51.100.7:41000"), request),
+            "198.51.100.7"
+        );
+    }
+
+    #[test]
+    fn expired_rate_limit_buckets_are_removed() {
+        let mut limiter = RateLimiter::default();
+        limiter.requests.insert(
+            "expired|none".to_string(),
+            VecDeque::from([Instant::now() - StdDuration::from_secs(61)]),
+        );
+
+        assert!(limiter.allow("current|none", 1));
+        assert!(!limiter.requests.contains_key("expired|none"));
+    }
+
+    #[test]
+    fn missing_tokens_do_not_authorize_protected_routes() {
+        assert!(access_allowed(
+            AuthLevel::None,
+            super::RequiredAccess::Public,
+            false,
+            false,
+            false,
+            false,
+        ));
+        for required in [
+            super::RequiredAccess::ReadOnly,
+            super::RequiredAccess::Operator,
+            super::RequiredAccess::Admin,
+        ] {
+            assert!(!access_allowed(
+                AuthLevel::None,
+                required,
+                false,
+                false,
+                false,
+                false,
+            ));
+        }
+    }
+
+    #[test]
+    fn auth_session_does_not_report_protected_apis_open_without_tokens() {
+        let config = crate::config::PlatformConfig::default();
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("unused")),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (code, body) = handle_authenticated_runtime_request(
+            "GET",
+            "/auth/session",
+            None,
+            AuthLevel::None,
+            false,
+            false,
+            false,
+            false,
+            &state,
+        );
+
+        assert_eq!(code, 200);
+        assert!(body.contains("\"auth_required\":true"));
+        assert!(body.contains("\"authenticated\":false"));
+    }
+
+    #[test]
     fn handle_runtime_request_reads_recent_audit_entries() {
         let root = temp_dir("audit-read");
         let runtime_root = root.join("run/platform");
@@ -2672,6 +2934,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             &state,
         );
 
@@ -2702,6 +2965,7 @@ mod tests {
             Some("{\"desired_state\":\"paused\",\"deployment_state\":null}"),
             AuthLevel::None,
             true,
+            false,
             false,
             false,
             &state,
@@ -2735,11 +2999,42 @@ mod tests {
             true,
             false,
             false,
+            false,
             &state,
         );
 
         assert_eq!(code, 200);
         assert!(body.contains("\"success\":true"));
+    }
+
+    #[test]
+    fn auth_login_rejects_when_admin_auth_is_not_configured() {
+        let config = crate::config::PlatformConfig::default();
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("unused")),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+
+        let (code, body) = handle_authenticated_runtime_request(
+            "POST",
+            "/auth/login",
+            Some("{\"admin_token\":\"anything\"}"),
+            AuthLevel::None,
+            false,
+            false,
+            false,
+            false,
+            &state,
+        );
+
+        assert_eq!(code, 503);
+        assert!(body.contains("\"error\":\"admin_auth_not_configured\""));
+        assert!(response_headers("POST", "/auth/login", code, None, "cookie-secret").is_empty());
     }
 
     #[test]
@@ -2749,7 +3044,14 @@ mod tests {
             "GET /api/events/stream HTTP/1.1\r\nHost: 127.0.0.1:8081\r\nCookie: {cookie}; theme=dark\r\n\r\n"
         );
         assert_eq!(
-            request_auth_level(&request, Some("secret-token"), None, None, "cookie-secret"),
+            request_auth_level(
+                &request,
+                Some("secret-token"),
+                None,
+                None,
+                None,
+                "cookie-secret",
+            ),
             AuthLevel::Admin
         );
     }
@@ -2763,13 +3065,11 @@ mod tests {
             Some("secret-token"),
             "cookie-secret",
         );
-        assert!(
-            login_headers
-                .iter()
-                .any(|(name, value)| name == "Set-Cookie"
-                    && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=v1."))
-                    && !value.contains("secret-token"))
-        );
+        assert!(login_headers
+            .iter()
+            .any(|(name, value)| name == "Set-Cookie"
+                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=v1."))
+                && !value.contains("secret-token")));
 
         let logout_headers = response_headers(
             "POST",
@@ -2778,13 +3078,11 @@ mod tests {
             Some("secret-token"),
             "cookie-secret",
         );
-        assert!(
-            logout_headers
-                .iter()
-                .any(|(name, value)| name == "Set-Cookie"
-                    && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
-                    && value.contains("Max-Age=0"))
-        );
+        assert!(logout_headers
+            .iter()
+            .any(|(name, value)| name == "Set-Cookie"
+                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
+                && value.contains("Max-Age=0")));
     }
 
     #[test]
@@ -2792,7 +3090,14 @@ mod tests {
         let cookie = admin_session_cookie("secret-token", "cookie-secret");
         let request = format!("GET / HTTP/1.1\r\nCookie: {cookie}\r\n\r\n");
         assert_eq!(
-            request_auth_level(&request, Some("other-token"), None, None, "cookie-secret"),
+            request_auth_level(
+                &request,
+                Some("other-token"),
+                None,
+                None,
+                None,
+                "cookie-secret",
+            ),
             AuthLevel::None
         );
     }
@@ -2805,6 +3110,7 @@ mod tests {
             request_auth_level(
                 request,
                 Some("admin-secret"),
+                None,
                 None,
                 Some("sidecar-secret"),
                 "cookie-secret"
@@ -2834,6 +3140,7 @@ mod tests {
             AuthLevel::Sidecar,
             true,
             false,
+            false,
             true,
             &state,
         );
@@ -2845,6 +3152,7 @@ mod tests {
             Some("{\"desired_state\":\"paused\",\"deployment_state\":null}"),
             AuthLevel::Sidecar,
             true,
+            false,
             false,
             true,
             &state,
@@ -2861,6 +3169,7 @@ mod tests {
                 request,
                 Some("admin-secret"),
                 Some("operator-secret"),
+                None,
                 Some("sidecar-secret"),
                 "cookie-secret"
             ),
@@ -2890,6 +3199,7 @@ mod tests {
             AuthLevel::Operator,
             true,
             true,
+            false,
             true,
             &state,
         );
@@ -2903,11 +3213,141 @@ mod tests {
             AuthLevel::Operator,
             true,
             true,
+            false,
             true,
             &state,
         );
         assert_eq!(audit_code, 401);
         assert!(audit_body.contains("\"error\":\"unauthorized\""));
+    }
+
+    #[test]
+    fn worker_token_cannot_access_operator_or_admin_endpoints() {
+        let request = "POST /api/deployments/example.live/intents HTTP/1.1\r\nx-ploy-worker-token: worker-secret\r\n\r\n";
+        let auth_level = request_auth_level(
+            request,
+            Some("admin-secret"),
+            Some("operator-secret"),
+            Some("worker-secret"),
+            Some("sidecar-secret"),
+            "cookie-secret",
+        );
+        assert_eq!(auth_level, AuthLevel::Worker);
+        assert!(access_allowed(
+            auth_level,
+            required_access("POST", "/api/deployments/example.live/intents"),
+            true,
+            true,
+            true,
+            true,
+        ));
+        assert!(!access_allowed(
+            auth_level,
+            required_access("POST", "/api/deployments/example.live/control"),
+            true,
+            true,
+            true,
+            true,
+        ));
+        assert!(!access_allowed(
+            auth_level,
+            required_access("GET", "/api/audit/logs"),
+            true,
+            true,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn intent_json_cannot_spoof_admission_source() {
+        let request: PaperIntentRequest = serde_json::from_value(serde_json::json!({
+            "market_id": "market-1",
+            "token_id": "token-1",
+            "side": "sell",
+            "quantity": "1",
+            "limit_price": "0.5",
+            "purpose": "reduce",
+            "admission_source": "authenticated_operator"
+        }))
+        .expect("intent request accepts only its public trading fields");
+
+        assert_eq!(
+            request.purpose,
+            ploy_operator_contracts::IntentPurpose::Reduce
+        );
+        assert_eq!(
+            intent_admission_source(AuthLevel::Worker),
+            Some(IntentAdmissionSource::Worker),
+        );
+    }
+
+    #[test]
+    fn unauthenticated_and_sidecar_cannot_become_operator_source() {
+        assert_eq!(intent_admission_source(AuthLevel::None), None);
+        assert_eq!(intent_admission_source(AuthLevel::Sidecar), None);
+        assert_eq!(
+            intent_admission_source(AuthLevel::Operator),
+            Some(IntentAdmissionSource::AuthenticatedOperator),
+        );
+        assert_eq!(
+            intent_admission_source(AuthLevel::Admin),
+            Some(IntentAdmissionSource::AuthenticatedOperator),
+        );
+    }
+
+    #[test]
+    fn worker_only_auth_configuration_is_recognized() {
+        let config = crate::config::PlatformConfig {
+            worker_token: Some("worker-secret".to_string().into()),
+            ..crate::config::PlatformConfig::default()
+        };
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("unused")),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+        let body = serde_json::json!({
+            "market_id": "market-1",
+            "token_id": "token-1",
+            "side": "buy",
+            "quantity": "1",
+            "limit_price": "0.5",
+            "purpose": "entry"
+        })
+        .to_string();
+
+        let (missing_code, missing_body) = handle_authenticated_runtime_request(
+            "POST",
+            "/api/deployments/missing.live/intents",
+            Some(&body),
+            AuthLevel::None,
+            false,
+            false,
+            true,
+            false,
+            &state,
+        );
+        assert_eq!(missing_code, 401);
+        assert!(missing_body.contains("worker, operator, or admin token is required"));
+
+        let (worker_code, worker_body) = handle_authenticated_runtime_request(
+            "POST",
+            "/api/deployments/missing.live/intents",
+            Some(&body),
+            AuthLevel::Worker,
+            false,
+            false,
+            true,
+            false,
+            &state,
+        );
+        assert_eq!(worker_code, 404);
+        assert!(worker_body.contains("deployment_not_found"));
     }
 
     #[test]
@@ -2928,10 +3368,28 @@ mod tests {
             ..crate::config::PlatformConfig::default()
         };
 
+        let invalid_body = serde_json::json!({
+            "deployment_id": "invalid.paper",
+            "bundle_id": "example",
+            "runtime_mode": "paper",
+            "account_id": "acct-invalid",
+            "desired_state": "running"
+        })
+        .to_string();
+        let (invalid_code, invalid_response) = handle_api_request(
+            "PUT",
+            "/api/deployments/invalid.paper",
+            Some(&invalid_body),
+            &config,
+        );
+        assert_eq!(invalid_code, 400);
+        assert!(invalid_response.contains("apply_failed"));
+
         let apply_body = serde_json::json!({
             "deployment_id": "example.paper",
             "bundle_id": "example",
             "runtime_mode": "paper",
+            "account_id": "paper:test-http-apply",
             "desired_state": "running"
         })
         .to_string();
@@ -2977,6 +3435,7 @@ mod tests {
                     "deployment_id": "example.paper",
                     "bundle_id": "example",
                     "runtime_mode": "paper",
+                    "account_id": "paper:test-http-submit",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -2995,11 +3454,12 @@ mod tests {
         };
 
         let body = serde_json::to_string(&PaperIntentRequest {
+            idempotency_key: None,
             market_id: "market-1".to_string(),
             token_id: "token-1".to_string(),
             side: "buy".to_string(),
             quantity: rust_decimal::Decimal::ONE,
-            limit_price: Some(rust_decimal::Decimal::ONE),
+            limit_price: Some(rust_decimal::Decimal::new(5, 1)),
             purpose: ploy_operator_contracts::IntentPurpose::Entry,
         })
         .expect("request json");
@@ -3012,10 +3472,6 @@ mod tests {
         );
         assert_eq!(submit_code, 200);
         assert!(submit_response.contains("\"deployment_id\":\"example.paper\""));
-
-        let trading_body =
-            fs::read_to_string(runtime_root.join("trading-state.json")).expect("trading snapshot");
-        assert!(trading_body.contains("\"deployment_id\": \"example.paper\""));
     }
 
     #[test]
@@ -3125,16 +3581,12 @@ mod tests {
         assert_eq!(alerts_code, 200);
         let alerts: Vec<ploy_operator_contracts::ActiveAlert> =
             serde_json::from_str(&alerts_body).expect("alerts json");
-        assert!(
-            alerts
-                .iter()
-                .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale)
-        );
-        assert!(
-            alerts
-                .iter()
-                .any(|alert| alert.source_id.contains("live_reconcile"))
-        );
+        assert!(alerts
+            .iter()
+            .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale));
+        assert!(alerts
+            .iter()
+            .any(|alert| alert.source_id.contains("live_reconcile")));
     }
 
     #[test]
@@ -3182,6 +3634,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": "0x1111111111111111111111111111111111111111",
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -3199,22 +3653,28 @@ mod tests {
             ..crate::config::PlatformConfig::default()
         };
 
-        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+        crate::runtime::seed_empty_live_ledgers(&config);
+        let mut daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::acknowledged("venue-live-http-1")),
         )
         .expect("boot daemon");
+        daemon.control_plane.deployments.set_observed_state(
+            "example.live",
+            ploy_operator_contracts::ObservedState::Running,
+        );
         let state = Arc::new(AppState {
             daemon: Arc::new(Mutex::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
         let body = serde_json::to_string(&PaperIntentRequest {
+            idempotency_key: None,
             market_id: "market-1".to_string(),
             token_id: "token-1".to_string(),
             side: "buy".to_string(),
             quantity: rust_decimal::Decimal::ONE,
-            limit_price: Some(rust_decimal::Decimal::ONE),
+            limit_price: Some(rust_decimal::Decimal::new(5, 1)),
             purpose: ploy_operator_contracts::IntentPurpose::Entry,
         })
         .expect("request json");
@@ -3248,6 +3708,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": "0x1111111111111111111111111111111111111111",
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -3265,24 +3727,30 @@ mod tests {
             ..crate::config::PlatformConfig::default()
         };
 
-        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+        crate::runtime::seed_empty_live_ledgers(&config);
+        let mut daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::failed(
                 ploy_connectivity::ExecutionError::Transport("gateway offline".to_string()),
             )),
         )
         .expect("boot daemon");
+        daemon.control_plane.deployments.set_observed_state(
+            "example.live",
+            ploy_operator_contracts::ObservedState::Running,
+        );
         let state = Arc::new(AppState {
             daemon: Arc::new(Mutex::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
         let body = serde_json::to_string(&PaperIntentRequest {
+            idempotency_key: None,
             market_id: "market-1".to_string(),
             token_id: "token-1".to_string(),
             side: "buy".to_string(),
             quantity: rust_decimal::Decimal::ONE,
-            limit_price: Some(rust_decimal::Decimal::ONE),
+            limit_price: Some(rust_decimal::Decimal::new(5, 1)),
             purpose: ploy_operator_contracts::IntentPurpose::Entry,
         })
         .expect("request json");
@@ -3293,13 +3761,13 @@ mod tests {
             Some(&body),
             &state,
         );
-        assert_eq!(submit_code, 503);
-        assert!(submit_response.contains("\"error\":\"live_execution_unavailable\""));
+        assert_eq!(submit_code, 200);
+        assert!(submit_response.contains("\"state\":\"unknown\""));
         assert!(submit_response.contains("gateway offline"));
 
         let trading_body =
             fs::read_to_string(root.join("run/platform/trading-state.json")).expect("snapshot");
-        assert!(trading_body.contains("\"state\": \"pending\""));
+        assert!(trading_body.contains("\"state\": \"unknown\""));
         assert!(trading_body.contains("\"deployment_id\": \"example.live\""));
     }
 
@@ -3317,6 +3785,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": "0x1111111111111111111111111111111111111111",
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -3336,20 +3806,26 @@ mod tests {
 
         let gateway = StaticExecutionGateway::acknowledged("venue-live-http-cancel-1")
             .with_cancel_result(Ok(CancellationOutcome::Canceled));
-        let daemon =
+        crate::runtime::seed_empty_live_ledgers(&config);
+        let mut daemon =
             crate::runtime::PloyDaemon::boot_with_live_execution(&config, Box::new(gateway))
                 .expect("boot daemon");
+        daemon.control_plane.deployments.set_observed_state(
+            "example.live",
+            ploy_operator_contracts::ObservedState::Running,
+        );
         let state = Arc::new(AppState {
             daemon: Arc::new(Mutex::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
         let submit_body = serde_json::to_string(&PaperIntentRequest {
+            idempotency_key: None,
             market_id: "market-1".to_string(),
             token_id: "token-1".to_string(),
             side: "buy".to_string(),
             quantity: rust_decimal::Decimal::ONE,
-            limit_price: Some(rust_decimal::Decimal::ONE),
+            limit_price: Some(rust_decimal::Decimal::new(5, 1)),
             purpose: ploy_operator_contracts::IntentPurpose::Entry,
         })
         .expect("request json");
@@ -3398,6 +3874,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": "0x1111111111111111111111111111111111111111",
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -3419,15 +3897,21 @@ mod tests {
             .with_replace_result(Ok(ReplaceOutcome::Replaced {
                 venue_order_id: "venue-live-http-replace-2".to_string(),
             }));
-        let daemon =
+        crate::runtime::seed_empty_live_ledgers(&config);
+        let mut daemon =
             crate::runtime::PloyDaemon::boot_with_live_execution(&config, Box::new(gateway))
                 .expect("boot daemon");
+        daemon.control_plane.deployments.set_observed_state(
+            "example.live",
+            ploy_operator_contracts::ObservedState::Running,
+        );
         let state = Arc::new(AppState {
             daemon: Arc::new(Mutex::new(daemon)),
             events: Arc::new(EventBroker::default()),
         });
 
         let submit_body = serde_json::to_string(&PaperIntentRequest {
+            idempotency_key: None,
             market_id: "market-1".to_string(),
             token_id: "token-1".to_string(),
             side: "buy".to_string(),
@@ -3486,6 +3970,8 @@ mod tests {
                     "deployment_id": "example.live",
                     "bundle_id": "example",
                     "runtime_mode": "live",
+                    "account_id": "0x1111111111111111111111111111111111111111",
+                    "max_gross_exposure": "5",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -3503,11 +3989,16 @@ mod tests {
             ..crate::config::PlatformConfig::default()
         };
 
+        crate::runtime::seed_empty_live_ledgers(&config);
         let mut daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
             &config,
             Box::new(StaticExecutionGateway::acknowledged("venue-live-http-2")),
         )
         .expect("boot daemon");
+        daemon.control_plane.deployments.set_observed_state(
+            "example.live",
+            ploy_operator_contracts::ObservedState::Running,
+        );
         daemon
             .submit_intent(TradingIntent {
                 intent_id: "intent-live-http-2".to_string(),
@@ -3516,7 +4007,7 @@ mod tests {
                 token_id: "token-1".to_string(),
                 side: TradeSide::Buy,
                 quantity: rust_decimal::Decimal::ONE,
-                limit_price: Some(rust_decimal::Decimal::ONE),
+                limit_price: Some(rust_decimal::Decimal::new(5, 1)),
                 purpose: TradingIntentPurpose::Entry,
                 created_at: chrono::Utc::now(),
             })
@@ -3663,33 +4154,29 @@ mod tests {
         fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
         fs::write(&registry_file, "[]").expect("registry");
         let valid_run = serde_json::json!({
-                "run_id": "run-nullable",
-                "cycle_kind": "research_oversight",
-                "status": "started",
-                "started_at": Utc::now(),
-                "finished_at": null,
-                "session_id": null,
-                "model": "sonnet",
-                "platform_status": null,
-                "deployment_count": 0,
-                "oversight_signal_count": 0,
-                "oversight_playbook_count": 0,
-                "total_cost_usd": null,
-                "tool_calls": [],
-                "research_reports": 0,
-                "oversight_alerts": 0,
-                "operator_recommendations": 0,
-                "failure_reason": null,
-                "runtime_context": null,
-                "output_summary": null,
-                "evaluation": null
-            })
-            .to_string();
-        fs::write(
-            &agent_runs_file,
-            format!("{{broken json\n{valid_run}\n"),
-        )
-        .expect("agent runs");
+            "run_id": "run-nullable",
+            "cycle_kind": "research_oversight",
+            "status": "started",
+            "started_at": Utc::now(),
+            "finished_at": null,
+            "session_id": null,
+            "model": "sonnet",
+            "platform_status": null,
+            "deployment_count": 0,
+            "oversight_signal_count": 0,
+            "oversight_playbook_count": 0,
+            "total_cost_usd": null,
+            "tool_calls": [],
+            "research_reports": 0,
+            "oversight_alerts": 0,
+            "operator_recommendations": 0,
+            "failure_reason": null,
+            "runtime_context": null,
+            "output_summary": null,
+            "evaluation": null
+        })
+        .to_string();
+        fs::write(&agent_runs_file, format!("{{broken json\n{valid_run}\n")).expect("agent runs");
 
         let config = crate::config::PlatformConfig {
             registry_file,
@@ -3824,6 +4311,46 @@ mod tests {
         assert!(queued_request.contains("\"objective\":\"Find a gated PM5D research candidate\""));
         let queued_runs = fs::read_to_string(agent_runs_file).expect("runs file");
         assert!(queued_runs.contains("\"status\":\"requested\""));
+
+        let over_limit = serde_json::json!({
+            "objective":"bounded", "strategy_profile":"test", "autonomy_mode":"research_until_blocked",
+            "target_evidence":"diagnostic", "symbols":["BTCUSDT"], "max_turns":31,
+            "budget_usd":1.0, "run_packet":"packet", "run_contract":"contract"
+        }).to_string();
+        let (status_code, body) =
+            handle_runtime_request("POST", "/api/agent/runs", Some(&over_limit), &state);
+        assert_eq!(status_code, 400);
+        assert!(body.contains("agent_run_limits_exceeded"));
+
+        for (max_turns, budget_usd) in [
+            (0, serde_json::json!(1.0)),
+            (1, serde_json::json!(0.0)),
+            (1, serde_json::json!(1.01)),
+        ] {
+            let invalid = serde_json::json!({
+                "objective":"bounded", "strategy_profile":"test",
+                "autonomy_mode":"research_until_blocked", "target_evidence":"diagnostic",
+                "symbols":["BTCUSDT"], "max_turns":max_turns, "budget_usd":budget_usd,
+                "run_packet":"packet", "run_contract":"contract"
+            })
+            .to_string();
+            let (status_code, body) =
+                handle_runtime_request("POST", "/api/agent/runs", Some(&invalid), &state);
+            assert_eq!(status_code, 400);
+            assert!(body.contains("agent_run_limits_exceeded"));
+        }
+
+        for invalid_json in [
+            r#"{"objective":"bounded","strategy_profile":"test","autonomy_mode":"research_until_blocked","target_evidence":"diagnostic","symbols":[],"budget_usd":1.0,"run_packet":"packet","run_contract":"contract"}"#,
+            r#"{"objective":"bounded","strategy_profile":"test","autonomy_mode":"research_until_blocked","target_evidence":"diagnostic","symbols":[],"max_turns":1,"run_packet":"packet","run_contract":"contract"}"#,
+            r#"{"objective":"bounded","strategy_profile":"test","autonomy_mode":"research_until_blocked","target_evidence":"diagnostic","symbols":[],"max_turns":1,"budget_usd":NaN,"run_packet":"packet","run_contract":"contract"}"#,
+            r#"{"objective":"bounded","strategy_profile":"test","autonomy_mode":"research_until_blocked","target_evidence":"diagnostic","symbols":[],"max_turns":1,"budget_usd":Infinity,"run_packet":"packet","run_contract":"contract"}"#,
+        ] {
+            let (status_code, body) =
+                handle_runtime_request("POST", "/api/agent/runs", Some(invalid_json), &state);
+            assert_eq!(status_code, 400);
+            assert!(body.contains("invalid_json"));
+        }
     }
 
     #[test]
@@ -3840,6 +4367,7 @@ mod tests {
                     "deployment_id": "example.paper",
                     "bundle_id": "example",
                     "runtime_mode": "paper",
+                    "account_id": "paper:test-proposal",
                     "desired_state": "running",
                     "observed_state": "running"
                 }
@@ -3964,6 +4492,7 @@ mod tests {
                     "deployment_id": "example.paper",
                     "bundle_id": "example",
                     "runtime_mode": "paper",
+                    "account_id": "paper:test-proposal-approval",
                     "desired_state": "running",
                     "observed_state": "running"
                 }

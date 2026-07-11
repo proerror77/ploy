@@ -1,7 +1,8 @@
 use ploy_operator_contracts::{
     ActiveAlert, AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest,
     DeploymentControlRequest, DeploymentState, DeploymentSummary, DesiredState, OperatorEvent,
-    OrderControlResponse, OrderReplaceRequest, PlatformMetrics, SystemStatus, TradingStateSnapshot,
+    OrderControlResponse, OrderReplaceRequest, PaperIntentRequest, PaperIntentResponse,
+    PlatformMetrics, SystemStatus, TradingStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -9,7 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ControlPlaneClient {
     pub control_plane_addr: String,
     pub admin_token: Option<String>,
@@ -225,6 +226,56 @@ impl ControlPlaneClient {
         )
     }
 
+    pub fn submit_intent(
+        &self,
+        deployment_id: &str,
+        request: &PaperIntentRequest,
+    ) -> Result<PaperIntentResponse, String> {
+        self.send_json(
+            "POST",
+            &format!("/api/deployments/{deployment_id}/intents"),
+            request,
+        )
+    }
+
+    pub fn submit_worker_intent(
+        &self,
+        deployment_id: &str,
+        request: &PaperIntentRequest,
+    ) -> Result<PaperIntentResponse, String> {
+        let worker_token = std::env::var("PLOY_WORKER_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+            .ok_or_else(|| {
+                "PLOY_WORKER_TOKEN is required for worker intent submission".to_string()
+            })?;
+        self.submit_worker_intent_with_token(deployment_id, request, &worker_token)
+    }
+
+    fn submit_worker_intent_with_token(
+        &self,
+        deployment_id: &str,
+        request: &PaperIntentRequest,
+        worker_token: &str,
+    ) -> Result<PaperIntentResponse, String> {
+        self.send_json_with_headers(
+            "POST",
+            &format!("/api/deployments/{deployment_id}/intents"),
+            request,
+            &format!("x-ploy-worker-token: {worker_token}\r\n"),
+        )
+    }
+
+    pub fn worker_scoped(&self) -> Self {
+        Self {
+            control_plane_addr: self.control_plane_addr.clone(),
+            admin_token: None,
+            operator_token: None,
+            sidecar_token: None,
+            runtime_root: self.runtime_root.clone(),
+        }
+    }
+
     fn read_status_snapshot(&self) -> Result<SystemStatus, String> {
         match self.read_status_over_http() {
             Ok(status) => return Ok(status),
@@ -306,13 +357,27 @@ impl ControlPlaneClient {
         B: serde::Serialize,
         T: DeserializeOwned,
     {
+        self.send_json_with_headers(method, path, body, &self.authorization_headers())
+    }
+
+    fn send_json_with_headers<B, T>(
+        &self,
+        method: &str,
+        path: &str,
+        body: &B,
+        authorization_headers: &str,
+    ) -> Result<T, String>
+    where
+        B: serde::Serialize,
+        T: DeserializeOwned,
+    {
         let mut stream = TcpStream::connect(&self.control_plane_addr)
             .map_err(|err| format!("connect {}: {err}", self.control_plane_addr))?;
         let body = serde_json::to_string(body).map_err(|err| format!("serialize body: {err}"))?;
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             self.control_plane_addr,
-            self.authorization_headers(),
+            authorization_headers,
             body.len(),
             body
         );
@@ -413,8 +478,9 @@ mod tests {
     use super::ControlPlaneClient;
     use ploy_operator_contracts::{
         DeploymentApplyRequest, DeploymentSnapshotEvent, DeploymentState, DeploymentSummary,
-        DesiredState, ObservedState, OperatorEvent, OrderControlResponse, OrderReplaceRequest,
-        SystemSnapshotEvent, SystemStatus, TradingStateSnapshot,
+        DesiredState, IntentPurpose, ObservedState, OperatorEvent, OrderControlResponse,
+        OrderReplaceRequest, PaperIntentRequest, SystemSnapshotEvent, SystemStatus,
+        TradingStateSnapshot,
     };
     use std::fs;
     use std::io::{Read, Write};
@@ -429,6 +495,83 @@ mod tests {
             .expect("duration")
             .as_nanos();
         std::env::temp_dir().join(format!("ployctl-{label}-{unique}"))
+    }
+
+    #[test]
+    fn worker_live_submit_uses_control_plane_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0_u8; 4096];
+            let bytes = stream.read(&mut request).expect("read request");
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(request.starts_with("POST /api/deployments/example.live/intents"));
+            assert!(request.contains("x-ploy-worker-token: worker-token"));
+            assert!(!request.contains("Authorization: Bearer"));
+            assert!(request.contains("\"idempotency_key\":\"intent-1\""));
+            let body = serde_json::json!({
+                "deployment_id": "example.live",
+                "intent_id": "daemon-intent-1",
+                "order_id": "order-daemon-intent-1",
+                "state": "acknowledged",
+                "venue_order_id": "venue-1",
+                "rejection_reason": null,
+                "last_error": null
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write response");
+        });
+
+        let mut client = ControlPlaneClient::default();
+        client.control_plane_addr = addr.to_string();
+        client.admin_token = Some("admin-token".to_string());
+        client.operator_token = Some("operator-token".to_string());
+        client.sidecar_token = Some("sidecar-token".to_string());
+        let worker_client = client.worker_scoped();
+        assert_eq!(worker_client.control_plane_addr, client.control_plane_addr);
+        assert_eq!(worker_client.runtime_root, client.runtime_root);
+        assert!(worker_client.admin_token.is_none());
+        assert!(worker_client.operator_token.is_none());
+        assert!(worker_client.sidecar_token.is_none());
+
+        let response = worker_client
+            .submit_worker_intent_with_token(
+                "example.live",
+                &PaperIntentRequest {
+                    idempotency_key: Some("intent-1".to_string()),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: "buy".to_string(),
+                    quantity: rust_decimal::Decimal::ONE,
+                    limit_price: Some(rust_decimal::Decimal::new(45, 2)),
+                    purpose: IntentPurpose::Entry,
+                },
+                "worker-token",
+            )
+            .expect("submit intent");
+
+        assert_eq!(response.state, "acknowledged");
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn worker_scope_clears_all_elevated_tokens() {
+        let mut client = ControlPlaneClient::default();
+        client.admin_token = Some("admin-token".to_string());
+        client.operator_token = Some("operator-token".to_string());
+        client.sidecar_token = Some("sidecar-token".to_string());
+
+        let worker_client = client.worker_scoped();
+        assert!(worker_client.admin_token.is_none());
+        assert!(worker_client.operator_token.is_none());
+        assert!(worker_client.sidecar_token.is_none());
     }
 
     #[test]
@@ -486,7 +629,7 @@ mod tests {
             runtime_root.join("trading-state.json"),
             serde_json::to_string(&vec![TradingStateSnapshot {
                 deployment_id: "example.paper".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                 ..TradingStateSnapshot::default()
             }])
             .expect("trading json"),
@@ -624,7 +767,7 @@ mod tests {
             .apply_deployment(&DeploymentApplyRequest {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                 account_id: "acct-paper".to_string(),
                 max_gross_exposure: Some(rust_decimal::Decimal::new(500, 2)),
                 deployment_state: DeploymentState::Enabled,
@@ -795,9 +938,7 @@ mod tests {
             let mut request = [0_u8; 1024];
             let bytes = stream.read(&mut request).expect("read request");
             let request = String::from_utf8_lossy(&request[..bytes]);
-            assert!(
-                request.starts_with("POST /api/deployments/example.live/orders/order-1/cancel")
-            );
+            assert!(request.starts_with("POST /api/deployments/example.live/orders/order-1/cancel"));
 
             let body = serde_json::to_string(&OrderControlResponse {
                 deployment_id: "example.live".to_string(),

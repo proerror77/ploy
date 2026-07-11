@@ -1,6 +1,6 @@
 use crate::ReconcileStatus;
 use ploy_connectivity::{LiveExecutionGateway, TrackedOrder};
-use ploy_operator_contracts::DeploymentState;
+use ploy_operator_contracts::DeploymentRuntimeMode;
 use ploy_platform::DeploymentRecord;
 use ploy_trading::TradingRuntime;
 use std::collections::{BTreeMap, HashMap};
@@ -15,7 +15,7 @@ pub fn reconcile_live_fills(
     let mut order_deployments = HashMap::new();
 
     for record in deployments {
-        if record.runtime_mode != "live" || record.deployment_state == DeploymentState::Archived {
+        if record.runtime_mode != DeploymentRuntimeMode::Live {
             continue;
         }
 
@@ -31,7 +31,8 @@ pub fn reconcile_live_fills(
                 order.venue_order_id.is_some()
                     && matches!(
                         order.state,
-                        ploy_trading::OrderState::Acknowledged
+                        ploy_trading::OrderState::Unknown
+                            | ploy_trading::OrderState::Acknowledged
                             | ploy_trading::OrderState::PartiallyFilled
                     )
             })
@@ -87,7 +88,7 @@ mod tests {
         let deployment = DeploymentRecord {
             deployment_id: "example.live".to_string(),
             bundle_id: "example".to_string(),
-            runtime_mode: "live".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
             account_id: "acct-live".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,
@@ -95,21 +96,25 @@ mod tests {
             observed_state: ObservedState::Running,
         };
         let mut runtime = TradingRuntime::default();
-        runtime.submit_intent(
-            TradingIntent {
-                intent_id: "intent-1".to_string(),
-                deployment_id: "example.live".to_string(),
-                market_id: "market-1".to_string(),
-                token_id: "token-1".to_string(),
-                side: TradeSide::Buy,
-                quantity: dec!(2),
-                limit_price: Some(dec!(0.45)),
-                purpose: IntentPurpose::Entry,
-                created_at: chrono::Utc::now(),
-            },
-            "order-1",
-        );
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "intent-1".to_string(),
+                    deployment_id: "example.live".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(2),
+                    limit_price: Some(dec!(0.45)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: chrono::Utc::now(),
+                },
+                "order-1",
+                None,
+            )
+            .expect("valid intent");
         runtime.acknowledge_order("order-1", "venue-1");
+        runtime.mark_order_unknown("order-1", "final persistence lost");
 
         let fill = FillRecord {
             fill_id: "fill-1".to_string(),
@@ -121,10 +126,12 @@ mod tests {
             fee: dec!(0.01),
             timestamp: chrono::Utc::now(),
         };
-        let gateway = StaticExecutionGateway::acknowledged("venue-1").with_reconciled_fills(vec![fill]);
+        let gateway =
+            StaticExecutionGateway::acknowledged("venue-1").with_reconciled_fills(vec![fill]);
         let mut trading = BTreeMap::from([(deployment.deployment_id.clone(), runtime)]);
 
-        let result = reconcile_live_fills(&gateway, &[deployment], &mut trading).expect("reconcile");
+        let result =
+            reconcile_live_fills(&gateway, &[deployment], &mut trading).expect("reconcile");
         assert_eq!(result, crate::ReconcileStatus::Applied(1));
         assert_eq!(
             trading
@@ -135,5 +142,99 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn unknown_without_venue_order_id_is_not_reconciled() {
+        let deployment = DeploymentRecord {
+            deployment_id: "example.live".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+            account_id: "acct-live".to_string(),
+            max_gross_exposure: None,
+            deployment_state: DeploymentState::Enabled,
+            desired_state: DesiredState::Paused,
+            observed_state: ObservedState::Degraded,
+        };
+        let mut runtime = TradingRuntime::default();
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "intent-unknown".to_string(),
+                    deployment_id: "example.live".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(1),
+                    limit_price: Some(dec!(0.40)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: chrono::Utc::now(),
+                },
+                "order-unknown",
+                None,
+            )
+            .unwrap();
+        runtime.mark_order_unknown("order-unknown", "transport lost");
+        let mut runtimes = BTreeMap::from([("example.live".to_string(), runtime)]);
+
+        let result = reconcile_live_fills(
+            &StaticExecutionGateway::acknowledged("unused"),
+            &[deployment],
+            &mut runtimes,
+        )
+        .unwrap();
+        assert_eq!(result, crate::ReconcileStatus::Noop);
+    }
+
+    #[test]
+    fn archived_orders_remain_reconcilable_until_flat() {
+        let deployment = DeploymentRecord {
+            deployment_id: "example.live".to_string(),
+            bundle_id: "example".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+            account_id: "acct-live".to_string(),
+            max_gross_exposure: Some(dec!(5)),
+            deployment_state: DeploymentState::Archived,
+            desired_state: DesiredState::Stopped,
+            observed_state: ObservedState::Stopped,
+        };
+        let mut runtime = TradingRuntime::default();
+        runtime
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "intent-archived".to_string(),
+                    deployment_id: "example.live".to_string(),
+                    market_id: "market-1".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(2),
+                    limit_price: Some(dec!(0.45)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: chrono::Utc::now(),
+                },
+                "order-archived",
+                None,
+            )
+            .expect("valid intent");
+        runtime.acknowledge_order("order-archived", "venue-archived");
+        let gateway =
+            StaticExecutionGateway::acknowledged("venue-archived").with_reconciled_fills(vec![
+                FillRecord {
+                    fill_id: "fill-archived".to_string(),
+                    order_id: "order-archived".to_string(),
+                    token_id: "token-1".to_string(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(2),
+                    price: dec!(0.45),
+                    fee: dec!(0.01),
+                    timestamp: chrono::Utc::now(),
+                },
+            ]);
+        let mut trading = BTreeMap::from([(deployment.deployment_id.clone(), runtime)]);
+
+        let result = reconcile_live_fills(&gateway, &[deployment], &mut trading)
+            .expect("archived order reconciliation");
+
+        assert_eq!(result, crate::ReconcileStatus::Applied(1));
     }
 }

@@ -3,12 +3,14 @@ use ploy_strategy_runtime::run_strategy_with_deployment_id_and_output;
 use std::path::PathBuf;
 
 use crate::print_usage;
+use ploy_deployments::CANONICAL_CONTROL_GENERATION;
 
 pub async fn run_command(args: &[String], command: Option<&str>) {
     let mut config_path: Option<String> = None;
     let mut deployment_id: Option<String> = None;
     let mut output_json: Option<PathBuf> = None;
     let mut force_dry_run = false;
+    let mut control_generation: Option<String> = None;
     let mut i = if command == Some("run") { 2 } else { 1 };
     while i < args.len() {
         match args[i].as_str() {
@@ -41,6 +43,15 @@ pub async fn run_command(args: &[String], command: Option<&str>) {
             }
             "--dry-run" => force_dry_run = true,
             "--foreground" => {}
+            "--control-generation" => {
+                if i + 1 >= args.len() || args[i + 1].starts_with("--") {
+                    eprintln!("Error: --control-generation requires a value");
+                    print_usage();
+                    std::process::exit(1);
+                }
+                i += 1;
+                control_generation = args.get(i).cloned();
+            }
             "--help" | "-h" => {
                 print_usage();
                 return;
@@ -59,6 +70,13 @@ pub async fn run_command(args: &[String], command: Option<&str>) {
         print_usage();
         std::process::exit(1);
     });
+    if control_generation
+        .as_deref()
+        .is_some_and(|generation| generation != CANONICAL_CONTROL_GENERATION)
+    {
+        eprintln!("Error: unsupported --control-generation");
+        std::process::exit(1);
+    }
 
     let config = match FullConfig::from_file(&config_path) {
         Ok(config) => config,

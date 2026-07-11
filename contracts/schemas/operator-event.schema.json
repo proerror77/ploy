@@ -279,6 +279,13 @@
         }
       }
     },
+    "DeploymentRuntimeMode": {
+      "type": "string",
+      "enum": [
+        "paper",
+        "live"
+      ]
+    },
     "DeploymentSnapshotEvent": {
       "type": "object",
       "required": [
@@ -552,6 +559,13 @@
         "filled_qty": {
           "type": "string",
           "pattern": "^-?[0-9]+(\\.[0-9]+)?$"
+        },
+        "idempotency_key": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "intent_id": {
           "type": "string"
@@ -1324,7 +1338,7 @@
           "$ref": "#/definitions/RiskSnapshotResponse"
         },
         "runtime_mode": {
-          "type": "string"
+          "$ref": "#/definitions/DeploymentRuntimeMode"
         }
       }
     }

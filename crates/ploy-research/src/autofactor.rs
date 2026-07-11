@@ -3277,18 +3277,14 @@ mod tests {
         let matrix = autofactor_matrix_from_v2(&rows).expect("matrix");
 
         assert!(matrix.column("bayes_posterior_prob").expect("posterior")[0].is_finite());
-        assert!(
-            matrix
-                .column("bayes_model_calibrated_prob")
-                .expect("model calibrated")[0]
-                .is_nan()
-        );
-        assert!(
-            matrix
-                .column("bayes_model_calibrated_edge")
-                .expect("model edge")[0]
-                .is_nan()
-        );
+        assert!(matrix
+            .column("bayes_model_calibrated_prob")
+            .expect("model calibrated")[0]
+            .is_nan());
+        assert!(matrix
+            .column("bayes_model_calibrated_edge")
+            .expect("model edge")[0]
+            .is_nan());
     }
 
     #[test]
@@ -3296,16 +3292,12 @@ mod tests {
         let rows = (0..8).map(synthetic_v2_row).collect::<Vec<_>>();
         let matrix = autofactor_matrix_from_v2(&rows).expect("matrix");
         let seeds = domain_seed_candidates(&matrix.input_names());
-        assert!(
-            seeds
-                .iter()
-                .any(|candidate| candidate.name == "bayes_contrarian_settlement_edge")
-        );
-        assert!(
-            seeds
-                .iter()
-                .any(|candidate| candidate.name == "bayes_model_market_reversal")
-        );
+        assert!(seeds
+            .iter()
+            .any(|candidate| candidate.name == "bayes_contrarian_settlement_edge"));
+        assert!(seeds
+            .iter()
+            .any(|candidate| candidate.name == "bayes_model_market_reversal"));
 
         let generated = bayes_settlement_generated_candidates(&matrix.input_names());
         assert!(generated.iter().any(|candidate| {
@@ -3326,18 +3318,14 @@ mod tests {
 
         assert!(matrix.column("bayes_market_prior_prob").expect("prior")[0].is_nan());
         assert!(matrix.column("bayes_edge").expect("edge")[0].is_nan());
-        assert!(
-            matrix
-                .column("bayes_full_depth_edge")
-                .expect("full depth edge")[0]
-                .is_nan()
-        );
-        assert!(
-            matrix
-                .column("bayes_conservative_edge")
-                .expect("conservative edge")[0]
-                .is_nan()
-        );
+        assert!(matrix
+            .column("bayes_full_depth_edge")
+            .expect("full depth edge")[0]
+            .is_nan());
+        assert!(matrix
+            .column("bayes_conservative_edge")
+            .expect("conservative edge")[0]
+            .is_nan());
         assert!(matrix.column("bayes_external_prob").expect("external")[0].is_finite());
         assert!(matrix.column("bayes_posterior_prob").expect("posterior")[0].is_finite());
     }
@@ -3380,11 +3368,9 @@ mod tests {
     fn evaluates_domain_candidate_with_icir_gate() {
         let (matrix, labels, windows) = synthetic_matrix(24);
         let candidates = domain_seed_candidates(&matrix.input_names());
-        assert!(
-            candidates
-                .iter()
-                .any(|item| item.name == "ofi_l5_depth_norm")
-        );
+        assert!(candidates
+            .iter()
+            .any(|item| item.name == "ofi_l5_depth_norm"));
         let options = AutoFactorOptions {
             min_observations: 20,
             min_window_observations: 6,
@@ -3471,30 +3457,22 @@ mod tests {
             .expect("repricing gap report");
         assert_eq!(repricing_gap.decision, AutoFactorDecision::Candidate);
         assert!(repricing_gap.spearman_ic > 0.95);
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "poly_lag_pressure")
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "amplitude_weighted_momentum_30s_sigma")
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "amplitude_weighted_momentum_30s_vol_gap")
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "mut_spread_adjusted_external_move_pm_lag_gate")
-        );
-        assert!(
-            reports.iter().any(|report| report.name
-                == "mut2_mut_spread_adjusted_external_move_pm_lag_gate_squashed")
-        );
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "poly_lag_pressure"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "amplitude_weighted_momentum_30s_sigma"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "amplitude_weighted_momentum_30s_vol_gap"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "mut_spread_adjusted_external_move_pm_lag_gate"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name
+                == "mut2_mut_spread_adjusted_external_move_pm_lag_gate_squashed"));
     }
 
     #[test]
@@ -3596,31 +3574,25 @@ mod tests {
             report.name
                 == "auto_settlement_model_full_depth_settlement_edge_x_near_strike_x_capacity_x_entry_price_quality"
         }));
-        assert!(
-            reports.iter().any(|report| report.name
-                == "mut_auto_settlement_model_full_depth_settlement_edge_capacity")
-        );
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "auto_settlement_bayes_full_depth_edge")
-        );
+        assert!(reports
+            .iter()
+            .any(|report| report.name
+                == "mut_auto_settlement_model_full_depth_settlement_edge_capacity"));
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "auto_settlement_bayes_full_depth_edge"));
         assert!(reports.iter().any(
             |report| report.name == "auto_settlement_bayes_full_depth_confidence_weighted_edge"
         ));
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name == "auto_settlement_bayes_model_full_depth_edge")
-        );
+        assert!(reports
+            .iter()
+            .any(|report| report.name == "auto_settlement_bayes_model_full_depth_edge"));
         assert!(reports.iter().any(|report| {
             report.name == "auto_settlement_bayes_model_full_depth_confidence_weighted_edge"
         }));
-        assert!(
-            reports
-                .iter()
-                .any(|report| report.name.starts_with("mut2_"))
-        );
+        assert!(reports
+            .iter()
+            .any(|report| report.name.starts_with("mut2_")));
     }
 
     #[test]
@@ -3987,11 +3959,9 @@ mod tests {
         )
         .expect("reports");
 
-        assert!(
-            reports
-                .iter()
-                .all(|report| !report.name.starts_with("auto_settlement_"))
-        );
+        assert!(reports
+            .iter()
+            .all(|report| !report.name.starts_with("auto_settlement_")));
     }
 
     #[test]
@@ -4009,11 +3979,9 @@ mod tests {
                 .expect("reports");
 
         assert!(!reports.is_empty());
-        assert!(
-            reports
-                .iter()
-                .all(|report| report.target.as_deref() == Some("reprice_pnl_30s"))
-        );
+        assert!(reports
+            .iter()
+            .all(|report| report.target.as_deref() == Some("reprice_pnl_30s")));
 
         let formatted = format_autofactor_reports(&reports, reports.len());
         assert!(formatted.contains("reprice_pnl_30s"));

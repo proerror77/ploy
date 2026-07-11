@@ -134,7 +134,7 @@ mod tests {
             runtime_root.join("trading-state.json"),
             serde_json::to_string(&vec![TradingStateSnapshot {
                 deployment_id: "example.paper".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                 ..TradingStateSnapshot::default()
             }])
             .expect("trading json"),

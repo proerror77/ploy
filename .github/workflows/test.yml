@@ -64,6 +64,73 @@ jobs:
         run: |
           "${HOME}/go/bin/actionlint" -color
 
+  rust-format:
+    name: Rust formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91
+          components: rustfmt
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+  safety-scans:
+    name: Retired route and SSH safety scans
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Validate frontend route contract
+        run: node ploy-frontend/scripts/check-route-contract.mjs
+
+      - name: Reject retired routes, insecure SSH, and reset bypasses
+        run: |
+          set -euo pipefail
+          run_forbidden_scan() {
+            label="$1"
+            pattern="$2"
+            shift 2
+            set +e
+            if command -v rg >/dev/null 2>&1; then
+              rg -n -- "${pattern}" "$@"
+            else
+              grep -R -n -E -- "${pattern}" "$@"
+            fi
+            scan_status=$?
+            set -e
+            case "${scan_status}" in
+              0)
+                echo "forbidden ${label} match found" >&2
+                exit 1
+                ;;
+              1)
+                return 0
+                ;;
+              *)
+                echo "${label} scanner error (rg exit ${scan_status})" >&2
+                exit "${scan_status}"
+                ;;
+            esac
+          }
+
+          run_forbidden_scan \
+            "retired frontend route" \
+            "/stats/|'/(trades|positions|security/events|system/start|config|agent/|sidecar/)" \
+            ploy-frontend/src/services/api.ts
+          run_forbidden_scan \
+            "insecure SSH or reset bypass" \
+            'StrictHostKeyChecking[[:space:]=]+no|UserKnownHostsFile[[:space:]=]+/dev/null|allow[_-]?running' \
+            .github/workflows
+
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
@@ -83,13 +150,9 @@ jobs:
       - name: Run cargo audit
         run: |
           # Temporary exception: sqlx 0.8.6 keeps an unused mysql driver chain in Cargo.lock,
-          # which pulls the vulnerable `rsa` crate despite no mysql runtime in this repo.
-          # RUSTSEC-2026-0049: rustls-webpki 0.103.8 has CRL matching issue, requires rustls update.
-          # RUSTSEC-2026-0098: rustls-webpki 0.103.10 URI name constraints issue; fix requires rustls update.
-          # RUSTSEC-2026-0099: rustls-webpki 0.103.10 wildcard name constraints; same upstream fix.
-          # RUSTSEC-2026-0104: rustls-webpki 0.103.12 CRL parsing panic; fix requires rustls update.
-          # RUSTSEC-2025-0021: gix-features 0.39.1 SHA-1 collision; pulled by burn-dataset, no git ops in prod.
-          cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0049 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 --ignore RUSTSEC-2026-0104 --ignore RUSTSEC-2025-0021
+          # which pulls `rsa` despite this workspace having no reachable mysql runtime path.
+          # RustSec lists no fixed release; remove this ignore when sqlx drops the lockfile edge.
+          cargo audit --ignore RUSTSEC-2023-0071
 
   rust-control-plane:
     name: Rust control-plane/core
@@ -485,7 +548,7 @@ jobs:
         with:
           shared-key: frontend-sidecar-contracts-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build frontend and sidecar
+      - name: Validate frontend
         run: |
           set -euo pipefail
           SECONDS=0
@@ -493,10 +556,24 @@ jobs:
           node scripts/export_operator_contract_types.mjs --check
           npm ci --prefix ploy-frontend
           npm run contracts:check --prefix ploy-frontend
+          npm run lint --prefix ploy-frontend
           npm run build --prefix ploy-frontend
+          npm audit --omit=dev --audit-level=moderate --prefix ploy-frontend
+          oversized_chunks="$(find ploy-frontend/dist/assets -type f -name '*.js' -size +500k -print)"
+          if [ -n "${oversized_chunks}" ]; then
+            echo "frontend JavaScript chunks exceed 500 KiB:" >&2
+            echo "${oversized_chunks}" >&2
+            exit 1
+          fi
+
+      - name: Validate sidecar
+        run: |
+          set -euo pipefail
           npm ci --prefix ploy-sidecar
           npm run contracts:check --prefix ploy-sidecar
+          npm test --prefix ploy-sidecar
           npm run build --prefix ploy-sidecar
+          npm audit --omit=dev --audit-level=moderate --prefix ploy-sidecar
           echo "### Frontend and sidecar lane" >> "$GITHUB_STEP_SUMMARY"
           echo "Elapsed seconds: ${SECONDS}" >> "$GITHUB_STEP_SUMMARY"
 
@@ -590,6 +667,8 @@ jobs:
     name: Open Follow-up Issue
     needs:
       - workflow-lint
+      - rust-format
+      - safety-scans
       - audit
       - rust-control-plane
       - rust-runner-lean

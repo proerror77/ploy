@@ -158,8 +158,7 @@ pub fn auto_settlement_formula_score(
         return None;
     }
     let mut score = inputs.settlement_edge;
-    let suffix =
-        normalize_runtime_formula_suffix(normalized_name.strip_prefix(settlement_prefix)?);
+    let suffix = normalize_runtime_formula_suffix(normalized_name.strip_prefix(settlement_prefix)?);
     let suffix = apply_selector_gate(&suffix, inputs)?;
 
     match suffix.as_str() {

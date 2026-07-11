@@ -13,7 +13,10 @@
  *   Sidecar → Codex CLI / xAI Grok → ployd control plane
  */
 
+import assert from "node:assert/strict";
+import { setTimeout as delay } from "node:timers/promises";
 import { tradingOutputSchema } from "./schemas/output.js";
+import { runAwaitedPollLoop } from "./runtime/poll-loop.js";
 import type {
   AgentRunRecord,
   AgentToolCallRecord,
@@ -30,11 +33,13 @@ import {
 } from "./runtime/run-recorder.js";
 import {
   claimQueuedAgentRunRequests,
+  finalizeNeedsRetry,
   queuedAgentRunAttempt,
-  requeueAgentRunRequest,
   type QueuedAgentRunRequest,
 } from "./runtime/run-requests.js";
 import { readHarnessContext } from "./runtime/harness-memory.js";
+import { sidecarAdmissionLimits, validateAgentRunAdmission } from "./runtime/admission.js";
+import { evaluateAgentRunContract } from "./runtime/evaluator.js";
 import {
   queryGrokBuilderContext,
   queryGrokStrategyCompletion,
@@ -51,7 +56,6 @@ import {
 const CODEX_MODEL = process.env.CODEX_CLI_MODEL?.trim() || null;
 const AGENT_ENGINE = process.env.SIDECAR_AGENT_ENGINE || "codex";
 const POLL_INTERVAL = parseInt(process.env.SIDECAR_POLL_INTERVAL_SECS || "300", 10) * 1000;
-const MAX_BUDGET = parseFloat(process.env.SIDECAR_MAX_BUDGET_USD || "1.00");
 const DRY_RUN = process.env.SIDECAR_DRY_RUN !== "false";
 const PLOY_API = process.env.PLOY_API_URL || "http://localhost:8081";
 
@@ -98,6 +102,16 @@ type FocusedSubagentResult = {
   summary: string;
   toolCalls: AgentToolCallRecord[];
 };
+
+function focusedSubagentReceipts(
+  profile: FocusedSubagentProfile,
+  result: Pick<FocusedSubagentResult, "status" | "toolCalls">
+): AgentToolCallRecord[] {
+  return [
+    { name: `subagent__${profile}`, status: result.status },
+    ...result.toolCalls,
+  ];
+}
 
 async function backendFetchJson<T>(path: string): Promise<T | null> {
   try {
@@ -278,7 +292,10 @@ async function runFocusedSubagent(params: {
       profile: params.profile,
       status: completion.status,
       summary: completion.summary,
-      toolCalls: [{ name: `codex_cli__${params.profile}`, status: "called" }],
+      toolCalls: [
+        { name: `codex_cli__${params.profile}`, status: "called" },
+        ...result.tool_calls,
+      ],
     };
   } catch (error) {
     return {
@@ -295,6 +312,12 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
   const runtimeContext = await buildRuntimeContext();
   const harnessContext = await readHarnessContext();
   const toolCalls: AgentToolCallRecord[] = [];
+  const admissionError = validateAgentRunAdmission(queued.request);
+  let turnsRemaining = queued.request.max_turns;
+  const consumeTurn = () => {
+    if (turnsRemaining <= 0) throw new Error("agent run max_turns exhausted");
+    turnsRemaining -= 1;
+  };
   let sessionId: string | null = null;
   let totalCostUsd: number | null = null;
   let failureReason: string | null = null;
@@ -305,7 +328,9 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
   console.log(`\n[${startedAt}] Starting queued strategy run ${queued.run_id}`);
 
   try {
-    if (queued.request.strategy_profile.includes("grok_builder")) {
+    if (admissionError) throw new Error(admissionError);
+      if (queued.request.strategy_profile.includes("grok_builder")) {
+        consumeTurn();
       try {
         grokApiContext = await queryGrokBuilderContext({
           objective: queued.request.objective,
@@ -329,6 +354,7 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
     }
 
     for (const profile of selectSubagentProfiles(queued, harnessContext)) {
+      consumeTurn();
       const result = await runFocusedSubagent({
         profile,
         queued,
@@ -336,11 +362,11 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
         harnessContext,
       });
       subagentResults.push(result);
-      toolCalls.push({ name: `subagent__${profile}`, status: result.status });
-      toolCalls.push(...result.toolCalls);
+      toolCalls.push(...focusedSubagentReceipts(profile, result));
     }
 
     if (AGENT_ENGINE === "grok") {
+      consumeTurn();
       const grokRun = await queryGrokStrategyCompletion({
         objective: queued.request.objective,
         runPacket: queued.request.run_packet,
@@ -358,6 +384,7 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
       };
       console.log(`  Grok engine completed queued run with status: ${completion.status}`);
     } else {
+      consumeTurn();
       const codexRun = await queryCodexStrategyCompletion({
         objective: queued.request.objective,
         runPacket: queued.request.run_packet,
@@ -370,6 +397,7 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
       completion = codexRun.value;
       sessionId = codexRun.session_id;
       toolCalls.push({ name: "codex_cli__exec", status: "called" });
+      toolCalls.push(...codexRun.tool_calls);
       console.log(`  Codex CLI completed queued run with status: ${completion.status}`);
     }
   } catch (error) {
@@ -390,7 +418,7 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
     totalCostUsd,
     failureReason,
     completion,
-    request: JSON.parse(JSON.stringify(queued.request)) as JsonValue,
+    request: { ...JSON.parse(JSON.stringify(queued.request)), queue_attempt: queuedAgentRunAttempt(queued) } as JsonValue,
     harnessSubagents: JSON.parse(
       JSON.stringify({
         focused_subagents: subagentResults,
@@ -398,7 +426,6 @@ async function runQueuedStrategyRequest(queued: QueuedAgentRunRequest): Promise<
       })
     ) as JsonValue,
   });
-  await recordAgentRun(record);
   return record;
 }
 
@@ -424,6 +451,7 @@ async function runScanCycle(): Promise<void> {
     });
     sessionId = codexRun.session_id;
     resultOutput = codexRun.value;
+    toolCalls.push(...codexRun.tool_calls);
     toolCalls.push({ name: "codex_cli__exec", status: "called" });
 
     // Log structured output
@@ -482,7 +510,12 @@ async function runSidecarCycle(): Promise<void> {
       const record = await runQueuedStrategyRequest(request);
       if (record.status === "needs_retry") {
         const reason = retryReason(record);
-        const retry = await requeueAgentRunRequest(request, reason);
+        const retry = await finalizeNeedsRetry({
+          queued: request,
+          reason,
+          recordTerminal: () => recordAgentRun(record),
+          checkpoint: () => batch.complete(request),
+        });
         if (retry) {
           console.warn(
             `  Requeued ${request.run_id} after needs_retry (${queuedAgentRunAttempt(retry)}/${process.env.SIDECAR_AGENT_RUN_MAX_RETRIES || "1"}): ${reason}`
@@ -490,6 +523,9 @@ async function runSidecarCycle(): Promise<void> {
         } else {
           console.warn(`  Retry limit reached for ${request.run_id}: ${reason}`);
         }
+      } else {
+        await recordAgentRun(record);
+        await batch.complete(request);
       }
     }
     await batch.acknowledge();
@@ -532,17 +568,36 @@ async function main() {
   console.log(`  Codex model: ${CODEX_MODEL || "default config"}`);
   console.log(`  Dry run: ${DRY_RUN}`);
   console.log(`  Poll interval: ${POLL_INTERVAL / 1000}s`);
-  console.log(`  Max budget/cycle: $${MAX_BUDGET}`);
+  const limits = sidecarAdmissionLimits();
+  console.log(`  Max turns/run: ${limits.maxTurns}`);
+  console.log(`  Max budget/cycle: $${limits.maxBudgetUsd}`);
   console.log("");
 
-  // Run first cycle immediately
-  await runSidecarCycle();
-
-  // Then run on interval
-  setInterval(runSidecarCycle, POLL_INTERVAL);
+  await runAwaitedPollLoop(runSidecarCycle, () => delay(POLL_INTERVAL));
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+function selfTest() {
+  const receipts = focusedSubagentReceipts("replay-parity", {
+    status: "success",
+    toolCalls: [
+      { name: "codex_cli__replay-parity", status: "called" },
+      { name: "mcp__research__run_backtest", status: "completed" },
+    ],
+  });
+  const evaluation = evaluateAgentRunContract({
+    request: { run_contract: "requires_executable_replay = true" },
+    toolCalls: receipts,
+    completion: null,
+    failureReason: null,
+  });
+  assert.equal(evaluation?.status, "passed", "focused_subagent_mcp_receipt_satisfies_run_contract");
+}
+
+if (process.env.SIDECAR_SELF_TEST === "true") {
+  selfTest();
+} else {
+  main().catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}

@@ -84,19 +84,29 @@ jobs:
           fi
 
       - name: Configure SSH
+        env:
+          TANGO_1_1_KNOWN_HOSTS: ${{ secrets.TANGO_1_1_KNOWN_HOSTS }}
         run: |
+          set -euo pipefail
           install -m 700 -d ~/.ssh
+          if [ -z "${TANGO_1_1_KNOWN_HOSTS}" ]; then
+            echo "TANGO_1_1_KNOWN_HOSTS secret is required for pinned SSH host verification" >&2
+            exit 1
+          fi
+          printf '%s\n' "${TANGO_1_1_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
           printf '%s\n' '${{ secrets.TANGO_1_1_SSH_KEY }}' > ~/.ssh/tango_1_1_key
           chmod 600 ~/.ssh/tango_1_1_key
           cat > ~/.ssh/config <<EOF
           Host tango-1-1
             HostName ${DEPLOY_HOST}
+            HostKeyAlias tango-1-1
             User root
             IdentityFile ~/.ssh/tango_1_1_key
             BatchMode yes
             ConnectionAttempts 1
-            StrictHostKeyChecking no
-            UserKnownHostsFile /dev/null
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
             ServerAliveInterval 10
             ServerAliveCountMax 2
             ConnectTimeout 10

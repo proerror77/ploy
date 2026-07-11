@@ -12,8 +12,14 @@ impl BacktestMetrics {
     pub fn from_pnls(pnls: &[f64]) -> Self {
         let n = pnls.len();
         if n == 0 {
-            return Self { trade_count: 0, win_count: 0, win_rate: 0.0,
-                total_pnl: 0.0, sharpe_per_trade: 0.0, max_drawdown: 0.0 };
+            return Self {
+                trade_count: 0,
+                win_count: 0,
+                win_rate: 0.0,
+                total_pnl: 0.0,
+                sharpe_per_trade: 0.0,
+                max_drawdown: 0.0,
+            };
         }
         let win_count = pnls.iter().filter(|&&p| p > 0.0).count();
         let total_pnl: f64 = pnls.iter().sum();
@@ -40,13 +46,23 @@ impl BacktestMetrics {
         let mut max_drawdown = 0.0_f64;
         for &p in pnls {
             cumulative += p;
-            if cumulative > peak { peak = cumulative; }
+            if cumulative > peak {
+                peak = cumulative;
+            }
             let dd = peak - cumulative;
-            if dd > max_drawdown { max_drawdown = dd; }
+            if dd > max_drawdown {
+                max_drawdown = dd;
+            }
         }
 
-        Self { trade_count: n, win_count, win_rate: win_count as f64 / n as f64,
-            total_pnl, sharpe_per_trade, max_drawdown }
+        Self {
+            trade_count: n,
+            win_count,
+            win_rate: win_count as f64 / n as f64,
+            total_pnl,
+            sharpe_per_trade,
+            max_drawdown,
+        }
     }
 }
 

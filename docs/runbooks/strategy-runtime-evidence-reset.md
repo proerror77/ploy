@@ -13,8 +13,9 @@ Use this only when the evidence stage is `dry_run_candidate`,
 
 - Never run a destructive reset while the target deployment is desired or
   observed `running`.
-- Never set `allow_running=true` for PM5D dry-run cleanup unless a separate
-  incident issue explains why pausing is impossible.
+- The workflow always stops the target through the canonical control plane,
+  verifies the worker is gone, and stops `ployd` under a restart trap before
+  destructive deletion. There is no running-state bypass.
 - Always run a preview first and keep the uploaded backup artifact.
 - Destructive execution requires both:
   - `execute=true`
@@ -44,14 +45,14 @@ runtime_modes=dry_run,dryrun,paper
 2. Read the current deployment state:
 
    ```bash
-   curl -fsS --max-time 10 http://8.221.143.151/api/deployments \
-     | jq '.[]? | select(.deployment_id=="pm5d.threelayer.settlement-probability-btc-eth.dryrun") | {deployment_id,desired_state,observed_state,deployment_state}'
+   ssh tango-1-1 'set -a; . /opt/ploy/.env; set +a; /opt/ploy/bin/ployctl deployments list' \
+     | rg 'pm5d.threelayer.settlement-probability-btc-eth.dryrun'
    ```
 
 3. Read the current dry-run report:
 
    ```bash
-   curl -fsS --max-time 10 http://8.221.143.151/api/reports/dry-run \
+   ssh tango-1-1 'set -a; . /opt/ploy/.env; set +a; token="${PLOY_ADMIN_TOKEN:-${PLOY_API_ADMIN_TOKEN:-${PLOY_API_KEY:-}}}"; curl -fsS -H "Authorization: Bearer ${token}" http://127.0.0.1:8081/api/reports/dry-run' \
      | jq '.strategies[]? | select(.deployment_id=="pm5d.threelayer.settlement-probability-btc-eth.dryrun") | {summary,metrics,execution_diagnostics}'
    ```
 
@@ -75,25 +76,19 @@ gh workflow run reset-strategy-runtime-evidence.yml \
   -f strategy_id=three_layer \
   -f runtime_modes=dry_run,dryrun,paper \
   -f execute=false \
-  -f allow_running=false \
   -f confirm=
 ```
 
 Download the artifact and inspect `manifest.json`. The preview should report
 matched orders and fills, but `deleted_orders` must be `0`.
 
-## Pause The Deployment
+## Deployment Stop Guard
 
-Pause the target with the operator control plane before destructive reset:
-
-```bash
-ssh tango-1-1 '/opt/ploy/bin/ployctl deployments pause pm5d.threelayer.settlement-probability-btc-eth.dryrun'
-```
-
-Then re-read `/api/deployments` until both desired and observed state are no
-longer `running`.
-
-Do not continue to destructive reset if either state remains `running`.
+For `execute=true`, the workflow requests `desired_state=stopped`, waits for
+desired and observed state to become stopped, verifies the worker PID/process
+is gone, then stops `ployd` before deletion. An EXIT trap restarts `ployd` on
+success or failure. Any missing host token, service, deployment, or worker-stop
+evidence blocks deletion.
 
 ## Execute Reset
 
@@ -108,14 +103,12 @@ gh workflow run reset-strategy-runtime-evidence.yml \
   -f strategy_id=three_layer \
   -f runtime_modes=dry_run,dryrun,paper \
   -f execute=true \
-  -f allow_running=false \
   -f confirm=delete-strategy-runtime-evidence
 ```
 
 The `tango-1-1` environment approval gate must remain enabled. After the run,
 download the reset artifact and verify:
 
-- `guard-status.json` has `status=allowed`.
 - `manifest.json` exists.
 - `before.orders` / `before.fills` match the intended target rows.
 - `deleted_orders` equals the expected target order count.

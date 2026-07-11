@@ -5,8 +5,8 @@ use serde_json::Value;
 
 use crate::discovery::types::{MarketDescriptor, MarketFamily, MarketSemantics, SettlementSource};
 use crate::reference_prices::{
-    ReferencePriceRegistry, ReferencePriceSource, latest_reference_price,
-    market_symbol_to_chainlink_symbol,
+    latest_reference_price, market_symbol_to_chainlink_symbol, ReferencePriceRegistry,
+    ReferencePriceSource,
 };
 
 #[derive(Debug, Clone)]
@@ -238,8 +238,8 @@ mod tests {
 
     use super::{crypto_market_start_time, discover_crypto_markets, infer_market_window_secs};
     use crate::reference_prices::{
-        ReferenceAssetClass, ReferencePriceKey, ReferencePriceSnapshot, ReferencePriceSource,
-        new_reference_price_registry, upsert_reference_price,
+        new_reference_price_registry, upsert_reference_price, ReferenceAssetClass,
+        ReferencePriceKey, ReferencePriceSnapshot, ReferencePriceSource,
     };
 
     #[tokio::test]
@@ -435,7 +435,11 @@ mod tests {
             Some(Utc.with_ymd_and_hms(2026, 4, 10, 7, 45, 0).unwrap())
         );
         assert_eq!(
-            infer_market_window_secs(start_time, market.end_date.unwrap(), market.question.as_deref().unwrap()),
+            infer_market_window_secs(
+                start_time,
+                market.end_date.unwrap(),
+                market.question.as_deref().unwrap()
+            ),
             Some(300)
         );
     }

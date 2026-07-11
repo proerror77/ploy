@@ -5360,6 +5360,7 @@ dependencies = [
  "rust_decimal_macros",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -5401,6 +5402,7 @@ dependencies = [
 name = "ploy-runner-host"
 version = "0.1.0"
 dependencies = [
+ "ploy-deployments",
  "ploy-market-data",
  "ploy-strategy-bundles",
  "ploy-strategy-runtime",
@@ -5439,9 +5441,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
- "ploy-connectivity",
+ "ploy-control-client",
  "ploy-feed-loaders",
  "ploy-market-data",
+ "ploy-operator-contracts",
+ "ploy-platform-runtime",
  "ploy-strategy-bundles",
  "ploy-trading",
  "rust_decimal",
@@ -5468,6 +5472,7 @@ name = "ployctl"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "ploy-connectivity",
  "ploy-control-client",
  "ploy-operator-contracts",
  "ploy-platform",
@@ -6896,9 +6901,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.12"
+version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8279bb85272c9f10811ae6a6c547ff594d6a7f3c6c6b02ee9726d1d0dcfcdd06"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "ring",
  "rustls-pki-types",

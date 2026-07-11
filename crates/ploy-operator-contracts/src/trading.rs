@@ -27,6 +27,8 @@ pub struct TradingIntentSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PaperIntentRequest {
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
     pub market_id: String,
     pub token_id: String,
     pub side: String,
@@ -85,6 +87,8 @@ pub struct OrderSnapshot {
     pub filled_qty: Decimal,
     pub rejection_reason: Option<String>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -128,7 +132,7 @@ pub struct RiskSnapshotResponse {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TradingStateSnapshot {
     pub deployment_id: String,
-    pub runtime_mode: String,
+    pub runtime_mode: crate::DeploymentRuntimeMode,
     pub intents: Vec<TradingIntentSnapshot>,
     pub orders: Vec<OrderSnapshot>,
     pub fills: Vec<FillSnapshot>,
@@ -324,7 +328,7 @@ mod tests {
         let timestamp = Utc::now();
         let value = serde_json::to_value(TradingStateSnapshot {
             deployment_id: "example.paper".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: crate::DeploymentRuntimeMode::Paper,
             intents: vec![TradingIntentSnapshot {
                 intent_id: "intent-1".to_string(),
                 market_id: "market-1".to_string(),
@@ -348,6 +352,7 @@ mod tests {
                 filled_qty: rust_decimal::Decimal::ONE,
                 rejection_reason: None,
                 last_error: None,
+                idempotency_key: None,
             }],
             fills: vec![],
             positions: vec![],
@@ -384,6 +389,7 @@ mod tests {
                     "filled_qty": "1",
                     "rejection_reason": null,
                     "last_error": null,
+                    "idempotency_key": null,
                 }],
                 "fills": [],
                 "positions": [],
@@ -408,6 +414,7 @@ mod tests {
     #[test]
     fn paper_intent_contract_uses_stable_wire_keys() {
         let request = serde_json::to_value(PaperIntentRequest {
+            idempotency_key: Some("request-1".to_string()),
             market_id: "market-1".to_string(),
             token_id: "token-1".to_string(),
             side: "buy".to_string(),
@@ -419,6 +426,7 @@ mod tests {
         assert_eq!(
             request,
             json!({
+                "idempotency_key": "request-1",
                 "market_id": "market-1",
                 "token_id": "token-1",
                 "side": "buy",

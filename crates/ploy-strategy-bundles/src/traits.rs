@@ -33,6 +33,25 @@ pub struct ExecutionReport {
     pub price_basis: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitOutcome {
+    Acknowledged,
+    Rejected,
+    Unknown,
+}
+
+impl ExecutionReport {
+    pub fn submit_outcome(&self) -> SubmitOutcome {
+        if self.rejected {
+            SubmitOutcome::Rejected
+        } else if self.order_id.is_empty() && self.rejection_reason.is_some() {
+            SubmitOutcome::Unknown
+        } else {
+            SubmitOutcome::Acknowledged
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExecutionPolicy {
     pub max_slippage_bps: Decimal,
@@ -63,6 +82,10 @@ pub trait Executor: Send {
     }
 
     fn last_reconcile_attempted(&self) -> bool {
+        true
+    }
+
+    fn owns_live_retries(&self) -> bool {
         true
     }
 
@@ -189,7 +212,7 @@ pub struct SignalRecord {
 #[async_trait]
 pub trait Recorder: Send {
     /// Record a signal evaluation (both entries and rejections).
-    async fn record_signal(&mut self, signal: &SignalRecord);
+    async fn record_signal(&mut self, signal: &SignalRecord) -> Result<(), String>;
 
     /// Record order submission or rejection for execution audit.
     async fn record_order(
@@ -199,7 +222,8 @@ pub trait Recorder: Send {
         _signal: Option<&SignalRecord>,
         _report: &ExecutionReport,
         _order_id: &str,
-    ) {
+    ) -> Result<(), String> {
+        Ok(())
     }
 
     /// Record a fill for execution audit.
@@ -210,11 +234,12 @@ pub trait Recorder: Send {
         _signal: Option<&SignalRecord>,
         _fill: &FillRecord,
         _report: &ExecutionReport,
-    ) {
+    ) -> Result<(), String> {
+        Ok(())
     }
 
     /// Flush buffered records to storage.
-    async fn flush(&mut self);
+    async fn flush(&mut self) -> Result<(), String>;
 }
 
 /// No-op recorder for tests.
@@ -222,6 +247,10 @@ pub struct NullRecorder;
 
 #[async_trait]
 impl Recorder for NullRecorder {
-    async fn record_signal(&mut self, _signal: &SignalRecord) {}
-    async fn flush(&mut self) {}
+    async fn record_signal(&mut self, _signal: &SignalRecord) -> Result<(), String> {
+        Ok(())
+    }
+    async fn flush(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }

@@ -790,7 +790,7 @@ pub async fn build_research_snapshot_from_database(
     pool: &sqlx::PgPool,
     options: ResearchSnapshotBuildOptions,
 ) -> Result<ResearchSnapshot> {
-    use ploy_feed_loaders::{HistoricalLoadOptions, load_from_database_with_options};
+    use ploy_feed_loaders::{load_from_database_with_options, HistoricalLoadOptions};
     use ploy_market_contracts::MarketUpdate;
 
     use crate::{
@@ -1556,11 +1556,9 @@ mod tests {
             },
         )
         .expect_err("PM book cadence mismatch should fail closed");
-        assert!(
-            mismatch
-                .to_string()
-                .contains("snapshot pm_book_sample_secs 120 does not match requested 30")
-        );
+        assert!(mismatch
+            .to_string()
+            .contains("snapshot pm_book_sample_secs 120 does not match requested 30"));
 
         let coarse = validate_snapshot_request_coverage(
             &manifest,
@@ -1577,11 +1575,9 @@ mod tests {
             },
         )
         .expect_err("PM book cadence coarser than quote-age gate should fail closed");
-        assert!(
-            coarse
-                .to_string()
-                .contains("full-depth execution claims require PM book cadence")
-        );
+        assert!(coarse
+            .to_string()
+            .contains("full-depth execution claims require PM book cadence"));
     }
 
     #[test]

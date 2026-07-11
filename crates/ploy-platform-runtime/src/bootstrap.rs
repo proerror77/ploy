@@ -1,6 +1,10 @@
-use crate::{build_worker_launch_spec, WorkerTickConfig};
+use crate::{
+    build_worker_launch_spec, deployment_control::validate_live_account_scope, WorkerTickConfig,
+};
 use ploy_deployments::WorkerSupervisor;
-use ploy_operator_contracts::DesiredState;
+use ploy_operator_contracts::{
+    DeploymentRuntimeMode, DeploymentState, DesiredState, ObservedState,
+};
 use ploy_platform::{DeploymentRecord, DeploymentRegistry};
 use ploy_trading::TradingRuntime;
 use std::collections::BTreeMap;
@@ -11,15 +15,52 @@ pub fn apply_loaded_registry_state(
     supervisor: &mut WorkerSupervisor,
     trading: &mut BTreeMap<String, TradingRuntime>,
     config: &WorkerTickConfig,
-) {
+) -> bool {
+    let loaded_records = records.clone();
+    let mut quarantined = false;
     for record in records {
         let deployment_id = record.deployment_id.clone();
         let desired_state = record.desired_state;
+        let invalid_account_scope = validate_live_account_scope(&record, &loaded_records).is_err();
 
         registry.upsert(record);
-        trading.entry(deployment_id.clone()).or_default();
+        if invalid_account_scope {
+            quarantined = true;
+            supervisor.terminate_pidfile_worker(build_worker_launch_spec(
+                registry.get(&deployment_id).expect("record inserted"),
+                config,
+            ));
+            registry.set_desired_state(&deployment_id, DesiredState::Paused);
+            registry.set_observed_state(&deployment_id, ObservedState::Degraded);
+            continue;
+        }
+        let live_ledger_missing = registry.get(&deployment_id).is_some_and(|record| {
+            record.runtime_mode == DeploymentRuntimeMode::Live
+                && record.deployment_state != DeploymentState::Archived
+                && !trading.contains_key(&deployment_id)
+        });
+        if live_ledger_missing {
+            quarantined = true;
+            supervisor.terminate_pidfile_worker(build_worker_launch_spec(
+                registry.get(&deployment_id).expect("record inserted"),
+                config,
+            ));
+            registry.set_desired_state(&deployment_id, DesiredState::Paused);
+            registry.set_observed_state(&deployment_id, ObservedState::Degraded);
+            continue;
+        }
+        if registry
+            .get(&deployment_id)
+            .is_some_and(|record| record.runtime_mode == DeploymentRuntimeMode::Paper)
+        {
+            trading.entry(deployment_id.clone()).or_default();
+        }
 
-        if desired_state == DesiredState::Running {
+        if desired_state == DesiredState::Running
+            && registry
+                .get(&deployment_id)
+                .is_some_and(|record| record.deployment_state != DeploymentState::Archived)
+        {
             if supervisor.status(&deployment_id).is_none() {
                 supervisor.start(build_worker_launch_spec(
                     registry.get(&deployment_id).expect("record inserted"),
@@ -31,6 +72,7 @@ pub fn apply_loaded_registry_state(
             }
         }
     }
+    quarantined
 }
 
 #[cfg(test)]
@@ -42,7 +84,7 @@ mod tests {
     use ploy_platform::{DeploymentRecord, DeploymentRegistry};
     use ploy_trading::TradingRuntime;
     use rust_decimal_macros::dec;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -61,10 +103,8 @@ mod tests {
     }
 
     fn test_working_directory() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "ploy-platform-bootstrap-workdir-{}",
-            test_id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("ploy-platform-bootstrap-workdir-{}", test_id()));
         fs::create_dir_all(&path).expect("create test working directory");
         path
     }
@@ -93,6 +133,7 @@ mod tests {
             runner_binary: test_runner_binary(),
             strategy_config_root: PathBuf::from("config/strategies"),
             working_directory: test_working_directory(),
+            canonical_live_ledgers: BTreeSet::new(),
         }
     }
 
@@ -107,8 +148,8 @@ mod tests {
             vec![DeploymentRecord {
                 deployment_id: "example.paper".to_string(),
                 bundle_id: "example".to_string(),
-                runtime_mode: "paper".to_string(),
-                account_id: "acct-paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+                account_id: "paper:test-example".to_string(),
                 max_gross_exposure: Some(dec!(5)),
                 deployment_state: DeploymentState::Enabled,
                 desired_state: DesiredState::Running,
@@ -135,8 +176,8 @@ mod tests {
         let records = vec![DeploymentRecord {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
-            runtime_mode: "paper".to_string(),
-            account_id: "acct-paper".to_string(),
+            runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+            account_id: "paper:test-example".to_string(),
             max_gross_exposure: Some(dec!(5)),
             deployment_state: DeploymentState::Enabled,
             desired_state: DesiredState::Running,
@@ -160,6 +201,114 @@ mod tests {
         );
 
         assert_eq!(first_pid, second_pid);
+    }
+
+    #[test]
+    fn archived_running_record_is_not_bootstrapped() {
+        let mut registry = DeploymentRegistry::default();
+        let mut supervisor = WorkerSupervisor::default();
+        let mut trading = BTreeMap::<String, TradingRuntime>::new();
+        let config = config();
+
+        apply_loaded_registry_state(
+            vec![DeploymentRecord {
+                deployment_id: "example.archived".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+                account_id: "paper:test-example".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Archived,
+                desired_state: DesiredState::Running,
+                observed_state: ObservedState::Stopped,
+            }],
+            &mut registry,
+            &mut supervisor,
+            &mut trading,
+            &config,
+        );
+
+        assert!(registry.get("example.archived").is_some());
+        assert!(trading.contains_key("example.archived"));
+        assert!(supervisor.status("example.archived").is_none());
+    }
+
+    #[test]
+    fn loaded_unsafe_live_account_scope_is_paused_degraded() {
+        let mut registry = DeploymentRegistry::default();
+        let mut supervisor = WorkerSupervisor::default();
+        let mut trading = BTreeMap::<String, TradingRuntime>::from([
+            ("first.live".to_string(), TradingRuntime::default()),
+            ("second.live".to_string(), TradingRuntime::default()),
+        ]);
+        let config = config();
+        let records = vec![
+            DeploymentRecord {
+                deployment_id: "first.live".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+                account_id: "0x1111111111111111111111111111111111111111".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+                observed_state: ObservedState::Starting,
+            },
+            DeploymentRecord {
+                deployment_id: "second.live".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+                account_id: "0x1111111111111111111111111111111111111111".to_string(),
+                max_gross_exposure: Some(dec!(6)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+                observed_state: ObservedState::Starting,
+            },
+        ];
+
+        apply_loaded_registry_state(
+            records,
+            &mut registry,
+            &mut supervisor,
+            &mut trading,
+            &config,
+        );
+
+        for deployment_id in ["first.live", "second.live"] {
+            let blocked = registry.get(deployment_id).expect("registry record");
+            assert_eq!(blocked.desired_state, DesiredState::Paused);
+            assert_eq!(blocked.observed_state, ObservedState::Degraded);
+            assert!(supervisor.status(deployment_id).is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_live_record_without_canonical_ledger_is_paused_degraded() {
+        let mut registry = DeploymentRegistry::default();
+        let mut supervisor = WorkerSupervisor::default();
+        let mut trading = BTreeMap::<String, TradingRuntime>::new();
+        let config = config();
+
+        apply_loaded_registry_state(
+            vec![DeploymentRecord {
+                deployment_id: "legacy.live".to_string(),
+                bundle_id: "example".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Live,
+                account_id: "0x1111111111111111111111111111111111111111".to_string(),
+                max_gross_exposure: Some(dec!(5)),
+                deployment_state: DeploymentState::Enabled,
+                desired_state: DesiredState::Running,
+                observed_state: ObservedState::Starting,
+            }],
+            &mut registry,
+            &mut supervisor,
+            &mut trading,
+            &config,
+        );
+
+        let blocked = registry.get("legacy.live").expect("registry record");
+        assert_eq!(blocked.desired_state, DesiredState::Paused);
+        assert_eq!(blocked.observed_state, ObservedState::Degraded);
+        assert!(!trading.contains_key("legacy.live"));
+        assert!(supervisor.status("legacy.live").is_none());
     }
 
     fn wait_for_worker_pid(

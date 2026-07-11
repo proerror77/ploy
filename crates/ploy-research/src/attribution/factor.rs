@@ -6,7 +6,9 @@ pub fn factor_pnl(fills: &[(f64, Vec<(String, f64)>)]) -> BTreeMap<String, f64> 
     let mut map: BTreeMap<String, f64> = BTreeMap::new();
     for (pnl, factors) in fills {
         let total_weight: f64 = factors.iter().map(|(_, v)| v.abs()).sum();
-        if total_weight == 0.0 { continue; }
+        if total_weight == 0.0 {
+            continue;
+        }
         for (name, value) in factors {
             *map.entry(name.clone()).or_default() += pnl * value.abs() / total_weight;
         }

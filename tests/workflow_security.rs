@@ -61,6 +61,81 @@ fn ci_runs_dependency_vulnerability_audit() {
         );
     }
 
+    for (needle, description) in [
+        ("cargo fmt --all -- --check", "rustfmt gate"),
+        (
+            "npm run contracts:check --prefix ploy-frontend",
+            "frontend contracts",
+        ),
+        ("npm run lint --prefix ploy-frontend", "frontend lint"),
+        ("npm run build --prefix ploy-frontend", "frontend build"),
+        (
+            "npm audit --omit=dev --audit-level=moderate --prefix ploy-frontend",
+            "frontend audit",
+        ),
+        ("-size +500k", "frontend chunk limit"),
+        (
+            "npm run contracts:check --prefix ploy-sidecar",
+            "sidecar contracts",
+        ),
+        ("npm test --prefix ploy-sidecar", "sidecar tests"),
+        ("npm run build --prefix ploy-sidecar", "sidecar build"),
+        (
+            "npm audit --omit=dev --audit-level=moderate --prefix ploy-sidecar",
+            "sidecar audit",
+        ),
+        (
+            "node ploy-frontend/scripts/check-route-contract.mjs",
+            "retired route scan",
+        ),
+        (
+            "StrictHostKeyChecking[[:space:]=]+no|UserKnownHostsFile[[:space:]=]+/dev/null|allow[_-]?running",
+            "insecure SSH scan",
+        ),
+    ] {
+        if !content.contains(needle) {
+            offenders.push(format!("test.yml: missing {description}"));
+        }
+    }
+
+    for (needle, description) in [
+        (
+            "command -v rg >/dev/null 2>&1",
+            "explicit rg availability guard",
+        ),
+        ("scan_status=$?", "rg exit-status capture"),
+        ("case \"${scan_status}\" in", "rg exit-status dispatch"),
+        ("forbidden ${label} match found", "rg match failure branch"),
+        ("1)\n                return 0", "rg clean branch"),
+        (
+            "scanner error (rg exit ${scan_status})",
+            "rg scanner-error branch",
+        ),
+        ("exit \"${scan_status}\"", "rg scanner-error propagation"),
+        ("retired frontend route", "retired-route rg scan"),
+    ] {
+        if !content.contains(needle) {
+            offenders.push(format!("test.yml: missing fail-closed {description}"));
+        }
+    }
+    if content.contains("if rg -n") {
+        offenders
+            .push("test.yml: rg scans must not treat every nonzero status as clean".to_string());
+    }
+
+    for retired_ignore in [
+        "RUSTSEC-2026-0049",
+        "RUSTSEC-2026-0098",
+        "RUSTSEC-2026-0099",
+        "RUSTSEC-2026-0104",
+    ] {
+        if content.contains(retired_ignore) {
+            offenders.push(format!(
+                "test.yml: stale production-path ignore {retired_ignore}"
+            ));
+        }
+    }
+
     assert!(
         offenders.is_empty(),
         "workflow dependency-audit guard failed:\n{}",
@@ -611,7 +686,10 @@ fn hosted_factor_walk_forward_has_candidate_replay_feedback_input() {
     let candidate_section = hosted
         .split("- name: Download candidate strategy replay artifact")
         .nth(1)
-        .and_then(|tail| tail.split("- name: Download full-depth execution surface artifact").next())
+        .and_then(|tail| {
+            tail.split("- name: Download full-depth execution surface artifact")
+                .next()
+        })
         .unwrap_or("");
     if candidate_section.contains("--strip-prefix") {
         offenders.push(
@@ -1325,10 +1403,9 @@ fn optimize_workflow_builds_and_runs_in_one_job() {
 fn deployed_research_tools_do_not_ship_legacy_factor_research_binary() {
     let deploy = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
     let acr = workflow_contents(".github/workflows/build-push-acr.yml");
-    let dockerfile = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("Dockerfile.research"),
-    )
-    .expect("read Dockerfile.research");
+    let dockerfile =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Dockerfile.research"))
+            .expect("read Dockerfile.research");
     let cargo = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/ploy-research/Cargo.toml"),
     )
@@ -1366,8 +1443,7 @@ fn deployed_research_tools_do_not_ship_legacy_factor_research_binary() {
     }
     if !deploy.contains("rm -f ${DEPLOY_ROOT}/bin/factor-research") {
         offenders.push(
-            "deploy-tango-1-1.yml: must remove stale factor-research binary on deploy"
-                .to_string(),
+            "deploy-tango-1-1.yml: must remove stale factor-research binary on deploy".to_string(),
         );
     }
     if !acr.contains("--example run_backtest") {

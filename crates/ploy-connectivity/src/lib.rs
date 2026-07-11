@@ -13,6 +13,7 @@ use rust_decimal_macros::dec;
 use secrecy::{ExposeSecret, SecretString};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Duration;
 use thiserror::Error;
 
 pub const CRATE_MARKER: &str = "ploy-connectivity";
@@ -110,6 +111,8 @@ pub enum ExecutionError {
 }
 
 pub trait LiveExecutionGateway: Send + Sync + std::fmt::Debug {
+    fn probe(&self) -> Result<(), ExecutionError>;
+
     fn submit(&self, request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError>;
 
     fn cancel(&self, request: &CancellationRequest) -> Result<CancellationOutcome, ExecutionError>;
@@ -124,6 +127,7 @@ pub trait LiveExecutionGateway: Send + Sync + std::fmt::Debug {
 
 #[derive(Debug, Clone)]
 pub struct StaticExecutionGateway {
+    probe_result: Result<(), ExecutionError>,
     result: Result<ExecutionOutcome, ExecutionError>,
     cancel_result: Result<CancellationOutcome, ExecutionError>,
     replace_result: Result<ReplaceOutcome, ExecutionError>,
@@ -134,6 +138,7 @@ impl StaticExecutionGateway {
     pub fn acknowledged(venue_order_id: impl Into<String>) -> Self {
         let venue_order_id = venue_order_id.into();
         Self {
+            probe_result: Ok(()),
             result: Ok(ExecutionOutcome::Acknowledged {
                 venue_order_id: venue_order_id.clone(),
             }),
@@ -148,6 +153,7 @@ impl StaticExecutionGateway {
     pub fn rejected(reason: impl Into<String>) -> Self {
         let reason = reason.into();
         Self {
+            probe_result: Ok(()),
             result: Ok(ExecutionOutcome::Rejected {
                 reason: reason.clone(),
             }),
@@ -159,6 +165,7 @@ impl StaticExecutionGateway {
 
     pub fn failed(error: ExecutionError) -> Self {
         Self {
+            probe_result: Ok(()),
             result: Err(error.clone()),
             cancel_result: Ok(CancellationOutcome::Canceled),
             replace_result: Err(error),
@@ -171,6 +178,11 @@ impl StaticExecutionGateway {
         result: Result<CancellationOutcome, ExecutionError>,
     ) -> Self {
         self.cancel_result = result;
+        self
+    }
+
+    pub fn with_probe_result(mut self, result: Result<(), ExecutionError>) -> Self {
+        self.probe_result = result;
         self
     }
 
@@ -194,6 +206,10 @@ impl StaticExecutionGateway {
 }
 
 impl LiveExecutionGateway for StaticExecutionGateway {
+    fn probe(&self) -> Result<(), ExecutionError> {
+        self.probe_result.clone()
+    }
+
     fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
         self.result.clone()
     }
@@ -289,6 +305,41 @@ impl PolymarketExecutionConfig {
         }
 
         config
+    }
+}
+
+pub fn polymarket_execution_principal_from_env() -> Result<String, ExecutionError> {
+    polymarket_execution_principal(&PolymarketExecutionConfig::from_env())
+}
+
+pub fn polymarket_execution_principal(
+    config: &PolymarketExecutionConfig,
+) -> Result<String, ExecutionError> {
+    match config.signature_type {
+        WalletSignatureType::Eoa => {
+            let private_key = config
+                .private_key
+                .as_ref()
+                .map(ExposeSecret::expose_secret)
+                .ok_or_else(|| {
+                    ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
+                })?;
+            let signer = PrivateKeySigner::from_str(private_key).map_err(|err| {
+                ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
+            })?;
+            Ok(format!("{:#x}", signer.address()))
+        }
+        WalletSignatureType::Proxy | WalletSignatureType::GnosisSafe => {
+            let funder = config.funder.as_deref().ok_or_else(|| {
+                ExecutionError::Configuration(
+                    "POLY_FUNDER is required for proxy or gnosis_safe signatures".to_string(),
+                )
+            })?;
+            let address = Address::from_str(funder).map_err(|err| {
+                ExecutionError::Configuration(format!("invalid POLY_FUNDER: {err}"))
+            })?;
+            Ok(format!("{address:#x}"))
+        }
     }
 }
 
@@ -408,6 +459,21 @@ impl PolymarketExecutionGateway {
 }
 
 impl LiveExecutionGateway for PolymarketExecutionGateway {
+    fn probe(&self) -> Result<(), ExecutionError> {
+        let client = self.get_or_init_client()?;
+        let result = self.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), client.server_time())
+                .await
+                .map_err(|_| ExecutionError::Transport("venue health probe timed out".to_string()))?
+                .map(|_| ())
+                .map_err(|err| ExecutionError::Transport(format!("venue health probe: {err}")))
+        });
+        if let Err(error) = &result {
+            self.maybe_clear_client_cache(error);
+        }
+        result
+    }
+
     fn submit(&self, request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
         let limit_price = request.limit_price.ok_or_else(|| {
             ExecutionError::Validation(
@@ -895,7 +961,7 @@ mod tests {
     use super::{
         cap_sell_quantity_to_balance, conditional_token_balance_to_shares,
         execution_price_override, normalize_aggressive_price, normalize_execution_amount,
-        normalize_market_order_quantity, normalize_order_quantity,
+        normalize_market_order_quantity, normalize_order_quantity, polymarket_execution_principal,
         polymarket_signature_type_from_env, tracked_trade_fill, trade_side, unique_token_ids,
         CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
         ExecutionRequest, LiveExecutionGateway, OrderExecutionType, PolymarketExecutionConfig,
@@ -910,6 +976,7 @@ mod tests {
     use polymarket_client_sdk::types::{Address, B256, U256};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
+    use secrecy::SecretString;
     use std::str::FromStr;
 
     #[test]
@@ -933,6 +1000,26 @@ mod tests {
                 venue_order_id: "venue-order-1".to_string()
             }
         );
+    }
+
+    #[test]
+    fn execution_principal_is_derived_from_signer_or_funder() {
+        let eoa = polymarket_execution_principal(&PolymarketExecutionConfig {
+            private_key: Some(SecretString::from(format!("0x{:064x}", 1))),
+            signature_type: WalletSignatureType::Eoa,
+            ..PolymarketExecutionConfig::default()
+        })
+        .expect("eoa principal");
+        assert_eq!(eoa, "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf");
+
+        let proxy = polymarket_execution_principal(&PolymarketExecutionConfig {
+            private_key: None,
+            signature_type: WalletSignatureType::Proxy,
+            funder: Some("0x1111111111111111111111111111111111111111".to_string()),
+            ..PolymarketExecutionConfig::default()
+        })
+        .expect("proxy principal");
+        assert_eq!(proxy, "0x1111111111111111111111111111111111111111");
     }
 
     #[test]

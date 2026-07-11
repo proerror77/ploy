@@ -29,6 +29,23 @@ pub enum DesiredState {
     Stopped,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentRuntimeMode {
+    #[default]
+    Paper,
+    Live,
+}
+
+impl std::fmt::Display for DeploymentRuntimeMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Paper => "paper",
+            Self::Live => "live",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ObservedState {
@@ -58,7 +75,7 @@ pub struct DeploymentSummary {
 pub struct DeploymentApplyRequest {
     pub deployment_id: String,
     pub bundle_id: String,
-    pub runtime_mode: String,
+    pub runtime_mode: DeploymentRuntimeMode,
     #[serde(default = "default_account_id")]
     pub account_id: String,
     #[serde(default)]
@@ -85,8 +102,8 @@ pub struct DeploymentStateSummary {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeploymentApplyRequest, DeploymentControlRequest, DeploymentState, DeploymentSummary,
-        DesiredState, ObservedState,
+        DeploymentApplyRequest, DeploymentControlRequest, DeploymentRuntimeMode, DeploymentState,
+        DeploymentSummary, DesiredState, ObservedState,
     };
     use rust_decimal::Decimal;
     use serde_json::json;
@@ -133,7 +150,7 @@ mod tests {
         let value = serde_json::to_value(DeploymentApplyRequest {
             deployment_id: "example.paper".to_string(),
             bundle_id: "example".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: DeploymentRuntimeMode::Paper,
             account_id: "acct-paper".to_string(),
             max_gross_exposure: Some(Decimal::new(500, 2)),
             deployment_state: DeploymentState::Enabled,
@@ -153,6 +170,30 @@ mod tests {
                 "desired_state": "running",
             })
         );
+    }
+
+    #[test]
+    fn unknown_runtime_mode_is_rejected() {
+        let result = serde_json::from_value::<DeploymentApplyRequest>(json!({
+            "deployment_id": "example.typo",
+            "bundle_id": "example",
+            "runtime_mode": "liv",
+            "desired_state": "running"
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn paper_mode_typo_cannot_launch_live() {
+        let result = serde_json::from_value::<DeploymentApplyRequest>(json!({
+            "deployment_id": "example.paper",
+            "bundle_id": "example",
+            "runtime_mode": "papre",
+            "desired_state": "running"
+        }));
+
+        assert!(result.is_err());
     }
 
     #[test]

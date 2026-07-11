@@ -289,6 +289,15 @@ impl SystemService {
             .unwrap_or(false)
     }
 
+    pub fn source_is_fresh_at(&self, source_id: &str, now: DateTime<Utc>) -> bool {
+        self.sources.get(source_id).is_some_and(|source| {
+            !source.forced_stale
+                && source.last_seen_at.is_some_and(|last_seen_at| {
+                    last_seen_at <= now && now - last_seen_at <= source.stale_after
+                })
+        })
+    }
+
     pub fn metrics(
         &self,
         total_deployments: usize,
@@ -510,5 +519,37 @@ mod tests {
         let alerts = service.active_alerts();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].source_id, "venue:polymarket");
+    }
+
+    #[test]
+    fn absent_venue_source_is_not_fresh() {
+        let service = SystemService::default();
+
+        assert!(!service.source_is_fresh_at("venue:polymarket", Utc::now()));
+    }
+
+    #[test]
+    fn stale_venue_source_is_not_fresh_without_refresh_side_effect() {
+        let mut service = SystemService::default();
+        service.note_source_heartbeat("venue:polymarket", "venue", Duration::seconds(15));
+
+        assert!(
+            !service.source_is_fresh_at("venue:polymarket", Utc::now() + Duration::seconds(16),)
+        );
+        assert_eq!(service.stale_source_count(), 0);
+    }
+
+    #[test]
+    fn future_venue_source_is_not_fresh() {
+        let now = Utc::now();
+        let mut service = SystemService::default();
+        service.note_source_heartbeat("venue:polymarket", "venue", Duration::seconds(15));
+        service
+            .sources
+            .get_mut("venue:polymarket")
+            .expect("venue source")
+            .last_seen_at = Some(now + Duration::seconds(1));
+
+        assert!(!service.source_is_fresh_at("venue:polymarket", now));
     }
 }

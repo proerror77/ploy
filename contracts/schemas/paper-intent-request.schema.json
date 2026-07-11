@@ -10,6 +10,13 @@
     "token_id"
   ],
   "properties": {
+    "idempotency_key": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "limit_price": {
       "type": [
         "string",

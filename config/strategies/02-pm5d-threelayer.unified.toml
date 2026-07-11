@@ -28,10 +28,10 @@ min_time_remaining_secs = 69
 max_time_remaining_secs = 99
 cooldown_secs = 35
 
-stake_usd = 15.0
+stake_usd = 5.0
 max_positions = 1000
 max_daily_trades = 1000
-allowed_window_secs = [300, 900]
+allowed_window_secs = [300]
 
 # Optimized parameters (TPE 200 trials, train Apr 10-13, val Apr 14-15)
 # Train: Sharpe=137.8, 239 trades, +$5,743

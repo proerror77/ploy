@@ -73,16 +73,18 @@ impl BufferedRecorder {
 
 #[async_trait]
 impl Recorder for BufferedRecorder {
-    async fn record_signal(&mut self, signal: &SignalRecord) {
+    async fn record_signal(&mut self, signal: &SignalRecord) -> Result<(), String> {
         self.buffer.push(signal.clone());
         self.total_recorded += 1;
         if self.buffer.len() >= self.batch_size {
             self.do_flush().await;
         }
+        Ok(())
     }
 
-    async fn flush(&mut self) {
+    async fn flush(&mut self) -> Result<(), String> {
         self.do_flush().await;
+        Ok(())
     }
 }
 
@@ -123,13 +125,13 @@ mod tests {
 
         let mut recorder = BufferedRecorder::new(2, Some(flush_fn));
 
-        recorder.record_signal(&sample_signal()).await;
+        recorder.record_signal(&sample_signal()).await.unwrap();
         assert_eq!(flushed.lock().unwrap().len(), 0); // not yet
 
-        recorder.record_signal(&sample_signal()).await;
+        recorder.record_signal(&sample_signal()).await.unwrap();
         assert_eq!(flushed.lock().unwrap().len(), 2); // batch triggered
 
-        recorder.record_signal(&sample_signal()).await;
+        recorder.record_signal(&sample_signal()).await.unwrap();
         recorder.flush().await;
         assert_eq!(flushed.lock().unwrap().len(), 3); // manual flush
     }
@@ -137,8 +139,8 @@ mod tests {
     #[tokio::test]
     async fn counting_mode_no_panic() {
         let mut recorder = BufferedRecorder::counting();
-        recorder.record_signal(&sample_signal()).await;
-        recorder.record_signal(&sample_signal()).await;
+        recorder.record_signal(&sample_signal()).await.unwrap();
+        recorder.record_signal(&sample_signal()).await.unwrap();
         recorder.flush().await;
         // No panic, signals discarded
     }

@@ -6,11 +6,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use ploy_research::research_os::manager::{
-    ResearchBudget, ResearchManagerInput, plan_next_research,
+    plan_next_research, ResearchBudget, ResearchManagerInput,
 };
-use serde_json::{Value, json};
-use sqlx::PgPool;
+use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.windows(2)

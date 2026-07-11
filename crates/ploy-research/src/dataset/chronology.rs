@@ -61,7 +61,7 @@ pub fn build_canonical_event_chronology(
 
 #[cfg(test)]
 mod tests {
-    use super::{EventMetadataChronologyInput, build_canonical_event_chronology};
+    use super::{build_canonical_event_chronology, EventMetadataChronologyInput};
     use chrono::{TimeZone, Utc};
 
     #[test]

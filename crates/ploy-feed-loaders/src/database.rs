@@ -855,22 +855,21 @@ async fn load_l2_data(
     updates: &mut Vec<MarketUpdate>,
 ) -> Result<(), sqlx::Error> {
     let sample_secs = sample_secs.max(1) as i64;
-    let rows: Vec<(DateTime<Utc>, String, Decimal, i32, Decimal, Decimal)> = match sqlx::query_as(
-        BINANCE_LOB_SAMPLED_QUERY,
-    )
-    .bind(symbols)
-    .bind(from)
-    .bind(to)
-    .bind(sample_secs)
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(%error, "Failed to load L2 data from binance_lob_ticks");
-            Vec::new()
-        }
-    };
+    let rows: Vec<(DateTime<Utc>, String, Decimal, i32, Decimal, Decimal)> =
+        match sqlx::query_as(BINANCE_LOB_SAMPLED_QUERY)
+            .bind(symbols)
+            .bind(from)
+            .bind(to)
+            .bind(sample_secs)
+            .fetch_all(pool)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "Failed to load L2 data from binance_lob_ticks");
+                Vec::new()
+            }
+        };
 
     info!(count = rows.len(), "Loaded L2 data from binance_lob_ticks");
     for (ts, symbol, obi, spread_bps, bid_volume_5, ask_volume_5) in rows {

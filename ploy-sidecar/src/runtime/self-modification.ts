@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { appendFile, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -17,6 +17,8 @@ export type SelfModificationProposal = {
   title: string;
   patch: string;
   verification_command: string;
+  verification_profile: string;
+  patch_hash: string;
   status: "proposed" | "applied";
   created_at: string;
   applied_at?: string;
@@ -62,9 +64,9 @@ export async function proposeSelfModification(params: {
     proposal_id: `selfmod-${randomUUID()}`,
     title: params.title,
     patch: params.patch,
-    verification_command:
-      params.verification_command ||
-      "npm run build --prefix ploy-sidecar && npm run build --prefix ploy-frontend",
+    verification_command: "profile:sidecar_frontend_build",
+    verification_profile: "sidecar_frontend_build",
+    patch_hash: createHash("sha256").update(params.patch).digest("hex"),
     status: "proposed",
     created_at: new Date().toISOString(),
   };
@@ -157,8 +159,8 @@ export async function applyApprovedSelfModification(params: {
   pull_request_body?: string;
   base_branch?: string;
 }): Promise<SelfModificationProposal> {
-  verifySelfModificationApproval(params.approval_token);
   const proposal = await readProposal(params.proposal_id);
+  verifySelfModificationProposalApproval(proposal, params.approval_token);
   const repoRoot = await findRepoRoot();
   await ensureCleanWorktree(repoRoot);
   const publishPullRequest = params.publish_pull_request === true;
@@ -184,9 +186,9 @@ export async function applyApprovedSelfModification(params: {
     await run(repoRoot, "git", ["apply", "--check", "-"], proposal.patch);
     await run(repoRoot, "git", ["apply", "-"], proposal.patch);
     patchApplied = true;
-    await runShell(repoRoot, proposal.verification_command);
+    await runVerificationProfile(repoRoot, proposal.verification_profile);
     if (publishPullRequest) {
-      await run(repoRoot, "git", ["add", "-A"]);
+      await run(repoRoot, "git", ["add", "--", ...patchPaths(proposal.patch)]);
       await run(repoRoot, "git", ["diff", "--cached", "--quiet"]).then(
         () => {
           throw new Error("self-modification patch produced no staged changes");
@@ -255,6 +257,51 @@ function verifySelfModificationApproval(approvalToken: string): void {
   if (approvalToken !== expectedToken) {
     throw new Error("invalid self-modification approval token");
   }
+}
+
+export function selfModificationApprovalProof(proposal: Pick<SelfModificationProposal, "proposal_id" | "patch_hash" | "verification_profile">, secret: string): string {
+  return createHmac("sha256", secret)
+    .update(`${proposal.proposal_id}\n${proposal.patch_hash}\n${proposal.verification_profile}`)
+    .digest("hex");
+}
+
+export function verifySelfModificationProposalApproval(proposal: SelfModificationProposal, proof: string): void {
+  const secret = process.env.PLOY_HARNESS_SELF_MOD_APPROVAL_TOKEN;
+  if (!secret) throw new Error("self-modification approval is not configured");
+  const actualPatchHash = createHash("sha256").update(proposal.patch).digest("hex");
+  if (actualPatchHash !== proposal.patch_hash) {
+    throw new Error("self-modification proposal patch hash mismatch");
+  }
+  const expected = Buffer.from(selfModificationApprovalProof(proposal, secret), "hex");
+  const actual = Buffer.from(proof, "hex");
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    throw new Error("invalid self-modification approval proof");
+  }
+}
+
+async function runVerificationProfile(cwd: string, profile: string): Promise<void> {
+  const profiles: Record<string, Array<[string, string[]]>> = {
+    sidecar_frontend_build: [
+      ["npm", ["run", "build", "--prefix", "ploy-sidecar"]],
+      ["npm", ["run", "build", "--prefix", "ploy-frontend"]],
+    ],
+    sidecar_test: [["npm", ["test", "--prefix", "ploy-sidecar"]]],
+  };
+  const selected = profiles[profile];
+  if (!selected) throw new Error(`unsupported verification profile: ${profile}`);
+  for (const [command, args] of selected) {
+    await execFileAsync(command, args, { cwd, maxBuffer: 1024 * 1024 * 20 });
+  }
+}
+
+function patchPaths(patch: string): string[] {
+  const paths = [
+    ...[...patch.matchAll(/^--- (?:a\/)?(.+)$/gm)].map((match) => match[1]),
+    ...[...patch.matchAll(/^\+\+\+ (?:b\/)?(.+)$/gm)].map((match) => match[1]),
+    ...[...patch.matchAll(/^rename (?:from|to) (.+)$/gm)].map((match) => match[1]),
+  ].filter((path) => path !== "/dev/null");
+  if (paths.length === 0) throw new Error("self-modification patch contains no stageable paths");
+  return [...new Set(paths)];
 }
 
 function validateWorkflowAllowed(workflow: string): void {
@@ -411,13 +458,6 @@ async function run(cwd: string, command: string, args: string[], input?: string)
   });
 }
 
-async function runShell(cwd: string, command: string): Promise<void> {
-  await execFileAsync("sh", ["-lc", command], {
-    cwd,
-    maxBuffer: 1024 * 1024 * 20,
-  });
-}
-
 async function selfTest() {
   const originalPath = process.env.PLOY_HARNESS_SELF_MODIFICATIONS_FILE;
   const originalRoot = process.env.PLOY_SELF_MOD_REPO_ROOT;
@@ -425,12 +465,14 @@ async function selfTest() {
   const originalAllowPr = process.env.PLOY_HARNESS_SELF_MOD_ALLOW_PR;
   const originalAllowDeploy = process.env.PLOY_HARNESS_SELF_MOD_ALLOW_DEPLOY;
   const originalDeployWorkflows = process.env.PLOY_HARNESS_SELF_MOD_DEPLOY_WORKFLOWS;
+  const originalNpmLog = process.env.PLOY_SELF_MOD_NPM_LOG;
   const originalPathValue = process.env.PATH;
   const dir = await mkdtemp(join(tmpdir(), "ploy-self-mod-"));
   const logDir = await mkdtemp(join(tmpdir(), "ploy-self-mod-log-"));
   const binDir = await mkdtemp(join(tmpdir(), "ploy-self-mod-bin-"));
   const remoteDir = await mkdtemp(join(tmpdir(), "ploy-self-mod-origin-"));
   const logPath = join(logDir, "self-mod.jsonl");
+  const npmLogPath = join(logDir, "npm.log");
 
   try {
     process.env.PLOY_HARNESS_SELF_MODIFICATIONS_FILE = logPath;
@@ -455,6 +497,13 @@ async function selfTest() {
       "utf8"
     );
     await chmod(join(binDir, "gh"), 0o755);
+    process.env.PLOY_SELF_MOD_NPM_LOG = npmLogPath;
+    await writeFile(
+      join(binDir, "npm"),
+      "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PLOY_SELF_MOD_NPM_LOG\"\nexit 0\n",
+      "utf8"
+    );
+    await chmod(join(binDir, "npm"), 0o755);
     await run(dir, "git", ["init"]);
     await run(dir, "git", ["checkout", "-b", "main"]);
     await run(dir, "git", ["config", "user.email", "test@example.com"]);
@@ -468,6 +517,13 @@ async function selfTest() {
     await run(dir, "git", ["remote", "add", "origin", remoteDir]);
     await run(dir, "git", ["push", "-u", "origin", "main"]);
 
+    await runVerificationProfile(dir, "sidecar_frontend_build");
+    assert.deepEqual((await readFile(npmLogPath, "utf8")).trim().split(/\r?\n/), [
+      "run build --prefix ploy-sidecar",
+      "run build --prefix ploy-frontend",
+    ], "sidecar_frontend_build_invokes_both_fixed_builds");
+    await writeFile(npmLogPath, "", "utf8");
+
     const proposal = await proposeSelfModification({
       title: "update readme",
       patch: "diff --git a/README.md b/README.md\nindex 229a18c..13d29f8 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-before\n+after\n",
@@ -475,7 +531,7 @@ async function selfTest() {
     });
     const applied = await applyApprovedSelfModification({
       proposal_id: proposal.proposal_id,
-      approval_token: "approve",
+      approval_token: selfModificationApprovalProof(proposal, "approve"),
       publish_pull_request: true,
       branch_name: "selfmod/test",
     });
@@ -495,13 +551,54 @@ async function selfTest() {
     await assert.rejects(
       applyApprovedSelfModification({
         proposal_id: failedProposal.proposal_id,
-        approval_token: "approve",
+        approval_token: selfModificationApprovalProof(proposal, "approve"),
         publish_pull_request: true,
         branch_name: "selfmod/fail",
       })
     );
+    assert.notEqual(
+      selfModificationApprovalProof(proposal, "approve"),
+      selfModificationApprovalProof(failedProposal, "approve"),
+      "approval_proof_cannot_be_reused_for_another_proposal"
+    );
+    await assert.rejects(
+      async () => verifySelfModificationProposalApproval(
+        { ...proposal, patch: `${proposal.patch}\n# tampered` },
+        selfModificationApprovalProof(proposal, "approve")
+      ),
+      /patch hash mismatch/,
+      "tampered_patch_with_old_hash_and_proof_is_rejected"
+    );
     assert.equal((await runOutput(dir, "git", ["branch", "--show-current"])).trim(), "selfmod/test");
     assert.equal((await runOutput(dir, "git", ["branch", "--list", "selfmod/fail"])).trim(), "");
+
+    await writeFile(join(dir, "DELETE.md"), "delete me\n", "utf8");
+    await writeFile(join(dir, "RENAME-OLD.md"), "rename me\n", "utf8");
+    await run(dir, "git", ["add", "--", "DELETE.md", "RENAME-OLD.md"]);
+    await run(dir, "git", ["commit", "-m", "self-test patch paths"]);
+
+    await rm(join(dir, "DELETE.md"));
+    const deletionPatch = await runOutput(dir, "git", ["diff", "--", "DELETE.md"]);
+    await writeFile(join(dir, "DELETE.md"), "delete me\n", "utf8");
+    await run(dir, "git", ["apply", "-"], deletionPatch);
+    await run(dir, "git", ["add", "--", ...patchPaths(deletionPatch)]);
+    assert.equal(await runOutput(dir, "git", ["diff", "--cached"]), deletionPatch,
+      "delete_only_patch_stages_deleted_path");
+    await run(dir, "git", ["restore", "--staged", "--", "DELETE.md"]);
+    await writeFile(join(dir, "DELETE.md"), "delete me\n", "utf8");
+
+    await rename(join(dir, "RENAME-OLD.md"), join(dir, "RENAME-NEW.md"));
+    await run(dir, "git", ["add", "--", "RENAME-OLD.md", "RENAME-NEW.md"]);
+    const renamePatch = await runOutput(dir, "git", ["diff", "--cached", "--find-renames"]);
+    await run(dir, "git", ["restore", "--staged", "--", "RENAME-OLD.md", "RENAME-NEW.md"]);
+    await rename(join(dir, "RENAME-NEW.md"), join(dir, "RENAME-OLD.md"));
+    await run(dir, "git", ["apply", "-"], renamePatch);
+    await run(dir, "git", ["add", "--", ...patchPaths(renamePatch)]);
+    assert.equal(await runOutput(dir, "git", ["diff", "--cached", "--find-renames"]), renamePatch,
+      "rename_patch_stages_old_and_new_paths");
+    await run(dir, "git", ["restore", "--staged", "--", "RENAME-OLD.md", "RENAME-NEW.md"]);
+    await rm(join(dir, "RENAME-NEW.md"));
+    await writeFile(join(dir, "RENAME-OLD.md"), "rename me\n", "utf8");
 
     const deployment = await dispatchApprovedSelfModificationDeployment({
       approval_token: "approve",
@@ -538,6 +635,7 @@ async function selfTest() {
     restoreEnv("PLOY_HARNESS_SELF_MOD_ALLOW_PR", originalAllowPr);
     restoreEnv("PLOY_HARNESS_SELF_MOD_ALLOW_DEPLOY", originalAllowDeploy);
     restoreEnv("PLOY_HARNESS_SELF_MOD_DEPLOY_WORKFLOWS", originalDeployWorkflows);
+    restoreEnv("PLOY_SELF_MOD_NPM_LOG", originalNpmLog);
     restoreEnv("PATH", originalPathValue);
     await rm(dir, { recursive: true, force: true });
     await rm(logDir, { recursive: true, force: true });

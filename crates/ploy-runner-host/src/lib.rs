@@ -16,7 +16,9 @@ fn print_usage_for(program: &str) {
     #[cfg(feature = "ops")]
     eprintln!("  collect-markets           Discover Polymarket markets into the local DB catalog");
     #[cfg(feature = "ops")]
-    eprintln!("  collect-quotes            Collect orderbook quotes from Polymarket CLOB WebSocket");
+    eprintln!(
+        "  collect-quotes            Collect orderbook quotes from Polymarket CLOB WebSocket"
+    );
     #[cfg(feature = "ops")]
     eprintln!("  collect-pm-trades         Collect public Polymarket trade prints from Data API");
     #[cfg(feature = "ops")]
@@ -36,12 +38,13 @@ fn print_usage_for(program: &str) {
     eprintln!("  --output-json <path>     Write a machine-readable runtime evaluation");
     eprintln!("  --dry-run                Force dry-run mode (simulated execution)");
     eprintln!("  --foreground             Run in foreground (default, kept for compat)");
+    eprintln!("  --control-generation <generation>  Canonical daemon control generation");
     #[cfg(feature = "ops")]
     ops::print_usage();
 }
 
 fn print_mode_usage(program: &str) {
-    eprintln!("Usage: {program} --config <path> [--deployment-id <id>] [--dry-run] [--foreground]");
+    eprintln!("Usage: {program} --config <path> [--deployment-id <id>] [--dry-run] [--foreground] [--control-generation <generation>]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --config <path>          Unified TOML config file (required)");
@@ -49,6 +52,7 @@ fn print_mode_usage(program: &str) {
     eprintln!("  --output-json <path>     Write a machine-readable runtime evaluation");
     eprintln!("  --dry-run                Force dry-run mode (simulated execution)");
     eprintln!("  --foreground             Run in foreground (default, kept for compat)");
+    eprintln!("  --control-generation <generation>  Canonical daemon control generation");
 }
 
 fn program_name(args: &[String]) -> String {
@@ -150,7 +154,14 @@ pub async fn run_with_implicit_run_args(args: Vec<String>) {
 fn normalize_mode_args(mut args: Vec<String>) -> Vec<String> {
     match args.get(1).map(String::as_str) {
         None
-        | Some("--config" | "--deployment-id" | "--output-json" | "--dry-run" | "--foreground") => {
+        | Some(
+            "--config"
+            | "--deployment-id"
+            | "--output-json"
+            | "--dry-run"
+            | "--foreground"
+            | "--control-generation",
+        ) => {
             args.insert(1, "run".to_string());
         }
         _ => {}

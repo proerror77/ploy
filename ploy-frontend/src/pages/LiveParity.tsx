@@ -16,6 +16,7 @@ import { formatTimestamp } from '@/lib/utils';
 import { api } from '@/services/api';
 import { ws } from '@/services/websocket';
 import { useStore } from '@/store';
+import { queryViewState } from '@/lib/operatorViewState.mjs';
 
 import type { LiveParityPair, ParityOrderRow, SnapshotSummary } from '@/lib/liveParity';
 
@@ -297,6 +298,7 @@ export function LiveParity() {
   }, [queryClient, setTradingSnapshots]);
 
   const snapshots = storeSnapshots.length > 0 ? storeSnapshots : polledSnapshots ?? [];
+  const snapshotView = queryViewState(snapshots.length > 0 ? snapshots : undefined, error);
   const report = buildLiveParityReport(snapshots);
   const hasAlert = report.alertPairs.length > 0;
 
@@ -321,6 +323,7 @@ export function LiveParity() {
 
   return (
     <div className="p-8">
+      {snapshotView.kind === 'stale' && <div role="alert" className="mb-6 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">实时刷新失败，以下为缓存数据（stale）：{snapshotView.message}</div>}
       <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold">Dry-run / Live Parity</h1>

@@ -1,11 +1,11 @@
-use std::fs::{File, create_dir_all};
+use std::fs::{create_dir_all, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use polars::io::parquet::write::ParquetWriter;
 use polars::prelude::*;
 
-use crate::factors::{EventFactorSummary, export_observations_parquet};
+use crate::factors::{export_observations_parquet, EventFactorSummary};
 
 use super::{DatasetSplit, DatasetSplitAssignment, EventIndexEntry, EventRootDatasetBuild};
 
@@ -227,8 +227,8 @@ mod tests {
         split_assignments_to_frame,
     };
     use crate::dataset::{
-        DatasetSourceWindow, EventMetadataChronologyInput, EventRootDatasetBuildRequest,
-        build_event_root_dataset, standard_event_root_dataset_artifacts,
+        build_event_root_dataset, standard_event_root_dataset_artifacts, DatasetSourceWindow,
+        EventMetadataChronologyInput, EventRootDatasetBuildRequest,
     };
     use crate::factors::FactorObservation;
     use chrono::{Duration, TimeZone, Utc};

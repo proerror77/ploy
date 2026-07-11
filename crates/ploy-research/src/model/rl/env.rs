@@ -17,8 +17,15 @@ pub struct BinaryEventEnv<'a> {
 
 impl<'a> BinaryEventEnv<'a> {
     pub fn new(obs: &'a [FactorObservation], fee: f64) -> Self {
-        assert!(!obs.is_empty(), "BinaryEventEnv requires at least one observation");
-        Self { obs, cursor: 0, fee }
+        assert!(
+            !obs.is_empty(),
+            "BinaryEventEnv requires at least one observation"
+        );
+        Self {
+            obs,
+            cursor: 0,
+            fee,
+        }
     }
 }
 
@@ -29,17 +36,36 @@ impl<'a> Environment for BinaryEventEnv<'a> {
     }
 
     fn step(&mut self, action: u8) -> (Vec<f64>, f64, bool) {
-        assert!(self.cursor < self.obs.len(), "step() called after done=true");
+        assert!(
+            self.cursor < self.obs.len(),
+            "step() called after done=true"
+        );
         let o = &self.obs[self.cursor];
         let settled_up = o.settlement_up > 0.5;
         let reward = match action {
-            1 => if settled_up { 1.0 - o.pm_up_ask - self.fee } else { -o.pm_up_ask - self.fee },
-            2 => if !settled_up { o.pm_up_bid - self.fee } else { o.pm_up_bid - 1.0 - self.fee },
+            1 => {
+                if settled_up {
+                    1.0 - o.pm_up_ask - self.fee
+                } else {
+                    -o.pm_up_ask - self.fee
+                }
+            }
+            2 => {
+                if !settled_up {
+                    o.pm_up_bid - self.fee
+                } else {
+                    o.pm_up_bid - 1.0 - self.fee
+                }
+            }
             _ => 0.0,
         };
         self.cursor += 1;
         let done = self.cursor >= self.obs.len();
-        let next = if done { vec![0.0; 16] } else { obs_to_state(&self.obs[self.cursor]) };
+        let next = if done {
+            vec![0.0; 16]
+        } else {
+            obs_to_state(&self.obs[self.cursor])
+        };
         (next, reward, done)
     }
 }

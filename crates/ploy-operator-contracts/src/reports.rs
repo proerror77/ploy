@@ -260,7 +260,7 @@ pub struct DryRunPerformanceReport {
 #[cfg(test)]
 mod tests {
     use super::DryRunPerformanceReport;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     #[test]
     fn dry_run_report_roundtrip_preserves_diagnostics_fields() {

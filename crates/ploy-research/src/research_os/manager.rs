@@ -1575,15 +1575,12 @@ mod tests {
         let plan = plan_next_research(&input).expect("plan");
 
         assert_eq!(plan.theme, "candidate_to_runtime_replay");
-        assert!(
-            plan.actions
-                .contains(&"build_runtime_candidate_replay".to_string())
-        );
-        assert!(
-            !plan
-                .actions
-                .contains(&"generate_typed_llm_prior_json".to_string())
-        );
+        assert!(plan
+            .actions
+            .contains(&"build_runtime_candidate_replay".to_string()));
+        assert!(!plan
+            .actions
+            .contains(&"generate_typed_llm_prior_json".to_string()));
         assert!(plan.blocker_actions.iter().any(|item| {
             item.blocker_family == "strategy_economics"
                 && item.action == "mutate_or_reject_negative_runtime_edge"

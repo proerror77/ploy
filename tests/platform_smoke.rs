@@ -9,7 +9,7 @@ fn platform_smoke_registers_and_starts_one_deployment() {
     control_plane.deployments.upsert(DeploymentRecord {
         deployment_id: "example.paper".to_string(),
         bundle_id: "openclaw".to_string(),
-        runtime_mode: "paper".to_string(),
+        runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
         account_id: "acct-paper".to_string(),
         max_gross_exposure: Some(rust_decimal::Decimal::new(500, 2)),
         deployment_state: DeploymentState::Enabled,
@@ -21,7 +21,7 @@ fn platform_smoke_registers_and_starts_one_deployment() {
     supervisor.start(WorkerLaunchSpec {
         deployment_id: "example.paper".to_string(),
         bundle_id: "openclaw".to_string(),
-        runtime_mode: "paper".to_string(),
+        runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
         desired_state: DesiredState::Running,
         command: PathBuf::from("/bin/sh"),
         args: vec!["-lc".to_string(), "sleep 30".to_string()],

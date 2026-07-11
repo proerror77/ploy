@@ -1,3 +1,124 @@
+# Current Session - Live Admission And Account Guards (2026-07-11)
+
+Evidence stage: `implementation hardening`. Implement Slice 1 from the approved
+local-trading-readiness plan. Live remains paused; this session performs no
+remote, cloud, wallet, database, or venue mutation.
+
+## Files / Ownership
+
+- Task 1: shared live intent risk classification, venue freshness, worker auth.
+- Task 2: canonical live wallet/account cap and paper namespace.
+- Integrator: this tracker, per-task review, final branch verification.
+
+## Tasks
+
+- [x] Create isolated `fix/live-admission-account-guards` worktree from local main.
+- [x] Prove focused baseline suites are green.
+- [x] Task 1: fail closed on live admission health and complete review.
+- [x] Task 2: enforce canonical live wallet/cap scope and complete review.
+- [x] Run Slice 1 verification.
+- [ ] Complete whole-branch review and land through PR/CI.
+
+## Review
+
+- Baseline: 133 tests passed across `ploy-platform`, `ploy-platform-runtime`,
+  and `ploy-daemon-host`; no local PostgreSQL or external call was used.
+- Task 1 completed in `037b0c5d`: 146 core tests, 12 control-client tests,
+  11 strategy-runtime tests, and the locked workspace check passed. Independent
+  re-review approved with no Critical, Important, or Minor findings.
+- Task 2 now enforces canonical `0x` live wallet scope, `paper:` account
+  namespaces, bounded account exposure, durable quarantine, and fresh venue
+  health before live admission. No live path is enabled by this slice.
+- First independent review found and the implementation now closes archived
+  live re-enable bypass, per-deployment shared-cap drift, boot/no-op venue
+  freshness forgery, invalid apply HTTP status, and incomplete go-live
+  postflight. Go-live postflight failure now pauses the deployment.
+- Verification: `173` core tests passed across `ploy-platform`,
+  `ploy-connectivity`, `ploy-platform-runtime`, and `ploy-daemon-host`; all `87` daemon-host tests
+  passed after updating the shared deployment fixtures; the nine strategy
+  config contract tests and `26` ployctl tests passed; locked workspace check
+  passed with warnings only; shell syntax and `git diff --check` passed.
+- Final independent re-review approved with no Critical, Important, or Minor
+  findings after the execution principal was cryptographically bound to the
+  live manifest account.
+- PR #741 initial CI exposed two workflow portability findings: Ubuntu lacked
+  `rg`, and two intentional local-to-remote SSH expansions lacked ShellCheck
+  annotations. The safety scan now falls back to `grep -R -E`; actionlint 1.7.7
+  and both local forbidden-pattern scans pass.
+- The live/default runner matrix then caught dry-run/live config drift after
+  the live risk reduction. The canonical ThreeLayer dry-run now uses the same
+  `$5` fixed stake and 5-minute-only window as live, preserving the strict
+  config-parity gate instead of weakening it.
+
+---
+
+# Current Session - Comprehensive Safety Hardening (2026-07-10)
+
+Evidence stage: implementation hardening. The repository-wide review found
+live-execution, authentication, operator-contract, Sidecar durability, and CI
+gaps that must be closed before any live deployment is resumed.
+
+Plan: docs/superpowers/plans/2026-07-10-comprehensive-safety-hardening.md
+
+## Files / Ownership
+
+- Task 1: crates/ploy-trading, trading contracts, ID generation.
+- Task 2: deployment contracts, registry lifecycle, worker supervisor/tick.
+- Task 3: control client, canonical live submission, recording and restore.
+- Task 4: daemon auth/rate limiting and deployment workflows.
+- Task 5: ploy-frontend canonical API/UI paths.
+- Task 6: ploy-sidecar, OpenClaw heartbeat, agent-run admission.
+- Task 7: CI, dependency locks, formatting, final evidence.
+- Integrator only: this tasks/todo.md section and cross-task conflict resolution.
+
+## Tasks
+
+- [x] Task 1: Enforce trading-domain invariants and collision-proof IDs.
+- [x] Task 2: Type deployment modes and close lifecycle/spec drift.
+- [x] Task 3: Centralize live submission, ambiguity handling, and restore.
+- [x] Task 4: Make API/workflow security fail closed.
+- [x] Task 5: Align the frontend with canonical routes and visible errors.
+- [x] Task 6: Bound Sidecar execution, queue replay, and self-mod approvals.
+- [x] Task 7: Enforce CI/audit/format gates and complete final review.
+
+## Baseline
+
+- Rust control/runtime baseline: 129 passed across 13 suites.
+- Frontend contracts, lint, and production build passed; main chunk was 802.53 kB.
+- Sidecar contracts and build passed.
+- No local PostgreSQL or live/remote action was used.
+
+## Review
+
+- Task 1 complete in `20895cc7`: final spec/quality review approved with no
+  Critical, Important, or Minor findings. Covering suites passed 109 tests;
+  the final unknown-mode regression slice passed 87 platform/daemon tests.
+- Task 2 complete in `f502d956`: final spec/quality review approved with no
+  findings. The required suite passed 130 tests across 10 suites.
+- Task 3 complete in `d37b8a8f`: final spec/quality review approved; only
+  non-blocking contract naming/report-history observations remain.
+- Task 4 complete in `f5a89a24`: final spec/quality review approved; local
+  `actionlint` remains unavailable, while YAML/bash/negative checks passed.
+- Task 5 complete in `469bca2f`: final review approved; production audit is
+  clean and the largest JavaScript chunk is 228.36 kB.
+- Task 6 complete in `22f04d5a`: final review approved; Sidecar contracts,
+  self-tests, build, and production audit all pass with zero vulnerabilities.
+- Task 7 complete in `34923ade` and `29b5eade`: final task review approved.
+  Rust formatting, generated contracts, CI safety gates, workflow scans, and
+  the rustls-webpki update are verified. `actionlint` is not installed locally;
+  YAML parsing, embedded shell syntax, and workflow regressions passed.
+- Raw cargo audit has one no-fix advisory, `RUSTSEC-2023-0071`, reachable only
+  through the workspace-disabled `sqlx-mysql` feature; CI retains one explicit
+  documented exception and no rustls/webpki exceptions.
+- Final whole-branch review approved at `b7d5d08e` with no Critical,
+  Important, or Minor findings.
+- Final head verification: Rust 430 passed / 1 ignored across 24 suites;
+  locked workspace check completed with 0 errors; frontend and Sidecar
+  contracts/build/production audits passed with 0 npm vulnerabilities;
+  workflow security passed 30 tests; replay/backtest evidence contracts passed
+  3 tests; YAML parsing, formatting, chunk-size, and diff checks passed.
+
+
 # Current Session - Codex CLI Sidecar Engine (2026-07-09)
 
 Evidence stage: `diagnostic` sidecar runtime migration. Replace the old

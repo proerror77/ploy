@@ -1,16 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fs::{File, create_dir_all};
+use std::fs::{create_dir_all, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
 use ploy_research::{
-    DatasetBuildManifest, DatasetBuildStats, DatasetSkipCounts, DatasetSourceWindow, DatasetSplit,
-    DatasetSplitAssignment, DatasetSplitCounts, DatasetSplitPolicy, EventIndexEntry,
     assign_chronological_event_splits, event_index_to_frame, split_assignments_to_frame,
-    standard_event_root_dataset_artifacts,
+    standard_event_root_dataset_artifacts, DatasetBuildManifest, DatasetBuildStats,
+    DatasetSkipCounts, DatasetSourceWindow, DatasetSplit, DatasetSplitAssignment,
+    DatasetSplitCounts, DatasetSplitPolicy, EventIndexEntry,
 };
 use polars::io::parquet::read::ParquetReader;
 use polars::io::parquet::write::ParquetWriter;
@@ -793,8 +793,8 @@ mod tests {
     use super::*;
     use chrono::Duration;
     use ploy_research::{
-        DatasetSourceWindow, EventMetadataChronologyInput, EventRootDatasetBuildRequest,
-        FactorObservation, build_event_root_dataset, export_event_root_dataset_parquet,
+        build_event_root_dataset, export_event_root_dataset_parquet, DatasetSourceWindow,
+        EventMetadataChronologyInput, EventRootDatasetBuildRequest, FactorObservation,
     };
     use std::fs;
 

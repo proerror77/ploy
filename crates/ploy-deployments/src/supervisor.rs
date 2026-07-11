@@ -1,5 +1,6 @@
 use crate::health::heartbeat;
 use crate::protocol::{WorkerLaunchSpec, WorkerStatus};
+use crate::runtime::terminate_pidfile_worker;
 use crate::runtime::DeploymentRuntime;
 use std::collections::BTreeMap;
 
@@ -54,6 +55,19 @@ impl WorkerSupervisor {
         Some(status)
     }
 
+    pub fn restart_with_spec(&mut self, spec: WorkerLaunchSpec) -> &WorkerStatus {
+        self.stop(&spec.deployment_id);
+        self.start(spec)
+    }
+
+    pub fn terminate_pidfile_worker(&mut self, spec: WorkerLaunchSpec) -> bool {
+        if self.stop(&spec.deployment_id).is_some() {
+            true
+        } else {
+            terminate_pidfile_worker(&spec)
+        }
+    }
+
     pub fn workers(&self) -> impl Iterator<Item = &WorkerStatus> {
         self.workers.values().map(DeploymentRuntime::status)
     }
@@ -63,14 +77,14 @@ impl WorkerSupervisor {
 mod tests {
     use super::WorkerSupervisor;
     use crate::protocol::WorkerLaunchSpec;
-    use ploy_operator_contracts::{DesiredState, ObservedState};
+    use ploy_operator_contracts::{DeploymentRuntimeMode, DesiredState, ObservedState};
     use std::path::PathBuf;
 
     fn test_launch_spec() -> WorkerLaunchSpec {
         WorkerLaunchSpec {
             deployment_id: "openclaw.default".to_string(),
             bundle_id: "openclaw".to_string(),
-            runtime_mode: "paper".to_string(),
+            runtime_mode: DeploymentRuntimeMode::Paper,
             desired_state: DesiredState::Running,
             command: PathBuf::from("/bin/sh"),
             args: vec!["-lc".to_string(), "sleep 30".to_string()],

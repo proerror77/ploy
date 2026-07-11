@@ -97,7 +97,7 @@ pub fn assign_chronological_event_splits(
 
 #[cfg(test)]
 mod tests {
-    use super::{SplitBuildError, assign_chronological_event_splits};
+    use super::{assign_chronological_event_splits, SplitBuildError};
     use crate::dataset::{DatasetSplit, DatasetSplitPolicy, EventChronologyKey};
     use chrono::{Duration, TimeZone, Utc};
     use std::collections::{HashMap, HashSet};

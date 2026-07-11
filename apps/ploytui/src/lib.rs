@@ -249,7 +249,7 @@ mod tests {
             }],
             trading: vec![TradingStateSnapshot {
                 deployment_id: "example.paper".to_string(),
-                runtime_mode: "paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                 ..TradingStateSnapshot::default()
             }],
             recent_events: vec![
@@ -284,7 +284,7 @@ mod tests {
                 OperatorEvent::TradingSnapshot(TradingSnapshotEvent {
                     trading: vec![TradingStateSnapshot {
                         deployment_id: "example.paper".to_string(),
-                        runtime_mode: "paper".to_string(),
+                        runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                         ..TradingStateSnapshot::default()
                     }],
                 }),

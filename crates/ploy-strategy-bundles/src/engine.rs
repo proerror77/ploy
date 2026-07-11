@@ -18,7 +18,9 @@ use uuid::Uuid;
 use ploy_trading::IntentPurpose;
 use rust_decimal_macros::dec;
 
-use crate::traits::{Executor, Feed, MarketUpdate, Recorder, StrategyDecision, StrategyLogic};
+use crate::traits::{
+    Executor, Feed, MarketUpdate, Recorder, StrategyDecision, StrategyLogic, SubmitOutcome,
+};
 
 const MIN_LIVE_RETRY_SHARES: Decimal = dec!(1.00);
 const MIN_LIVE_RETRY_NOTIONAL: Decimal = dec!(1.00);
@@ -185,7 +187,7 @@ where
             "StrategyRuntime started",
         );
 
-        while let Some(update) = self.feed.next().await {
+        'runtime: while let Some(update) = self.feed.next().await {
             updates_processed += 1;
             self.executor.observe_market_update(&update);
 
@@ -250,7 +252,12 @@ where
                 let signal_ref = signal.as_ref();
 
                 if let Some(signal) = signal_ref {
-                    self.recorder.record_signal(signal).await;
+                    if let Err(error) = self.recorder.record_signal(signal).await {
+                        warn!(%error, "Failed to persist signal record");
+                        if self.config.mode == RuntimeMode::Live {
+                            panic!("live recorder failed: {error}");
+                        }
+                    }
                 }
 
                 let mut intent = self.executor.prepare_intent(&intent);
@@ -258,11 +265,27 @@ where
                 let order_id = Uuid::new_v4().to_string();
 
                 let report = self.executor.submit(&intent, &order_id).await;
-                self.recorder
+                if let Err(error) = self
+                    .recorder
                     .record_order(&strategy_name, &intent, signal_ref, &report, &order_id)
-                    .await;
+                    .await
+                {
+                    warn!(%error, "Failed to persist order record");
+                    if self.config.mode == RuntimeMode::Live {
+                        panic!("live recorder failed: {error}");
+                    }
+                }
 
-                if report.rejected && report.fill.is_none() {
+                if report.submit_outcome() == SubmitOutcome::Unknown {
+                    warn!(
+                        order_id = %order_id,
+                        error = report.rejection_reason.as_deref().unwrap_or("transport ambiguity"),
+                        "Live submission outcome is unknown; stopping without retry"
+                    );
+                    break 'runtime;
+                }
+
+                if report.submit_outcome() == SubmitOutcome::Rejected && report.fill.is_none() {
                     // Pure rejection — keep the signal audit trail, but don't record an intent.
                     // Notify the strategy so it can arm cooldowns and avoid hammering the same
                     // signal on every tick (e.g. balance exhausted, FAK no match).
@@ -273,7 +296,15 @@ where
                 }
 
                 // Intent accepted (possibly with fill)
-                self.trading.submit_intent(intent.clone(), order_id.clone());
+                if let Err(err) = self
+                    .trading
+                    .submit_intent(intent.clone(), order_id.clone(), None)
+                {
+                    let reason = err.to_string();
+                    warn!(order_id = %order_id, reason = %reason, "Ignoring invalid intent");
+                    self.strategy.on_reject(&intent, &reason);
+                    continue;
+                }
                 if !report.order_id.is_empty() && report.order_id != order_id {
                     self.trading
                         .acknowledge_order(&order_id, report.order_id.clone());
@@ -290,9 +321,16 @@ where
                         );
                         continue;
                     }
-                    self.recorder
+                    if let Err(error) = self
+                        .recorder
                         .record_fill(&strategy_name, &intent, signal_ref, fill, &report)
-                        .await;
+                        .await
+                    {
+                        warn!(%error, "Failed to persist fill record");
+                        if self.config.mode == RuntimeMode::Live {
+                            panic!("live recorder failed: {error}");
+                        }
+                    }
                     self.strategy.on_fill(&fill);
                     fills_recorded += 1;
                     debug!(
@@ -368,12 +406,26 @@ where
                             price_basis: None,
                         };
 
-                        self.recorder
+                        if let Err(error) = self
+                            .recorder
                             .record_fill(&strategy_name, &intent, None, &fill, &report)
-                            .await;
-                        self.recorder
+                            .await
+                        {
+                            if self.config.mode == RuntimeMode::Live {
+                                panic!("live recorder failed: {error}");
+                            }
+                            warn!(%error, "Failed to persist reconciled fill");
+                        }
+                        if let Err(error) = self
+                            .recorder
                             .record_order(&strategy_name, &intent, None, &report, &fill.order_id)
-                            .await;
+                            .await
+                        {
+                            if self.config.mode == RuntimeMode::Live {
+                                panic!("live recorder failed: {error}");
+                            }
+                            warn!(%error, "Failed to persist reconciled order");
+                        }
                         self.strategy.on_fill(&fill);
                         fills_recorded += 1;
                         if self
@@ -397,17 +449,24 @@ where
                 }
                 Err(error) => {
                     warn!(error = %error, "Fill reconciliation failed");
+                    if self.config.mode == RuntimeMode::Live {
+                        panic!("live fill reconciliation failed: {error}");
+                    }
                     false
                 }
             };
 
-            if reconcile_completed {
-                self.process_live_unfilled_orders(
-                    &mut pending_live_orders,
-                    &mut intents_submitted,
-                    &mut fills_recorded,
-                )
-                .await;
+            if reconcile_completed && self.executor.owns_live_retries() {
+                if let Err(error) = self
+                    .process_live_unfilled_orders(
+                        &mut pending_live_orders,
+                        &mut intents_submitted,
+                        &mut fills_recorded,
+                    )
+                    .await
+                {
+                    panic!("live recorder failed: {error}");
+                }
             }
 
             if updates_processed % DIAGNOSTIC_LOG_INTERVAL_UPDATES == 0 {
@@ -431,7 +490,12 @@ where
             }
         }
 
-        self.recorder.flush().await;
+        if let Err(error) = self.recorder.flush().await {
+            warn!(%error, "Failed to flush recorder");
+            if self.config.mode == RuntimeMode::Live {
+                panic!("live recorder flush failed: {error}");
+            }
+        }
 
         let elapsed = start.elapsed().as_secs_f64();
         let mark_prices: BTreeMap<String, Decimal> = BTreeMap::new();
@@ -518,9 +582,9 @@ where
         pending_live_orders: &mut BTreeMap<String, PendingLiveOrder>,
         intents_submitted: &mut u64,
         fills_recorded: &mut u64,
-    ) {
+    ) -> Result<(), String> {
         if self.config.mode != RuntimeMode::Live || pending_live_orders.is_empty() {
-            return;
+            return Ok(());
         }
 
         let policy = self.executor.execution_policy();
@@ -578,7 +642,7 @@ where
                         &terminal_report,
                         &order_id,
                     )
-                    .await;
+                    .await?;
                 self.strategy.on_reject(&pending.intent, &terminal_reason);
                 warn!(order_id = %order_id, reason = %terminal_reason, "Live order terminal dust");
                 continue;
@@ -616,7 +680,7 @@ where
                     &terminal_report,
                     &order_id,
                 )
-                .await;
+                .await?;
 
             if pending.attempts >= policy.max_attempts {
                 self.strategy.on_reject(&pending.intent, &terminal_reason);
@@ -645,7 +709,7 @@ where
                     &report,
                     &retry_order_id,
                 )
-                .await;
+                .await?;
 
             if report.rejected && report.fill.is_none() {
                 let reason = report.rejection_reason.as_deref().unwrap_or("unknown");
@@ -659,8 +723,15 @@ where
                 continue;
             }
 
-            self.trading
-                .submit_intent(retry_intent.clone(), retry_order_id.clone());
+            if let Err(err) =
+                self.trading
+                    .submit_intent(retry_intent.clone(), retry_order_id.clone(), None)
+            {
+                let reason = err.to_string();
+                warn!(order_id = %retry_order_id, reason = %reason, "Ignoring invalid retry intent");
+                self.strategy.on_reject(&retry_intent, &reason);
+                continue;
+            }
             if !report.order_id.is_empty() && report.order_id != retry_order_id {
                 self.trading
                     .acknowledge_order(&retry_order_id, report.order_id.clone());
@@ -671,7 +742,7 @@ where
                 if self.trading.record_fill(fill.clone()) {
                     self.recorder
                         .record_fill(&strategy_name, &retry_intent, None, fill, &report)
-                        .await;
+                        .await?;
                     self.strategy.on_fill(fill);
                     *fills_recorded += 1;
                 }
@@ -686,6 +757,7 @@ where
                 );
             }
         }
+        Ok(())
     }
 
     fn bypasses_throttle(update: &MarketUpdate) -> bool {
@@ -734,8 +806,8 @@ mod tests {
         StrategyRuntime,
     };
     use crate::traits::{
-        ExecutionPolicy, ExecutionReport, Executor, Feed, MarketUpdate, Recorder, SignalRecord,
-        StrategyDecision, StrategyLogic,
+        ExecutionPolicy, ExecutionReport, Executor, Feed, MarketUpdate, NullRecorder, Recorder,
+        SignalRecord, StrategyDecision, StrategyLogic,
     };
 
     struct SingleUpdateFeed {
@@ -978,10 +1050,88 @@ mod tests {
         fills: Arc<Mutex<Vec<String>>>,
     }
 
+    struct FailingRecorder {
+        submissions: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Recorder for FailingRecorder {
+        async fn record_signal(&mut self, _signal: &SignalRecord) -> Result<(), String> {
+            assert!(self.submissions.lock().unwrap().is_empty());
+            Err("recorder unavailable".to_string())
+        }
+
+        async fn flush(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "live recorder failed")]
+    async fn live_recorder_failure_stops_submission() {
+        let now = Utc::now();
+        let submissions = Arc::new(Mutex::new(Vec::new()));
+        let strategy = RecordingStrategy {
+            emitted: false,
+            signal: SignalRecord {
+                strategy: "test".into(),
+                event_id: Some("event-1".into()),
+                token_id: Some("token-1".into()),
+                intent_id: Some("intent-1".into()),
+                symbol: "BTCUSDT".into(),
+                direction: "UP".into(),
+                p_hat: 0.7,
+                edge: 0.1,
+                entry_price: dec!(0.40),
+                decision: "enter".into(),
+                ts: now,
+            },
+            intent: TradingIntent {
+                intent_id: "intent-1".into(),
+                deployment_id: "example.live".into(),
+                market_id: "event-1".into(),
+                token_id: "token-1".into(),
+                side: TradeSide::Buy,
+                quantity: dec!(1),
+                limit_price: Some(dec!(0.40)),
+                purpose: IntentPurpose::Entry,
+                created_at: now,
+            },
+        };
+        let feed = SingleUpdateFeed {
+            next: Some(MarketUpdate::SpotPrice {
+                symbol: "BTCUSDT".into(),
+                price: dec!(100000),
+                ts: now,
+            }),
+        };
+        let executor = AcknowledgingExecutor {
+            submissions: submissions.clone(),
+            ..AcknowledgingExecutor::default()
+        };
+        let mut runtime = StrategyRuntime::new(
+            strategy,
+            feed,
+            executor,
+            Box::new(FailingRecorder {
+                submissions: submissions.clone(),
+            }),
+            RuntimeConfig {
+                mode: RuntimeMode::Live,
+                throttle_hz: None,
+                max_updates: None,
+                skip_settlement_exits: false,
+            },
+        );
+
+        runtime.run().await;
+    }
+
     #[async_trait]
     impl Recorder for CollectingRecorder {
-        async fn record_signal(&mut self, signal: &SignalRecord) {
+        async fn record_signal(&mut self, signal: &SignalRecord) -> Result<(), String> {
             self.signals.lock().unwrap().push(signal.clone());
+            Ok(())
         }
 
         async fn record_order(
@@ -991,12 +1141,13 @@ mod tests {
             _signal: Option<&SignalRecord>,
             _report: &ExecutionReport,
             _order_id: &str,
-        ) {
+        ) -> Result<(), String> {
             self.orders.lock().unwrap().push((
                 strategy.to_string(),
                 intent.intent_id.clone(),
                 intent.deployment_id.clone(),
             ));
+            Ok(())
         }
 
         async fn record_fill(
@@ -1006,11 +1157,14 @@ mod tests {
             _signal: Option<&SignalRecord>,
             fill: &FillRecord,
             _report: &ExecutionReport,
-        ) {
+        ) -> Result<(), String> {
             self.fills.lock().unwrap().push(fill.fill_id.clone());
+            Ok(())
         }
 
-        async fn flush(&mut self) {}
+        async fn flush(&mut self) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -1220,6 +1374,203 @@ mod tests {
     }
 
     struct SkippedReconcileExecutor;
+    struct FailingReconcileExecutor {
+        submissions: usize,
+    }
+
+    #[async_trait]
+    impl Executor for FailingReconcileExecutor {
+        async fn submit(&mut self, _intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
+            self.submissions += 1;
+            assert_eq!(self.submissions, 1, "submitted after reconcile failure");
+            ExecutionReport {
+                order_id: "venue-1".to_string(),
+                fill: None,
+                rejected: false,
+                rejection_reason: None,
+                slippage: None,
+                market_impact: None,
+                price_basis: None,
+            }
+        }
+
+        async fn cancel(&mut self, _order_id: &str) -> bool {
+            false
+        }
+
+        async fn reconcile_fills(
+            &mut self,
+            _orders: &OrderLedger,
+        ) -> Result<Vec<FillRecord>, String> {
+            Err("control plane unavailable".to_string())
+        }
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "live fill reconciliation failed")]
+    async fn live_reconcile_error_stops_runtime_immediately() {
+        let now = Utc::now();
+        let strategy = RecordingStrategy {
+            emitted: false,
+            signal: SignalRecord {
+                strategy: "test".into(),
+                event_id: Some("event-1".into()),
+                token_id: Some("token-1".into()),
+                intent_id: Some("intent-1".into()),
+                symbol: "BTCUSDT".into(),
+                direction: "UP".into(),
+                p_hat: 0.7,
+                edge: 0.1,
+                entry_price: dec!(0.4),
+                decision: "enter".into(),
+                ts: now,
+            },
+            intent: TradingIntent {
+                intent_id: "intent-1".into(),
+                deployment_id: "example.live".into(),
+                market_id: "event-1".into(),
+                token_id: "token-1".into(),
+                side: TradeSide::Buy,
+                quantity: dec!(1),
+                limit_price: Some(dec!(0.4)),
+                purpose: IntentPurpose::Entry,
+                created_at: now,
+            },
+        };
+        let mut runtime = StrategyRuntime::new(
+            strategy,
+            MultiUpdateFeed {
+                updates: VecDeque::from(vec![
+                    MarketUpdate::SpotPrice {
+                        symbol: "BTCUSDT".into(),
+                        price: dec!(1),
+                        ts: now,
+                    },
+                    MarketUpdate::SpotPrice {
+                        symbol: "BTCUSDT".into(),
+                        price: dec!(2),
+                        ts: now,
+                    },
+                ]),
+            },
+            FailingReconcileExecutor { submissions: 0 },
+            Box::new(NullRecorder),
+            RuntimeConfig {
+                mode: RuntimeMode::Live,
+                throttle_hz: None,
+                max_updates: None,
+                skip_settlement_exits: false,
+            },
+        );
+        runtime.run().await;
+    }
+
+    struct CanonicalFillExecutor {
+        order_id: Option<String>,
+        emitted: bool,
+    }
+
+    #[async_trait]
+    impl Executor for CanonicalFillExecutor {
+        fn owns_live_retries(&self) -> bool {
+            false
+        }
+
+        async fn submit(&mut self, _intent: &TradingIntent, order_id: &str) -> ExecutionReport {
+            self.order_id = Some(order_id.to_string());
+            ExecutionReport {
+                order_id: "venue-1".to_string(),
+                fill: None,
+                rejected: false,
+                rejection_reason: None,
+                slippage: None,
+                market_impact: None,
+                price_basis: None,
+            }
+        }
+
+        async fn cancel(&mut self, _order_id: &str) -> bool {
+            false
+        }
+
+        async fn reconcile_fills(
+            &mut self,
+            _orders: &OrderLedger,
+        ) -> Result<Vec<FillRecord>, String> {
+            if self.emitted {
+                return Ok(Vec::new());
+            }
+            self.emitted = true;
+            Ok(vec![FillRecord {
+                fill_id: "canonical-fill-1".to_string(),
+                order_id: self.order_id.clone().expect("submitted order"),
+                token_id: "token-up".to_string(),
+                side: TradeSide::Buy,
+                quantity: dec!(2),
+                price: dec!(0.40),
+                fee: Decimal::ZERO,
+                timestamp: Utc::now(),
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_reconciled_fill_updates_strategy_position() {
+        let now = Utc::now();
+        let intent = TradingIntent {
+            intent_id: "intent-1".to_string(),
+            deployment_id: "example.live".to_string(),
+            market_id: "event-1".to_string(),
+            token_id: "token-up".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(2),
+            limit_price: Some(dec!(0.40)),
+            purpose: IntentPurpose::Entry,
+            created_at: now,
+        };
+        let strategy = RecordingStrategy {
+            emitted: false,
+            signal: SignalRecord {
+                strategy: "test".to_string(),
+                event_id: Some("event-1".to_string()),
+                token_id: Some("token-up".to_string()),
+                intent_id: Some("intent-1".to_string()),
+                symbol: "BTCUSDT".to_string(),
+                direction: "UP".to_string(),
+                p_hat: 0.7,
+                edge: 0.1,
+                entry_price: dec!(0.40),
+                decision: "enter".to_string(),
+                ts: now,
+            },
+            intent,
+        };
+        let mut runtime = StrategyRuntime::new(
+            strategy,
+            SingleUpdateFeed {
+                next: Some(MarketUpdate::SpotPrice {
+                    symbol: "BTCUSDT".into(),
+                    price: dec!(100000),
+                    ts: now,
+                }),
+            },
+            CanonicalFillExecutor {
+                order_id: None,
+                emitted: false,
+            },
+            Box::new(NullRecorder),
+            RuntimeConfig {
+                mode: RuntimeMode::Live,
+                throttle_hz: None,
+                max_updates: Some(1),
+                skip_settlement_exits: false,
+            },
+        );
+
+        let result = runtime.run().await;
+        assert_eq!(result.fills_recorded, 1);
+        assert_eq!(runtime.trading().positions().net_qty("token-up"), dec!(2));
+    }
 
     #[async_trait]
     impl Executor for SkippedReconcileExecutor {
@@ -1767,20 +2118,23 @@ mod tests {
     async fn restored_live_ack_order_is_managed_as_pending() {
         let now = Utc::now();
         let mut trading = ploy_trading::TradingRuntime::default();
-        trading.submit_intent(
-            TradingIntent {
-                intent_id: "restored-intent".into(),
-                deployment_id: "example.live".into(),
-                market_id: "evt1".into(),
-                token_id: "token-up".into(),
-                side: TradeSide::Buy,
-                quantity: dec!(10),
-                limit_price: Some(dec!(0.30)),
-                purpose: IntentPurpose::Entry,
-                created_at: now,
-            },
-            "restored-order",
-        );
+        trading
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "restored-intent".into(),
+                    deployment_id: "example.live".into(),
+                    market_id: "evt1".into(),
+                    token_id: "token-up".into(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(10),
+                    limit_price: Some(dec!(0.30)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: now,
+                },
+                "restored-order",
+                None,
+            )
+            .expect("valid restored intent");
         trading.acknowledge_order("restored-order", "venue-restored");
 
         let feed = SingleUpdateFeed {
@@ -1822,20 +2176,23 @@ mod tests {
     async fn restored_live_retry_order_continues_from_existing_attempt_suffix() {
         let now = Utc::now();
         let mut trading = ploy_trading::TradingRuntime::default();
-        trading.submit_intent(
-            TradingIntent {
-                intent_id: "pm5d_BTCUSDT_UP_retry2".into(),
-                deployment_id: "example.live".into(),
-                market_id: "evt1".into(),
-                token_id: "token-up".into(),
-                side: TradeSide::Buy,
-                quantity: dec!(10),
-                limit_price: Some(dec!(0.30)),
-                purpose: IntentPurpose::Entry,
-                created_at: now,
-            },
-            "restored-order",
-        );
+        trading
+            .submit_intent(
+                TradingIntent {
+                    intent_id: "pm5d_BTCUSDT_UP_retry2".into(),
+                    deployment_id: "example.live".into(),
+                    market_id: "evt1".into(),
+                    token_id: "token-up".into(),
+                    side: TradeSide::Buy,
+                    quantity: dec!(10),
+                    limit_price: Some(dec!(0.30)),
+                    purpose: IntentPurpose::Entry,
+                    created_at: now,
+                },
+                "restored-order",
+                None,
+            )
+            .expect("valid restored intent");
         trading.acknowledge_order("restored-order", "venue-restored");
 
         let submissions = Arc::new(Mutex::new(Vec::new()));

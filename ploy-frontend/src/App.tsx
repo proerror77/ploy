@@ -1,126 +1,45 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { lazy, Suspense, useEffect } from 'react';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { useEffect } from 'react';
 import { Layout } from '@/components/Layout';
-import { Dashboard } from '@/pages/Dashboard';
-import { TradeHistory } from '@/pages/TradeHistory';
-import { LiveMonitor } from '@/pages/LiveMonitor';
-import { LiveParity } from '@/pages/LiveParity';
-import { OperatorCockpit } from '@/pages/OperatorCockpit';
-import { DryRunReport } from '@/pages/DryRunReport';
-import { StrategyBuilder } from '@/pages/StrategyBuilder';
-import { HarnessMemory } from '@/pages/HarnessMemory';
-import { StrategyMonitor } from '@/pages/StrategyMonitor';
-import { SystemControl } from '@/pages/SystemControl';
-import { SecurityAudit } from '@/pages/SecurityAudit';
-import { NBASwingMonitor } from '@/pages/NBASwingMonitor';
-import { RiskDashboard } from '@/pages/RiskDashboard';
 import { ws } from '@/services/websocket';
 import { useStore } from '@/store';
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: 1,
-      refetchOnWindowFocus: false,
-    },
-  },
-});
+const StrategyMonitor = lazy(() => import('@/pages/StrategyMonitor').then((m) => ({ default: m.StrategyMonitor })));
+const TradeHistory = lazy(() => import('@/pages/TradeHistory').then((m) => ({ default: m.TradeHistory })));
+const LiveParity = lazy(() => import('@/pages/LiveParity').then((m) => ({ default: m.LiveParity })));
+const SecurityAudit = lazy(() => import('@/pages/SecurityAudit').then((m) => ({ default: m.SecurityAudit })));
 
-function App() {
-  const {
-    setWsConnected,
-    addLog,
-    addTrade,
-    setDeployments,
-    setTradingSnapshots,
-    updatePositions,
-    updateMarketData,
-    setSystemStatus,
-  } = useStore();
+const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } } });
 
+function ApplicationLifecycle() {
+  const setWsConnected = useStore((state) => state.setWsConnected);
   useEffect(() => {
-    // Connect to WebSocket
+    const unsubscribe = ws.onConnectionChange(setWsConnected);
     ws.connect();
+    return () => { unsubscribe(); ws.disconnect(); };
+  }, [setWsConnected]);
+  return null;
+}
 
-    // Track connection state
-    const unsubConnection = ws.onConnectionChange((connected) => {
-      setWsConnected(connected);
-    });
-
-    // Subscribe to all events
-    const unsubscribe = ws.subscribe('*', (event) => {
-      switch (event.type) {
-        case 'log':
-          addLog(event.data);
-          break;
-        case 'trade':
-          addTrade(event.data);
-          break;
-        case 'position':
-          updatePositions([event.data]);
-          break;
-        case 'market':
-          updateMarketData(event.data);
-          break;
-        case 'status':
-          setSystemStatus(event.data.status);
-          break;
-        case 'system_snapshot':
-          setSystemStatus(event.data.system.status);
-          break;
-        case 'deployment_snapshot':
-          setDeployments(event.data.deployments);
-          break;
-        case 'trading_snapshot':
-          setTradingSnapshots(event.data.trading);
-          break;
-      }
-    });
-
-    return () => {
-      unsubConnection();
-      unsubscribe();
-      ws.disconnect();
-    };
-  }, [
-    setWsConnected,
-    addLog,
-    addTrade,
-    setDeployments,
-    setTradingSnapshots,
-    updatePositions,
-    updateMarketData,
-    setSystemStatus,
-  ]);
-
+export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
+      <ApplicationLifecycle />
       <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Layout />}>
-            <Route index element={<Dashboard />} />
-            <Route path="cockpit" element={<OperatorCockpit />} />
-            <Route path="trades" element={<TradeHistory />} />
-            <Route path="monitor" element={<LiveMonitor />} />
-            <Route path="parity" element={<LiveParity />} />
-            <Route path="dry-run" element={<DryRunReport />} />
-            <Route path="dry-run/:deploymentId" element={<DryRunReport />} />
-            <Route path="reports/strategies" element={<DryRunReport />} />
-            <Route path="reports/strategy" element={<DryRunReport />} />
-            <Route path="builder" element={<StrategyBuilder />} />
-            <Route path="harness" element={<HarnessMemory />} />
-            <Route path="deployments" element={<StrategyMonitor />} />
-            <Route path="monitor-strategy" element={<StrategyMonitor />} />
-            <Route path="nba-swing" element={<NBASwingMonitor />} />
-            <Route path="risk" element={<RiskDashboard />} />
-            <Route path="control" element={<SystemControl />} />
-            <Route path="security" element={<SecurityAudit />} />
-          </Route>
-        </Routes>
+        <Suspense fallback={<div className="p-8 text-muted-foreground">加载中...</div>}>
+          <Routes>
+            <Route path="/" element={<Layout />}>
+              <Route index element={<Navigate to="/deployments" replace />} />
+              <Route path="deployments" element={<StrategyMonitor />} />
+              <Route path="trades" element={<TradeHistory />} />
+              <Route path="parity" element={<LiveParity />} />
+              <Route path="security" element={<SecurityAudit />} />
+              <Route path="*" element={<Navigate to="/deployments" replace />} />
+            </Route>
+          </Routes>
+        </Suspense>
       </BrowserRouter>
     </QueryClientProvider>
   );
 }
-
-export default App;

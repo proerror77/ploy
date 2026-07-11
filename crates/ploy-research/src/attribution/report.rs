@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use crate::attribution::factor::factor_pnl;
+use crate::attribution::regime::{regime_pnl, RegimePnl};
 use crate::backtest::engine::SimulatedFill;
 use crate::backtest::metrics::BacktestMetrics;
 use ploy_operator_contracts::Regime;
-use crate::attribution::regime::{regime_pnl, RegimePnl};
-use crate::attribution::factor::factor_pnl;
+use std::collections::BTreeMap;
 
 pub struct AttributionReport {
     pub overall: BacktestMetrics,
@@ -12,10 +12,7 @@ pub struct AttributionReport {
 }
 
 impl AttributionReport {
-    pub fn build(
-        fills: &[SimulatedFill],
-        factor_fills: &[(f64, Vec<(String, f64)>)],
-    ) -> Self {
+    pub fn build(fills: &[SimulatedFill], factor_fills: &[(f64, Vec<(String, f64)>)]) -> Self {
         let pnls: Vec<f64> = fills.iter().map(|f| f.pnl).collect();
         Self {
             overall: BacktestMetrics::from_pnls(&pnls),
@@ -35,8 +32,13 @@ impl AttributionReport {
         );
         eprintln!("\n--- By Regime ---");
         for (regime, r) in &self.by_regime {
-            eprintln!("  {:8} trades={:4} win={:.1}% pnl={:.4}",
-                regime.as_str(), r.trade_count, r.win_rate() * 100.0, r.total_pnl);
+            eprintln!(
+                "  {:8} trades={:4} win={:.1}% pnl={:.4}",
+                regime.as_str(),
+                r.trade_count,
+                r.win_rate() * 100.0,
+                r.total_pnl
+            );
         }
         eprintln!("\n--- By Factor (P&L contribution, top 10) ---");
         let mut factor_vec: Vec<(&String, &f64)> = self.by_factor.iter().collect();

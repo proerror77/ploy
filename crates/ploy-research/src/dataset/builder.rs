@@ -3,15 +3,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 
 use crate::factors::{
-    FactorObservation, TaskGrainDerivedArtifacts, build_task_grain_derived_artifacts_for_event_ids,
+    build_task_grain_derived_artifacts_for_event_ids, FactorObservation, TaskGrainDerivedArtifacts,
 };
 
 use super::{
-    CANONICAL_REGIME_VERSION, DATASET_MANIFEST_VERSION, DatasetArtifacts, DatasetBuildManifest,
-    DatasetBuildStats, DatasetLabelContract, DatasetSourceWindow, DatasetSplit,
-    DatasetSplitAssignment, DatasetSplitCounts, DatasetSplitPolicy, EventIndexEntry,
-    EventMetadataChronologyInput, SplitBuildError, assign_chronological_event_splits,
-    build_canonical_event_chronology,
+    assign_chronological_event_splits, build_canonical_event_chronology, DatasetArtifacts,
+    DatasetBuildManifest, DatasetBuildStats, DatasetLabelContract, DatasetSourceWindow,
+    DatasetSplit, DatasetSplitAssignment, DatasetSplitCounts, DatasetSplitPolicy, EventIndexEntry,
+    EventMetadataChronologyInput, SplitBuildError, CANONICAL_REGIME_VERSION,
+    DATASET_MANIFEST_VERSION,
 };
 
 #[derive(Debug, Clone)]
@@ -268,8 +268,8 @@ pub fn standard_event_root_dataset_artifacts() -> DatasetArtifacts {
 #[cfg(test)]
 mod tests {
     use super::{
-        DatasetBuildError, EventRootDatasetBuildRequest, build_event_root_dataset,
-        standard_event_root_dataset_artifacts,
+        build_event_root_dataset, standard_event_root_dataset_artifacts, DatasetBuildError,
+        EventRootDatasetBuildRequest,
     };
     use crate::dataset::{DatasetSourceWindow, DatasetSplit, EventMetadataChronologyInput};
     use crate::factors::FactorObservation;

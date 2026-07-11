@@ -89,14 +89,21 @@ jobs:
         if: ${{ github.event.inputs.data_dir != '' && github.event.inputs.sync_parquet_data == 'true' }}
         env:
           DATA_DIR: ${{ github.event.inputs.data_dir }}
+          TANGO_1_1_KNOWN_HOSTS: ${{ secrets.TANGO_1_1_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
+          if [ -z "${TANGO_1_1_KNOWN_HOSTS}" ]; then
+            echo "TANGO_1_1_KNOWN_HOSTS secret is required for pinned SSH host verification" >&2
+            exit 1
+          fi
           echo "${{ secrets.TANGO_SSH_KEY }}" > ~/.ssh/tango_key
           chmod 600 ~/.ssh/tango_key
+          printf '%s\n' "${TANGO_1_1_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
           mkdir -p "${DATA_DIR}"
           rsync -az \
-            -e "ssh -i ~/.ssh/tango_key -o StrictHostKeyChecking=no" \
+            -e "ssh -i ~/.ssh/tango_key -o HostKeyAlias=tango-1-1 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts" \
             root@172.16.0.204:/opt/ploy/data/parquet/ \
             "${DATA_DIR}/"
 

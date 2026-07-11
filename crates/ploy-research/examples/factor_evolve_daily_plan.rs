@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use ploy_research::research_os::manager::{
-    ResearchManagerInput, build_research_manager_plan, validate_evidence_stage,
+    build_research_manager_plan, validate_evidence_stage, ResearchManagerInput,
 };
 
 fn main() -> anyhow::Result<()> {

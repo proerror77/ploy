@@ -1,5 +1,5 @@
-use crate::{ProposalStore, restore_trading_runtime};
-use ploy_operator_contracts::TradingStateSnapshot;
+use crate::{restore_trading_runtime, ProposalStore};
+use ploy_operator_contracts::{DeploymentRuntimeMode, TradingStateSnapshot};
 use ploy_platform::DeploymentRecord;
 use ploy_trading::TradingRuntime;
 use std::collections::BTreeMap;
@@ -22,7 +22,7 @@ pub fn load_registry_records(path: &Path) -> io::Result<Vec<DeploymentRecord>> {
 
 pub fn load_trading_runtimes(
     path: &Path,
-    known_deployments: impl Fn(&str) -> bool,
+    expected_runtime_mode: impl Fn(&str) -> Option<DeploymentRuntimeMode>,
 ) -> io::Result<BTreeMap<String, TradingRuntime>> {
     if !path.exists() {
         return Ok(BTreeMap::new());
@@ -33,12 +33,15 @@ pub fn load_trading_runtimes(
         return Ok(BTreeMap::new());
     }
 
-    let snapshots: Vec<TradingStateSnapshot> =
-        serde_json::from_str(&raw).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let snapshots: Vec<TradingStateSnapshot> = serde_json::from_str(&raw)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
     let mut runtimes = BTreeMap::new();
     for snapshot in snapshots {
-        if !known_deployments(&snapshot.deployment_id) {
+        let Some(expected_mode) = expected_runtime_mode(&snapshot.deployment_id) else {
+            continue;
+        };
+        if snapshot.runtime_mode != expected_mode {
             continue;
         }
         let deployment_id = snapshot.deployment_id.clone();
@@ -142,9 +145,56 @@ mod tests {
             .to_string(),
         )
         .expect("write");
-        let runtimes = load_trading_runtimes(&path, |id| id == "example.paper").expect("load");
+        let runtimes = load_trading_runtimes(&path, |id| {
+            (id == "example.paper").then_some(ploy_operator_contracts::DeploymentRuntimeMode::Paper)
+        })
+        .expect("load");
         assert_eq!(runtimes.len(), 1);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn trading_runtime_load_requires_snapshot_mode_to_match_registry_mode() {
+        for (snapshot_mode, registry_mode, expected) in [
+            (
+                "paper",
+                ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+                1,
+            ),
+            (
+                "live",
+                ploy_operator_contracts::DeploymentRuntimeMode::Live,
+                1,
+            ),
+            (
+                "paper",
+                ploy_operator_contracts::DeploymentRuntimeMode::Live,
+                0,
+            ),
+            (
+                "live",
+                ploy_operator_contracts::DeploymentRuntimeMode::Paper,
+                0,
+            ),
+        ] {
+            let path = temp_path("trading-mode-match");
+            fs::write(
+                &path,
+                serde_json::json!([{
+                    "deployment_id": "example.mode",
+                    "runtime_mode": snapshot_mode,
+                    "intents": [], "orders": [], "fills": [], "positions": [],
+                    "pnl": {"realized_pnl":"0","unrealized_pnl":"0","total_fees":"0","net_pnl":"0"},
+                    "risk": {"pending_intents":0,"active_orders":0,"open_positions":0,"gross_exposure":"0","reserved_order_exposure":"0","total_gross_exposure":"0"}
+                }])
+                .to_string(),
+            )
+            .expect("snapshot");
+            let runtimes = load_trading_runtimes(&path, |_| Some(registry_mode.clone()))
+                .expect("load mode-aware runtimes");
+            assert_eq!(runtimes.len(), expected);
+            let _ = fs::remove_file(path);
+        }
     }
 
     #[test]

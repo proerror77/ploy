@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use ploy_research::DatasetBuildManifest;
 use polars::io::parquet::read::ParquetReader;
 use polars::prelude::*;
