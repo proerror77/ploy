@@ -69,20 +69,18 @@ class RuntimeMarketDataBoundaryTests(unittest.TestCase):
         workflow_text = workflow.read_text()
         cloud_assist_text = (ROOT / "scripts" / "ci" / "deploy_tango_cloud_assist.py").read_text()
         self.assertIn("ploy-market-discovery.service", workflow_text)
+        self.assertIn("deploy_tango_cloud_assist.py --print-remote-script", workflow_text)
         self.assertLess(
-            workflow_text.index("systemctl restart ploy-market-discovery.service"),
-            workflow_text.index("systemctl restart ploy-quote-collector.service"),
+            cloud_assist_text.index("systemctl restart ploy-market-discovery.service"),
+            cloud_assist_text.index("systemctl restart ploy-quote-collector.service"),
             "market discovery must refresh catalog before quote collector subscribes",
         )
         self.assertLess(
-            workflow_text.index("systemctl restart ploy-market-discovery.service"),
-            workflow_text.index("systemctl restart ploy-pm-trade-collector.service"),
+            cloud_assist_text.index("systemctl restart ploy-market-discovery.service"),
+            cloud_assist_text.index("systemctl restart ploy-pm-trade-collector.service"),
             "market discovery must refresh catalog before trade collector polls",
         )
-        for text, name in (
-            (workflow_text, "deploy-tango-1-1.yml"),
-            (cloud_assist_text, "deploy_tango_cloud_assist.py"),
-        ):
+        for text, name in ((cloud_assist_text, "deploy_tango_cloud_assist.py"),):
             discovery_restart = text.index("systemctl restart ploy-market-discovery.service")
             catalog_wait = text.index(
                 "pm_market_catalog has no active crypto markets after market-discovery restart"
@@ -115,8 +113,11 @@ class RuntimeMarketDataBoundaryTests(unittest.TestCase):
     def test_pm_trade_deploy_health_uses_collector_poll_not_fresh_insert(self) -> None:
         workflow = ROOT / ".github" / "workflows" / "deploy-tango-1-1.yml"
         cloud_assist = ROOT / "scripts" / "ci" / "deploy_tango_cloud_assist.py"
+        self.assertIn(
+            "deploy_tango_cloud_assist.py --print-remote-script", workflow.read_text()
+        )
 
-        for path in (workflow, cloud_assist):
+        for path in (cloud_assist,):
             text = path.read_text()
             self.assertIn("wait_for_recent_log", text)
             self.assertIn("Polymarket trade collector poll complete", text)
@@ -124,22 +125,13 @@ class RuntimeMarketDataBoundaryTests(unittest.TestCase):
             self.assertIn("pm trade collector failed after deploy", text)
             self.assertIn("120", text)
             self.assertIn("5", text)
-            if path.name == "deploy-tango-1-1.yml":
-                self.assertIn('local since="\\${DEPLOY_STARTED_AT}"', text)
-                self.assertIn(
-                    '"pm trade collector did not complete a healthy poll after deploy" \\\n'
-                    "              120 \\\n"
-                    "              5",
-                    text,
-                )
-            else:
-                self.assertIn('local since="${{DEPLOY_STARTED_AT}}"', text)
-                self.assertIn(
-                    '"pm trade collector did not complete a healthy poll after deploy" \\\\\n'
-                    "  120 \\\\\n"
-                    "  5",
-                    text,
-                )
+            self.assertIn('local since="${{DEPLOY_STARTED_AT}}"', text)
+            self.assertIn(
+                '"pm trade collector did not complete a healthy poll after deploy" \\\\\n'
+                "  120 \\\\\n"
+                "  5",
+                text,
+            )
             self.assertNotIn(
                 "clob_trade_ticks WHERE received_at >= NOW() - INTERVAL '5 minutes'",
                 text,
