@@ -1,4 +1,6 @@
+import os
 import pathlib
+import subprocess
 import unittest
 
 
@@ -42,6 +44,65 @@ class AliyunDualHostWorkflowContracts(unittest.TestCase):
         )
         self.assertIn("! -name 'pm5d_threelayer_live_gate.sh'", workflow)
         self.assertIn("research host bundle contains a live deployment", workflow)
+        self.assertIn('-p ployctl', workflow)
+        self.assertIn('dist/bin/ployctl', workflow)
+
+    def test_tango_ssh_deploy_uses_shared_generated_remote_script(self):
+        workflow = (ROOT / ".github" / "workflows" / "deploy-tango-1-1.yml").read_text()
+        self.assertIn(
+            "deploy_tango_cloud_assist.py --print-remote-script", workflow
+        )
+        self.assertNotIn("ssh tango-1-1 /bin/bash <<EOF", workflow)
+
+        run_block_sizes = []
+        lines = workflow.splitlines()
+        for index, line in enumerate(lines):
+            if line.strip() != "run: |":
+                continue
+            indent = len(line) - len(line.lstrip())
+            block = []
+            for candidate in lines[index + 1 :]:
+                candidate_indent = len(candidate) - len(candidate.lstrip())
+                if candidate.strip() and candidate_indent <= indent:
+                    break
+                block.append(candidate)
+            run_block_sizes.append(len("\n".join(block).encode()))
+        self.assertLess(max(run_block_sizes), 21_000)
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "DEPLOY_ROOT": "/opt/ploy",
+                "DEPLOY_BUNDLE_NAME": "ploy-test.tar.gz",
+                "GITHUB_SHA": "a" * 40,
+                "DEPLOY_OSS_REGION": "ap-northeast-1",
+                "ALIYUN_OSS_BUCKET": "test-bucket",
+                "DEPLOY_OSS_PREFIX": "deploy/tango-1-1",
+                "ALIYUN_OSS_ACCESS_KEY_ID": "test-id",
+                "ALIYUN_OSS_ACCESS_KEY_SECRET": "test-secret",
+                "DEPLOY_MIGRATIONS": "",
+            }
+        )
+        generated = subprocess.run(
+            [
+                "python3",
+                str(ROOT / "scripts" / "ci" / "deploy_tango_cloud_assist.py"),
+                "--print-remote-script",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        syntax = subprocess.run(
+            ["bash", "-n"],
+            input=generated.stdout,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
 
     def test_trade_bundle_contains_full_control_plane_and_paused_gate(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy-trade.yml").read_text()
@@ -93,16 +154,13 @@ class AliyunDualHostWorkflowContracts(unittest.TestCase):
 
         self.assertIn('import re', gate)
 
-        self.assertIn(
-            'record.update(desired_state="paused", observed_state="paused")', tango
-        )
         cloud_assist = (
             ROOT / "scripts" / "ci" / "deploy_tango_cloud_assist.py"
         ).read_text()
+        self.assertIn("--print-remote-script", tango)
         self.assertIn('record["desired_state"] = "paused"', cloud_assist)
         self.assertIn('record["observed_state"] = "paused"', cloud_assist)
-        for research_deploy in (tango, cloud_assist):
-            self.assertIn("-iname '*live*.toml'", research_deploy)
+        self.assertIn("-iname '*live*.toml'", cloud_assist)
 
         self.assertIn("group: ploy-trade-host", workflow)
         self.assertIn("group: ploy-trade-host", trade)
