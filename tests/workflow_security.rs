@@ -441,8 +441,8 @@ fn recorded_replay_parity_supports_auto_window() {
         "approval_environment:",
         "default: \"tango-1-1-build-only\"",
         "runner_source:",
-        "Runner binary source: deployed for runtime parity, workflow_ref for branch regression",
-        "default: \"deployed\"",
+        "Runner source: workflow_ref for exact-SHA promotion, deployed for diagnostics",
+        "default: \"workflow_ref\"",
         "- \"deployed\"",
         "- \"workflow_ref\"",
         "Build replay runner from workflow ref",
@@ -500,8 +500,8 @@ fn recorded_replay_parity_supports_auto_window() {
         }
     }
     for needle in [
-        "`runner_source=deployed` is the\ndefault",
-        "`runner_source=workflow_ref` only as the branch-regression mode",
+        "`runner_source=workflow_ref` is\nthe default",
+        "`runner_source=deployed` only as a diagnostic",
         "does not\ndeploy artifacts, restart services, replace `/opt/ploy/bin/ploy-runner`, or\nenable live orders",
     ] {
         if !runbook.contains(needle) {
@@ -843,21 +843,21 @@ fn runtime_candidate_replay_allows_empty_entry_score_override() {
 }
 
 #[test]
-fn tango_deploy_keeps_pm5d_live_paused() {
+fn tango_deploy_removes_live_authority() {
     let workflow = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
     let cloud_assist = workflow_contents("scripts/ci/deploy_tango_cloud_assist.py");
     let mut offenders = Vec::new();
 
     for needle in [
         "environment: ${{ inputs.deploy && 'tango-1-1' || 'tango-1-1-build-only' }}",
-        "Verify live deployment remains paused in bundle",
-        "pm5d.threelayer.live.json",
-        "desired_state=paused",
-        "deployments inspect pm5d.threelayer.live",
-        "deployments inspect pm5d.threelayer.live 2>&1",
-        "awk '\\$1 == \"pm5d.threelayer.live\"",
-        "desired=Paused",
-        "observed=Paused",
+        "Verify research bundle has no live authority",
+        "research host bundle contains a live deployment",
+        "require_research_host_has_no_live",
+        "sed -i -E '/^[[:space:]]*(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=/d'",
+        "mode=Live",
+        "systemctl stop ployd.service",
+        "deployments pause",
+        "deployments archive",
     ] {
         if !workflow.contains(needle) {
             offenders.push(format!("deploy-tango-1-1.yml: missing `{needle}`"));
@@ -865,12 +865,12 @@ fn tango_deploy_keeps_pm5d_live_paused() {
     }
 
     for needle in [
-        "require_pm5d_live_paused",
-        "deployments inspect pm5d.threelayer.live",
-        "deployments inspect pm5d.threelayer.live 2>&1",
-        "awk '$1 == \"pm5d.threelayer.live\"",
-        "desired=Paused",
-        "observed=Paused",
+        "require_research_host_has_no_live",
+        "sed -i -E '/^[[:space:]]*(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=/d'",
+        "mode=Live",
+        "systemctl stop ployd.service",
+        "deployments pause",
+        "deployments archive",
     ] {
         if !cloud_assist.contains(needle) {
             offenders.push(format!("deploy_tango_cloud_assist.py: missing `{needle}`"));
@@ -879,7 +879,7 @@ fn tango_deploy_keeps_pm5d_live_paused() {
 
     assert!(
         offenders.is_empty(),
-        "tango deploy live-paused guard failed:\n{}",
+        "tango deploy live-authority removal guard failed:\n{}",
         offenders.join("\n")
     );
 }
@@ -1239,29 +1239,26 @@ fn test_matrix_owns_research_heavy_feature_contract() {
 }
 
 #[test]
-fn release_platform_workflow_pins_host_fingerprints() {
+fn release_platform_workflow_is_build_only() {
     let content = workflow_contents(".github/workflows/release-platform.yml");
     let mut offenders = Vec::new();
 
-    if content.matches("uses: appleboy/").count() != 2 {
-        offenders.push(
-            "release-platform.yml: expected exactly two appleboy steps (scp + ssh)".to_string(),
-        );
-    }
-
-    if content.matches("fingerprint:").count() != 2 {
-        offenders.push(
-            "release-platform.yml: expected fingerprint pinning on both appleboy steps".to_string(),
-        );
-    }
-
-    if !content.contains("EC2_HOST_FINGERPRINT || secrets.AWS_EC2_HOST_FINGERPRINT") {
-        offenders.push("release-platform.yml: missing EC2 fingerprint secret wiring".to_string());
+    for forbidden in [
+        "uses: appleboy/",
+        "environment: production",
+        "EC2_HOST",
+        "deploy:",
+    ] {
+        if content.contains(forbidden) {
+            offenders.push(format!(
+                "release-platform.yml: build-only workflow contains `{forbidden}`"
+            ));
+        }
     }
 
     assert!(
         offenders.is_empty(),
-        "release-platform.yml fingerprint pinning check failed:\n{}",
+        "release-platform.yml build-only check failed:\n{}",
         offenders.join("\n")
     );
 }
@@ -1282,7 +1279,7 @@ fn host_deploy_workflows_require_main_provenance_and_pinned_ssh() {
         (
             "deploy-trade.yml",
             &trade,
-            "environment: ploy-trade-1",
+            "'ploy-trade-1'",
             "PLOY_TRADE_1_KNOWN_HOSTS",
         ),
     ] {

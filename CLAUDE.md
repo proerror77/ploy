@@ -160,9 +160,10 @@ ci/<short-description>        — CI/workflow changes
 
 ### Deployment
 - **Backtest**: trigger `backtest.yml` (workflow_dispatch) with `git_ref=main`
-- **Deploy dryrun/live**: trigger `deploy-tango-1-1.yml` (workflow_dispatch) with `git_ref=main`
+- **Deploy research/dry-run**: trigger `deploy-tango-1-1.yml` (workflow_dispatch) with `git_ref=main`
 - **Deploy trade**: trigger `deploy-trade.yml` (workflow_dispatch) with `git_ref=main`
-- **Release platform**: trigger `release-platform.yml` (workflow_dispatch) with `git_ref=main`
+- **Build portable platform bundle**: trigger `release-platform.yml` (workflow_dispatch); it is build-only
+- **Approve live**: trigger `approve-live-trade.yml` from `main`; exact-SHA evidence and protected human approval are required
 - **ACK deploy**: trigger `build-push-acr.yml` with `push_images=true` only from `git_ref=main`, then `deploy-ack.yml` with the immutable 40-character SHA image tag
 - Never deploy from a feature branch directly
 - Never build Rust on tango-1-1 — CI builds and ships artifacts only
@@ -186,8 +187,9 @@ ci/<short-description>        — CI/workflow changes
   Do not push or deploy mutable `latest` tags.
 - Keep deployment secrets in GitHub environments/repository secrets. Never place
   secrets in local files, commits, logs, pasted command output, or ad hoc scripts.
-- Prefer environment-scoped workflows (`tango-1-1`, `production`, `ploy-ci-1`,
-  `ack`) over direct SSH when an equivalent workflow exists.
+- Prefer environment-scoped workflows (`tango-1-1`, `ploy-trade-1`,
+  `ploy-trade-live`, `ploy-ci-1`, `ack`) over direct SSH when an equivalent
+  workflow exists.
 - Do not recover from failed CI/CD by hot-patching Rust binaries or compiling
   source on trading hosts. Fix the workflow or source and redeploy CI-built
   artifacts.
@@ -372,7 +374,10 @@ Available gstack skills: /office-hours, /plan-ceo-review, /plan-eng-review, /pla
 
 - For trading hosts (for example `tango-1-1`), do not build Rust source on-host.
 - Build in CI/GitHub Actions and deploy release artifacts only.
-- Preferred production path: `.github/workflows/release-aliyun.yml`.
+- Preferred Aliyun paths are `.github/workflows/deploy-tango-1-1.yml` for the
+  research/data host and `.github/workflows/deploy-trade.yml` for the paused
+  trade host. Live resume is restricted to
+  `.github/workflows/approve-live-trade.yml`.
 - Keep host Rust on latest stable via rustup, and ensure default `rustc`/`cargo` resolve to rustup-managed binaries.
 - Enforce systemd guardrails on live ploy services:
   - `Restart=always`

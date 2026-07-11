@@ -117,7 +117,10 @@ rules.
   required.
 - On trading hosts, do not build Rust source on-host. Build in CI and deploy
   release artifacts only.
-- Preferred production workflow: `.github/workflows/release-platform.yml`.
+- Use `.github/workflows/deploy-tango-1-1.yml` for the research/data host and
+  `.github/workflows/deploy-trade.yml` for the immutable paused trade host.
+  Live resume is restricted to `.github/workflows/approve-live-trade.yml`.
+  `.github/workflows/release-platform.yml` is build-only.
 - Live services should keep these systemd guardrails:
   - `Restart=always`
   - `RestartSec=5`

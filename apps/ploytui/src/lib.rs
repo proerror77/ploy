@@ -241,6 +241,7 @@ mod tests {
             }],
             deployments: vec![DeploymentSummary {
                 deployment_id: "example.paper".to_string(),
+                runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                 account_id: "acct-paper".to_string(),
                 max_gross_exposure: None,
                 deployment_state: DeploymentState::Enabled,
@@ -274,6 +275,7 @@ mod tests {
                 OperatorEvent::DeploymentSnapshot(DeploymentSnapshotEvent {
                     deployments: vec![DeploymentSummary {
                         deployment_id: "example.paper".to_string(),
+                        runtime_mode: ploy_operator_contracts::DeploymentRuntimeMode::Paper,
                         account_id: "acct-paper".to_string(),
                         max_gross_exposure: None,
                         deployment_state: DeploymentState::Enabled,

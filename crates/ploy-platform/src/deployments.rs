@@ -30,6 +30,7 @@ impl DeploymentRecord {
     pub fn summary(&self) -> DeploymentSummary {
         DeploymentSummary {
             deployment_id: self.deployment_id.clone(),
+            runtime_mode: self.runtime_mode.clone(),
             account_id: self.account_id.clone(),
             max_gross_exposure: self.max_gross_exposure,
             deployment_state: self.deployment_state,

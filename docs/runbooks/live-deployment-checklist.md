@@ -12,12 +12,10 @@ This checklist is the operator-facing go/no-go gate. It assumes:
 
 ## Before You Start
 
-- Confirm you are on the workspace-default release path:
-  - `.github/workflows/release-platform.yml`
-  - `deployment/ployd.service`
-  - `scripts/install-platform-service.sh`
-  - `deployment/ploy-maintenance.timer`
-  - `deployment/ploy-platform-watchdog.timer`
+- Confirm the trade host was installed from the named protected path:
+  - `.github/workflows/deploy-trade.yml`
+  - `deployment/ployd-trade.service`
+  - an immutable `/opt/ploy/releases/<main-sha>` receipt
 - Confirm the host has:
   - `/opt/ploy/bin/ployd`
   - `/opt/ploy/bin/ployctl`
@@ -105,15 +103,25 @@ This verifies `02-pm5d-threelayer.live.toml` against the dry-run config, applies
 `pm5d.threelayer.live` with `desired_state=paused`, and stops before any live
 orders can be placed.
 
-Only after explicit operator approval, run:
+The staging script cannot resume live. Real live enablement is available only
+through `.github/workflows/approve-live-trade.yml`, which requires successful
+exact-SHA runtime replay, recorded replay/dry-run strict parity, positive
+dry-run economics, bounded drawdown, no open dry-run positions, the protected
+`ploy-trade-live` environment approval, and the explicit 5 USD risk
+acknowledgement. A failed observed-running or fresh-venue postflight pauses the
+deployment automatically.
 
-```bash
-/opt/ploy/scripts/drills/pm5d_threelayer_live_gate.sh --go-live
-```
+The trade daemon also enforces this boundary: when
+`PLOY_LIVE_APPROVAL_FILE` is configured, both a live `apply` with
+`desired_state=running` and a later `resume` are rejected unless the protected
+workflow has installed a short-lived root-owned receipt matching the deployment
+wallet, 5 USD exposure cap, exact release SHA, and immutable live-config hash.
+The workflow removes the pending receipt after the transition, so a later
+pause requires a new evidence review and human approval.
 
 ## Not Covered By This Checklist
 
-This checklist does not:
+Manual execution of this checklist does not:
 
 - place live orders
 - cancel live venue orders

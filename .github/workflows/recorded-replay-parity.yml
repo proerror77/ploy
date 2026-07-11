@@ -38,15 +38,15 @@ on:
       skip_settlement_exits:
         description: "Skip settlement exits for entry-only dry-run parity; set false for executable settlement replay"
         required: false
-        default: "true"
+        default: "false"
         type: choice
         options:
           - "true"
           - "false"
       runner_source:
-        description: "Runner binary source: deployed for runtime parity, workflow_ref for branch regression"
+        description: "Runner source: workflow_ref for exact-SHA promotion, deployed for diagnostics"
         required: false
-        default: "deployed"
+        default: "workflow_ref"
         type: choice
         options:
           - "deployed"
@@ -180,7 +180,8 @@ jobs:
             "${SINCE}" \
             "${UNTIL}" \
             "${SKIP_SETTLEMENT_EXITS}" \
-            "${RUNNER_SOURCE}" <<'EOF'
+            "${RUNNER_SOURCE}" \
+            "${GITHUB_SHA}" <<'EOF'
           set -euo pipefail
           deployment_id="$1"
           config_path="$2"
@@ -190,6 +191,7 @@ jobs:
           until_ts="$6"
           skip_settlement_exits="$7"
           runner_source="$8"
+          runner_git_sha="$9"
           case "${skip_settlement_exits}" in
             true|false) ;;
             *) echo "skip_settlement_exits must be true or false" >&2; exit 1 ;;
@@ -215,6 +217,42 @@ jobs:
           test -r "${remote_dir}/extract_official_settlement_evidence.py"
           test -r "${remote_dir}/replay_dryrun_parity.py"
           test -r "${remote_dir}/resolve_recorded_replay_window.py"
+
+          python3 - \
+            "${remote_dir}/approval-provenance.json" \
+            "${deployment_id}" \
+            "${config_path}" \
+            "${recording_path}" \
+            "${runner_source}" \
+            "${runner_git_sha}" \
+            "${skip_settlement_exits}" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          output, deployment_id, config_path, recording_path, runner_source, runner_git_sha, skip_settlement_exits = sys.argv[1:]
+          def sha256(path):
+              return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+          pathlib.Path(output).write_text(
+              json.dumps(
+                  {
+                      "schema_version": 1,
+                      "deployment_id": deployment_id,
+                      "config_path": config_path,
+                      "config_sha256": sha256(config_path),
+                      "recording_path": recording_path,
+                      "recording_sha256": sha256(recording_path),
+                      "runner_source": runner_source,
+                      "runner_git_sha": runner_git_sha,
+                      "skip_settlement_exits": skip_settlement_exits == "true",
+                  },
+                  indent=2,
+                  sort_keys=True,
+              ) + "\n",
+              encoding="utf-8",
+          )
+          PY
 
           set -a
           . /opt/ploy/.env
@@ -392,6 +430,7 @@ jobs:
           scp tango-1-1:"${REMOTE_DIR}/dryrun-report.json" artifacts/dryrun/dryrun.json
           scp tango-1-1:"${REMOTE_DIR}/resolved-window.json" artifacts/parity/resolved-window.json
           scp tango-1-1:"${REMOTE_DIR}/resolved-window.env" artifacts/parity/resolved-window.env
+          scp tango-1-1:"${REMOTE_DIR}/approval-provenance.json" artifacts/parity/approval-provenance.json
 
       - name: Compare replay and dry-run evidence
         env:

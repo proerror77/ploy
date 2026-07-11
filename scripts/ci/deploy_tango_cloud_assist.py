@@ -82,19 +82,19 @@ service_exists() {{
   systemctl cat "$1" >/dev/null 2>&1
 }}
 
-require_pm5d_live_paused() {{
-  local live_status
-  local live_line
-  live_status="$("${{DEPLOY_ROOT}}/bin/ployctl" deployments inspect pm5d.threelayer.live 2>&1)"
-  echo "${{live_status}}"
-  live_line="$(printf '%s\n' "${{live_status}}" | awk '$1 == "pm5d.threelayer.live" {{ print; exit }}')"
-  case "${{live_line}}" in
-    *"desired=Paused"*"observed=Paused"*) ;;
-    *)
-      echo "pm5d.threelayer.live must remain desired=Paused observed=Paused after deploy" >&2
-      exit 1
-      ;;
-  esac
+require_research_host_has_no_live() {{
+  local deployments
+  if grep -Eq '^[[:space:]]*(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=' "${{DEPLOY_ROOT}}/.env"; then
+    echo "research host must not retain a live signing key" >&2
+    exit 1
+  fi
+  deployments="$("${{DEPLOY_ROOT}}/bin/ployctl" deployments list 2>&1)"
+  echo "${{deployments}}"
+  if printf '%s\n' "${{deployments}}" | awk \
+    '/mode=Live/ && !/lifecycle=Archived desired=Stopped observed=Stopped/ {{ found=1 }} END {{ exit !found }}'; then
+    echo "research host still has a non-archived live deployment" >&2
+    exit 1
+  fi
 }}
 
 require_service_guardrails() {{
@@ -203,6 +203,36 @@ for unit in \\
   fi
 done
 
+# Revoke runtime authority before replacing any research-host files.
+if [ -f "${{DEPLOY_ROOT}}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "${{DEPLOY_ROOT}}/.env"
+  set +a
+fi
+if service_exists ployd.service; then
+  if [ -x "${{DEPLOY_ROOT}}/bin/ployctl" ]; then
+    "${{DEPLOY_ROOT}}/bin/ployctl" deployments pause pm5d.threelayer.live >/dev/null 2>&1 || true
+  fi
+  systemctl stop ployd.service
+fi
+python3 - "${{DEPLOY_ROOT}}/data/state/deployments.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+if path.exists():
+    records = json.loads(path.read_text(encoding="utf-8"))
+    for record in records:
+        if record.get("runtime_mode") == "live":
+            record["desired_state"] = "paused"
+            record["observed_state"] = "paused"
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+PY
+
 install -m 0755 ./bin/ployd "${{DEPLOY_ROOT}}/bin/ployd"
 install -m 0755 ./bin/ploy-runner "${{DEPLOY_ROOT}}/bin/ploy-runner"
 rm -f "${{DEPLOY_ROOT}}/bin/factor-research"
@@ -211,6 +241,12 @@ install -m 0755 ./bin/persist-research-trace "${{DEPLOY_ROOT}}/bin/persist-resea
 install -m 0755 ./bin/research-trace-plan "${{DEPLOY_ROOT}}/bin/research-trace-plan"
 install -m 0644 ./config/strategies/*.toml "${{DEPLOY_ROOT}}/config/strategies/"
 install -m 0644 ./config/deployments/*.json "${{DEPLOY_ROOT}}/config/deployments/"
+find "${{DEPLOY_ROOT}}/config/strategies" -maxdepth 1 -type f -iname '*live*.toml' -delete
+python3 -c 'import json,pathlib,sys; [path.unlink() for path in pathlib.Path(sys.argv[1]).glob("*.json") if json.loads(path.read_text()).get("runtime_mode") == "live"]' "${{DEPLOY_ROOT}}/config/deployments"
+rm -f "${{DEPLOY_ROOT}}/scripts/drills/pm5d_threelayer_live_gate.sh"
+if [ -f "${{DEPLOY_ROOT}}/.env" ]; then
+  sed -i -E '/^[[:space:]]*(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=/d' "${{DEPLOY_ROOT}}/.env"
+fi
 install -m 0755 ./scripts/*.py "${{DEPLOY_ROOT}}/scripts/"
 install -m 0755 ./scripts/*.sh "${{DEPLOY_ROOT}}/scripts/"
 install -m 0644 ./scripts/*.sql "${{DEPLOY_ROOT}}/scripts/"
@@ -290,6 +326,13 @@ systemctl enable --now ploy-pm-trade-collector.service
 systemctl restart ploy-pm-trade-collector.service
 if service_exists ployd.service; then
   systemctl restart ployd.service
+  existing_live_ids="$("${{DEPLOY_ROOT}}/bin/ployctl" deployments list 2>/dev/null \
+    | awk '/mode=Live/ && !/lifecycle=Archived/ {{print $1}}' || true)"
+  while IFS= read -r live_id; do
+    [ -n "${{live_id}}" ] || continue
+    "${{DEPLOY_ROOT}}/bin/ployctl" deployments pause "${{live_id}}"
+    "${{DEPLOY_ROOT}}/bin/ployctl" deployments archive "${{live_id}}"
+  done <<< "${{existing_live_ids}}"
 fi
 
 DEPLOY_VERIFY_SINCE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -317,7 +360,7 @@ if service_exists ployd.service; then
   curl -fsS http://127.0.0.1:8081/health
   curl -fsS http://127.0.0.1:8081/api/reports/dry-run | "${{DEPLOY_ROOT}}/scripts/check_dryrun_report_contract.py"
   "${{DEPLOY_ROOT}}/bin/ployctl" deployments list
-  require_pm5d_live_paused
+  require_research_host_has_no_live
 fi
 
 wait_for_recent_rows \\

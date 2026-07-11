@@ -8,15 +8,14 @@ RENDERED_MANIFEST=""
 DRYRUN_CONFIG=""
 LIVE_CONFIG=""
 DEPLOYMENT_ID=""
-GO_LIVE=0
 RUN_DRY_RUN_DRILL=1
 WARNINGS=0
 
 usage() {
   cat <<'EOF'
-Usage: pm5d_threelayer_live_gate.sh [--go-live] [--host-root /opt/ploy] [--addr http://127.0.0.1:8081]
+Usage: pm5d_threelayer_live_gate.sh [--host-root /opt/ploy] [--addr http://127.0.0.1:8081]
 
-Prepares the PM5D ThreeLayer live deployment on a Tango host.
+Stages the PM5D ThreeLayer live deployment as paused on the trade host.
 
 Default behavior:
   - verify daemon, env, manifest, and live/dry-run config parity
@@ -24,12 +23,8 @@ Default behavior:
   - apply pm5d.threelayer.live with desired_state=paused
   - stop before placing any live orders
 
-With --go-live:
-  - perform the same checks
-  - apply the paused live manifest
-  - resume pm5d.threelayer.live
-
 The script never edits /opt/ploy/.env and never changes strategy parameters.
+Only the protected live-approval workflow may resume the deployment.
 EOF
 }
 
@@ -129,10 +124,6 @@ PY
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --go-live)
-      GO_LIVE=1
-      shift
-      ;;
     --host-root)
       HOST_ROOT="$2"
       shift 2
@@ -170,7 +161,7 @@ done
 PLOYCTL="${HOST_ROOT}/bin/ployctl"
 ENV_FILE="${HOST_ROOT}/.env"
 MANIFEST="${MANIFEST:-${HOST_ROOT}/config/deployments/pm5d.threelayer.live.json}"
-DRYRUN_CONFIG="${DRYRUN_CONFIG:-${HOST_ROOT}/config/strategies/02-pm5d-threelayer.unified.toml}"
+DRYRUN_CONFIG="${DRYRUN_CONFIG:-${HOST_ROOT}/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml}"
 LIVE_CONFIG="${LIVE_CONFIG:-${HOST_ROOT}/config/strategies/02-pm5d-threelayer.live.toml}"
 
 require_command systemctl
@@ -251,16 +242,16 @@ case "$SIGNATURE_TYPE" in
 esac
 
 log_step "manifest and config parity"
-python3 - "$MANIFEST" "$DRYRUN_CONFIG" "$LIVE_CONFIG" "$GO_LIVE" <<'PY'
+python3 - "$MANIFEST" "$DRYRUN_CONFIG" "$LIVE_CONFIG" <<'PY'
 import json
 import pathlib
 import re
 import sys
+import tomllib
 
 manifest_path = pathlib.Path(sys.argv[1])
 dryrun_path = pathlib.Path(sys.argv[2])
 live_path = pathlib.Path(sys.argv[3])
-go_live = sys.argv[4] == "1"
 
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 if manifest.get("deployment_id") != "pm5d.threelayer.live":
@@ -270,32 +261,44 @@ if manifest.get("bundle_id") != "02-pm5d-threelayer.live":
 if manifest.get("runtime_mode") != "live":
     raise SystemExit("manifest runtime_mode must be live")
 if manifest.get("desired_state") != "paused":
-    raise SystemExit("manifest desired_state must stay paused; --go-live resumes explicitly")
+    raise SystemExit("manifest desired_state must stay paused")
 if manifest.get("account_id") != "live-wallet-must-be-rendered":
     raise SystemExit("repository live manifest must retain its unrendered wallet sentinel")
 
-dryrun = dryrun_path.read_text(encoding="utf-8")
-live = live_path.read_text(encoding="utf-8")
-if not re.search(r'(?m)^mode = "dryrun"$', dryrun):
-    raise SystemExit("dry-run config must contain mode = \"dryrun\"")
-if not re.search(r'(?m)^mode = "live"$', live):
-    raise SystemExit("live config must contain mode = \"live\"")
+dryrun = tomllib.loads(dryrun_path.read_text(encoding="utf-8"))
+live = tomllib.loads(live_path.read_text(encoding="utf-8"))
+if dryrun.get("runtime", {}).get("mode") != "dryrun":
+    raise SystemExit("source config must use runtime.mode=dryrun")
+if live.get("runtime", {}).get("mode") != "live":
+    raise SystemExit("live config must use runtime.mode=live")
 
-def material_config(text):
-    return "\n".join(
-        line.rstrip()
-        for line in text.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    )
+dryrun["runtime"]["mode"] = "live"
+for key in (
+    "record_market_updates_to",
+    "record_market_updates_max_records",
+    "record_market_updates_max_bytes",
+):
+    dryrun["runtime"].pop(key, None)
 
-normalized = re.sub(r'(?m)^mode = "dryrun"$', 'mode = "live"', dryrun, count=1)
-if material_config(normalized) != material_config(live):
-    raise SystemExit("live config must match dry-run config exactly except [runtime].mode")
+dry_strategy = dryrun["strategy"]
+live_strategy = live["strategy"]
+if not (0 < float(live_strategy["stake_usd"]) <= float(manifest["max_gross_exposure"]) <= 5):
+    raise SystemExit("live stake/exposure must be positive and capped at 5 USD")
+if not (0 < int(live_strategy["max_positions"]) <= int(dry_strategy["max_positions"])):
+    raise SystemExit("live max_positions must be a positive dry-run risk reduction")
+if not (0 < int(live_strategy["max_daily_trades"]) <= 10):
+    raise SystemExit("live max_daily_trades must be bounded at 10")
+if not set(live_strategy["allowed_window_secs"]).issubset(dry_strategy["allowed_window_secs"]):
+    raise SystemExit("live windows must be a subset of replayed dry-run windows")
+if float(live_strategy["stake_usd"]) > float(dry_strategy["stake_usd"]):
+    raise SystemExit("live stake cannot exceed replayed dry-run stake")
 
-if go_live:
-    print("manifest/config gate: go-live requested")
-else:
-    print("manifest/config gate: paused apply only")
+for key in ("stake_usd", "max_positions", "max_daily_trades", "allowed_window_secs"):
+    dry_strategy[key] = live_strategy[key]
+if dryrun != live:
+    raise SystemExit("live model/execution config differs from promoted dry-run source")
+
+print("manifest/config gate: paused apply only")
 PY
 
 RENDERED_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/ploy-live-manifest.XXXXXX.json")"
@@ -328,38 +331,9 @@ case "$INSPECT_OUTPUT" in
   *) fail "live deployment was not applied as paused" ;;
 esac
 
-if [[ "$GO_LIVE" -ne 1 ]]; then
-  log_step "result"
-  if [[ "$WARNINGS" -gt 0 ]]; then
-    printf 'READY-WITH-WARNINGS: %s is staged paused; review warnings before --go-live.\n' "$DEPLOYMENT_ID"
-  else
-    printf 'READY: %s is staged paused. Run with --go-live only after manual live approval.\n' "$DEPLOYMENT_ID"
-  fi
-  exit 0
-fi
-
-[[ "$WARNINGS" -eq 0 ]] || fail "go-live is blocked while readiness warnings are active"
-
-log_step "resume live deployment"
-RESUME_OUTPUT="$(ployctl_capture deployments resume "$DEPLOYMENT_ID")"
-printf '%s\n' "$RESUME_OUTPUT"
-LIVE_READY=0
-for _ in {1..15}; do
-  FINAL_INSPECT="$(ployctl_capture deployments inspect "$DEPLOYMENT_ID")"
-  FINAL_METRICS="$(ployctl_capture system metrics)"
-  if [[ "$FINAL_INSPECT" == *"desired=Running"*"observed=Running"* ]] \
-    && [[ "$FINAL_METRICS" == *"venue:venue:polymarket:healthy"* ]]; then
-    LIVE_READY=1
-    break
-  fi
-  sleep 1
-done
-printf '%s\n' "$FINAL_INSPECT"
-printf '%s\n' "$FINAL_METRICS"
-if [[ "$LIVE_READY" -ne 1 ]]; then
-  ployctl_capture deployments pause "$DEPLOYMENT_ID" >&2 || true
-  fail "live deployment failed observed-running or fresh-venue postflight and was paused"
-fi
-
 log_step "result"
-printf 'LIVE: %s resume command accepted. Watch ployctl trading status and worker logs immediately.\n' "$DEPLOYMENT_ID"
+if [[ "$WARNINGS" -gt 0 ]]; then
+  printf 'STAGED-WITH-WARNINGS: %s remains paused; live approval is blocked until warnings are cleared.\n' "$DEPLOYMENT_ID"
+else
+  printf 'STAGED: %s remains paused. Only the protected live-approval workflow may resume it.\n' "$DEPLOYMENT_ID"
+fi

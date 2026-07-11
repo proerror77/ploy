@@ -1,26 +1,30 @@
 # Platform Deploy Runbook
 
-## Default Release Path
+## Deployment Paths
 
-The workspace-default deploy path is:
+Aliyun host mutation is split by role:
 
-- GitHub Actions workflow: `.github/workflows/release-platform.yml`
-- Long-running systemd unit: `deployment/ployd.service`
-- Host install helper: `scripts/install-platform-service.sh`
+- `.github/workflows/deploy-tango-1-1.yml`: data collection, research,
+  replay, and dry-run only. The bundle contains no live manifest, live config,
+  signing key, or live-resume gate.
+- `.github/workflows/deploy-trade.yml`: immutable exact-main-SHA trade control
+  plane, installed under `/opt/ploy/releases/<sha>` and staged paused.
+- `.github/workflows/approve-live-trade.yml`: the only live resume path, behind
+  artifact validation and the protected `ploy-trade-live` human environment.
 
-Use `deploy=false` when dispatching the workflow if you only want CI to build,
-package, checksum, and upload the platform bundle artifact without touching the
-remote host. The default `deploy=true` preserves the normal release path.
+`.github/workflows/release-platform.yml` is build-only. It packages and
+checksums the portable platform bundle but has no remote host credentials or
+deployment job, so it cannot become a third production path.
 
-This path deploys three binaries:
+The trade path deploys three binaries:
 
 - `/opt/ploy/bin/ployd`
 - `/opt/ploy/bin/ployctl`
-- `/opt/ploy/bin/ploytui`
+- `/opt/ploy/bin/ploy-runner`
 
-`ployd` is the only default long-running process. `ployctl` is an operator
-client used for post-deploy verification and remote inspection. `ploytui` is
-the thin terminal console built on the same daemon HTTP surface.
+`ployd` is the only systemd platform process. It supervises the runner;
+`ployctl` is the operator client used for post-deploy verification and remote
+inspection.
 
 Deployment resources are managed separately from the daemon process. Operators
 apply a deployment manifest and then use `ployctl` to inspect or change desired
@@ -49,32 +53,28 @@ The release bundle contains:
 - `scripts/ploy_platform_watchdog.sh`
 - `data/state/deployments.json.sample`
 
-## Host Installation Flow
+## Trade Host Installation Flow
 
-After the bundle lands on the host, the deploy workflow:
+After the bundle lands on `ploy-trade-1`, the deploy workflow:
 
-1. Installs `ployd`, `ployctl`, and `ploytui` into `/opt/ploy/bin`
-2. Installs `deployment/ployd.service` and host-support maintenance/watchdog
-   unit files into `/opt/ploy/deployment`
-3. Installs `scripts/install-platform-service.sh`,
-   `scripts/ploy_maintenance.sh`, and `scripts/ploy_platform_watchdog.sh` into
-   `/opt/ploy/scripts`
-4. Seeds `/opt/ploy/data/state/deployments.json` if missing
-5. Runs `install-platform-service.sh`, which installs `ployd.service` and the
-   maintenance/watchdog timers into systemd
-6. Restarts `ployd`
-7. Verifies:
-   - `systemctl status ployd`
-   - `systemctl status ploy-platform-watchdog.timer`
-   - `systemctl status ploy-maintenance.timer`
-   - `curl -fsS http://127.0.0.1:8081/health`
-   - `/opt/ploy/bin/ployctl system status`
-   - `/opt/ploy/bin/ployctl system metrics`
-   - `/opt/ploy/bin/ployctl system alerts`
-   - `/opt/ploy/bin/ployctl system audit`
-   - `/opt/ploy/bin/ployctl trading status`
-   - `/opt/ploy/bin/ploytui`
-   - `curl -N http://127.0.0.1:8081/api/events/stream`
+1. Verifies the CI bundle checksum and refuses to overwrite an existing SHA
+   release with different bytes.
+2. Installs the bundle under `/opt/ploy/releases/<sha>` and atomically switches
+   `/opt/ploy/current`, with rollback on failed postflight.
+3. Installs `deployment/ployd-trade.service` with exact restart, memory, and OOM
+   guardrails; no Rust build occurs on-host.
+4. Derives and verifies the execution principal, renders the wallet-bound live
+   manifest in memory, and applies it with `desired_state=paused`.
+5. Verifies the release receipt, health endpoint, operator surfaces, exact
+   systemd guardrails, absence of `cargo`/`rustc`, and
+   `desired=Paused observed=Paused`.
+
+Before changing a release, the trade workflow pauses the canonical live
+deployment, stops `ployd`, and rewrites every persisted live desired state to
+paused. Deploy and live approval share the `ploy-trade-host` concurrency group.
+Release files and stable config aliases remain root-owned; `ploy` receives write
+access only to state/run/log paths. Rollback restores the previous symlink,
+service unit, and environment while keeping live paused.
 
 ## Required Host Paths
 

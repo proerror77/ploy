@@ -70,7 +70,8 @@ when the mismatch is understood and tracked as a follow-up issue.
 | ACK deploy | `.github/workflows/deploy-ack.yml` | Deploy immutable SHA image tags through the protected `ack` environment |
 | Tango deploy | `.github/workflows/deploy-tango-1-1.yml` | Ship CI-built artifacts to `tango-1-1` and verify host health |
 | Trade deploy | `.github/workflows/deploy-trade.yml` | Deploy runner/configs to `ploy-trade-1` through a protected environment |
-| Platform release | `.github/workflows/release-platform.yml` | Build platform bundle and optionally deploy it |
+| Platform bundle | `.github/workflows/release-platform.yml` | Build a portable checksumed artifact only; named host workflows own deployment |
+| Live approval | `.github/workflows/approve-live-trade.yml` | Validate exact-SHA replay/dry-run/parity evidence, then require protected human approval before bounded live resume |
 
 `backtest.yml` emits `strategy_backtest_evaluation` as replay/backtest
 evidence, not as dry-run or live promotion evidence. Its `data_dir` path uses
@@ -247,13 +248,13 @@ closed dry-run rows when available, and falls back to current open rows when a
 fresh recording has not yet accumulated closed events. The workflow records the resolved window in the workflow summary, issue comment, and
 `resolved-window.json` artifact. Manual timestamps remain supported for
 reproducing a known incident window or an older research issue.
-The workflow is read-only evidence generation. `runner_source=deployed` is the
-default because runtime parity should compare the deployed dry-run report with
-the deployed `/opt/ploy/bin/ploy-runner` on the same host. Use
-`runner_source=workflow_ref` only as the branch-regression mode: it builds
-`new-ploy-runner` on the GitHub runner from the requested workflow ref, copies
-that temporary binary to the replay scratch directory on `tango-1-1`, and
-compares that branch binary against the deployed config/recording. Both modes
+The workflow is read-only evidence generation. `runner_source=workflow_ref` is
+the default so promotion evidence is bound to the exact reviewed Git SHA: it
+builds `new-ploy-runner` on the GitHub runner, copies that temporary binary to
+the replay scratch directory on `tango-1-1`, and compares it against the
+deployed config/recording. Use `runner_source=deployed` only as a diagnostic for
+the currently installed Tango binary; deployed-runner evidence cannot satisfy
+the protected live-approval gate. Both modes
 use a temporary replay config plus report/database reads. The workflow does not
 deploy artifacts, restart services, replace `/opt/ploy/bin/ploy-runner`, or
 enable live orders. Its `approval_environment` input therefore defaults to
