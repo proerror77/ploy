@@ -852,12 +852,7 @@ fn tango_deploy_removes_live_authority() {
         "environment: ${{ inputs.deploy && 'tango-1-1' || 'tango-1-1-build-only' }}",
         "Verify research bundle has no live authority",
         "research host bundle contains a live deployment",
-        "require_research_host_has_no_live",
-        "sed -i -E '/^[[:space:]]*(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=/d'",
-        "mode=Live",
-        "systemctl stop ployd.service",
-        "deployments pause",
-        "deployments archive",
+        "deploy_tango_cloud_assist.py --print-remote-script",
     ] {
         if !workflow.contains(needle) {
             offenders.push(format!("deploy-tango-1-1.yml: missing `{needle}`"));
@@ -890,10 +885,13 @@ fn tango_deploy_pm_trade_postflight_uses_collector_health_not_fresh_trade_rows()
     let cloud_assist = workflow_contents("scripts/ci/deploy_tango_cloud_assist.py");
     let mut offenders = Vec::new();
 
-    for (name, content) in [
-        ("deploy-tango-1-1.yml", workflow.as_str()),
-        ("deploy_tango_cloud_assist.py", cloud_assist.as_str()),
-    ] {
+    if !workflow.contains("deploy_tango_cloud_assist.py --print-remote-script") {
+        offenders.push(
+            "deploy-tango-1-1.yml: shared reviewed remote script is not executed".to_string(),
+        );
+    }
+
+    for (name, content) in [("deploy_tango_cloud_assist.py", cloud_assist.as_str())] {
         if content.contains(
             "SELECT EXISTS (SELECT 1 FROM clob_trade_ticks WHERE received_at >= NOW() - INTERVAL '5 minutes')",
         ) {
@@ -925,10 +923,7 @@ fn tango_deploy_pm_trade_postflight_uses_collector_health_not_fresh_trade_rows()
         }
     }
 
-    for (name, content) in [
-        ("deploy-tango-1-1.yml", workflow.as_str()),
-        ("deploy_tango_cloud_assist.py", cloud_assist.as_str()),
-    ] {
+    for (name, content) in [("deploy_tango_cloud_assist.py", cloud_assist.as_str())] {
         let discovery_restart = content.find("systemctl restart ploy-market-discovery.service");
         let catalog_wait = content
             .find("pm_market_catalog has no active crypto markets after market-discovery restart");
@@ -982,13 +977,6 @@ fn tango_deploy_pm_trade_postflight_uses_collector_health_not_fresh_trade_rows()
         }
     }
 
-    if !workflow.contains(
-        "\"pm trade collector did not complete a healthy poll after deploy\" \\\n              120 \\\n              5",
-    ) {
-        offenders.push(
-            "deploy-tango-1-1.yml: PM trade collector healthy-poll wait is too short".to_string(),
-        );
-    }
     if !cloud_assist.contains(
         "\"pm trade collector did not complete a healthy poll after deploy\" \\\\\n  120 \\\\\n  5",
     ) {
@@ -1399,6 +1387,7 @@ fn optimize_workflow_builds_and_runs_in_one_job() {
 #[test]
 fn deployed_research_tools_do_not_ship_legacy_factor_research_binary() {
     let deploy = workflow_contents(".github/workflows/deploy-tango-1-1.yml");
+    let deploy_helper = workflow_contents("scripts/ci/deploy_tango_cloud_assist.py");
     let acr = workflow_contents(".github/workflows/build-push-acr.yml");
     let dockerfile =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Dockerfile.research"))
@@ -1438,9 +1427,10 @@ fn deployed_research_tools_do_not_ship_legacy_factor_research_binary() {
             ));
         }
     }
-    if !deploy.contains("rm -f ${DEPLOY_ROOT}/bin/factor-research") {
+    if !deploy_helper.contains("rm -f \"${{DEPLOY_ROOT}}/bin/factor-research\"") {
         offenders.push(
-            "deploy-tango-1-1.yml: must remove stale factor-research binary on deploy".to_string(),
+            "deploy_tango_cloud_assist.py: must remove stale factor-research binary on deploy"
+                .to_string(),
         );
     }
     if !acr.contains("--example run_backtest") {

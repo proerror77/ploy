@@ -22,6 +22,8 @@ negative replay evidence blocks `dry_run_candidate` and `live_candidate`.
 - [ ] Verify both ECS identities, set pinned GitHub known-host secrets, and
       prove strict SSH or authenticated Cloud Assistant reachability.
 - [ ] Merge the bootstrap/reachability slice through PR and green CI.
+- [x] Restore Tango workflow dispatch by moving the oversized SSH heredoc onto
+      the shared, executable Cloud Assistant remote-script generator.
 - [ ] Deploy latest main to Tango; verify collectors, data freshness, research
       binaries, dry-run isolation, no live authority, and no on-host Rust build.
 - [ ] Run fresh snapshot, factor attribution, walk-forward, executable replay,
@@ -43,6 +45,17 @@ negative replay evidence blocks `dry_run_candidate` and `live_candidate`.
   workflow now downloads the versioned official Aliyun CLI v3.3.18 asset and
   verifies its published SHA256 before extraction or access-key configuration.
   Final review found no remaining P0/P1; actionlint and six contract tests pass.
+- PR #743 merged as `d3b7a7a6`. Two authenticated ECS searches found no
+  `PLOY_TRADE_1_HOST` match in the current Aliyun account, so the existing trade
+  host is not yet an attestable member of the requested Aliyun dual-host pair.
+- Dispatching Tango then exposed a repository workflow blocker before any host
+  mutation: GitHub rejected the 26 KB inline SSH script because one `run`
+  expression exceeded 21,000 characters. The SSH path now prints the same
+  generated remote script used by Cloud Assistant and pipes it to strict SSH.
+- The Tango bundle now builds, packages, and installs the matching `ployctl`
+  used by live-authority cleanup and postflight; it no longer relies on a stale
+  host binary. Full workflow security passed 30/30, platform workflow 1/1,
+  Python contracts 6/6, actionlint, generated-script `bash -n`, and diff checks.
 
 ---
 

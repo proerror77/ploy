@@ -234,6 +234,7 @@ if path.exists():
 PY
 
 install -m 0755 ./bin/ployd "${{DEPLOY_ROOT}}/bin/ployd"
+install -m 0755 ./bin/ployctl "${{DEPLOY_ROOT}}/bin/ployctl"
 install -m 0755 ./bin/ploy-runner "${{DEPLOY_ROOT}}/bin/ploy-runner"
 rm -f "${{DEPLOY_ROOT}}/bin/factor-research"
 install -m 0755 ./bin/research-snapshot-compile "${{DEPLOY_ROOT}}/bin/research-snapshot-compile"
@@ -550,4 +551,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--print-remote-script"]:
+        print(remote_script(), end="")
+        raise SystemExit(0)
     raise SystemExit(main())
