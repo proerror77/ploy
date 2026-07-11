@@ -16,6 +16,28 @@ Aliyun host mutation is split by role:
 checksums the portable platform bundle but has no remote host credentials or
 deployment job, so it cannot become a third production path.
 
+## Host Identity Bootstrap
+
+Both SSH deploy paths require alias-keyed pinned host material:
+`TANGO_1_1_KNOWN_HOSTS` for `tango-1-1` and
+`PLOY_TRADE_1_KNOWN_HOSTS` for `ploy-trade-1`. Never create these secrets from
+an unauthenticated `ssh-keyscan` result alone.
+
+When the trade-host secret is missing or the ECS host keys rotate, dispatch
+`.github/workflows/bootstrap-aliyun-host-keys.yml` from `main`. The workflow
+resolves the host to exactly one ECS instance, reads `/etc/ssh/ssh_host_*_key.pub`
+through authenticated Aliyun Cloud Assistant, and requires the public network
+keys to match that attestation. Download the resulting
+`ploy-trade-1-known-hosts` artifact, inspect its fingerprints in the workflow
+log, then set the repository secret:
+
+```bash
+gh secret set PLOY_TRADE_1_KNOWN_HOSTS < attested-known-hosts.txt
+```
+
+The bootstrap workflow only emits public host keys. It does not deploy, alter
+the instance, weaken `StrictHostKeyChecking`, or expose SSH private keys.
+
 The trade path deploys three binaries:
 
 - `/opt/ploy/bin/ployd`

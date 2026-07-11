@@ -1,3 +1,51 @@
+# Current Session - Aliyun Research Runtime And Paused Trade Deploy (2026-07-11)
+
+Evidence stage: `deployment/runtime safety plumbing`, followed by fresh
+`diagnostic` / `factor_attribution` / `executable_replay` evidence. Existing
+negative replay evidence blocks `dry_run_candidate` and `live_candidate`.
+
+## Files / Ownership
+
+- `.github/workflows/bootstrap-aliyun-host-keys.yml`
+  - Owner: authenticated ECS host-key attestation artifact; no deployment.
+- `.github/workflows/deploy-tango-1-1.yml`, research/audit workflows
+  - Owner: Cloud Assistant reachability when pinned SSH material is absent;
+    SSH remains strict and is never TOFU.
+- `docs/runbooks/`, `tests/`
+  - Owner: operator procedure and workflow contracts.
+- `tasks/todo.md`, `tasks/lessons.md`
+  - Owner: plan, runtime evidence, blockers, and reusable fixture lessons.
+
+## Tasks
+
+- [x] Add an authenticated Aliyun Cloud Assistant host-key attestation workflow.
+- [ ] Verify both ECS identities, set pinned GitHub known-host secrets, and
+      prove strict SSH or authenticated Cloud Assistant reachability.
+- [ ] Merge the bootstrap/reachability slice through PR and green CI.
+- [ ] Deploy latest main to Tango; verify collectors, data freshness, research
+      binaries, dry-run isolation, no live authority, and no on-host Rust build.
+- [ ] Run fresh snapshot, factor attribution, walk-forward, executable replay,
+      backtest/drawdown, and recorded parity as allowed by evidence gates.
+- [ ] Deploy latest main to `ploy-trade-1` paused; verify immutable SHA,
+      systemd guardrails, control plane, venue health, and approval receipt path.
+- [ ] Keep live paused unless fresh evidence passes and the user approves the
+      protected `ploy-trade-live` environment risk gate.
+
+## Review
+
+- PR #742 merged as `5e54364b`; all required CI passed after two worker tests
+  were corrected to use explicit fixture synchronization.
+- Repository secrets currently contain both host addresses and SSH keys but
+  lack `TANGO_1_1_KNOWN_HOSTS` and `PLOY_TRADE_1_KNOWN_HOSTS`. Local Aliyun CLI
+  credentials belong to a different/empty account, so host identity must be
+  attested inside GitHub Actions using repository-scoped Aliyun credentials.
+- Independent review found and closed one supply-chain blocker: the attestation
+  workflow now downloads the versioned official Aliyun CLI v3.3.18 asset and
+  verifies its published SHA256 before extraction or access-key configuration.
+  Final review found no remaining P0/P1; actionlint and six contract tests pass.
+
+---
+
 # Current Session - Live Admission And Account Guards (2026-07-11)
 
 Evidence stage: `implementation hardening`. Implement Slice 1 from the approved
