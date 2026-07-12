@@ -1,4 +1,61 @@
-# Current Session - Aliyun Research Runtime And Paused Trade Deploy (2026-07-11)
+# Current Session - Market Data V2 And Redeem Repair (2026-07-12)
+
+Evidence stage: `deployment/runtime safety plumbing`. This slice repairs data
+and settlement capabilities but does not itself produce `dry_run_candidate` or
+`live_candidate` evidence.
+
+## Files / Ownership
+
+- `Cargo.toml`, `Cargo.lock`, `crates/ploy-market-data/`
+  - Owner: Polymarket V2 SDK/API migration and collector compatibility.
+- `crates/ploy-runner-host/`, `deployment/systemd/`, deployment workflows
+  - Owner: public collector commands, services, packaging, and health checks.
+- account-ops crate/app and focused tests
+  - Owner: fail-closed Redeem check/plan/execute boundary and receipt evidence.
+- `docs/`, `tasks/todo.md`
+  - Owner: operator contract, verification, and remaining external blockers.
+
+## Tasks
+
+- [x] Replace the archived Polymarket V1 SDK with the official V2 SDK and
+      migrate Gamma discovery to keyset pagination.
+- [x] Preserve Polymarket CLOB/Data/RTDS collection contracts under V2 and add
+      focused compatibility tests.
+- [x] Add minimal public collectors for the declared missing CEX surfaces,
+      reusing one normalized collector loop and existing PostgreSQL boundary.
+- [x] Add an independent account-ops Redeem capability with read-only check and
+      plan by default; live submission must fail closed without explicit gates.
+- [x] Package collectors/account-ops in CI-built deploy artifacts while keeping
+      research hosts free of trading authority and trade deployment paused.
+- [x] Run focused checks, full relevant suites, review the diff, commit, push,
+      open a PR, and monitor CI.
+- [ ] Deploy only after trusted ECS identity is restored; do not bypass pinned
+      host identity or trigger live/redeem operations.
+
+## Review
+
+- Official Polymarket V2 `0.6.0` now owns active CLOB/Data/Gamma/RTDS paths.
+  Gamma discovery uses keyset pagination; RTDS compatibility tests cover current
+  equity update/snapshot payloads and the required encoded filter contract.
+- Public CEX collection covers Binance futures/force orders, OKX, Bybit,
+  Coinbase, and Kraken. Independent review corrected the Binance combined-stream
+  URL, added liquidation health evidence, and replaced stringly library errors
+  with a typed collector error.
+- Redeem is an isolated account-ops command, never a daemon. Check/plan is
+  read-only, position discovery paginates, execute requires the exact short-lived
+  plan hash plus an explicit write gate, and submitted/ambiguous operations stay
+  locked until exact-transaction reconciliation.
+- Local verification passed: 50 market-data tests, runner full-feature check,
+  13 deployment/runtime Python tests, 11 account-ops tests, dependency gate,
+  formatting, shell syntax, and diff checks. The official relayer dependency has
+  16 low-severity transitive advisories and no moderate/high/critical advisory.
+- Actual Aliyun deployment and live Redeem acceptance remain blocked on trusted
+  ECS identity and protected human approval; neither was bypassed in this slice.
+- PR #748 merged CEX collection as `7c516a63`, PR #746 merged guarded account
+  ops as `fd40a449`, and PR #747 merged the Polymarket V2 migration as
+  `8feefd68`; every required CI check passed.
+
+# Previous Session - Aliyun Research Runtime And Paused Trade Deploy (2026-07-11)
 
 Evidence stage: `deployment/runtime safety plumbing`, followed by fresh
 `diagnostic` / `factor_attribution` / `executable_replay` evidence. Existing
