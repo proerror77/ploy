@@ -14,9 +14,8 @@ does not deploy, resume trading, or produce promotion evidence.
 - [x] Add a failing runtime test proving idle market updates do not reconcile.
 - [x] Skip reconciliation until an active order exists.
 - [x] Run focused tests, formatting, and diff checks.
-- [ ] Follow-up: separate market-catalog refresh from quote refresh before
-      lowering the 2-second DB polling interval; do not multiply catalog query
-      load or reopen direct public feeds from strategy runners.
+- [x] Separate market-catalog refresh from quote refresh and lower active quote
+      polling to 100ms while keeping catalog queries at 2 seconds.
 
 ## Review
 
@@ -29,6 +28,12 @@ does not deploy, resume trading, or produce promotion evidence.
 - Verification passed: 203 `ploy-strategy-bundles` library tests, the
   `ploy-strategy-runtime` live/live-execution build, workspace formatting, and
   `git diff --check`. The build reports 16 existing dead-code warnings.
+- The DB feed now prioritizes 100ms quote ticks while retaining 2-second catalog
+  refreshes. Both timers skip missed ticks, so a slow DB response does not cause
+  a burst of stale catch-up queries; catalog failures preserve the last known
+  active-token set.
+- Second-slice verification passed: 54 live market-data tests, 11 live strategy
+  runtime tests, six market-data-boundary tests, formatting, and diff checks.
 
 # Current Session - Market Data V2 And Redeem Repair (2026-07-12)
 

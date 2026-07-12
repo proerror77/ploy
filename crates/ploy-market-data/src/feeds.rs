@@ -496,6 +496,12 @@ pub fn spawn_db_polymarket_feed(
         let mut expired_events = HashSet::new();
         let mut last_quote_ts: HashMap<String, DateTime<Utc>> = HashMap::new();
         let mut last_book_ts: HashMap<String, DateTime<Utc>> = HashMap::new();
+        let mut active_tokens = Vec::new();
+        let (catalog_poll_interval, quote_poll_interval) = db_polymarket_poll_intervals();
+        let mut catalog_poll = tokio::time::interval(catalog_poll_interval);
+        let mut quote_poll = tokio::time::interval(quote_poll_interval);
+        catalog_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        quote_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         info!(
             symbols = ?symbols_upper,
@@ -503,228 +509,259 @@ pub fn spawn_db_polymarket_feed(
         );
 
         loop {
-            let now = Utc::now();
-            let mut active_tokens = Vec::new();
-
-            let rows: Vec<(
-                String,
-                Option<String>,
-                Option<DateTime<Utc>>,
-                Option<DateTime<Utc>>,
-                Option<String>,
-                Option<String>,
-                Option<Decimal>,
-            )> = match sqlx::query_as(
-                r#"
-                SELECT
-                    market_slug,
-                    symbol,
-                    start_time,
-                    end_time,
-                    ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->>0) AS up_token_id,
-                    ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->>1) AS down_token_id,
-                    price_to_beat
-                FROM pm_market_metadata
-                WHERE symbol = ANY($1)
-                  AND end_time > NOW() - ($2::BIGINT * INTERVAL '1 second')
-                  AND COALESCE(start_time, end_time - INTERVAL '300 seconds')
-                        < NOW() + INTERVAL '6 minutes'
-                  AND raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
-                ORDER BY start_time, end_time, market_slug
-                "#,
-            )
-            .bind(&symbols_upper)
-            .bind(DB_POLYMARKET_SETTLEMENT_RETRY_LOOKBACK_SECS)
-            .fetch_all(&pool)
-            .await
-            {
-                Ok(rows) => rows,
-                Err(error) => {
-                    warn!(error = %error, "DB Polymarket event query failed");
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    continue;
-                }
-            };
-
-            for (event_id, symbol, start_time, end_time, up_token, down_token, price_to_beat) in
-                rows
-            {
-                let Some(symbol) = symbol.filter(|value| !value.is_empty()) else {
-                    continue;
-                };
-                let Some(end_time) = end_time else {
-                    continue;
-                };
-                let Some(up_token) = up_token.map(|value| normalize_token_id(&value)) else {
-                    continue;
-                };
-                let Some(down_token) = down_token.map(|value| normalize_token_id(&value)) else {
-                    continue;
-                };
-                if up_token.is_empty() || down_token.is_empty() {
-                    continue;
-                }
-
-                let start_time = start_time.unwrap_or(end_time - Duration::seconds(300));
-                let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
-
-                if discovered_events.insert(event_id.clone()) {
-                    let _ = tx.send(MarketUpdate::EventDiscovered {
-                        event_id: Arc::from(event_id.as_str()),
-                        symbol: Arc::from(symbol.as_str()),
-                        up_token: Arc::from(up_token.as_str()),
-                        down_token: Arc::from(down_token.as_str()),
-                        end_time,
-                        window_secs,
-                        price_to_beat,
-                        resolved_up_won: None,
-                    });
-                }
-
-                if end_time <= now {
-                    if !expired_events.contains(&event_id) {
-                        let resolved_up_won =
-                            resolve_db_event_outcome(&pool, &event_id, &up_token, &down_token)
-                                .await;
-                        if !mark_db_event_expired_if_resolved(
-                            &mut expired_events,
-                            &event_id,
-                            resolved_up_won,
-                        ) {
-                            debug!(
-                                event_id = %event_id,
-                                "DB Polymarket event settlement pending; retrying until official outcome is available",
-                            );
-                            continue;
-                        }
-                        let _ = tx.send(MarketUpdate::EventExpired {
-                            event_id: Arc::from(event_id.as_str()),
-                            end_time,
-                            resolved_up_won,
-                        });
-                    }
-                } else {
-                    active_tokens.push(up_token);
-                    active_tokens.push(down_token);
-                }
-            }
-
-            if !active_tokens.is_empty() {
-                let quote_rows: Vec<(
-                    String,
-                    Option<Decimal>,
-                    Option<Decimal>,
-                    Option<Decimal>,
-                    Option<Decimal>,
-                    DateTime<Utc>,
-                )> = match sqlx::query_as(
-                    r#"
-                    SELECT DISTINCT ON (token_id)
-                        token_id, best_bid, best_ask, bid_size, ask_size, received_at
-                    FROM clob_quote_ticks
-                    WHERE token_id = ANY($1)
-                      AND received_at > NOW() - INTERVAL '30 seconds'
-                      AND (best_bid IS NOT NULL OR best_ask IS NOT NULL)
-                    ORDER BY token_id, received_at DESC
-                    "#,
-                )
-                .bind(&active_tokens)
-                .fetch_all(&pool)
-                .await
-                {
-                    Ok(rows) => rows,
-                    Err(error) => {
-                        warn!(error = %error, "DB Polymarket quote query failed");
-                        Vec::new()
-                    }
-                };
-
-                for (token_id, bid, ask, bid_size, ask_size, ts) in quote_rows {
-                    if last_quote_ts
-                        .get(&token_id)
-                        .is_some_and(|last_ts| *last_ts >= ts)
-                    {
-                        continue;
-                    }
-                    last_quote_ts.insert(token_id.clone(), ts);
-                    if tx
-                        .send(MarketUpdate::Quote {
-                            token_id: Arc::from(token_id.as_str()),
-                            bid,
-                            ask,
-                            bid_size,
-                            ask_size,
-                            bid_levels: Vec::new(),
-                            ask_levels: Vec::new(),
-                            ts,
-                        })
-                        .is_err()
-                    {
+            tokio::select! {
+                biased;
+                _ = quote_poll.tick(), if !active_tokens.is_empty() => {
+                    if !publish_db_polymarket_quotes(
+                        &tx,
+                        &pool,
+                        &active_tokens,
+                        &mut last_quote_ts,
+                        &mut last_book_ts,
+                    ).await {
                         return;
                     }
                 }
-
-                let book_rows: Vec<(String, Value, Value, DateTime<Utc>)> = match sqlx::query_as(
-                    r#"
-                    SELECT DISTINCT ON (token_id)
-                        token_id, bids, asks, received_at
-                    FROM clob_orderbook_snapshots
-                    WHERE token_id = ANY($1)
-                      AND received_at > NOW() - INTERVAL '30 seconds'
-                      AND (
-                          jsonb_array_length(bids) > 0
-                          OR jsonb_array_length(asks) > 0
-                      )
-                    ORDER BY token_id, received_at DESC
-                    "#,
-                )
-                .bind(&active_tokens)
-                .fetch_all(&pool)
-                .await
-                {
-                    Ok(rows) => rows,
-                    Err(error) => {
-                        warn!(error = %error, "DB Polymarket orderbook query failed");
-                        Vec::new()
-                    }
-                };
-
-                for (token_id, bids, asks, ts) in book_rows {
-                    if last_book_ts
-                        .get(&token_id)
-                        .is_some_and(|last_ts| *last_ts >= ts)
-                    {
-                        continue;
-                    }
-                    let bid_levels = book_levels_from_json(&bids, false);
-                    let ask_levels = book_levels_from_json(&asks, true);
-                    if bid_levels.is_empty() && ask_levels.is_empty() {
-                        continue;
-                    }
-                    let best_bid = bid_levels.first();
-                    let best_ask = ask_levels.first();
-                    last_book_ts.insert(token_id.clone(), ts);
-                    if tx
-                        .send(MarketUpdate::Quote {
-                            token_id: Arc::from(token_id.as_str()),
-                            bid: best_bid.map(|level| level.price),
-                            ask: best_ask.map(|level| level.price),
-                            bid_size: best_bid.map(|level| level.size),
-                            ask_size: best_ask.map(|level| level.size),
-                            bid_levels,
-                            ask_levels,
-                            ts,
-                        })
-                        .is_err()
-                    {
-                        return;
+                _ = catalog_poll.tick() => {
+                    match refresh_db_polymarket_catalog(
+                        &tx,
+                        &symbols_upper,
+                        &pool,
+                        &mut discovered_events,
+                        &mut expired_events,
+                    ).await {
+                        Ok(tokens) => active_tokens = tokens,
+                        Err(error) => warn!(error = %error, "DB Polymarket event query failed"),
                     }
                 }
             }
-
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     })
+}
+
+fn db_polymarket_poll_intervals() -> (StdDuration, StdDuration) {
+    (StdDuration::from_secs(2), StdDuration::from_millis(100))
+}
+
+async fn refresh_db_polymarket_catalog(
+    tx: &broadcast::Sender<MarketUpdate>,
+    symbols: &[String],
+    pool: &PgPool,
+    discovered_events: &mut HashSet<String>,
+    expired_events: &mut HashSet<String>,
+) -> Result<Vec<String>, sqlx::Error> {
+    let now = Utc::now();
+    let rows: Vec<(
+        String,
+        Option<String>,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+        Option<String>,
+        Option<String>,
+        Option<Decimal>,
+    )> = sqlx::query_as(
+        r#"
+        SELECT
+            market_slug,
+            symbol,
+            start_time,
+            end_time,
+            ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->>0) AS up_token_id,
+            ((raw_market->'markets'->0->>'clobTokenIds')::jsonb->>1) AS down_token_id,
+            price_to_beat
+        FROM pm_market_metadata
+        WHERE symbol = ANY($1)
+          AND end_time > NOW() - ($2::BIGINT * INTERVAL '1 second')
+          AND COALESCE(start_time, end_time - INTERVAL '300 seconds')
+                < NOW() + INTERVAL '6 minutes'
+          AND raw_market->'markets'->0->'clobTokenIds' IS NOT NULL
+        ORDER BY start_time, end_time, market_slug
+        "#,
+    )
+    .bind(symbols)
+    .bind(DB_POLYMARKET_SETTLEMENT_RETRY_LOOKBACK_SECS)
+    .fetch_all(pool)
+    .await?;
+    let mut active_tokens = Vec::new();
+
+    for (event_id, symbol, start_time, end_time, up_token, down_token, price_to_beat) in rows {
+        let Some(symbol) = symbol.filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        let Some(end_time) = end_time else {
+            continue;
+        };
+        let Some(up_token) = up_token.map(|value| normalize_token_id(&value)) else {
+            continue;
+        };
+        let Some(down_token) = down_token.map(|value| normalize_token_id(&value)) else {
+            continue;
+        };
+        if up_token.is_empty() || down_token.is_empty() {
+            continue;
+        }
+
+        let start_time = start_time.unwrap_or(end_time - Duration::seconds(300));
+        let window_secs = (end_time - start_time).num_seconds().max(0) as u64;
+
+        if discovered_events.insert(event_id.clone()) {
+            let _ = tx.send(MarketUpdate::EventDiscovered {
+                event_id: Arc::from(event_id.as_str()),
+                symbol: Arc::from(symbol.as_str()),
+                up_token: Arc::from(up_token.as_str()),
+                down_token: Arc::from(down_token.as_str()),
+                end_time,
+                window_secs,
+                price_to_beat,
+                resolved_up_won: None,
+            });
+        }
+
+        if end_time <= now {
+            if !expired_events.contains(&event_id) {
+                let resolved_up_won =
+                    resolve_db_event_outcome(pool, &event_id, &up_token, &down_token).await;
+                if !mark_db_event_expired_if_resolved(expired_events, &event_id, resolved_up_won) {
+                    debug!(
+                        event_id = %event_id,
+                        "DB Polymarket event settlement pending; retrying until official outcome is available",
+                    );
+                    continue;
+                }
+                let _ = tx.send(MarketUpdate::EventExpired {
+                    event_id: Arc::from(event_id.as_str()),
+                    end_time,
+                    resolved_up_won,
+                });
+            }
+        } else {
+            active_tokens.push(up_token);
+            active_tokens.push(down_token);
+        }
+    }
+
+    Ok(active_tokens)
+}
+
+async fn publish_db_polymarket_quotes(
+    tx: &broadcast::Sender<MarketUpdate>,
+    pool: &PgPool,
+    active_tokens: &[String],
+    last_quote_ts: &mut HashMap<String, DateTime<Utc>>,
+    last_book_ts: &mut HashMap<String, DateTime<Utc>>,
+) -> bool {
+    let quote_rows: Vec<(
+        String,
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<Decimal>,
+        Option<Decimal>,
+        DateTime<Utc>,
+    )> = match sqlx::query_as(
+        r#"
+        SELECT DISTINCT ON (token_id)
+            token_id, best_bid, best_ask, bid_size, ask_size, received_at
+        FROM clob_quote_ticks
+        WHERE token_id = ANY($1)
+          AND received_at > NOW() - INTERVAL '30 seconds'
+          AND (best_bid IS NOT NULL OR best_ask IS NOT NULL)
+        ORDER BY token_id, received_at DESC
+        "#,
+    )
+    .bind(active_tokens)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(error = %error, "DB Polymarket quote query failed");
+            Vec::new()
+        }
+    };
+
+    for (token_id, bid, ask, bid_size, ask_size, ts) in quote_rows {
+        if last_quote_ts
+            .get(&token_id)
+            .is_some_and(|last_ts| *last_ts >= ts)
+        {
+            continue;
+        }
+        last_quote_ts.insert(token_id.clone(), ts);
+        if tx
+            .send(MarketUpdate::Quote {
+                token_id: Arc::from(token_id.as_str()),
+                bid,
+                ask,
+                bid_size,
+                ask_size,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
+                ts,
+            })
+            .is_err()
+        {
+            return false;
+        }
+    }
+
+    let book_rows: Vec<(String, Value, Value, DateTime<Utc>)> = match sqlx::query_as(
+        r#"
+        SELECT DISTINCT ON (token_id)
+            token_id, bids, asks, received_at
+        FROM clob_orderbook_snapshots
+        WHERE token_id = ANY($1)
+          AND received_at > NOW() - INTERVAL '30 seconds'
+          AND (
+              jsonb_array_length(bids) > 0
+              OR jsonb_array_length(asks) > 0
+          )
+        ORDER BY token_id, received_at DESC
+        "#,
+    )
+    .bind(active_tokens)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(error = %error, "DB Polymarket orderbook query failed");
+            Vec::new()
+        }
+    };
+
+    for (token_id, bids, asks, ts) in book_rows {
+        if last_book_ts
+            .get(&token_id)
+            .is_some_and(|last_ts| *last_ts >= ts)
+        {
+            continue;
+        }
+        let bid_levels = book_levels_from_json(&bids, false);
+        let ask_levels = book_levels_from_json(&asks, true);
+        if bid_levels.is_empty() && ask_levels.is_empty() {
+            continue;
+        }
+        let best_bid = bid_levels.first();
+        let best_ask = ask_levels.first();
+        last_book_ts.insert(token_id.clone(), ts);
+        if tx
+            .send(MarketUpdate::Quote {
+                token_id: Arc::from(token_id.as_str()),
+                bid: best_bid.map(|level| level.price),
+                ask: best_ask.map(|level| level.price),
+                bid_size: best_bid.map(|level| level.size),
+                ask_size: best_ask.map(|level| level.size),
+                bid_levels,
+                ask_levels,
+                ts,
+            })
+            .is_err()
+        {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn mark_db_event_expired_if_resolved(
@@ -1478,9 +1515,9 @@ fn parse_agg_trade_msg(v: &serde_json::Value) -> Option<AggTradeMsg> {
 #[cfg(test)]
 mod tests {
     use super::{
-        book_quote_from_rest, equity_price_subscription, l2_updates_from_book,
-        mark_db_event_expired_if_resolved, parse_agg_trade_msg, parse_equity_price_payload,
-        rtds_market_data_ws_config, RestBook,
+        book_quote_from_rest, db_polymarket_poll_intervals, equity_price_subscription,
+        l2_updates_from_book, mark_db_event_expired_if_resolved, parse_agg_trade_msg,
+        parse_equity_price_payload, rtds_market_data_ws_config, RestBook,
     };
     use chrono::Utc;
     use ploy_market_contracts::MarketUpdate;
@@ -1496,6 +1533,13 @@ mod tests {
         assert_eq!(config.heartbeat_interval, Duration::from_secs(15));
         assert_eq!(config.heartbeat_timeout, Duration::from_secs(45));
         assert!(config.reconnect.max_attempts.is_none());
+    }
+
+    #[test]
+    fn db_polymarket_quotes_refresh_without_accelerating_catalog_queries() {
+        let (catalog, quotes) = db_polymarket_poll_intervals();
+        assert_eq!(catalog, Duration::from_secs(2));
+        assert_eq!(quotes, Duration::from_millis(100));
     }
 
     #[test]
