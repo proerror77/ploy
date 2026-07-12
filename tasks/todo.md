@@ -22976,3 +22976,45 @@ resume live trading.
   the latest replay had one losing trade and `promotion_ready=false`. This
   slice therefore changes safety plumbing only and does not deploy or resume
   live trading.
+
+# CEX Public Market Data (2026-07-12)
+
+## Goal
+
+Collect current public Binance Futures metrics/liquidations and normalized L2
+books from OKX, Bybit, Coinbase Advanced Trade, and Kraken v2 on the Tango
+research host. This is data-collection plumbing only; it does not change any
+strategy promotion or live-trading gate.
+
+## TDD seams
+
+- Public parser/state seam: official exchange payloads produce normalized
+  futures snapshots, liquidation events, and L2 book snapshots.
+- Operator seam: `ploy-runner` exposes one collector command and the Tango
+  deployment installs, starts, and verifies its systemd service.
+
+## Files / Ownership
+
+- `crates/ploy-market-data/` and `crates/ploy-runner-host/`: collector and CLI.
+- `migrations/049_cex_public_market_data.sql`: normalized persistence contract.
+- `deployment/systemd/`, Tango workflows/scripts, and health/audit scripts:
+  deploy and runtime evidence.
+- `docs/COLLECTOR_RUNBOOK.md`: operator contract.
+
+## Tasks
+
+- [x] Add failing parser/state tests for futures, liquidations, and four L2 feeds.
+- [x] Implement the minimum collector and schema that make those tests pass.
+- [x] Wire the CLI, systemd service, Tango bundle/deploy/health checks, and audits.
+- [x] Update docs and run focused Rust/Python/workflow validation.
+- [x] Review the diff, record evidence here, and commit atomically.
+
+## Review
+
+- Added one normalized table, collector command, and systemd unit for Binance
+  Futures plus OKX, Bybit, Coinbase, and Kraken public L2 data.
+- Kraken validates the official CRC32 top-ten checksum without discarding
+  decimal scale; Bybit delta/reset and all venue payloads have focused tests.
+- Validation: 47 market-data Rust tests, runner full-feature check, 41 focused
+  Python workflow/audit tests, and 30 workflow-security tests passed. Binance
+  premium-index, open-interest, and basis REST probes also passed live.

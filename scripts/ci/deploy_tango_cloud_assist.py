@@ -195,6 +195,7 @@ for unit in \\
   ploy-binance-price-collector.service \\
   ploy-deribit-iv-collector.service \\
   ploy-deribit-greeks-collector.service \\
+  ploy-cex-public-collector.service \\
   ploy-market-discovery.service \\
   ploy-quote-collector.service \\
   ploy-pm-trade-collector.service; do
@@ -264,6 +265,7 @@ install -m 0644 ./deployment/systemd/ploy-binance-lob-collector.service /etc/sys
 install -m 0644 ./deployment/systemd/ploy-binance-price-collector.service /etc/systemd/system/ploy-binance-price-collector.service
 install -m 0644 ./deployment/systemd/ploy-deribit-iv-collector.service /etc/systemd/system/ploy-deribit-iv-collector.service
 install -m 0644 ./deployment/systemd/ploy-deribit-greeks-collector.service /etc/systemd/system/ploy-deribit-greeks-collector.service
+install -m 0644 ./deployment/systemd/ploy-cex-public-collector.service /etc/systemd/system/ploy-cex-public-collector.service
 install -m 0644 ./deployment/systemd/ploy-market-discovery.service /etc/systemd/system/ploy-market-discovery.service
 install -m 0644 ./deployment/systemd/ploy-pm-trade-collector.service /etc/systemd/system/ploy-pm-trade-collector.service
 install -m 0644 ./deployment/systemd/ploy-polymarket-v2-indexer-import.service /etc/systemd/system/ploy-polymarket-v2-indexer-import.service
@@ -303,6 +305,8 @@ systemctl enable --now ploy-deribit-iv-collector.service
 systemctl restart ploy-deribit-iv-collector.service
 systemctl enable --now ploy-deribit-greeks-collector.service
 systemctl restart ploy-deribit-greeks-collector.service
+systemctl enable --now ploy-cex-public-collector.service
+systemctl restart ploy-cex-public-collector.service
 systemctl enable --now ploy-market-discovery.service
 systemctl restart ploy-market-discovery.service
 if ! check_recent_rows \\
@@ -354,6 +358,8 @@ systemctl is-active --quiet ploy-deribit-iv-collector.service
 require_service_guardrails ploy-deribit-iv-collector.service
 systemctl is-active --quiet ploy-deribit-greeks-collector.service
 require_service_guardrails ploy-deribit-greeks-collector.service
+systemctl is-active --quiet ploy-cex-public-collector.service
+require_service_guardrails ploy-cex-public-collector.service
 systemctl is-active --quiet ploy-market-discovery.service
 require_service_guardrails ploy-market-discovery.service
 if service_exists ployd.service; then
@@ -367,6 +373,14 @@ fi
 wait_for_recent_rows \\
   "SELECT EXISTS (SELECT 1 FROM binance_agg_trade_ticks WHERE trade_time >= NOW() - INTERVAL '10 minutes')" \\
   "binance_agg_trade_ticks is not fresh after deploy"
+wait_for_recent_rows \\
+  "SELECT EXISTS (SELECT 1 FROM cex_public_market_ticks WHERE kind = 'derivatives_snapshot' AND event_time >= NOW() - INTERVAL '5 minutes')" \\
+  "Binance futures public data is not fresh after deploy"
+for cex in okx bybit coinbase kraken; do
+  wait_for_recent_rows \\
+    "SELECT EXISTS (SELECT 1 FROM cex_public_market_ticks WHERE exchange = '${{cex}}' AND kind = 'lob' AND event_time >= NOW() - INTERVAL '5 minutes')" \\
+    "${{cex}} L2 public data is not fresh after deploy"
+done
 wait_for_recent_rows \\
   "SELECT EXISTS (SELECT 1 FROM binance_lob_ticks WHERE event_time >= NOW() - INTERVAL '10 minutes')" \\
   "binance_lob_ticks is not fresh after deploy"

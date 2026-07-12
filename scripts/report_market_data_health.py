@@ -58,14 +58,16 @@ def source_snapshot(
     stale_after_seconds: int,
     scan_table: Optional[str] = None,
     latest_method: str = "order",
+    where_sql: str = "TRUE",
 ):
     scan_table = scan_table or table
     if latest_method == "max":
-        latest_sql = f"SELECT max({timestamp_column}) AS latest_at FROM {scan_table}"
+        latest_sql = f"SELECT max({timestamp_column}) AS latest_at FROM {scan_table} WHERE {where_sql}"
     else:
         latest_sql = f"""
   SELECT {timestamp_column} AS latest_at
   FROM {scan_table}
+  WHERE {where_sql}
   ORDER BY {timestamp_column} DESC
   LIMIT 1
 """
@@ -163,6 +165,41 @@ def main() -> int:
                 "deribit_atm_greeks_ticks",
                 "fetched_at",
                 300,
+            ),
+            source_snapshot(
+                "binance_futures",
+                "cex_public_market_ticks",
+                "event_time",
+                300,
+                where_sql="source_key = 'binance/derivatives_snapshot'",
+            ),
+            source_snapshot(
+                "okx_lob",
+                "cex_public_market_ticks",
+                "event_time",
+                300,
+                where_sql="source_key = 'okx/lob'",
+            ),
+            source_snapshot(
+                "bybit_lob",
+                "cex_public_market_ticks",
+                "event_time",
+                300,
+                where_sql="source_key = 'bybit/lob'",
+            ),
+            source_snapshot(
+                "coinbase_lob",
+                "cex_public_market_ticks",
+                "event_time",
+                300,
+                where_sql="source_key = 'coinbase/lob'",
+            ),
+            source_snapshot(
+                "kraken_lob",
+                "cex_public_market_ticks",
+                "event_time",
+                300,
+                where_sql="source_key = 'kraken/lob'",
             ),
         ]
         payload = {

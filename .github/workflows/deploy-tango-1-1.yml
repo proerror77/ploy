@@ -57,6 +57,7 @@ env:
     046_factor_registry_blockers.sql
     047_full_depth_execution_surfaces.sql
     048_official_settlement_coverage_checks.sql
+    049_cex_public_market_data.sql
 
 jobs:
   build-and-deploy:
@@ -225,6 +226,7 @@ jobs:
           cp deployment/systemd/ploy-binance-price-collector.service dist/deployment/systemd/ploy-binance-price-collector.service
           cp deployment/systemd/ploy-deribit-iv-collector.service dist/deployment/systemd/ploy-deribit-iv-collector.service
           cp deployment/systemd/ploy-deribit-greeks-collector.service dist/deployment/systemd/ploy-deribit-greeks-collector.service
+          cp deployment/systemd/ploy-cex-public-collector.service dist/deployment/systemd/ploy-cex-public-collector.service
           cp deployment/systemd/ploy-market-discovery.service dist/deployment/systemd/ploy-market-discovery.service
           cp deployment/systemd/ploy-pm-trade-collector.service dist/deployment/systemd/ploy-pm-trade-collector.service
           cp deployment/systemd/ploy-polymarket-v2-indexer-import.service dist/deployment/systemd/ploy-polymarket-v2-indexer-import.service
@@ -405,7 +407,7 @@ jobs:
             echo "- Target: \`${{ secrets.TANGO_1_1_HOST }}\`"
             echo "- Transport: \`GitHub Actions -> OSS -> SSH, fallback Cloud Assistant\`"
             echo "- OSS object: \`${{ steps.upload_bundle_to_oss.outputs.bundle_object }}\`"
-            echo "- Services: \`ployd\` (if installed), \`ploy-binance-aggtrade-collector\`, \`ploy-binance-price-collector\`, \`ploy-binance-lob-collector\`, \`ploy-deribit-iv-collector\`, \`ploy-market-discovery\`, \`ploy-quote-collector\`, \`ploy-pm-trade-collector\`"
+            echo "- Services: \`ployd\` (if installed), existing collectors, and \`ploy-cex-public-collector\`"
             echo "- Git ref: \`${{ github.event.inputs.git_ref }}\`"
             echo "- Migrations: \`${DEPLOY_MIGRATIONS}\`"
             echo "- Postgres pre/postflight: required"

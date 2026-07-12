@@ -5309,6 +5309,7 @@ name = "ploy-market-data"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "crc32fast",
  "futures",
  "ploy-market-contracts",
  "polymarket-client-sdk",

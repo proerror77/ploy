@@ -61,6 +61,13 @@ SOURCE_PROFILES = {
         "binance_lob",
     ],
     "research-windows": ["research_valid_windows"],
+    "cex-extended": [
+        "binance_futures",
+        "okx_lob",
+        "bybit_lob",
+        "coinbase_lob",
+        "kraken_lob",
+    ],
 }
 
 
@@ -841,6 +848,46 @@ def gap_targets(symbols: Iterable[str]) -> list[GapTarget]:
         ),
         GapTarget("deribit_iv", "deribit_iv_ticks", "fetched_at", 900),
         GapTarget("deribit_atm_greeks", "deribit_atm_greeks_ticks", "fetched_at", 900),
+        GapTarget(
+            "binance_futures",
+            "cex_public_market_ticks",
+            "event_time",
+            300,
+            filter_column="source_key",
+            filter_value="binance/derivatives_snapshot",
+        ),
+        GapTarget(
+            "okx_lob",
+            "cex_public_market_ticks",
+            "event_time",
+            300,
+            filter_column="source_key",
+            filter_value="okx/lob",
+        ),
+        GapTarget(
+            "bybit_lob",
+            "cex_public_market_ticks",
+            "event_time",
+            300,
+            filter_column="source_key",
+            filter_value="bybit/lob",
+        ),
+        GapTarget(
+            "coinbase_lob",
+            "cex_public_market_ticks",
+            "event_time",
+            300,
+            filter_column="source_key",
+            filter_value="coinbase/lob",
+        ),
+        GapTarget(
+            "kraken_lob",
+            "cex_public_market_ticks",
+            "event_time",
+            300,
+            filter_column="source_key",
+            filter_value="kraken/lob",
+        ),
     ]
     for symbol in symbols:
         targets.extend(
