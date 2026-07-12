@@ -26,15 +26,15 @@ use crate::discovery::crypto::DiscoveredCryptoMarket;
 use crate::discovery::sports::discover_sports_markets;
 use crate::discovery::upsert_market_catalog;
 use crate::feeds::spawn_quote_feed_until;
+use crate::gamma_keyset::fetch_markets;
 use crate::reference_prices::{new_reference_price_registry, ReferencePriceRegistry};
 
 const SCAN_INTERVAL_SECS: u64 = 30;
 const SPORTS_DISCOVERY_REFRESH_SECS: i64 = 300;
 const SPORTS_DISCOVERY_LIMIT: i32 = 500;
 const DEFAULT_DISCOVERY_LOOKAHEAD_MINUTES: i64 = 20;
-const CRYPTO_MARKET_CATEGORY: &str = "Crypto";
 const CRYPTO_DISCOVERY_PAGE_LIMIT: i32 = 100;
-const CRYPTO_DISCOVERY_MAX_PAGES: i32 = 12;
+const CRYPTO_DISCOVERY_MAX_MARKETS: usize = 1_200;
 const QUOTE_FEED_GRACE_SECS: i64 = 90;
 /// How far back to look for open positions that need recovery on startup.
 const RECOVERY_LOOKBACK_HOURS: i64 = 48;
@@ -167,14 +167,9 @@ pub fn spawn_market_scanner(
 
             expire_tracked_events(&tx, &mut tracked, pool.as_ref(), now).await;
 
-            let mut request = MarketsRequest::default();
-            request.end_date_min = Some(now);
-            request.end_date_max = Some(now + Duration::minutes(6));
-            request.category = Some(CRYPTO_MARKET_CATEGORY.to_string());
-            request.closed = Some(false);
-            request.limit = Some(100);
+            let request = crypto_markets_request(now, 6);
 
-            match client.markets(&request).await {
+            match fetch_markets(&request, CRYPTO_DISCOVERY_MAX_MARKETS).await {
                 Ok(markets) => {
                     let mut new_tokens: Vec<U256> = Vec::new();
                     let mut quote_stop_at: Option<DateTime<Utc>> = None;
@@ -610,55 +605,34 @@ fn should_refresh_sports_catalog(
 }
 
 async fn refresh_crypto_catalog(
-    client: &GammaClient,
+    _client: &GammaClient,
     pool: &PgPool,
     reference_prices: &ReferencePriceRegistry,
     symbols: &[String],
     now: DateTime<Utc>,
     lookahead_minutes: i64,
 ) -> usize {
-    let mut discovered_count = 0;
-
-    for page in 0..CRYPTO_DISCOVERY_MAX_PAGES {
-        let request = crypto_markets_request(now, lookahead_minutes, page);
-
-        match client.markets(&request).await {
-            Ok(markets) => {
-                if markets.is_empty() {
-                    break;
-                }
-
-                let discovered =
-                    discover_crypto_markets(&markets, symbols, reference_prices, now).await;
-                for market in &discovered {
-                    persist_discovered_crypto_market(Some(pool), market).await;
-                }
-                discovered_count += discovered.len();
-
-                if markets.len() < CRYPTO_DISCOVERY_PAGE_LIMIT as usize {
-                    break;
-                }
+    let request = crypto_markets_request(now, lookahead_minutes);
+    match fetch_markets(&request, CRYPTO_DISCOVERY_MAX_MARKETS).await {
+        Ok(markets) => {
+            let discovered =
+                discover_crypto_markets(&markets, symbols, reference_prices, now).await;
+            for market in &discovered {
+                persist_discovered_crypto_market(Some(pool), market).await;
             }
-            Err(error) => {
-                warn!(
-                    error = %error,
-                    page,
-                    "Gamma markets query failed during catalog refresh"
-                );
-                break;
-            }
+            discovered.len()
+        }
+        Err(error) => {
+            warn!(error = %error, "Gamma markets keyset query failed during catalog refresh");
+            0
         }
     }
-
-    discovered_count
 }
 
-fn crypto_markets_request(now: DateTime<Utc>, lookahead_minutes: i64, page: i32) -> MarketsRequest {
+fn crypto_markets_request(now: DateTime<Utc>, lookahead_minutes: i64) -> MarketsRequest {
     let mut request = MarketsRequest::default();
     request.end_date_min = Some(now - Duration::minutes(1));
     request.end_date_max = Some(now + Duration::minutes(lookahead_minutes));
-    request.offset = Some(page * CRYPTO_DISCOVERY_PAGE_LIMIT);
-    request.category = Some(CRYPTO_MARKET_CATEGORY.to_string());
     request.closed = Some(false);
     request.limit = Some(CRYPTO_DISCOVERY_PAGE_LIMIT);
     request
@@ -782,10 +756,11 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use polymarket_client_sdk::ToQueryParams;
 
+    use crate::gamma_keyset::markets_keyset_url;
+
     use super::{
         crypto_markets_request, extend_quote_feed_stop_at, parse_token_id, quote_feed_deadline,
-        should_refresh_sports_catalog, MarketDiscoveryCollectorConfig, CRYPTO_DISCOVERY_PAGE_LIMIT,
-        CRYPTO_MARKET_CATEGORY,
+        should_refresh_sports_catalog, MarketDiscoveryCollectorConfig,
     };
 
     #[test]
@@ -843,15 +818,17 @@ mod tests {
     }
 
     #[test]
-    fn crypto_catalog_request_filters_gamma_to_crypto_category() {
+    fn crypto_catalog_request_uses_gamma_keyset_pagination() {
         let now = Utc.with_ymd_and_hms(2026, 5, 17, 13, 30, 0).unwrap();
-        let request = crypto_markets_request(now, 20, 5);
+        let request = crypto_markets_request(now, 20);
         let query = request.query_params(None);
 
-        assert_eq!(request.category.as_deref(), Some(CRYPTO_MARKET_CATEGORY));
-        assert!(query.contains("category=Crypto"));
-        assert_eq!(request.offset, Some(5 * CRYPTO_DISCOVERY_PAGE_LIMIT));
-        assert!(query.contains("offset=500"));
+        assert_eq!(
+            markets_keyset_url(),
+            "https://gamma-api.polymarket.com/markets/keyset"
+        );
+        assert_eq!(request.offset, None);
+        assert!(!query.contains("offset="));
         assert!(query.contains("closed=false"));
         assert!(query.contains("limit=100"));
     }

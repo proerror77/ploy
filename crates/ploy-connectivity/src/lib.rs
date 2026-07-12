@@ -885,9 +885,10 @@ fn normalize_execution_amount(
     _limit_price: Decimal,
     side: Side,
 ) -> Result<Amount, polymarket_client_sdk::error::Error> {
+    let shares = normalize_order_quantity(quantity);
     match side {
-        Side::Buy => Amount::shares(normalize_market_order_quantity(quantity)),
-        Side::Sell => Amount::shares(normalize_market_order_quantity(quantity)),
+        Side::Buy => Amount::shares(shares),
+        Side::Sell => Amount::shares(shares),
         _ => unreachable!("invalid Polymarket side"),
     }
 }
@@ -1094,9 +1095,9 @@ mod tests {
             .expect("sell amount");
 
         assert!(buy.is_shares());
-        assert_eq!(buy.as_inner(), dec!(24.4678));
+        assert_eq!(buy.as_inner(), dec!(24.46));
         assert!(sell.is_shares());
-        assert_eq!(sell.as_inner(), dec!(24.4678));
+        assert_eq!(sell.as_inner(), dec!(24.46));
     }
 
     #[test]
