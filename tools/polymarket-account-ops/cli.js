@@ -6,6 +6,7 @@ const {
   buildPlan,
   executePlan,
   fetchPositions,
+  reconcileOperation,
   reconcileTransaction,
   runtimeContext,
   verifyPositionRoutes,
@@ -43,8 +44,13 @@ async function main() {
   }
   if (command === "reconcile") {
     const transactionId = option("--transaction-id");
-    if (!transactionId) throw new Error("reconcile requires --transaction-id <id>");
-    const result = await reconcileTransaction(transactionId);
+    const operationId = option("--operation-id");
+    if (Boolean(transactionId) === Boolean(operationId)) {
+      throw new Error("reconcile requires exactly one of --transaction-id <id> or --operation-id <id>");
+    }
+    const result = transactionId
+      ? await reconcileTransaction(transactionId)
+      : await reconcileOperation(operationId);
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }

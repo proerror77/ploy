@@ -276,7 +276,7 @@ function makeRelayClient(env = process.env) {
   };
 }
 
-async function executePlan(plan, expectedHash, env = process.env) {
+async function executePlan(plan, expectedHash, env = process.env, dependencies = {}) {
   if (env.PLOY_ACCOUNT_OPS_WRITE_ENABLED !== "true") throw new Error("account-ops writes are disabled");
   const context = runtimeContext(env);
   validatePlan(plan, context, expectedHash);
@@ -286,15 +286,18 @@ async function executePlan(plan, expectedHash, env = process.env) {
   let submitted = false;
   try {
     const history = readLedger(ledger);
-    const { client, publicClient } = makeRelayClient(env);
+    const relay = dependencies.relay || makeRelayClient(env);
+    const { client, publicClient } = relay;
+    const fetchCurrentPositions = dependencies.fetchPositions || fetchPositions;
+    const verifyCurrentRoutes = dependencies.verifyPositionRoutes || verifyPositionRoutes;
     for (const item of plan.items) {
       const prior = history.filter((event) => event.operationId === item.operationId).at(-1);
-      if (prior && ["submitted", "ambiguous"].includes(prior.state)) {
+      if (prior && ["submitting", "submission_unknown", "submitted", "ambiguous"].includes(prior.state)) {
         throw new Error(`operation ${item.operationId} requires reconcile`);
       }
       if (prior && ["confirmed", "reconciled", "externally_redeemed"].includes(prior.state)) continue;
 
-      const current = await verifyPositionRoutes(await fetchPositions(context.account));
+      const current = await verifyCurrentRoutes(await fetchCurrentPositions(context.account));
       const candidates = current.filter((position) => position.redeemable && String(position.conditionId).toLowerCase() === item.conditionId);
       if (candidates.length === 0) {
         appendLedger(ledger, { operationId: item.operationId, conditionId: item.conditionId, state: "externally_redeemed" });
@@ -313,8 +316,15 @@ async function executePlan(plan, expectedHash, env = process.env) {
       });
       if (!approved) throw new Error(`adapter is not approved for condition ${item.conditionId}`);
       appendLedger(ledger, { operationId: item.operationId, conditionId: item.conditionId, state: "reserved", planSha256: plan.sha256, balanceBefore: before.toString() });
-      const response = await client.execute([redeemTransaction(item)], `ploy redeem ${item.conditionId}`);
       submitted = true;
+      appendLedger(ledger, { operationId: item.operationId, conditionId: item.conditionId, state: "submitting", metadata: `ploy redeem ${item.conditionId}` });
+      let response;
+      try {
+        response = await client.execute([redeemTransaction(item)], `ploy redeem ${item.conditionId}`);
+      } catch (error) {
+        appendLedger(ledger, { operationId: item.operationId, conditionId: item.conditionId, state: "submission_unknown", error: error.message });
+        throw new Error(`relayer submission outcome is unknown for operation ${item.operationId}; reconcile by operation id`);
+      }
       appendLedger(ledger, { operationId: item.operationId, conditionId: item.conditionId, state: "submitted", transactionId: response.transactionID, transactionHash: response.transactionHash || null });
       const result = await response.wait();
       if (!result || !["STATE_MINED", "STATE_CONFIRMED"].includes(result.state)) {
@@ -322,7 +332,7 @@ async function executePlan(plan, expectedHash, env = process.env) {
         throw new Error(`relayer result for ${item.conditionId} is ambiguous`);
       }
       const after = await publicClient.readContract({ address: CONTRACTS.pusd, abi: ERC20_BALANCE_ABI, functionName: "balanceOf", args: [context.account] });
-      const remaining = (await fetchPositions(context.account)).some((position) => position.redeemable && String(position.conditionId).toLowerCase() === item.conditionId);
+      const remaining = (await fetchCurrentPositions(context.account)).some((position) => position.redeemable && String(position.conditionId).toLowerCase() === item.conditionId);
       appendLedger(ledger, {
         operationId: item.operationId,
         conditionId: item.conditionId,
@@ -340,6 +350,42 @@ async function executePlan(plan, expectedHash, env = process.env) {
     if (!submitted && fs.existsSync(lock)) fs.rmdirSync(lock);
     throw error;
   }
+}
+
+async function reconcileOperation(operationId, env = process.env, dependencies = {}) {
+  if (!operationId) throw new Error("operation id is required");
+  const context = runtimeContext(env);
+  const { ledger } = ledgerPaths(env);
+  const history = readLedger(ledger);
+  const events = history.filter((event) => event.operationId === operationId);
+  const latest = events.at(-1);
+  if (!latest || !["submitting", "submission_unknown"].includes(latest.state)) {
+    throw new Error(`operation ${operationId} is not awaiting relayer discovery`);
+  }
+  const submitting = events.findLast((event) => event.state === "submitting");
+  if (!submitting) throw new Error(`operation ${operationId} has no submission evidence`);
+  const relay = dependencies.relay || makeRelayClient(env);
+  const transactions = await relay.client.getTransactions();
+  const earliest = Date.parse(submitting.at) - 60_000;
+  const matches = (Array.isArray(transactions) ? transactions : []).filter((candidate) => {
+    const sameMetadata = candidate.metadata === submitting.metadata;
+    const sameAccount = !candidate.proxyAddress
+      || normalizeAddress(candidate.proxyAddress, "relayer proxyAddress") === normalizeAddress(context.account, "account");
+    return sameMetadata && sameAccount && Date.parse(candidate.createdAt) >= earliest;
+  });
+  if (matches.length !== 1) {
+    throw new Error(`operation ${operationId} matched ${matches.length} relayer transactions; lock retained`);
+  }
+  const transaction = matches[0];
+  appendLedger(ledger, {
+    operationId,
+    conditionId: submitting.conditionId,
+    state: "submitted",
+    transactionId: transaction.transactionID,
+    transactionHash: transaction.transactionHash || null,
+    discoveredByOperation: true,
+  });
+  return reconcileTransaction(transaction.transactionID, env, { ...dependencies, relay });
 }
 
 async function reconcileTransaction(transactionId, env = process.env, dependencies = {}) {
@@ -420,6 +466,7 @@ module.exports = {
   executePlan,
   fetchPositions,
   readLedger,
+  reconcileOperation,
   reconcileTransaction,
   redeemTransaction,
   runtimeContext,

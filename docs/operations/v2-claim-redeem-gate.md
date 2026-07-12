@@ -90,6 +90,8 @@ PLOY_ACCOUNT_OPS_WRITE_ENABLED=true \
 # If execute reports an ambiguous or still-redeemable transaction, keep writes
 # disabled and reconcile that exact relayer transaction before any new plan:
 ploy-account-ops reconcile --transaction-id <relayer-transaction-id>
+# If the submission response was lost before a transaction ID was returned:
+ploy-account-ops reconcile --operation-id <ledger-operation-id>
 ```
 
 ## Gate Verification Commands

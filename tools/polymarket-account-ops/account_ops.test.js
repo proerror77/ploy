@@ -12,6 +12,7 @@ const {
   executePlan,
   fetchPositions,
   readLedger,
+  reconcileOperation,
   reconcileTransaction,
   redeemTransaction,
   sha256,
@@ -112,6 +113,80 @@ test("plan fails closed on wallet and route disagreement", () => {
 
 test("execute refuses to enter account operations while writes are disabled", async () => {
   await assert.rejects(() => executePlan({}, "ignored", {}), /writes are disabled/);
+});
+
+test("execute retains the lock when the relayer submission response is lost", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ploy-redeem-submit-unknown-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const ledger = path.join(directory, "redeem-ledger.jsonl");
+  const env = {
+    PLOY_ACCOUNT_OPS_WRITE_ENABLED: "true",
+    PLOY_LIVE_ACCOUNT_ID: account,
+    PLOY_RELEASE_SHA: releaseSha,
+    POLY_WALLET_TYPE: "SAFE",
+    PLOY_REDEEM_LEDGER: ledger,
+    PLOY_REDEEM_LOCK: `${ledger}.lock`,
+  };
+  const plan = buildPlan([position()], { account, releaseSha, walletType: "SAFE" });
+  await assert.rejects(
+    () => executePlan(plan, plan.sha256, env, {
+      relay: {
+        client: { execute: async () => { throw new Error("connection reset"); } },
+        publicClient: {
+          readContract: async ({ functionName }) => functionName === "isApprovedForAll" ? true : 100n,
+        },
+      },
+      fetchPositions: async () => [position()],
+      verifyPositionRoutes: async (positions) => positions,
+    }),
+    /submission outcome is unknown/,
+  );
+  assert.equal(fs.existsSync(`${ledger}.lock`), true);
+  assert.equal(readLedger(ledger).at(-1).state, "submission_unknown");
+});
+
+test("operation reconciliation discovers one exact relayer transaction before reconciling", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ploy-redeem-operation-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const ledger = path.join(directory, "redeem-ledger.jsonl");
+  const lock = `${ledger}.lock`;
+  fs.mkdirSync(lock);
+  const conditionId = position().conditionId;
+  const operationId = "operation-discovery";
+  const at = new Date().toISOString();
+  fs.writeFileSync(ledger, [
+    { at, operationId, conditionId, state: "submitting", metadata: `ploy redeem ${conditionId}` },
+    { at, operationId, conditionId, state: "submission_unknown" },
+  ].map(JSON.stringify).join("\n") + "\n");
+  const transaction = {
+    transactionID: "relay-discovered",
+    transactionHash: "0xabc",
+    proxyAddress: account,
+    metadata: `ploy redeem ${conditionId}`,
+    createdAt: at,
+    state: "STATE_MINED",
+  };
+  const relay = {
+    client: {
+      getTransactions: async () => [transaction],
+      getTransaction: async () => [transaction],
+    },
+    publicClient: { readContract: async () => 150n },
+  };
+  const result = await reconcileOperation(operationId, {
+    PLOY_LIVE_ACCOUNT_ID: account,
+    PLOY_RELEASE_SHA: releaseSha,
+    POLY_WALLET_TYPE: "SAFE",
+    PLOY_REDEEM_LEDGER: ledger,
+    PLOY_REDEEM_LOCK: lock,
+  }, {
+    relay,
+    fetchPositions: async () => [],
+    verifyPositionRoutes: async (positions) => positions,
+  });
+  assert.equal(result.state, "reconciled");
+  assert.equal(fs.existsSync(lock), false);
+  assert.equal(readLedger(ledger).some((event) => event.discoveredByOperation), true);
 });
 
 test("reconcile clears the lock only after the exact mined transaction disappears from Data API", async (t) => {
