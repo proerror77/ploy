@@ -1,6 +1,8 @@
 #[cfg(feature = "live")]
 pub mod binance_collectors;
 #[cfg(feature = "live")]
+pub mod cex_collectors;
+#[cfg(feature = "live")]
 pub mod collector;
 #[cfg(feature = "live")]
 pub mod deribit_collectors;

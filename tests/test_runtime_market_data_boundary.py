@@ -8,6 +8,40 @@ STRATEGY_DIR = ROOT / "config" / "strategies"
 
 
 class RuntimeMarketDataBoundaryTests(unittest.TestCase):
+    def test_public_cex_collector_is_deployed_and_health_gated(self) -> None:
+        collector = (ROOT / "crates/ploy-market-data/src/cex_collectors.rs").read_text()
+        runner = (ROOT / "crates/ploy-runner-host/src/lib.rs").read_text()
+        service = (ROOT / "deployment/systemd/ploy-cex-public-collector.service").read_text()
+        workflow = (ROOT / ".github/workflows/deploy-tango-1-1.yml").read_text()
+        deploy = (ROOT / "scripts/ci/deploy_tango_cloud_assist.py").read_text()
+        health = (ROOT / ".github/workflows/healthcheck-tango-1-1.yml").read_text()
+        audit = (ROOT / "scripts/audit_market_data_gaps.py").read_text()
+
+        for endpoint in (
+            "https://fapi.binance.com",
+            "wss://fstream.binance.com/stream",
+            "wss://ws.okx.com:8443/ws/v5/public",
+            "wss://stream.bybit.com/v5/public/spot",
+            "wss://advanced-trade-ws.coinbase.com",
+            "wss://ws.kraken.com/v2",
+        ):
+            self.assertIn(endpoint, collector)
+        self.assertIn("collect-cex-public", runner)
+        self.assertIn("ExecStart=/opt/ploy/bin/ploy-runner collect-cex-public", service)
+        self.assertIn("Restart=always", service)
+        self.assertIn("OOMPolicy=kill", service)
+        self.assertIn("049_cex_public_market_data.sql", workflow)
+        self.assertIn("ploy-cex-public-collector.service", workflow)
+        for text in (deploy, health):
+            self.assertIn("ploy-cex-public-collector.service", text)
+            self.assertIn("cex_public_market_ticks", text)
+            for exchange in ("okx", "bybit", "coinbase", "kraken"):
+                self.assertIn(exchange, text)
+        self.assertIn('"cex-extended"', audit)
+        self.assertIn("kind = 'liquidation'", health)
+        self.assertIn('"binance_liquidations"', (ROOT / "scripts/report_market_data_health.py").read_text())
+        self.assertIn('?streams={}', collector)
+
     def test_pm5d_runtime_configs_default_to_local_market_data(self) -> None:
         configs = sorted(STRATEGY_DIR.glob("02-pm5d*.toml"))
         self.assertGreaterEqual(len(configs), 1)

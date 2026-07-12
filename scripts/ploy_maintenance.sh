@@ -25,6 +25,7 @@ RETENTION_BINANCE_TICKS_DAYS="${PLOY_RETENTION_BINANCE_TICKS_DAYS:-7}"
 RETENTION_BINANCE_AGGTRADE_DAYS="${PLOY_RETENTION_BINANCE_AGGTRADE_DAYS:-7}"
 RETENTION_BINANCE_LOB_DAYS="${PLOY_RETENTION_BINANCE_LOB_DAYS:-7}"
 RETENTION_DERIBIT_IV_DAYS="${PLOY_RETENTION_DERIBIT_IV_DAYS:-7}"
+RETENTION_CEX_PUBLIC_DAYS="${PLOY_RETENTION_CEX_PUBLIC_DAYS:-30}"
 RETENTION_NBA_OBS_DAYS="${PLOY_RETENTION_NBA_OBS_DAYS:-7}"
 RETENTION_ORDER_EXEC_DAYS="${PLOY_RETENTION_ORDER_EXEC_DAYS:-7}"
 RETENTION_LOG_DAYS="${PLOY_RETENTION_LOG_DAYS:-7}"
@@ -83,6 +84,10 @@ if ! is_uint "$RETENTION_BINANCE_LOB_DAYS"; then
 fi
 if ! is_uint "$RETENTION_DERIBIT_IV_DAYS"; then
   echo "invalid PLOY_RETENTION_DERIBIT_IV_DAYS: $RETENTION_DERIBIT_IV_DAYS" >&2
+  exit 2
+fi
+if ! is_uint "$RETENTION_CEX_PUBLIC_DAYS"; then
+  echo "invalid PLOY_RETENTION_CEX_PUBLIC_DAYS: $RETENTION_CEX_PUBLIC_DAYS" >&2
   exit 2
 fi
 if ! is_uint "$RETENTION_NBA_OBS_DAYS"; then
@@ -146,7 +151,7 @@ if ! is_uint "$DERIBIT_PARTITION_LOOKAHEAD_DAYS"; then
   exit 2
 fi
 
-echo "ploy_maintenance: db=${DB_NAME} log_dir=${LOG_DIR} data_dir=${DATA_DIR} tmp_dir=${TMP_DIR} extra_log_dirs=${EXTRA_LOG_DIRS} clob_book_archive_dir=${CLOB_BOOK_ARCHIVE_DIR} clob_book_require_archive=${REQUIRE_CLOB_BOOK_ARCHIVE} clob_ticks_days=${RETENTION_CLOB_TICKS_DAYS} clob_book_days=${RETENTION_CLOB_BOOK_DAYS} clob_obh_days=${RETENTION_CLOB_ORDERBOOK_HISTORY_DAYS} clob_trades_days=${RETENTION_CLOB_TRADES_DAYS} clob_alerts_days=${RETENTION_CLOB_ALERTS_DAYS} binance_ticks_days=${RETENTION_BINANCE_TICKS_DAYS} binance_aggtrade_days=${RETENTION_BINANCE_AGGTRADE_DAYS} binance_lob_days=${RETENTION_BINANCE_LOB_DAYS} deribit_iv_days=${RETENTION_DERIBIT_IV_DAYS} nba_obs_days=${RETENTION_NBA_OBS_DAYS} order_exec_days=${RETENTION_ORDER_EXEC_DAYS} log_days=${RETENTION_LOG_DAYS} tmp_days=${RETENTION_TMP_DAYS} recording_days=${RETENTION_RECORDING_DAYS} parquet_days=${RETENTION_PARQUET_DAYS} log_max_file_mb=${RETENTION_LOG_MAX_FILE_MB} log_max_dir_mb=${RETENTION_LOG_MAX_DIR_MB} tmp_max_dir_mb=${RETENTION_TMP_MAX_DIR_MB} recording_max_dir_mb=${RETENTION_RECORDING_MAX_DIR_MB} parquet_max_dir_mb=${RETENTION_PARQUET_MAX_DIR_MB} clob_book_delete_batch_size=${CLOB_BOOK_DELETE_BATCH_SIZE} clob_book_delete_max_batches=${CLOB_BOOK_DELETE_MAX_BATCHES} deribit_partition_lookback_days=${DERIBIT_PARTITION_LOOKBACK_DAYS} deribit_partition_lookahead_days=${DERIBIT_PARTITION_LOOKAHEAD_DAYS} refresh_research_windows=${REFRESH_RESEARCH_WINDOWS} logs_only=${LOGS_ONLY}"
+echo "ploy_maintenance: db=${DB_NAME} log_dir=${LOG_DIR} data_dir=${DATA_DIR} tmp_dir=${TMP_DIR} extra_log_dirs=${EXTRA_LOG_DIRS} clob_book_archive_dir=${CLOB_BOOK_ARCHIVE_DIR} clob_book_require_archive=${REQUIRE_CLOB_BOOK_ARCHIVE} clob_ticks_days=${RETENTION_CLOB_TICKS_DAYS} clob_book_days=${RETENTION_CLOB_BOOK_DAYS} clob_obh_days=${RETENTION_CLOB_ORDERBOOK_HISTORY_DAYS} clob_trades_days=${RETENTION_CLOB_TRADES_DAYS} clob_alerts_days=${RETENTION_CLOB_ALERTS_DAYS} binance_ticks_days=${RETENTION_BINANCE_TICKS_DAYS} binance_aggtrade_days=${RETENTION_BINANCE_AGGTRADE_DAYS} binance_lob_days=${RETENTION_BINANCE_LOB_DAYS} deribit_iv_days=${RETENTION_DERIBIT_IV_DAYS} cex_public_days=${RETENTION_CEX_PUBLIC_DAYS} nba_obs_days=${RETENTION_NBA_OBS_DAYS} order_exec_days=${RETENTION_ORDER_EXEC_DAYS} log_days=${RETENTION_LOG_DAYS} tmp_days=${RETENTION_TMP_DAYS} recording_days=${RETENTION_RECORDING_DAYS} parquet_days=${RETENTION_PARQUET_DAYS} log_max_file_mb=${RETENTION_LOG_MAX_FILE_MB} log_max_dir_mb=${RETENTION_LOG_MAX_DIR_MB} tmp_max_dir_mb=${RETENTION_TMP_MAX_DIR_MB} recording_max_dir_mb=${RETENTION_RECORDING_MAX_DIR_MB} parquet_max_dir_mb=${RETENTION_PARQUET_MAX_DIR_MB} clob_book_delete_batch_size=${CLOB_BOOK_DELETE_BATCH_SIZE} clob_book_delete_max_batches=${CLOB_BOOK_DELETE_MAX_BATCHES} deribit_partition_lookback_days=${DERIBIT_PARTITION_LOOKBACK_DAYS} deribit_partition_lookahead_days=${DERIBIT_PARTITION_LOOKAHEAD_DAYS} refresh_research_windows=${REFRESH_RESEARCH_WINDOWS} logs_only=${LOGS_ONLY}"
 
 archived_clob_book_dates_select() {
   local marker day
@@ -449,6 +454,33 @@ BEGIN
 END
 \$\$;
 
+-- Sampled public CEX rows are intentionally bounded independently of raw
+-- Polymarket archives.
+DO \$\$
+DECLARE
+  batch_no integer := 0;
+  deleted_rows integer := 0;
+BEGIN
+  IF to_regclass('public.cex_public_market_ticks') IS NOT NULL THEN
+    LOOP
+      WITH doomed AS (
+        SELECT id
+        FROM cex_public_market_ticks
+        WHERE event_time < NOW() - INTERVAL '${RETENTION_CEX_PUBLIC_DAYS} days'
+        ORDER BY event_time
+        LIMIT ${CLOB_BOOK_DELETE_BATCH_SIZE}
+      )
+      DELETE FROM cex_public_market_ticks t
+      USING doomed
+      WHERE t.id = doomed.id;
+      GET DIAGNOSTICS deleted_rows = ROW_COUNT;
+      batch_no := batch_no + 1;
+      EXIT WHEN deleted_rows = 0 OR batch_no >= ${CLOB_BOOK_DELETE_MAX_BATCHES};
+    END LOOP;
+  END IF;
+END
+\$\$;
+
 -- CLOB orderbook-history L2 ticks (optional; table may not exist on all hosts)
 SELECT format(
   'DELETE FROM clob_orderbook_history_ticks WHERE book_ts < NOW() - INTERVAL ''%s days'';',
@@ -479,6 +511,7 @@ SELECT 'VACUUM (ANALYZE) clob_trade_alerts;' WHERE to_regclass('public.clob_trad
 SELECT 'ANALYZE binance_price_ticks;' WHERE to_regclass('public.binance_price_ticks') IS NOT NULL \\gexec
 SELECT 'ANALYZE binance_agg_trade_ticks;' WHERE to_regclass('public.binance_agg_trade_ticks') IS NOT NULL \\gexec
 SELECT 'ANALYZE binance_lob_ticks;' WHERE to_regclass('public.binance_lob_ticks') IS NOT NULL \\gexec
+SELECT 'ANALYZE cex_public_market_ticks;' WHERE to_regclass('public.cex_public_market_ticks') IS NOT NULL \\gexec
 VACUUM (ANALYZE) nba_live_observations;
 SELECT 'VACUUM (ANALYZE) agent_order_executions;' WHERE to_regclass('public.agent_order_executions') IS NOT NULL \\gexec
 SQL
