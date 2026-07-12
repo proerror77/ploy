@@ -10,9 +10,11 @@ const {
   CONTRACTS,
   buildPlan,
   executePlan,
+  fetchPositions,
   readLedger,
   reconcileTransaction,
   redeemTransaction,
+  sha256,
   validatePlan,
 } = require("./account_ops");
 
@@ -61,11 +63,40 @@ test("validation rejects stale plans and account drift", () => {
 });
 
 test("redeem calldata always routes through the current collateral adapter", () => {
+  assert.equal(CONTRACTS.standardAdapter, "0xAdA100Db00Ca00073811820692005400218FcE1f");
+  assert.equal(CONTRACTS.negRiskAdapter, "0xadA2005600Dec949baf300f4C6120000bDB6eAab");
   const plan = buildPlan([position({ negativeRisk: true })], { account, releaseSha, walletType: "SAFE" }, now);
   const transaction = redeemTransaction(plan.items[0]);
   assert.equal(transaction.to, CONTRACTS.negRiskAdapter);
   assert.equal(transaction.value, "0");
   assert.ok(transaction.data.startsWith("0x"));
+});
+
+test("validation rejects route and operation identity drift even with a recomputed plan hash", () => {
+  const plan = buildPlan([position()], { account, releaseSha, walletType: "SAFE" }, now);
+  plan.items[0].route = "unsupported";
+  const { sha256: _oldHash, ...unsigned } = plan;
+  plan.sha256 = sha256(unsigned);
+  assert.throws(
+    () => validatePlan(plan, { account, releaseSha, walletType: "SAFE" }, plan.sha256, now),
+    /unsupported redeem route/,
+  );
+});
+
+test("position discovery follows Data API offset pagination", async () => {
+  const offsets = [];
+  const positions = await fetchPositions(account, async (url) => {
+    offsets.push(url.searchParams.get("offset"));
+    const offset = Number(url.searchParams.get("offset"));
+    return {
+      ok: true,
+      json: async () => offset === 0
+        ? Array.from({ length: 500 }, (_, index) => ({ asset: String(index) }))
+        : [{ asset: "last" }],
+    };
+  });
+  assert.deepEqual(offsets, ["0", "500"]);
+  assert.equal(positions.length, 501);
 });
 
 test("plan fails closed on wallet and route disagreement", () => {

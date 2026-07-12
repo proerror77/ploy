@@ -16,6 +16,11 @@ to `false`; no daemon invokes Redeem automatically. The immutable trade bundle
 includes the Node.js runtime used by the official relayer client, so account
 operations do not depend on a separately installed host runtime.
 
+The official JavaScript relayer SDK requires string credentials and cannot
+provide Rust-style `zeroize` guarantees. Account ops is therefore an isolated,
+one-shot process: it reads credentials only at execution/reconciliation time,
+never logs them, is not imported by a daemon, and exits after the command.
+
 ## Current Dependency Evidence
 
 Read-only checks from the local workspace show why the gate matters:

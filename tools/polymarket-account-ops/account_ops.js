@@ -151,11 +151,23 @@ function validatePlan(plan, context, expectedHash, now = Date.now()) {
     throw new Error("plan expired or exceeds maximum TTL");
   }
   if (canonical(plan.contracts) !== canonical(CONTRACTS)) throw new Error("plan contract manifest mismatch");
+  const conditionIds = new Set();
   for (const item of plan.items) {
+    if (!new Set(["standard", "neg_risk"]).has(item.route)) throw new Error("unsupported redeem route");
+    if (!/^0x[0-9a-f]{64}$/.test(item.conditionId)) throw new Error("plan conditionId must be bytes32");
+    if (conditionIds.has(item.conditionId)) throw new Error("plan contains a duplicate conditionId");
+    conditionIds.add(item.conditionId);
     const target = item.route === "neg_risk" ? CONTRACTS.negRiskAdapter : CONTRACTS.standardAdapter;
     if (normalizeAddress(item.target, "item.target") !== normalizeAddress(target, "expected target")) {
       throw new Error("redeem adapter mismatch");
     }
+    const operationId = sha256({
+      chainId: CHAIN_ID,
+      account: normalizeAddress(plan.account, "plan.account"),
+      conditionId: item.conditionId,
+      route: item.route,
+    });
+    if (item.operationId !== operationId) throw new Error("operation id mismatch");
   }
   return plan;
 }
@@ -172,16 +184,23 @@ function redeemTransaction(item) {
   };
 }
 
-async function fetchPositions(account) {
-  const url = new URL("/positions", DATA_API);
-  url.searchParams.set("user", account);
-  url.searchParams.set("limit", "500");
-  url.searchParams.set("sizeThreshold", "0");
-  const response = await fetch(url, { signal: AbortSignal.timeout(20_000) });
-  if (!response.ok) throw new Error(`Data API positions failed: HTTP ${response.status}`);
-  const positions = await response.json();
-  if (!Array.isArray(positions)) throw new Error("Data API positions response is not an array");
-  return positions;
+async function fetchPositions(account, fetchImpl = fetch) {
+  const positions = [];
+  const pageSize = 500;
+  for (let page = 0; page < 20; page += 1) {
+    const url = new URL("/positions", DATA_API);
+    url.searchParams.set("user", account);
+    url.searchParams.set("limit", String(pageSize));
+    url.searchParams.set("offset", String(page * pageSize));
+    url.searchParams.set("sizeThreshold", "0");
+    const response = await fetchImpl(url, { signal: AbortSignal.timeout(20_000) });
+    if (!response.ok) throw new Error(`Data API positions failed: HTTP ${response.status}`);
+    const pagePositions = await response.json();
+    if (!Array.isArray(pagePositions)) throw new Error("Data API positions response is not an array");
+    positions.push(...pagePositions);
+    if (pagePositions.length < pageSize) return positions;
+  }
+  throw new Error("Data API positions exceeded the 10000-position safety limit");
 }
 
 async function verifyPositionRoutes(positions) {
