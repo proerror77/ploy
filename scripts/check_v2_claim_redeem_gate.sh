@@ -12,9 +12,9 @@ run() {
   "$@"
 }
 
-run cargo tree -p polymarket-client-sdk --no-default-features --features gamma -i alloy
-run cargo tree -p polymarket-client-sdk --no-default-features --features data -i alloy
-run cargo tree -p polymarket-client-sdk --no-default-features --features ctf -i alloy
+run cargo tree -p ploy-market-data --features live -i polymarket_client_sdk_v2
+run cargo tree -p ploy-connectivity -i polymarket_client_sdk_v2
+run cargo tree -p ploy-market-data --features live -i alloy
 if cargo metadata --format-version 1 --no-deps | grep -q '"name":"ploy-claimer"'; then
   run cargo tree -p ploy-claimer -i ethers-core
   run cargo tree -p ploy-claimer -i ethers-signers
@@ -26,7 +26,8 @@ fi
 cat <<'MSG'
 
 Gate status:
-- Phase 9 SDK slimming remains blocked until V2 claim/redeem evidence exists.
+- Official V2 SDK dependency checks passed; live Redeem evidence is still required.
 - Phase 10 claimer retirement has been applied. Keep verifying no downstream
   crate reintroduces ploy-claimer or ethers.
+- Account ops stays write-disabled after every deploy and is never a daemon.
 MSG
