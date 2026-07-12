@@ -1,3 +1,35 @@
+# Current Session - Live Hot-Path Latency (2026-07-13)
+
+Evidence stage: implementation hardening only. Live remains paused; this slice
+does not deploy, resume trading, or produce promotion evidence.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/engine.rs`: skip remote fill reconciliation
+  when no active order can produce a fill.
+- `tasks/todo.md`: plan and verification evidence.
+
+## Tasks
+
+- [x] Add a failing runtime test proving idle market updates do not reconcile.
+- [x] Skip reconciliation until an active order exists.
+- [x] Run focused tests, formatting, and diff checks.
+- [ ] Follow-up: separate market-catalog refresh from quote refresh before
+      lowering the 2-second DB polling interval; do not multiply catalog query
+      load or reopen direct public feeds from strategy runners.
+
+## Review
+
+- Empty-order runtime updates now perform zero fill-reconciliation calls. Active,
+  unknown, acknowledged, and partially-filled orders retain the existing
+  fail-closed reconciliation behavior.
+- Quote polling was deliberately not changed in this atomic slice because the
+  same loop also refreshes event metadata. Lowering its sleep directly would
+  amplify all remote DB queries rather than only improve quote freshness.
+- Verification passed: 203 `ploy-strategy-bundles` library tests, the
+  `ploy-strategy-runtime` live/live-execution build, workspace formatting, and
+  `git diff --check`. The build reports 16 existing dead-code warnings.
+
 # Current Session - Market Data V2 And Redeem Repair (2026-07-12)
 
 Evidence stage: `deployment/runtime safety plumbing`. This slice repairs data

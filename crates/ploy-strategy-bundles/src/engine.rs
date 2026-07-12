@@ -401,11 +401,7 @@ where
                 }
             }
 
-            let reconcile_completed = match self
-                .executor
-                .reconcile_fills(self.trading.orders())
-                .await
-            {
+            let reconcile_completed = match self.reconcile_active_fills().await {
                 Ok(fills) => {
                     let strategy_name = self.strategy.name().to_string();
                     for fill in fills {
@@ -585,6 +581,13 @@ where
     /// Read-only access to the trading runtime state.
     pub fn trading(&self) -> &TradingRuntime {
         &self.trading
+    }
+
+    async fn reconcile_active_fills(&mut self) -> Result<Vec<ploy_trading::FillRecord>, String> {
+        if self.trading.orders().active_orders() == 0 {
+            return Ok(Vec::new());
+        }
+        self.executor.reconcile_fills(self.trading.orders()).await
     }
 
     fn ensure_deployment_attribution(&self, intent: &mut TradingIntent) {
@@ -1495,8 +1498,65 @@ mod tests {
     }
 
     struct SkippedReconcileExecutor;
+    struct IdleReconcileCountingExecutor {
+        reconciles: Arc<Mutex<usize>>,
+    }
     struct FailingReconcileExecutor {
         submissions: usize,
+    }
+
+    #[async_trait]
+    impl Executor for IdleReconcileCountingExecutor {
+        async fn submit(&mut self, _intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
+            unreachable!("noop strategy must not submit")
+        }
+
+        async fn cancel(&mut self, _order_id: &str) -> bool {
+            false
+        }
+
+        async fn reconcile_fills(
+            &mut self,
+            _orders: &OrderLedger,
+        ) -> Result<Vec<FillRecord>, String> {
+            *self.reconciles.lock().unwrap() += 1;
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_market_updates_do_not_reconcile_without_active_orders() {
+        let reconciles = Arc::new(Mutex::new(0));
+        let now = Utc::now();
+        let mut runtime = StrategyRuntime::new(
+            NoopStrategy,
+            SingleUpdateFeed {
+                next: Some(MarketUpdate::Quote {
+                    token_id: "token-up".into(),
+                    bid: Some(dec!(0.40)),
+                    ask: Some(dec!(0.41)),
+                    bid_size: Some(dec!(10)),
+                    ask_size: Some(dec!(10)),
+                    bid_levels: Vec::new(),
+                    ask_levels: Vec::new(),
+                    ts: now,
+                }),
+            },
+            IdleReconcileCountingExecutor {
+                reconciles: reconciles.clone(),
+            },
+            Box::new(NullRecorder),
+            RuntimeConfig {
+                mode: RuntimeMode::Live,
+                throttle_hz: None,
+                max_updates: None,
+                skip_settlement_exits: false,
+            },
+        );
+
+        runtime.run().await;
+
+        assert_eq!(*reconciles.lock().unwrap(), 0);
     }
 
     #[async_trait]
