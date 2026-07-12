@@ -31,6 +31,10 @@ fn print_usage_for(program: &str) {
     eprintln!("  collect-deribit-iv        Collect Deribit option IV ticks (HTTP poll)");
     #[cfg(feature = "ops")]
     eprintln!("  collect-deribit-greeks    Collect Deribit ATM option greeks (HTTP poll)");
+    #[cfg(feature = "ops")]
+    eprintln!(
+        "  collect-cex-public        Collect Binance Futures and OKX/Bybit/Coinbase/Kraken L2"
+    );
     eprintln!();
     eprintln!("Options for 'run':");
     eprintln!("  --config <path>          Unified TOML config file (required)");
@@ -122,6 +126,12 @@ pub async fn run_with_args(args: Vec<String>) {
             ops::run_collect_deribit_greeks(&args).await;
             #[cfg(not(feature = "ops"))]
             eprintln!("The collect-deribit-greeks command requires the full/ops runner build");
+        }
+        Some("collect-cex-public") => {
+            #[cfg(feature = "ops")]
+            ops::run_collect_cex_public(&args).await;
+            #[cfg(not(feature = "ops"))]
+            eprintln!("The collect-cex-public command requires the full/ops runner build");
         }
         // --- End new collectors ---
         Some("run") | None => {

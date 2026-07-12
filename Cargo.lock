@@ -5114,6 +5114,7 @@ name = "ploy-market-data"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "crc32fast",
  "futures",
  "ploy-market-contracts",
  "polymarket_client_sdk_v2",
@@ -5123,6 +5124,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tracing",

@@ -33,6 +33,7 @@ systemd units:
 - `ploy-binance-lob-collector.service`
 - `ploy-deribit-iv-collector.service`
 - `ploy-deribit-greeks-collector.service`
+- `ploy-cex-public-collector.service`
 
 Trigger deploys from `main`:
 
@@ -61,7 +62,15 @@ Examples:
 /opt/ploy/bin/ploy-runner collect-binance-aggtrade --symbols BTCUSDT,ETHUSDT,SOLUSDT --db-url "$PLOY_DATABASE__URL"
 /opt/ploy/bin/ploy-runner collect-deribit-iv --currencies BTC,ETH,SOL --db-url "$PLOY_DATABASE__URL"
 /opt/ploy/bin/ploy-runner collect-deribit-greeks --currencies BTC,ETH,SOL --db-url "$PLOY_DATABASE__URL"
+/opt/ploy/bin/ploy-runner collect-cex-public --assets BTC,ETH,SOL --poll-secs 5 --sample-ms 1000 --db-url "$PLOY_DATABASE__URL"
 ```
+
+`collect-cex-public` writes one normalized `cex_public_market_ticks` surface:
+Binance USD-M mark/index price, funding, open interest, basis and liquidation;
+plus sampled L2 books from OKX `books5`, Bybit `orderbook.50`, Coinbase Advanced
+Trade `level2`, and Kraken WebSocket v2 `book`. Use the `cex-extended` gap-audit
+profile before consuming these rows in factor research. They are not part of
+the existing PM5D promotion gate by default.
 
 If a diagnostic requires remote secrets or production data, prefer a GitHub
 Actions workflow with environment-scoped secrets over a local command.
