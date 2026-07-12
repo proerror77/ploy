@@ -13,6 +13,7 @@ const {
   fetchPositions,
   makeWalletSession,
   reconcileOrder,
+  reconcileRedeem,
   runtimeContext,
   validatePlan,
 } = require("./account_ops");
@@ -41,7 +42,7 @@ async function main() {
   const resource = process.argv[2];
   const action = process.argv[3];
   if (!resource || !action) {
-    throw new Error("usage: ploy-predict-account-ops wallet check | order plan|approval-check|approve|execute|reconcile | redeem check|plan|approval-check|approve|execute");
+    throw new Error("usage: ploy-predict-account-ops wallet check | order plan|approval-check|approve|execute|reconcile | redeem check|plan|approval-check|approve|execute|reconcile");
   }
   const context = runtimeContext();
 
@@ -91,7 +92,7 @@ async function main() {
     return;
   }
   if (resource === "order" && action === "reconcile") {
-    const result = await reconcileOrder(requireOption("--operation-id"));
+    const result = await reconcileOrder(readPlan(), requireOption("--sha256"));
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }
@@ -100,7 +101,12 @@ async function main() {
     process.stdout.write(`${JSON.stringify({ status: "confirmed", receipts: result })}\n`);
     return;
   }
-  throw new Error("usage: ploy-predict-account-ops wallet check | order plan|approval-check|approve|execute|reconcile | redeem check|plan|approval-check|approve|execute");
+  if (resource === "redeem" && action === "reconcile") {
+    const result = await reconcileRedeem(readPlan(), requireOption("--sha256"));
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
+  throw new Error("usage: ploy-predict-account-ops wallet check | order plan|approval-check|approve|execute|reconcile | redeem check|plan|approval-check|approve|execute|reconcile");
 }
 
 main().catch((error) => {

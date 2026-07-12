@@ -101,10 +101,12 @@ jobs:
           strip "target/${PLATFORM_TARGET}/release/ployctl" || true
           strip "target/${PLATFORM_TARGET}/release/new-ploy-runner" || true
 
-      - name: Build and test Polymarket account ops
+      - name: Build and test account ops
         run: |
           cd tools/polymarket-account-ops
           npm ci --omit=dev
+          npm test
+          npm audit --omit=dev --audit-level=high
           cd ../predict-fun-account-ops
           npm ci --omit=dev
           npm test
@@ -344,6 +346,7 @@ jobs:
           upsert_env PLOY_REDEEM_LOCK "${root}/data/account-ops/redeem-ledger.jsonl.lock"
           upsert_env PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED "false"
           upsert_env PLOY_PREDICT_APPROVAL_WRITE_ENABLED "false"
+          upsert_env PLOY_PREDICT_RECONCILE_WRITE_ENABLED "false"
           upsert_env PLOY_PREDICT_OPS_LEDGER "${root}/data/account-ops/predict-fun-ledger.jsonl"
           upsert_env PLOY_PREDICT_OPS_LOCK "${root}/data/account-ops/predict-fun-ledger.jsonl.lock"
 

@@ -11,6 +11,8 @@ const {
   executeOrderPlan,
   executeRedeemPlan,
   loadWalletSecret,
+  makeWalletSession,
+  reconcileRedeem,
   validatePlan,
 } = require("./account_ops");
 
@@ -21,6 +23,10 @@ const MARKET = {
   feeRateBps: 200,
   isNegRisk: true,
   isYieldBearing: true,
+  tradingStatus: "OPEN",
+  status: "REGISTERED",
+  isVisible: true,
+  resolution: null,
   outcomes: [
     { name: "Yes", indexSet: 1, onChainId: "111" },
     { name: "No", indexSet: 2, onChainId: "222" },
@@ -45,6 +51,9 @@ test("order plan binds official market route, account, expiry, and exact hash", 
   assert.equal(plan.kind, "predict_fun_limit_order");
   assert.equal(plan.market.isNegRisk, true);
   assert.equal(plan.order.feeRateBps, 200);
+  assert.equal(plan.order.pricePerShareWei, "425000000000000000");
+  assert.equal(plan.order.makerAmount, "4250000000000000000");
+  assert.equal(plan.order.takerAmount, "10000000000000000000");
   assert.equal(plan.expiresAt, "2023-11-14T22:23:20.000Z");
   assert.equal(validatePlan(plan, CONTEXT, plan.sha256, 1_700_000_001_000), plan);
   assert.throws(() => validatePlan(plan, CONTEXT, "0".repeat(64)), /plan hash mismatch/);
@@ -57,6 +66,12 @@ test("order plan rejects a token or price not supported by the market", () => {
   assert.throws(() => buildOrderPlan(MARKET, {
     marketId: 42, tokenId: "111", side: "BUY", quantity: "1", limitPrice: "0.4251",
   }, CONTEXT), /decimal precision/);
+  assert.throws(() => buildOrderPlan({ ...MARKET, decimalPrecision: 4 }, {
+    marketId: 42, tokenId: "111", side: "SELL", quantity: "1", limitPrice: "0.1234",
+  }, CONTEXT), /truncated/);
+  assert.throws(() => buildOrderPlan({ ...MARKET, tradingStatus: "CLOSED" }, {
+    marketId: 42, tokenId: "111", side: "BUY", quantity: "1", limitPrice: "0.5",
+  }, CONTEXT), /visible, open, and unresolved/);
 });
 
 test("redeem plan keeps standard and neg-risk amount semantics distinct", () => {
@@ -80,6 +95,12 @@ test("wallet secret requires exactly one injected source and never accepts loose
   }), /exactly one/);
 });
 
+test("wallet session rejects non-HTTPS RPC before loading a signer", async () => {
+  await assert.rejects(makeWalletSession(CONTEXT, {
+    PREDICT_FUN_RPC_URL: "http://rpc.invalid",
+  }), /must use HTTPS/);
+});
+
 function runtimeEnv(tmp) {
   return {
     PLOY_LIVE_ACCOUNT_ID: CONTEXT.account,
@@ -94,7 +115,11 @@ function fakeOrderSession() {
   return { builder: {
     getApprovalSteps: () => [{ id: "allowance" }],
     checkApprovals: async () => [{ satisfied: true }],
-    getLimitOrderAmounts: () => ({ makerAmount: 425n, takerAmount: 1000n, pricePerShare: 425n }),
+    getLimitOrderAmounts: ({ side, pricePerShareWei, quantityWei }) => ({
+      makerAmount: side === 0 ? (pricePerShareWei * quantityWei) / 10n ** 18n : quantityWei,
+      takerAmount: side === 0 ? quantityWei : (pricePerShareWei * quantityWei) / 10n ** 18n,
+      pricePerShare: pricePerShareWei,
+    }),
     buildOrder: (_strategy, order) => ({ ...order, salt: "1", maker: CONTEXT.account, signer: CONTEXT.account }),
     buildTypedData: (order) => ({ message: order }),
     signTypedDataOrder: async ({ message }) => ({ ...message, signature: "0xsig" }),
@@ -125,6 +150,27 @@ test("order execution is write-gated and submits one official SDK payload", asyn
   assert.deepEqual(events.map((event) => event.state), ["submitting", "submitted"]);
 });
 
+test("order execution rechecks expiry immediately before submission", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "predict-expiry-"));
+  const generatedAt = 1_700_000_000_000;
+  const plan = buildOrderPlan(MARKET, {
+    marketId: 42, tokenId: "111", side: "BUY", quantity: "10", limitPrice: "0.425",
+  }, CONTEXT, generatedAt);
+  const times = [generatedAt + 1, generatedAt + 2, generatedAt + 600_001];
+  let submitted = false;
+  await assert.rejects(executeOrderPlan(plan, plan.sha256, {
+    ...runtimeEnv(tmp), PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED: "true",
+  }, {
+    market: MARKET,
+    session: fakeOrderSession(),
+    jwt: "jwt",
+    now: () => times.shift(),
+    submit: async () => { submitted = true; return { data: {} }; },
+  }), /expired/);
+  assert.equal(submitted, false);
+  assert.equal(fs.existsSync(path.join(tmp, "ledger.jsonl.lock")), false);
+});
+
 test("redemption execution routes neg-risk amount through official SDK and records receipt", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "predict-redeem-"));
   const positions = [{
@@ -147,4 +193,35 @@ test("redemption execution routes neg-risk amount through official SDK and recor
   assert.equal(options.isNegRisk, true);
   assert.equal(result[0].transactionHash, "0xtx");
   assert.deepEqual(events.map((event) => event.state), ["submitting", "confirmed"]);
+});
+
+test("redemption reconciliation only clears the lock owned by an exact settled plan", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "predict-reconcile-"));
+  const positions = [{
+    amount: "2500000000000000000",
+    market: { ...MARKET, resolution: { indexSet: 1, status: "WON" } },
+    outcome: MARKET.outcomes[0],
+  }];
+  const plan = buildRedeemPlan(positions, CONTEXT, 1_700_000_000_000);
+  const operationId = require("./account_ops").sha256({
+    kind: plan.kind, account: plan.account, chainId: plan.chainId, planSha256: plan.sha256,
+  });
+  const lock = path.join(tmp, "ledger.jsonl.lock");
+  fs.mkdirSync(lock);
+  fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify({ operationId }));
+  const env = {
+    ...runtimeEnv(tmp),
+    PLOY_PREDICT_RECONCILE_WRITE_ENABLED: "true",
+  };
+  await assert.rejects(reconcileRedeem(plan, plan.sha256, env, {
+    positions,
+    now: () => 1_700_001_000_000,
+  }), /still redeemable/);
+  assert.equal(fs.existsSync(lock), true);
+  const result = await reconcileRedeem(plan, plan.sha256, env, {
+    positions: [],
+    now: () => 1_700_001_000_000,
+  });
+  assert.equal(result.state, "reconciled");
+  assert.equal(fs.existsSync(lock), false);
 });

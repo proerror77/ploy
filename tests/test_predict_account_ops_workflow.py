@@ -21,12 +21,15 @@ class PredictAccountOpsWorkflowContracts(unittest.TestCase):
             '${root}/data/account-ops/predict-redeem-plan.json',
             'PLOY_PREDICT_APPROVAL_WRITE_ENABLED=true "${root}/bin/ploy-predict-account-ops"',
             'PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED=true "${root}/bin/ploy-predict-account-ops"',
+            'PLOY_PREDICT_RECONCILE_WRITE_ENABLED=true "${root}/bin/ploy-predict-account-ops"',
+            "Revalidate current main after human approval",
+            "require_unique_false PLOY_PREDICT_RECONCILE_WRITE_ENABLED",
             "StrictHostKeyChecking yes",
         ):
             self.assertIn(required, workflow)
-
         self.assertNotIn('upsert_env PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED "true"', workflow)
         self.assertNotIn('upsert_env PLOY_PREDICT_APPROVAL_WRITE_ENABLED "true"', workflow)
+        self.assertNotIn('upsert_env PLOY_PREDICT_RECONCILE_WRITE_ENABLED "true"', workflow)
 
     def test_trade_deploy_packages_adapter_but_resets_persistent_write_gates(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy-trade.yml").read_text()
@@ -35,9 +38,12 @@ class PredictAccountOpsWorkflowContracts(unittest.TestCase):
             "npm audit --omit=dev --audit-level=high",
             'upsert_env PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED "false"',
             'upsert_env PLOY_PREDICT_APPROVAL_WRITE_ENABLED "false"',
+            'upsert_env PLOY_PREDICT_RECONCILE_WRITE_ENABLED "false"',
             'ploy-predict-account-ops',
         ):
             self.assertIn(required, workflow)
+        self.assertGreaterEqual(workflow.count("npm test"), 2)
+        self.assertGreaterEqual(workflow.count("npm audit --omit=dev --audit-level=high"), 2)
 
 
 if __name__ == "__main__":

@@ -51,7 +51,7 @@ function normalizeContext(context) {
 
 function positiveDecimal(value, field) {
   const text = String(value);
-  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(text) || Number(text) <= 0) {
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(text) || !/[1-9]/.test(text)) {
     throw new Error(`${field} must be a positive decimal`);
   }
   return text;
@@ -59,7 +59,10 @@ function positiveDecimal(value, field) {
 
 function price(value, precision) {
   const text = positiveDecimal(value, "limitPrice");
-  if (Number(text) >= 1) throw new Error("limitPrice must be below 1");
+  if (!Number.isInteger(precision) || precision < 0 || precision > 18) {
+    throw new Error("market decimal precision must be an integer from 0 to 18");
+  }
+  if (!text.startsWith("0.")) throw new Error("limitPrice must be below 1");
   if ((text.split(".")[1] || "").length > precision) {
     throw new Error(`limitPrice exceeds market decimal precision ${precision}`);
   }
@@ -80,30 +83,59 @@ function planEnvelope(kind, payload, context, now) {
 }
 
 function buildOrderPlan(market, input, context, now = Date.now()) {
-  if (Number(input.marketId) !== Number(market.id)) throw new Error("marketId mismatch");
+  const marketId = Number(market.id);
+  if (!Number.isSafeInteger(marketId) || marketId <= 0 || Number(input.marketId) !== marketId) {
+    throw new Error("marketId mismatch or invalid");
+  }
   const outcome = (market.outcomes || []).find((candidate) => String(candidate.onChainId) === String(input.tokenId));
   if (!outcome) throw new Error("tokenId is not an outcome of the market");
   const side = String(input.side).toUpperCase();
   if (!new Set(["BUY", "SELL"]).has(side)) throw new Error("side must be BUY or SELL");
   const marketRoute = {
-    id: Number(market.id),
+    id: marketId,
     conditionId: String(market.conditionId).toLowerCase(),
     decimalPrecision: Number(market.decimalPrecision),
     feeRateBps: Number(market.feeRateBps),
     isNegRisk: Boolean(market.isNegRisk),
     isYieldBearing: Boolean(market.isYieldBearing),
+    tradingStatus: String(market.tradingStatus),
+    status: String(market.status),
+    isVisible: market.isVisible === true,
+    isResolved: market.resolution != null,
   };
   if (!/^0x[0-9a-f]{64}$/.test(marketRoute.conditionId)) throw new Error("conditionId must be bytes32");
   if (!Number.isInteger(marketRoute.feeRateBps) || marketRoute.feeRateBps < 0) throw new Error("invalid feeRateBps");
+  if (marketRoute.tradingStatus !== "OPEN" || !marketRoute.isVisible || marketRoute.isResolved) {
+    throw new Error("market must be visible, open, and unresolved");
+  }
+  if (![1, 2].includes(Number(outcome.indexSet))) throw new Error("outcome indexSet must be 1 or 2");
+  const quantity = positiveDecimal(input.quantity, "quantity");
+  if ((quantity.split(".")[1] || "").length > 18) throw new Error("quantity exceeds 18 decimals");
+  const limitPrice = price(input.limitPrice, marketRoute.decimalPrecision);
+  const sideValue = side === "BUY" ? Side.BUY : Side.SELL;
+  const builder = OrderBuilder.make(context.chainId === 56 ? ChainId.BnbMainnet : ChainId.BnbTestnet);
+  const requestedPriceWei = parseUnits(limitPrice, 18);
+  const requestedQuantityWei = parseUnits(quantity, 18);
+  const amounts = builder.getLimitOrderAmounts({
+    side: sideValue,
+    pricePerShareWei: requestedPriceWei,
+    quantityWei: requestedQuantityWei,
+  });
+  if (amounts.pricePerShare !== requestedPriceWei || amounts.amount !== requestedQuantityWei) {
+    throw new Error("price or quantity would be truncated by the Predict SDK");
+  }
   return planEnvelope("predict_fun_limit_order", {
     market: marketRoute,
     order: {
       tokenId: String(outcome.onChainId),
       outcomeIndexSet: Number(outcome.indexSet),
       side,
-      quantity: positiveDecimal(input.quantity, "quantity"),
-      limitPrice: price(input.limitPrice, marketRoute.decimalPrecision),
+      quantity,
+      limitPrice,
       feeRateBps: marketRoute.feeRateBps,
+      pricePerShareWei: amounts.pricePerShare.toString(),
+      makerAmount: amounts.makerAmount.toString(),
+      takerAmount: amounts.takerAmount.toString(),
     },
   }, context, now);
 }
@@ -118,10 +150,14 @@ function buildRedeemPlan(positions, context, now = Date.now()) {
     const amount = positiveDecimal(position.amount, "position.amount");
     const conditionId = String(market.conditionId).toLowerCase();
     if (!/^0x[0-9a-f]{64}$/.test(conditionId)) throw new Error("conditionId must be bytes32");
+    const marketId = Number(market.id);
+    const indexSet = Number(outcome.indexSet);
+    if (!Number.isSafeInteger(marketId) || marketId <= 0) throw new Error("marketId must be a positive safe integer");
+    if (![1, 2].includes(indexSet)) throw new Error("position indexSet must be 1 or 2");
     return [{
-      marketId: Number(market.id),
+      marketId,
       conditionId,
-      indexSet: Number(outcome.indexSet),
+      indexSet,
       tokenId: String(outcome.onChainId),
       amount,
       isNegRisk: Boolean(market.isNegRisk),
@@ -131,7 +167,7 @@ function buildRedeemPlan(positions, context, now = Date.now()) {
   return planEnvelope("predict_fun_redeem", { items }, context, now);
 }
 
-function validatePlan(plan, context, expectedHash, now = Date.now()) {
+function validatePlan(plan, context, expectedHash, now = Date.now(), allowExpired = false) {
   const { sha256: embeddedHash, ...unsigned } = plan;
   const actualHash = sha256(unsigned);
   if (actualHash !== embeddedHash || actualHash !== expectedHash) throw new Error("plan hash mismatch");
@@ -141,10 +177,15 @@ function validatePlan(plan, context, expectedHash, now = Date.now()) {
   if (plan.chainId !== normalized.chainId) throw new Error("plan chain mismatch");
   if (plan.releaseSha !== normalized.releaseSha) throw new Error("plan release mismatch");
   if (Date.parse(plan.generatedAt) > now + 30_000) throw new Error("plan generated in the future");
-  if (Date.parse(plan.expiresAt) <= now || Date.parse(plan.expiresAt) - Date.parse(plan.generatedAt) > PLAN_TTL_MS) {
+  if ((!allowExpired && Date.parse(plan.expiresAt) <= now)
+    || Date.parse(plan.expiresAt) - Date.parse(plan.generatedAt) > PLAN_TTL_MS) {
     throw new Error("plan expired or exceeds maximum TTL");
   }
   return plan;
+}
+
+function nowFrom(dependencies) {
+  return dependencies.now ? dependencies.now() : Date.now();
 }
 
 function loadWalletSecret(env = process.env) {
@@ -215,8 +256,12 @@ async function fetchPositions(context, env = process.env, fetchImpl = fetch) {
 }
 
 async function makeWalletSession(context, env = process.env) {
-  const provider = new JsonRpcProvider(requireEnv("PREDICT_FUN_RPC_URL", env), context.chainId, { staticNetwork: true });
+  const rpcUrl = new URL(requireEnv("PREDICT_FUN_RPC_URL", env));
+  if (rpcUrl.protocol !== "https:") throw new Error("PREDICT_FUN_RPC_URL must use HTTPS");
+  const provider = new JsonRpcProvider(rpcUrl.href, context.chainId, { staticNetwork: true });
   provider.pollingInterval = 300;
+  const reportedChainId = Number(BigInt(await provider.send("eth_chainId", [])));
+  if (reportedChainId !== context.chainId) throw new Error("Predict RPC chainId mismatch");
   const signer = new Wallet(loadWalletSecret(env), provider);
   const options = context.accountType === "PREDICT_ACCOUNT" ? { predictAccount: context.account } : undefined;
   const builder = await OrderBuilder.make(
@@ -279,12 +324,13 @@ async function checkApprovals(plan, session) {
 async function executeApprovals(plan, expectedHash, env = process.env, dependencies = {}) {
   if (env.PLOY_PREDICT_APPROVAL_WRITE_ENABLED !== "true") throw new Error("Predict approval writes are disabled");
   const context = runtimeContext(env);
-  validatePlan(plan, context, expectedHash);
+  validatePlan(plan, context, expectedHash, nowFrom(dependencies));
   const session = dependencies.session || await makeWalletSession(context, env);
   const scope = approvalScope(plan);
   const scopes = Array.isArray(scope) ? scope : [scope];
   const steps = dedupeSteps(scopes.flatMap((scope) => session.builder.getApprovalSteps(scope)));
   if (steps.length === 0) return { success: true, steps: [] };
+  validatePlan(plan, context, expectedHash, nowFrom(dependencies));
   const report = await session.builder.runApprovals(steps, { stopOnError: true });
   if (!report.success) throw new Error("Predict scoped approval failed");
   return report;
@@ -317,18 +363,31 @@ function operationId(plan) {
 
 function withWriteLock(plan, env, dependencies, work) {
   const { ledger, lock } = ledgerPaths(env);
+  const id = operationId(plan);
   fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
   fs.mkdirSync(lock, { mode: 0o700 });
-  const record = dependencies.record || ((event) => appendLedger(ledger, event));
-  let completed = false;
-  return Promise.resolve(work(record, operationId(plan)))
-    .then((result) => {
-      completed = true;
-      return result;
-    })
+  fs.writeFileSync(path.join(lock, "owner.json"), `${JSON.stringify({ operationId: id, planSha256: plan.sha256, kind: plan.kind })}\n`, {
+    mode: 0o600,
+    flag: "wx",
+  });
+  const sink = dependencies.record || ((event) => appendLedger(ledger, event));
+  let retain = false;
+  const record = (event) => {
+    if (new Set(["submitting", "submission_unknown", "ambiguous"]).has(event.state)) retain = true;
+    if (new Set(["submitted", "confirmed", "reconciled"]).has(event.state)) retain = false;
+    sink(event);
+  };
+  return Promise.resolve(work(record, id))
     .finally(() => {
-      if (completed && fs.existsSync(lock)) fs.rmdirSync(lock);
+      if (!retain && fs.existsSync(lock)) fs.rmSync(lock, { recursive: true });
     });
+}
+
+function assertLockOwner(lock, operationIdValue) {
+  const ownerPath = path.join(lock, "owner.json");
+  if (!fs.existsSync(ownerPath)) throw new Error("Predict account-op lock owner is missing");
+  const owner = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
+  if (owner.operationId !== operationIdValue) throw new Error("Predict account-op lock belongs to another operation");
 }
 
 function assertMarketUnchanged(plan, market) {
@@ -339,6 +398,10 @@ function assertMarketUnchanged(plan, market) {
     feeRateBps: Number(market.feeRateBps),
     isNegRisk: Boolean(market.isNegRisk),
     isYieldBearing: Boolean(market.isYieldBearing),
+    tradingStatus: String(market.tradingStatus),
+    status: String(market.status),
+    isVisible: market.isVisible === true,
+    isResolved: market.resolution != null,
   };
   if (canonical(current) !== canonical(plan.market)) throw new Error("market execution metadata changed after planning");
   if (!(market.outcomes || []).some((outcome) => String(outcome.onChainId) === plan.order.tokenId)) {
@@ -349,46 +412,53 @@ function assertMarketUnchanged(plan, market) {
 async function executeOrderPlan(plan, expectedHash, env = process.env, dependencies = {}) {
   if (env.PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED !== "true") throw new Error("Predict account-op writes are disabled");
   const context = runtimeContext(env);
-  validatePlan(plan, context, expectedHash);
+  validatePlan(plan, context, expectedHash, nowFrom(dependencies));
   const market = dependencies.market || await fetchMarket(plan.market.id, context, env);
   assertMarketUnchanged(plan, market);
-  const session = dependencies.session || await makeWalletSession(context, env);
-  const approvals = await checkApprovals(plan, session);
-  if (approvals.checks.some((check) => !check.satisfied)) throw new Error("required scoped approvals are missing");
-  const side = plan.order.side === "BUY" ? Side.BUY : Side.SELL;
-  const amounts = session.builder.getLimitOrderAmounts({
-    side,
-    pricePerShareWei: parseUnits(plan.order.limitPrice, 18),
-    quantityWei: parseUnits(plan.order.quantity, 18),
-  });
-  const order = session.builder.buildOrder("LIMIT", {
-    side,
-    tokenId: plan.order.tokenId,
-    makerAmount: amounts.makerAmount,
-    takerAmount: amounts.takerAmount,
-    nonce: 0n,
-    feeRateBps: plan.order.feeRateBps,
-    expiresAt: new Date(plan.expiresAt),
-  });
-  const typedData = session.builder.buildTypedData(order, {
-    isNegRisk: plan.market.isNegRisk,
-    isYieldBearing: plan.market.isYieldBearing,
-  });
-  const signedOrder = await session.builder.signTypedDataOrder(typedData);
-  const hash = session.builder.buildTypedDataHash(typedData);
-  const jwt = dependencies.jwt || await authenticate(session, context, env);
-  const submit = dependencies.submit || (async (body) => apiRequest(context, env, "/v1/orders", {
-    method: "POST",
-    jwt,
-    headers: { "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify(body),
-  }));
   return withWriteLock(plan, env, dependencies, async (record, id) => {
+    validatePlan(plan, context, expectedHash, nowFrom(dependencies));
+    const session = dependencies.session || await makeWalletSession(context, env);
+    const approvals = await checkApprovals(plan, session);
+    if (approvals.checks.some((check) => !check.satisfied)) throw new Error("required scoped approvals are missing");
+    const side = plan.order.side === "BUY" ? Side.BUY : Side.SELL;
+    const amounts = session.builder.getLimitOrderAmounts({
+      side,
+      pricePerShareWei: BigInt(plan.order.pricePerShareWei),
+      quantityWei: parseUnits(plan.order.quantity, 18),
+    });
+    if (amounts.pricePerShare.toString() !== plan.order.pricePerShareWei
+      || amounts.makerAmount.toString() !== plan.order.makerAmount
+      || amounts.takerAmount.toString() !== plan.order.takerAmount) {
+      throw new Error("SDK order amounts differ from the approved plan");
+    }
+    const order = session.builder.buildOrder("LIMIT", {
+      side,
+      tokenId: plan.order.tokenId,
+      makerAmount: BigInt(plan.order.makerAmount),
+      takerAmount: BigInt(plan.order.takerAmount),
+      nonce: 0n,
+      feeRateBps: plan.order.feeRateBps,
+      expiresAt: new Date(plan.expiresAt),
+    });
+    const typedData = session.builder.buildTypedData(order, {
+      isNegRisk: plan.market.isNegRisk,
+      isYieldBearing: plan.market.isYieldBearing,
+    });
+    const signedOrder = await session.builder.signTypedDataOrder(typedData);
+    const hash = session.builder.buildTypedDataHash(typedData);
+    const jwt = dependencies.jwt || await authenticate(session, context, env);
+    const submit = dependencies.submit || (async (body) => apiRequest(context, env, "/v1/orders", {
+      method: "POST",
+      jwt,
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify(body),
+    }));
+    validatePlan(plan, context, expectedHash, nowFrom(dependencies));
     record({ operationId: id, state: "submitting", kind: plan.kind, orderHash: hash });
     try {
       const response = await submit({ data: {
         order: { ...signedOrder, hash },
-        pricePerShare: amounts.pricePerShare.toString(),
+        pricePerShare: plan.order.pricePerShareWei,
         strategy: "LIMIT",
       } });
       record({ operationId: id, state: "submitted", kind: plan.kind, orderHash: hash, orderId: response.data.orderId });
@@ -408,16 +478,18 @@ function positionAmountWei(amount) {
 async function executeRedeemPlan(plan, expectedHash, env = process.env, dependencies = {}) {
   if (env.PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED !== "true") throw new Error("Predict account-op writes are disabled");
   const context = runtimeContext(env);
-  validatePlan(plan, context, expectedHash);
+  validatePlan(plan, context, expectedHash, nowFrom(dependencies));
   const positions = dependencies.positions || await fetchPositions(context, env);
   const fresh = buildRedeemPlan(positions, context, Date.parse(plan.generatedAt));
   if (canonical(fresh.items) !== canonical(plan.items)) throw new Error("redeemable positions changed after planning");
-  const session = dependencies.session || await makeWalletSession(context, env);
-  const approvals = await checkApprovals(plan, session);
-  if (approvals.checks.some((check) => !check.satisfied)) throw new Error("required scoped approvals are missing");
   return withWriteLock(plan, env, dependencies, async (record, id) => {
+    validatePlan(plan, context, expectedHash, nowFrom(dependencies));
+    const session = dependencies.session || await makeWalletSession(context, env);
+    const approvals = await checkApprovals(plan, session);
+    if (approvals.checks.some((check) => !check.satisfied)) throw new Error("required scoped approvals are missing");
     const receipts = [];
     for (const item of plan.items) {
+      validatePlan(plan, context, expectedHash, nowFrom(dependencies));
       record({ operationId: id, state: "submitting", kind: plan.kind, conditionId: item.conditionId, indexSet: item.indexSet });
       const options = {
         conditionId: item.conditionId,
@@ -439,13 +511,17 @@ async function executeRedeemPlan(plan, expectedHash, env = process.env, dependen
   });
 }
 
-async function reconcileOrder(operationIdValue, env = process.env, dependencies = {}) {
-  if (!operationIdValue) throw new Error("operation id is required");
+async function reconcileOrder(plan, expectedHash, env = process.env, dependencies = {}) {
+  if (env.PLOY_PREDICT_RECONCILE_WRITE_ENABLED !== "true") throw new Error("Predict reconciliation writes are disabled");
   const context = runtimeContext(env);
+  validatePlan(plan, context, expectedHash, nowFrom(dependencies), true);
+  const operationIdValue = operationId(plan);
   const { ledger, lock } = ledgerPaths(env);
+  assertLockOwner(lock, operationIdValue);
   const history = dependencies.history || readLedger(ledger);
   const latest = history.filter((event) => event.operationId === operationIdValue).at(-1);
-  if (!latest || latest.kind !== "predict_fun_limit_order" || latest.state !== "submission_unknown") {
+  if (!latest || latest.kind !== "predict_fun_limit_order"
+    || !new Set(["submitting", "submission_unknown"]).has(latest.state)) {
     throw new Error("operation is not an unknown Predict order submission");
   }
   const session = dependencies.session || await makeWalletSession(context, env);
@@ -460,8 +536,26 @@ async function reconcileOrder(operationIdValue, env = process.env, dependencies 
     orderId: payload.data.id,
     reconciled: true,
   });
-  if (fs.existsSync(lock)) fs.rmdirSync(lock);
+  fs.rmSync(lock, { recursive: true });
   return payload.data;
+}
+
+async function reconcileRedeem(plan, expectedHash, env = process.env, dependencies = {}) {
+  if (env.PLOY_PREDICT_RECONCILE_WRITE_ENABLED !== "true") throw new Error("Predict reconciliation writes are disabled");
+  const context = runtimeContext(env);
+  validatePlan(plan, context, expectedHash, nowFrom(dependencies), true);
+  const operationIdValue = operationId(plan);
+  const { ledger, lock } = ledgerPaths(env);
+  assertLockOwner(lock, operationIdValue);
+  const positions = dependencies.positions || await fetchPositions(context, env);
+  const current = buildRedeemPlan(positions, context, Date.parse(plan.generatedAt));
+  const remaining = new Set(current.items.map((item) => `${item.conditionId}:${item.indexSet}`));
+  if (plan.items.some((item) => remaining.has(`${item.conditionId}:${item.indexSet}`))) {
+    throw new Error("a planned Predict redemption is still redeemable; lock retained");
+  }
+  appendLedger(ledger, { operationId: operationIdValue, state: "reconciled", kind: plan.kind });
+  fs.rmSync(lock, { recursive: true });
+  return { operationId: operationIdValue, state: "reconciled" };
 }
 
 module.exports = {
@@ -479,6 +573,7 @@ module.exports = {
   normalizeContext,
   runtimeContext,
   reconcileOrder,
+  reconcileRedeem,
   sha256,
   validatePlan,
 };

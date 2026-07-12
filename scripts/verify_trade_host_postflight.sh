@@ -44,10 +44,16 @@ grep -Fxq "PLOY_LIVE_APPROVAL_FILE=${ROOT_DIR}/data/live-approvals/pending.json"
   || fail "runtime live-approval enforcement is not configured"
 grep -Fxq "PLOY_ACCOUNT_OPS_WRITE_ENABLED=false" "${ROOT_DIR}/.env" \
   || fail "account-ops must remain write-disabled after deploy"
-grep -Fxq "PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED=false" "${ROOT_DIR}/.env" \
-  || fail "Predict account-ops must remain write-disabled after deploy"
-grep -Fxq "PLOY_PREDICT_APPROVAL_WRITE_ENABLED=false" "${ROOT_DIR}/.env" \
-  || fail "Predict approval writes must remain disabled after deploy"
+require_unique_false() {
+  local key="$1"
+  [[ "$(grep -cE "^${key}=" "${ROOT_DIR}/.env")" == 1 ]] \
+    || fail "${key} must appear exactly once"
+  grep -Fxq "${key}=false" "${ROOT_DIR}/.env" \
+    || fail "${key} must remain disabled after deploy"
+}
+require_unique_false PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED
+require_unique_false PLOY_PREDICT_APPROVAL_WRITE_ENABLED
+require_unique_false PLOY_PREDICT_RECONCILE_WRITE_ENABLED
 [[ "$($STAT -c '%U:%G:%a' "${ROOT_DIR}/data/account-ops")" == "root:root:700" ]] \
   || fail "account-ops state directory must be root:root mode 700"
 "${release_dir}/bin/node" -e "require('${release_dir}/tools/polymarket-account-ops/account_ops.js')" \

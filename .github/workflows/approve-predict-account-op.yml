@@ -7,7 +7,7 @@ on:
         description: "Exact current main SHA already deployed to ploy-trade-1"
         required: true
       operation:
-        description: "One of: order_approve, order_execute, redeem_approve, redeem_execute"
+        description: "One of: order_approve, order_execute, order_reconcile, redeem_approve, redeem_execute, redeem_reconcile"
         required: true
       plan_sha256:
         description: "Exact SHA-256 printed by ploy-predict-account-ops plan"
@@ -45,7 +45,7 @@ jobs:
           [[ "${PLAN_SHA256}" =~ ^[0-9a-f]{64}$ ]]
           [[ "${RISK_CONFIRMATION}" == "I APPROVE THIS PREDICT ACCOUNT OPERATION" ]]
           case "${OPERATION}" in
-            order_approve|order_execute|redeem_approve|redeem_execute) ;;
+            order_approve|order_execute|order_reconcile|redeem_approve|redeem_execute|redeem_reconcile) ;;
             *) echo "unsupported operation" >&2; exit 1 ;;
           esac
           git fetch --no-tags --depth=1 origin main
@@ -58,6 +58,19 @@ jobs:
     runs-on: ubuntu-latest
     environment: ploy-trade-live
     steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.deploy_sha }}
+
+      - name: Revalidate current main after human approval
+        env:
+          DEPLOY_SHA: ${{ needs.validate.outputs.deploy_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin main
+          [[ "$(git rev-parse HEAD)" == "${DEPLOY_SHA}" ]]
+          [[ "$(git rev-parse origin/main)" == "${DEPLOY_SHA}" ]]
+
       - name: Configure pinned SSH
         env:
           PLOY_TRADE_1_KNOWN_HOSTS: ${{ secrets.PLOY_TRADE_1_KNOWN_HOSTS }}
@@ -95,12 +108,21 @@ jobs:
           root=/opt/ploy
           [[ "$(readlink -f "${root}/current")" == "${root}/releases/${deploy_sha}" ]]
           grep -Fxq "PLOY_RELEASE_SHA=${deploy_sha}" "${root}/.env"
-          grep -Fxq "PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED=false" "${root}/.env"
-          grep -Fxq "PLOY_PREDICT_APPROVAL_WRITE_ENABLED=false" "${root}/.env"
+          require_unique_false() {
+            local key="$1"
+            [[ "$(grep -cE "^${key}=" "${root}/.env")" == 1 ]]
+            grep -Fxq "${key}=false" "${root}/.env"
+          }
+          require_unique_false PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED
+          require_unique_false PLOY_PREDICT_APPROVAL_WRITE_ENABLED
+          require_unique_false PLOY_PREDICT_RECONCILE_WRITE_ENABLED
           set -a
           # shellcheck disable=SC1091
           . "${root}/.env"
           set +a
+          [[ "${PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED}" == false ]]
+          [[ "${PLOY_PREDICT_APPROVAL_WRITE_ENABLED}" == false ]]
+          [[ "${PLOY_PREDICT_RECONCILE_WRITE_ENABLED}" == false ]]
           case "${operation}" in
             order_*) plan="${root}/data/account-ops/predict-order-plan.json" ;;
             redeem_*) plan="${root}/data/account-ops/predict-redeem-plan.json" ;;
@@ -113,11 +135,17 @@ jobs:
             order_execute)
               PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED=true "${root}/bin/ploy-predict-account-ops" order execute --plan "${plan}" --sha256 "${plan_sha256}"
               ;;
+            order_reconcile)
+              PLOY_PREDICT_RECONCILE_WRITE_ENABLED=true "${root}/bin/ploy-predict-account-ops" order reconcile --plan "${plan}" --sha256 "${plan_sha256}"
+              ;;
             redeem_approve)
               PLOY_PREDICT_APPROVAL_WRITE_ENABLED=true "${root}/bin/ploy-predict-account-ops" redeem approve --plan "${plan}" --sha256 "${plan_sha256}"
               ;;
             redeem_execute)
               PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED=true "${root}/bin/ploy-predict-account-ops" redeem execute --plan "${plan}" --sha256 "${plan_sha256}"
+              ;;
+            redeem_reconcile)
+              PLOY_PREDICT_RECONCILE_WRITE_ENABLED=true "${root}/bin/ploy-predict-account-ops" redeem reconcile --plan "${plan}" --sha256 "${plan_sha256}"
               ;;
           esac
           REMOTE

@@ -66,7 +66,8 @@ class TradeHostPostflightTests(unittest.TestCase):
             f"PLOY_LIVE_APPROVAL_FILE={self.root}/data/live-approvals/pending.json\n"
             "PLOY_ACCOUNT_OPS_WRITE_ENABLED=false\n"
             "PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED=false\n"
-            "PLOY_PREDICT_APPROVAL_WRITE_ENABLED=false\n",
+            "PLOY_PREDICT_APPROVAL_WRITE_ENABLED=false\n"
+            "PLOY_PREDICT_RECONCILE_WRITE_ENABLED=false\n",
             encoding="utf-8",
         )
 
@@ -146,6 +147,13 @@ fi
             with self.subTest(key=key):
                 result = self.run_postflight(**{key: value})
                 self.assertNotEqual(result.returncode, 0)
+
+    def test_duplicate_predict_write_gate_fails_closed(self):
+        with (self.root / ".env").open("a", encoding="utf-8") as handle:
+            handle.write("PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED=true\n")
+        result = self.run_postflight()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must appear exactly once", result.stderr)
 
 
 if __name__ == "__main__":
