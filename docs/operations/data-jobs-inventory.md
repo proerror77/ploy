@@ -14,6 +14,7 @@ collection behavior.
 | `/opt/ploy/bin/ploy-runner collect-quotes` / `ploy-runner-host::ops` | canonical ops surface | runner ops | Full/ops build only; lean replay/backtest binaries intentionally do not expose it. |
 | `/opt/ploy/bin/ploy-runner collect-pm-trades` / `ploy-runner-host::ops` | canonical ops surface | runner ops | Polls Polymarket Data API trade prints into `clob_trade_ticks`; full/ops build only. |
 | `/opt/ploy/bin/ploy-runner collect-cex-public` / `ploy-runner-host::ops` | canonical ops surface | runner ops | Collects Binance Futures public metrics/liquidations and normalized OKX, Bybit, Coinbase, and Kraken L2 rows. |
+| `/opt/ploy/bin/ploy-runner collect-predict-fun` / `ploy-runner-host::ops` | canonical ops surface | runner ops | Collects Predict.fun market catalog and normalized Yes/No order-book snapshots; mainnet API key required. |
 | `ploy-feed-loaders` | canonical historical DB loader | research/backtest adapters | Owns SQLx historical `MarketUpdate` loading outside strategy-bundles. |
 | `scripts/export_parquet.sh` | canonical export helper | data/export host | Keep as the explicit Parquet export entrypoint until replaced by Rust datactl. |
 | `.github/workflows/backtest.yml` | canonical CI backtest lane | CI/backtest host | Should remain separated from trade-host deploy assumptions. |

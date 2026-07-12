@@ -82,6 +82,13 @@ service_exists() {{
   systemctl cat "$1" >/dev/null 2>&1
 }}
 
+predict_fun_configured() {{
+  [ -s /etc/ploy/predict-fun.env ] && {{
+    grep -Eq '^PREDICT_FUN_API_KEY=.+$' /etc/ploy/predict-fun.env ||
+    grep -Eq '^PREDICT_FUN_API_URL=https://api-testnet\\.predict\\.fun/?$' /etc/ploy/predict-fun.env
+  }}
+}}
+
 require_research_host_has_no_live() {{
   local deployments
   if grep -Eq '^[[:space:]]*(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=' "${{DEPLOY_ROOT}}/.env"; then
@@ -196,6 +203,7 @@ for unit in \\
   ploy-deribit-iv-collector.service \\
   ploy-deribit-greeks-collector.service \\
   ploy-cex-public-collector.service \\
+  ploy-predict-fun-collector.service \\
   ploy-market-discovery.service \\
   ploy-quote-collector.service \\
   ploy-pm-trade-collector.service; do
@@ -266,6 +274,7 @@ install -m 0644 ./deployment/systemd/ploy-binance-price-collector.service /etc/s
 install -m 0644 ./deployment/systemd/ploy-deribit-iv-collector.service /etc/systemd/system/ploy-deribit-iv-collector.service
 install -m 0644 ./deployment/systemd/ploy-deribit-greeks-collector.service /etc/systemd/system/ploy-deribit-greeks-collector.service
 install -m 0644 ./deployment/systemd/ploy-cex-public-collector.service /etc/systemd/system/ploy-cex-public-collector.service
+install -m 0644 ./deployment/systemd/ploy-predict-fun-collector.service /etc/systemd/system/ploy-predict-fun-collector.service
 install -m 0644 ./deployment/systemd/ploy-market-discovery.service /etc/systemd/system/ploy-market-discovery.service
 install -m 0644 ./deployment/systemd/ploy-pm-trade-collector.service /etc/systemd/system/ploy-pm-trade-collector.service
 install -m 0644 ./deployment/systemd/ploy-polymarket-v2-indexer-import.service /etc/systemd/system/ploy-polymarket-v2-indexer-import.service
@@ -307,6 +316,13 @@ systemctl enable --now ploy-deribit-greeks-collector.service
 systemctl restart ploy-deribit-greeks-collector.service
 systemctl enable --now ploy-cex-public-collector.service
 systemctl restart ploy-cex-public-collector.service
+if predict_fun_configured; then
+  systemctl enable --now ploy-predict-fun-collector.service
+  systemctl restart ploy-predict-fun-collector.service
+else
+  systemctl disable --now ploy-predict-fun-collector.service >/dev/null 2>&1 || true
+  echo "Predict.fun collector installed but disabled: /etc/ploy/predict-fun.env has no API key"
+fi
 systemctl enable --now ploy-market-discovery.service
 systemctl restart ploy-market-discovery.service
 if ! check_recent_rows \\
@@ -360,6 +376,10 @@ systemctl is-active --quiet ploy-deribit-greeks-collector.service
 require_service_guardrails ploy-deribit-greeks-collector.service
 systemctl is-active --quiet ploy-cex-public-collector.service
 require_service_guardrails ploy-cex-public-collector.service
+if predict_fun_configured; then
+  systemctl is-active --quiet ploy-predict-fun-collector.service
+  require_service_guardrails ploy-predict-fun-collector.service
+fi
 systemctl is-active --quiet ploy-market-discovery.service
 require_service_guardrails ploy-market-discovery.service
 if service_exists ployd.service; then
@@ -399,6 +419,17 @@ wait_for_recent_log \\
   "pm trade collector did not complete a healthy poll after deploy" \\
   120 \\
   5
+if predict_fun_configured; then
+  wait_for_recent_rows \\
+    "SELECT EXISTS (SELECT 1 FROM predict_fun_orderbook_ticks WHERE received_at >= NOW() - INTERVAL '10 minutes')" \\
+    "Predict.fun order books are not fresh after deploy"
+  wait_for_recent_log \\
+    "ploy-predict-fun-collector.service" \\
+    "Predict.fun collection pass complete" \\
+    "Predict.fun collector did not complete a healthy pass after deploy" \\
+    120 \\
+    5
+fi
 
 if service_exists ployd.service; then
   assert_no_recent_logs \\

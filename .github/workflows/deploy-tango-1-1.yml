@@ -58,6 +58,7 @@ env:
     047_full_depth_execution_surfaces.sql
     048_official_settlement_coverage_checks.sql
     049_cex_public_market_data.sql
+    050_predict_fun_market_data.sql
 
 jobs:
   build-and-deploy:
@@ -227,6 +228,7 @@ jobs:
           cp deployment/systemd/ploy-deribit-iv-collector.service dist/deployment/systemd/ploy-deribit-iv-collector.service
           cp deployment/systemd/ploy-deribit-greeks-collector.service dist/deployment/systemd/ploy-deribit-greeks-collector.service
           cp deployment/systemd/ploy-cex-public-collector.service dist/deployment/systemd/ploy-cex-public-collector.service
+          cp deployment/systemd/ploy-predict-fun-collector.service dist/deployment/systemd/ploy-predict-fun-collector.service
           cp deployment/systemd/ploy-market-discovery.service dist/deployment/systemd/ploy-market-discovery.service
           cp deployment/systemd/ploy-pm-trade-collector.service dist/deployment/systemd/ploy-pm-trade-collector.service
           cp deployment/systemd/ploy-polymarket-v2-indexer-import.service dist/deployment/systemd/ploy-polymarket-v2-indexer-import.service

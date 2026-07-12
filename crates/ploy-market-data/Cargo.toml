@@ -14,6 +14,7 @@ live = [
     "dep:futures",
     "dep:polymarket-client-sdk",
     "dep:reqwest",
+    "dep:secrecy",
     "dep:sqlx",
     "dep:tokio-tungstenite",
 ]
@@ -25,6 +26,7 @@ futures = { version = "0.3", optional = true }
 ploy-market-contracts.workspace = true
 polymarket-client-sdk = { package = "polymarket_client_sdk_v2", version = "=0.6.0", features = ["clob", "data", "gamma", "rtds", "tracing", "ws", "heartbeats"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"], optional = true }
+secrecy = { workspace = true, optional = true }
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 serde.workspace = true

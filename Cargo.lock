@@ -5121,6 +5121,7 @@ dependencies = [
  "reqwest 0.13.2",
  "rust_decimal",
  "rust_decimal_macros",
+ "secrecy 0.8.0",
  "serde",
  "serde_json",
  "sqlx",
