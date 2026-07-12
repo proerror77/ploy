@@ -20,6 +20,26 @@ const BYBIT_WS: &str = "wss://stream.bybit.com/v5/public/spot";
 const COINBASE_WS: &str = "wss://advanced-trade-ws.coinbase.com";
 const KRAKEN_WS: &str = "wss://ws.kraken.com/v2";
 
+#[derive(Debug, thiserror::Error)]
+pub enum CexCollectorError {
+    #[error("invalid CEX payload: {0}")]
+    InvalidPayload(String),
+    #[error("CEX HTTP request failed: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("CEX WebSocket failed: {0}")]
+    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("CEX JSON payload failed: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("CEX database write failed: {0}")]
+    Database(#[from] sqlx::Error),
+}
+
+type Result<T> = std::result::Result<T, CexCollectorError>;
+
+fn invalid(message: impl Into<String>) -> CexCollectorError {
+    CexCollectorError::InvalidPayload(message.into())
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NormalizedTick {
     pub exchange: String,
@@ -60,10 +80,10 @@ pub fn normalize_binance_futures(
     premium: &Value,
     open_interest: &Value,
     basis: Option<&Value>,
-) -> Result<NormalizedTick, String> {
+) -> Result<NormalizedTick> {
     let symbol = required_str(premium, "symbol")?.to_uppercase();
     if open_interest["symbol"].as_str() != Some(symbol.as_str()) {
-        return Err("Binance futures symbol mismatch".to_string());
+        return Err(invalid("Binance futures symbol mismatch"));
     }
     let event_ms = required_i64(premium, "time")?;
     let basis_row = basis
@@ -108,16 +128,16 @@ pub fn normalize_binance_futures(
     })
 }
 
-pub fn normalize_binance_liquidation(message: &Value) -> Result<NormalizedTick, String> {
+pub fn normalize_binance_liquidation(message: &Value) -> Result<NormalizedTick> {
     let data = message.get("data").unwrap_or(message);
     let order = data
         .get("o")
-        .ok_or_else(|| "Binance liquidation missing order".to_string())?;
+        .ok_or_else(|| invalid("Binance liquidation missing order"))?;
     let symbol = required_str(order, "s")?.to_uppercase();
     let event_ms = order["T"]
         .as_i64()
         .or_else(|| data["E"].as_i64())
-        .ok_or_else(|| "Binance liquidation missing event time".to_string())?;
+        .ok_or_else(|| invalid("Binance liquidation missing event time"))?;
     let side = required_str(order, "S")?.to_uppercase();
     let price = decimal_field(order, "ap").or_else(|| decimal_field(order, "p"));
     let quantity = decimal_field(order, "z").or_else(|| decimal_field(order, "q"));
@@ -161,17 +181,17 @@ pub fn normalize_binance_liquidation(message: &Value) -> Result<NormalizedTick, 
     })
 }
 
-fn required_str<'a>(value: &'a Value, field: &str) -> Result<&'a str, String> {
+fn required_str<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
     value[field]
         .as_str()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| format!("missing {field}"))
+        .ok_or_else(|| invalid(format!("missing {field}")))
 }
 
-fn required_i64(value: &Value, field: &str) -> Result<i64, String> {
+fn required_i64(value: &Value, field: &str) -> Result<i64> {
     value[field]
         .as_i64()
-        .ok_or_else(|| format!("missing {field}"))
+        .ok_or_else(|| invalid(format!("missing {field}")))
 }
 
 fn decimal(value: &Value) -> Option<Decimal> {
@@ -187,13 +207,13 @@ fn decimal_field(value: &Value, field: &str) -> Option<Decimal> {
     decimal(&value[field])
 }
 
-fn ms_to_utc(ms: i64) -> Result<DateTime<Utc>, String> {
+fn ms_to_utc(ms: i64) -> Result<DateTime<Utc>> {
     Utc.timestamp_millis_opt(ms)
         .single()
-        .ok_or_else(|| format!("invalid millisecond timestamp {ms}"))
+        .ok_or_else(|| invalid(format!("invalid millisecond timestamp {ms}")))
 }
 
-fn parse_time(value: &Value) -> Result<DateTime<Utc>, String> {
+fn parse_time(value: &Value) -> Result<DateTime<Utc>> {
     if let Some(ms) = value.as_i64() {
         return ms_to_utc(ms);
     }
@@ -203,9 +223,9 @@ fn parse_time(value: &Value) -> Result<DateTime<Utc>, String> {
         }
         return DateTime::parse_from_rfc3339(raw)
             .map(|value| value.with_timezone(&Utc))
-            .map_err(|error| error.to_string());
+            .map_err(|error| invalid(error.to_string()));
     }
-    Err("missing event timestamp".to_string())
+    Err(invalid("missing event timestamp"))
 }
 
 #[derive(Debug)]
@@ -230,13 +250,13 @@ impl CexBook {
         }
     }
 
-    pub fn apply_message(&mut self, _message: &Value) -> Result<Option<NormalizedTick>, String> {
+    pub fn apply_message(&mut self, _message: &Value) -> Result<Option<NormalizedTick>> {
         let update = match self.exchange.as_str() {
             "okx" => parse_okx(_message)?,
             "bybit" => parse_bybit(_message)?,
             "coinbase" => parse_coinbase(_message, &self.exchange_symbol)?,
             "kraken" => parse_kraken(_message)?,
-            other => return Err(format!("unsupported CEX book exchange {other}")),
+            other => return Err(invalid(format!("unsupported CEX book exchange {other}"))),
         };
         let Some(update) = update else {
             return Ok(None);
@@ -265,9 +285,9 @@ impl CexBook {
                 if actual != expected {
                     self.bids.clear();
                     self.asks.clear();
-                    return Err(format!(
+                    return Err(invalid(format!(
                         "Kraken L2 checksum mismatch: expected={expected} actual={actual}"
-                    ));
+                    )));
                 }
             }
         }
@@ -404,7 +424,7 @@ fn truncate_book(
     }
 }
 
-fn parse_okx(message: &Value) -> Result<Option<BookUpdate>, String> {
+fn parse_okx(message: &Value) -> Result<Option<BookUpdate>> {
     let Some(data) = message["data"].as_array().and_then(|rows| rows.first()) else {
         return Ok(None);
     };
@@ -421,7 +441,7 @@ fn parse_okx(message: &Value) -> Result<Option<BookUpdate>, String> {
     }))
 }
 
-fn parse_bybit(message: &Value) -> Result<Option<BookUpdate>, String> {
+fn parse_bybit(message: &Value) -> Result<Option<BookUpdate>> {
     if message["data"].is_null() {
         return Ok(None);
     }
@@ -439,7 +459,7 @@ fn parse_bybit(message: &Value) -> Result<Option<BookUpdate>, String> {
     }))
 }
 
-fn parse_coinbase(message: &Value, exchange_symbol: &str) -> Result<Option<BookUpdate>, String> {
+fn parse_coinbase(message: &Value, exchange_symbol: &str) -> Result<Option<BookUpdate>> {
     if message["channel"].as_str() != Some("l2_data") {
         return Ok(None);
     }
@@ -475,7 +495,7 @@ fn parse_coinbase(message: &Value, exchange_symbol: &str) -> Result<Option<BookU
     }))
 }
 
-fn parse_kraken(message: &Value) -> Result<Option<BookUpdate>, String> {
+fn parse_kraken(message: &Value) -> Result<Option<BookUpdate>> {
     if message["channel"].as_str() != Some("book") {
         return Ok(None);
     }
@@ -607,27 +627,18 @@ async fn run_binance_futures(
     }
 }
 
-async fn fetch_binance_futures(
-    client: &reqwest::Client,
-    symbol: &str,
-) -> Result<NormalizedTick, String> {
-    async fn get(
-        client: &reqwest::Client,
-        path: &str,
-        query: &[(&str, &str)],
-    ) -> Result<Value, String> {
+async fn fetch_binance_futures(client: &reqwest::Client, symbol: &str) -> Result<NormalizedTick> {
+    async fn get(client: &reqwest::Client, path: &str, query: &[(&str, &str)]) -> Result<Value> {
         client
             .get(format!("{BINANCE_FUTURES_REST}{path}"))
             .query(query)
             .timeout(Duration::from_secs(15))
             .send()
-            .await
-            .map_err(|error| error.to_string())?
-            .error_for_status()
-            .map_err(|error| error.to_string())?
+            .await?
+            .error_for_status()?
             .json()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(CexCollectorError::from)
     }
     let premium = get(client, "/fapi/v1/premiumIndex", &[("symbol", symbol)]).await?;
     let open_interest = get(client, "/fapi/v1/openInterest", &[("symbol", symbol)]).await?;
@@ -652,37 +663,28 @@ async fn run_binance_liquidations(pool: PgPool, assets: Vec<String>, running: Ar
         .collect();
     while running.load(Ordering::SeqCst) {
         let result = async {
-            let (socket, _) = connect_async(BINANCE_FUTURES_WS)
-                .await
-                .map_err(|error| error.to_string())?;
+            let stream_url = format!("{BINANCE_FUTURES_WS}?streams={}", streams.join("/"));
+            let (socket, _) = connect_async(stream_url).await?;
             let (mut write, mut read) = socket.split();
-            write
-                .send(Message::Text(
-                    serde_json::json!({"method":"SUBSCRIBE","params":streams,"id":1})
-                        .to_string()
-                        .into(),
-                ))
-                .await
-                .map_err(|error| error.to_string())?;
             while running.load(Ordering::SeqCst) {
                 let Some(message) = read.next().await else {
                     break;
                 };
-                match message.map_err(|error| error.to_string())? {
+                match message? {
                     Message::Text(text) => {
-                        let raw: Value =
-                            serde_json::from_str(&text).map_err(|error| error.to_string())?;
+                        let raw: Value = serde_json::from_str(&text)?;
                         if raw.get("result").is_some() {
                             continue;
                         }
                         let tick = normalize_binance_liquidation(&raw)?;
                         persist_tick(&pool, &tick).await?;
                     }
+                    Message::Ping(payload) => write.send(Message::Pong(payload)).await?,
                     Message::Close(_) => break,
                     _ => {}
                 }
             }
-            Ok::<(), String>(())
+            Ok::<(), CexCollectorError>(())
         }
         .await;
         if let Err(error) = result {
@@ -732,27 +734,24 @@ async fn run_book_connection(
     assets: &[String],
     sample_ms: u64,
     running: &Arc<AtomicBool>,
-) -> Result<(), String> {
+) -> Result<()> {
     let url = match exchange {
         "okx" => OKX_WS,
         "bybit" => BYBIT_WS,
         "coinbase" => COINBASE_WS,
         "kraken" => KRAKEN_WS,
-        _ => return Err(format!("unsupported exchange {exchange}")),
+        _ => return Err(invalid(format!("unsupported exchange {exchange}"))),
     };
     let exchange_symbols: Vec<String> = assets
         .iter()
         .map(|asset| exchange_symbol(exchange, asset))
         .collect();
-    let (socket, _) = connect_async(url)
-        .await
-        .map_err(|error| error.to_string())?;
+    let (socket, _) = connect_async(url).await?;
     let (mut write, mut read) = socket.split();
     for subscription in subscriptions(exchange, &exchange_symbols) {
         write
             .send(Message::Text(subscription.to_string().into()))
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
     }
     let mut books: HashMap<String, CexBook> = assets
         .iter()
@@ -775,15 +774,15 @@ async fn run_book_connection(
         tokio::select! {
             _ = heartbeat.tick() => {
                 if let Some(ping) = heartbeat_message(exchange) {
-                    write.send(ping).await.map_err(|error| error.to_string())?;
+                    write.send(ping).await?;
                 }
             }
             message = read.next() => {
                 let Some(message) = message else { break };
-                match message.map_err(|error| error.to_string())? {
+                match message? {
                     Message::Text(text) => {
                         if text.as_str() == "pong" { continue }
-                        let raw: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+                        let raw: Value = serde_json::from_str(&text)?;
                         for (symbol, book) in &mut books {
                             if let Some(tick) = book.apply_message(&raw)? {
                                 let due = last_persisted.get(symbol)
@@ -796,7 +795,7 @@ async fn run_book_connection(
                             }
                         }
                     }
-                    Message::Ping(payload) => write.send(Message::Pong(payload)).await.map_err(|error| error.to_string())?,
+                    Message::Ping(payload) => write.send(Message::Pong(payload)).await?,
                     Message::Close(_) => break,
                     _ => {}
                 }
@@ -838,7 +837,7 @@ fn heartbeat_message(exchange: &str) -> Option<Message> {
     }
 }
 
-async fn persist_tick(pool: &PgPool, tick: &NormalizedTick) -> Result<(), String> {
+async fn persist_tick(pool: &PgPool, tick: &NormalizedTick) -> Result<()> {
     sqlx::query(
         r#"INSERT INTO cex_public_market_ticks (
             exchange, market_type, symbol, exchange_symbol, kind, event_time,
@@ -885,8 +884,7 @@ async fn persist_tick(pool: &PgPool, tick: &NormalizedTick) -> Result<(), String
     .bind(&tick.dedupe_key)
     .bind(&tick.raw)
     .execute(pool)
-    .await
-    .map_err(|error| error.to_string())?;
+    .await?;
     Ok(())
 }
 

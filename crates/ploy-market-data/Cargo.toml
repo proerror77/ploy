@@ -33,6 +33,7 @@ sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "chro
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"], optional = true }
 tracing.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

@@ -174,6 +174,13 @@ def main() -> int:
                 where_sql="source_key = 'binance/derivatives_snapshot'",
             ),
             source_snapshot(
+                "binance_liquidations",
+                "cex_public_market_ticks",
+                "event_time",
+                86400,
+                where_sql="source_key = 'binance/liquidation'",
+            ),
+            source_snapshot(
                 "okx_lob",
                 "cex_public_market_ticks",
                 "event_time",

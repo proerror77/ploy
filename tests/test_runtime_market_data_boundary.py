@@ -38,6 +38,9 @@ class RuntimeMarketDataBoundaryTests(unittest.TestCase):
             for exchange in ("okx", "bybit", "coinbase", "kraken"):
                 self.assertIn(exchange, text)
         self.assertIn('"cex-extended"', audit)
+        self.assertIn("kind = 'liquidation'", health)
+        self.assertIn('"binance_liquidations"', (ROOT / "scripts/report_market_data_health.py").read_text())
+        self.assertIn('?streams={}', collector)
 
     def test_pm5d_runtime_configs_default_to_local_market_data(self) -> None:
         configs = sorted(STRATEGY_DIR.glob("02-pm5d*.toml"))

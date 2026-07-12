@@ -158,6 +158,11 @@ jobs:
               echo "Binance futures public data has not advanced within the last 5 minutes" >&2
               exit 1
             fi
+            if [ "$(PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
+              "SELECT NOT EXISTS (SELECT 1 FROM cex_public_market_ticks WHERE kind = 'derivatives_snapshot' AND received_at < NOW() - INTERVAL '30 minutes') OR EXISTS (SELECT 1 FROM cex_public_market_ticks WHERE kind = 'liquidation' AND event_time >= NOW() - INTERVAL '24 hours')")" != "t" ]; then
+              echo "Binance force-order stream has produced no liquidation data after its startup grace period" >&2
+              exit 1
+            fi
             for cex in okx bybit coinbase kraken; do
               if [ "$(PGPASSWORD=postgres psql -h localhost -U postgres -d ploy -Atqc \
                 "SELECT EXISTS (SELECT 1 FROM cex_public_market_ticks WHERE exchange = '${cex}' AND kind = 'lob' AND event_time >= NOW() - INTERVAL '5 minutes')")" != "t" ]; then
