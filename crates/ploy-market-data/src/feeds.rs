@@ -12,7 +12,7 @@ use futures::StreamExt;
 use ploy_market_contracts::{
     l2_updates_from_depth_totals, normalize_token_id, BookLevel, MarketUpdate,
 };
-use polymarket_client_sdk::rtds::{Client as RtdsClient, EquityPriceMessage};
+use polymarket_client_sdk::rtds::{Client as RtdsClient, Subscription};
 use polymarket_client_sdk::types::U256;
 use polymarket_client_sdk::ws::config::{Config as PolymarketWsConfig, ReconnectConfig};
 use rust_decimal::prelude::ToPrimitive;
@@ -1166,132 +1166,7 @@ pub fn spawn_pyth_reference_feed(
             let subscribe_symbol = raw_symbol.clone();
 
             join_set.spawn(async move {
-                let normalized_symbol = pyth_symbol(&subscribe_symbol);
-                let asset_class = infer_pyth_asset_class(&subscribe_symbol);
-                let client =
-                    RtdsClient::new(POLYMARKET_RTDS_WS_ENDPOINT, rtds_market_data_ws_config())
-                        .expect("RTDS market-data config should be valid");
-                let stream =
-                    match client.subscribe_equity_prices(Some(subscribe_symbol.clone()), true) {
-                        Ok(stream) => stream,
-                        Err(error) => {
-                            error!(
-                                symbol = %subscribe_symbol,
-                                error = %error,
-                                "Failed to subscribe to equity_prices"
-                            );
-                            return;
-                        }
-                    };
-
-                let mut stream = Box::pin(stream);
-                let mut message_count = 0_u64;
-
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok(EquityPriceMessage::Update(update)) => {
-                            let source_timestamp =
-                                DateTime::from_timestamp_millis(update.timestamp)
-                                    .unwrap_or_else(Utc::now);
-                            let received_at = update
-                                .received_at
-                                .and_then(DateTime::from_timestamp_millis)
-                                .unwrap_or_else(Utc::now);
-
-                            let snapshot = ReferencePriceSnapshot {
-                                key: ReferencePriceKey {
-                                    source: ReferencePriceSource::Pyth,
-                                    symbol: normalize_reference_symbol(&update.symbol),
-                                },
-                                asset_class,
-                                value: update.value,
-                                full_accuracy_value: Some(update.full_accuracy_value.clone()),
-                                source_timestamp,
-                                received_at,
-                                is_carried_forward: update.is_carried_forward,
-                            };
-
-                            upsert_reference_price(&registry, snapshot.clone()).await;
-
-                            if tx.send(reference_price_update(&snapshot)).is_err() {
-                                warn!(
-                                    symbol = %subscribe_symbol,
-                                    "Broadcast channel closed, stopping Pyth reference-price worker"
-                                );
-                                return;
-                            }
-
-                            if let Some(ref db) = pool {
-                                persist_reference_price(db, &snapshot).await;
-                            }
-
-                            message_count += 1;
-                            if message_count == 1 || message_count % 100 == 0 {
-                                info!(
-                                    symbol = %normalized_symbol,
-                                    source = %ReferencePriceSource::Pyth.as_str(),
-                                    asset_class = %asset_class.as_str(),
-                                    carried_forward = snapshot.is_carried_forward,
-                                    count = message_count,
-                                    "Pyth reference prices captured"
-                                );
-                            }
-                        }
-                        Ok(EquityPriceMessage::Snapshot(snapshot)) => {
-                            let snapshot_symbol = normalize_reference_symbol(&snapshot.symbol);
-                            for point in snapshot.data {
-                                let source_timestamp =
-                                    DateTime::from_timestamp_millis(point.timestamp)
-                                        .unwrap_or_else(Utc::now);
-                                let received_at = point
-                                    .received_at
-                                    .and_then(DateTime::from_timestamp_millis)
-                                    .unwrap_or_else(Utc::now);
-                                let snapshot = ReferencePriceSnapshot {
-                                    key: ReferencePriceKey {
-                                        source: ReferencePriceSource::Pyth,
-                                        symbol: snapshot_symbol.clone(),
-                                    },
-                                    asset_class,
-                                    value: point.value,
-                                    full_accuracy_value: point.full_accuracy_value.clone(),
-                                    source_timestamp,
-                                    received_at,
-                                    is_carried_forward: point.is_carried_forward,
-                                };
-
-                                upsert_reference_price(&registry, snapshot.clone()).await;
-
-                                if tx.send(reference_price_update(&snapshot)).is_err() {
-                                    warn!(
-                                        symbol = %subscribe_symbol,
-                                        "Broadcast channel closed, stopping Pyth reference-price worker"
-                                    );
-                                    return;
-                                }
-
-                                if let Some(ref db) = pool {
-                                    persist_reference_price(db, &snapshot).await;
-                                }
-                            }
-                        }
-                        Ok(_) => {
-                            debug!(
-                                symbol = %subscribe_symbol,
-                                "Ignoring unsupported non-exhaustive equity_prices message"
-                            );
-                        }
-                        Err(error) => {
-                            warn!(
-                                symbol = %subscribe_symbol,
-                                error = %error,
-                                "RTDS equity_prices stream error"
-                            );
-                        }
-                    }
-                }
-
-                warn!(symbol = %subscribe_symbol, "RTDS equity_prices stream ended");
+                run_pyth_reference_worker(tx, registry, subscribe_symbol, pool).await;
             });
         }
 
@@ -1301,6 +1176,140 @@ pub fn spawn_pyth_reference_feed(
             }
         }
     })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct EquityPriceTick {
+    #[serde(default)]
+    symbol: String,
+    value: Decimal,
+    full_accuracy_value: Option<String>,
+    timestamp: i64,
+    received_at: Option<i64>,
+    #[serde(default)]
+    is_carried_forward: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct EquityPriceSnapshotPayload {
+    symbol: String,
+    data: Vec<EquityPriceTick>,
+}
+
+fn parse_equity_price_payload(value: &Value) -> Option<Vec<EquityPriceTick>> {
+    if value.get("topic")?.as_str()? != "equity_prices" {
+        return None;
+    }
+    let message_type = value.get("type")?.as_str()?;
+    let payload = value.get("payload")?.clone();
+    if matches!(message_type, "subscribe" | "snapshot") {
+        let snapshot: EquityPriceSnapshotPayload = serde_json::from_value(payload).ok()?;
+        return Some(
+            snapshot
+                .data
+                .into_iter()
+                .map(|mut point| {
+                    point.symbol.clone_from(&snapshot.symbol);
+                    point
+                })
+                .collect(),
+        );
+    }
+    if message_type == "update" {
+        return serde_json::from_value(payload).ok().map(|tick| vec![tick]);
+    }
+    None
+}
+
+fn equity_price_subscription(symbol: &str) -> Subscription {
+    let inner_filter = serde_json::json!({"symbol": symbol}).to_string();
+    let encoded_filter = serde_json::to_string(&inner_filter)
+        .expect("serializing an equity symbol filter cannot fail");
+    Subscription::builder()
+        .topic("equity_prices".to_owned())
+        .msg_type("*".to_owned())
+        .filters(encoded_filter)
+        .build()
+}
+
+async fn run_pyth_reference_worker(
+    tx: Arc<broadcast::Sender<MarketUpdate>>,
+    registry: ReferencePriceRegistry,
+    subscribe_symbol: String,
+    pool: Option<PgPool>,
+) {
+    let normalized_symbol = pyth_symbol(&subscribe_symbol);
+    let asset_class = infer_pyth_asset_class(&subscribe_symbol);
+    let mut message_count = 0_u64;
+    let client = RtdsClient::new(POLYMARKET_RTDS_WS_ENDPOINT, rtds_market_data_ws_config())
+        .expect("RTDS market-data config should be valid");
+    let subscription = equity_price_subscription(&subscribe_symbol);
+    let stream = match client.subscribe_raw(subscription) {
+        Ok(stream) => stream,
+        Err(error) => {
+            warn!(symbol = %subscribe_symbol, error = %error, "RTDS equity_prices subscribe failed");
+            return;
+        }
+    };
+    let mut stream = Box::pin(stream);
+
+    while let Some(message) = stream.next().await {
+        let message = match message {
+            Ok(message) => message,
+            Err(error) => {
+                warn!(symbol = %subscribe_symbol, error = %error, "RTDS equity_prices stream error");
+                continue;
+            }
+        };
+        let envelope = serde_json::json!({
+            "topic": message.topic,
+            "type": message.msg_type,
+            "timestamp": message.timestamp,
+            "payload": message.payload,
+        });
+        let Some(ticks) = parse_equity_price_payload(&envelope) else {
+            continue;
+        };
+        for tick in ticks {
+            let source_timestamp =
+                DateTime::from_timestamp_millis(tick.timestamp).unwrap_or_else(Utc::now);
+            let received_at = tick
+                .received_at
+                .and_then(DateTime::from_timestamp_millis)
+                .unwrap_or_else(Utc::now);
+            let snapshot = ReferencePriceSnapshot {
+                key: ReferencePriceKey {
+                    source: ReferencePriceSource::Pyth,
+                    symbol: normalize_reference_symbol(&tick.symbol),
+                },
+                asset_class,
+                value: tick.value,
+                full_accuracy_value: tick.full_accuracy_value,
+                source_timestamp,
+                received_at,
+                is_carried_forward: tick.is_carried_forward,
+            };
+            upsert_reference_price(&registry, snapshot.clone()).await;
+            if tx.send(reference_price_update(&snapshot)).is_err() {
+                return;
+            }
+            if let Some(ref db) = pool {
+                persist_reference_price(db, &snapshot).await;
+            }
+            message_count += 1;
+            if message_count == 1 || message_count % 100 == 0 {
+                info!(
+                    symbol = %normalized_symbol,
+                    source = %ReferencePriceSource::Pyth.as_str(),
+                    asset_class = %asset_class.as_str(),
+                    carried_forward = snapshot.is_carried_forward,
+                    count = message_count,
+                    "Pyth reference prices captured"
+                );
+            }
+        }
+    }
+    warn!(symbol = %subscribe_symbol, "RTDS equity_prices stream ended");
 }
 
 /// Persist a spot price tick to `binance_price_ticks` for backtest replay.
@@ -1469,8 +1478,9 @@ fn parse_agg_trade_msg(v: &serde_json::Value) -> Option<AggTradeMsg> {
 #[cfg(test)]
 mod tests {
     use super::{
-        book_quote_from_rest, l2_updates_from_book, mark_db_event_expired_if_resolved,
-        parse_agg_trade_msg, rtds_market_data_ws_config, RestBook,
+        book_quote_from_rest, equity_price_subscription, l2_updates_from_book,
+        mark_db_event_expired_if_resolved, parse_agg_trade_msg, parse_equity_price_payload,
+        rtds_market_data_ws_config, RestBook,
     };
     use chrono::Utc;
     use ploy_market_contracts::MarketUpdate;
@@ -1486,6 +1496,55 @@ mod tests {
         assert_eq!(config.heartbeat_interval, Duration::from_secs(15));
         assert_eq!(config.heartbeat_timeout, Duration::from_secs(45));
         assert!(config.reconnect.max_attempts.is_none());
+    }
+
+    #[test]
+    fn parses_current_rtds_equity_update_and_snapshot_payloads() {
+        let update = parse_equity_price_payload(&json!({
+            "topic": "equity_prices",
+            "type": "update",
+            "timestamp": 1711382400000_i64,
+            "payload": {
+                "symbol": "aapl",
+                "value": 198.45,
+                "full_accuracy_value": "198.4523",
+                "timestamp": 1711382400000_i64,
+                "received_at": 1711382400005_i64
+            }
+        }))
+        .expect("current update envelope");
+        assert_eq!(update.len(), 1);
+        assert_eq!(update[0].symbol, "aapl");
+        assert_eq!(update[0].full_accuracy_value.as_deref(), Some("198.4523"));
+
+        let snapshot = parse_equity_price_payload(&json!({
+            "topic": "equity_prices",
+            "type": "subscribe",
+            "timestamp": 1711382400000_i64,
+            "payload": {
+                "symbol": "aapl",
+                "data": [{
+                    "value": 198.30,
+                    "full_accuracy_value": "198.3000",
+                    "timestamp": 1711382280000_i64,
+                    "received_at": 1711382280005_i64,
+                    "is_carried_forward": false
+                }]
+            }
+        }))
+        .expect("current snapshot envelope");
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].symbol, "aapl");
+        assert_eq!(snapshot[0].value, dec!(198.30));
+    }
+
+    #[test]
+    fn equity_subscription_preserves_the_server_string_filter_contract() {
+        let serialized = serde_json::to_value(equity_price_subscription("AAPL"))
+            .expect("serialize subscription");
+        assert_eq!(serialized["topic"], "equity_prices");
+        assert_eq!(serialized["type"], "*");
+        assert_eq!(serialized["filters"], r#"{"symbol":"AAPL"}"#);
     }
 
     #[test]

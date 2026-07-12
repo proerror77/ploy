@@ -6,6 +6,7 @@ use polymarket_client_sdk::gamma::Client as GammaClient;
 use serde_json::Value;
 
 use crate::discovery::types::{MarketDescriptor, MarketFamily, MarketSemantics, SettlementSource};
+use crate::gamma_keyset::fetch_markets;
 
 #[derive(Debug, Clone)]
 pub struct DiscoveredSportsMarket {
@@ -29,10 +30,10 @@ pub async fn discover_sports_markets(
 
     let mut request = MarketsRequest::default();
     request.closed = Some(false);
-    request.limit = Some(limit);
+    request.limit = Some(limit.min(100));
     request.sports_market_types = sports_market_types.market_types;
 
-    let markets = client.markets(&request).await?;
+    let markets = fetch_markets(&request, limit.max(1) as usize).await?;
     Ok(normalize_sports_markets(
         &markets, &teams, &sports, &leagues,
     ))

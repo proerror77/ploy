@@ -11,6 +11,8 @@ pub mod discovery;
 #[cfg(feature = "live")]
 pub mod feeds;
 #[cfg(feature = "live")]
+mod gamma_keyset;
+#[cfg(feature = "live")]
 pub mod pm_trades;
 #[cfg(feature = "live")]
 pub mod reference_prices;
