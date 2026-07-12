@@ -26,7 +26,7 @@ use crate::discovery::crypto::DiscoveredCryptoMarket;
 use crate::discovery::sports::discover_sports_markets;
 use crate::discovery::upsert_market_catalog;
 use crate::feeds::spawn_quote_feed_until;
-use crate::gamma_keyset::{fetch_markets, markets_keyset_url};
+use crate::gamma_keyset::fetch_markets;
 use crate::reference_prices::{new_reference_price_registry, ReferencePriceRegistry};
 
 const SCAN_INTERVAL_SECS: u64 = 30;
@@ -756,9 +756,11 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use polymarket_client_sdk::ToQueryParams;
 
+    use crate::gamma_keyset::markets_keyset_url;
+
     use super::{
-        crypto_markets_request, extend_quote_feed_stop_at, markets_keyset_url, parse_token_id,
-        quote_feed_deadline, should_refresh_sports_catalog, MarketDiscoveryCollectorConfig,
+        crypto_markets_request, extend_quote_feed_stop_at, parse_token_id, quote_feed_deadline,
+        should_refresh_sports_catalog, MarketDiscoveryCollectorConfig,
     };
 
     #[test]
