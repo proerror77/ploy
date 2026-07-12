@@ -1,6 +1,7 @@
 use ploy_market_data::binance_collectors::{
     collect_binance_aggtrade, collect_binance_lob, collect_binance_price,
 };
+use ploy_market_data::cex_collectors::collect_cex_public;
 use ploy_market_data::collector::{CollectorConfig, QuoteCollector};
 use ploy_market_data::deribit_collectors::{collect_deribit_greeks, collect_deribit_iv};
 use ploy_market_data::diagnostics::check_database;
@@ -96,6 +97,12 @@ pub fn print_usage() {
     eprintln!("Options for 'collect-deribit-greeks':");
     eprintln!("  --currencies <l>  Comma-separated currencies (default: BTC,ETH,SOL)");
     eprintln!("  --poll-secs <n>   Poll interval in seconds (default: 30)");
+    eprintln!("  --db-url <url>    Database URL (or DATABASE_URL/PLOY_DATABASE__URL)");
+    eprintln!();
+    eprintln!("Options for 'collect-cex-public':");
+    eprintln!("  --assets <list>   Comma-separated bases (default: BTC,ETH,SOL)");
+    eprintln!("  --poll-secs <n>   Binance Futures REST interval (default: 5)");
+    eprintln!("  --sample-ms <n>   Per-venue L2 persistence interval (default: 1000)");
     eprintln!("  --db-url <url>    Database URL (or DATABASE_URL/PLOY_DATABASE__URL)");
 }
 
@@ -481,4 +488,38 @@ pub async fn run_collect_deribit_greeks(args: &[String]) {
         }
     };
     collect_deribit_greeks(pool, currencies, poll_secs).await;
+}
+
+pub async fn run_collect_cex_public(args: &[String]) {
+    let db_url = match db_url(args) {
+        Ok(db_url) => db_url,
+        Err(error) => {
+            eprintln!("{error}");
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+    let assets = arg_value(args, "--assets")
+        .map(String::as_str)
+        .unwrap_or("BTC,ETH,SOL");
+    let poll_secs = arg_value(args, "--poll-secs")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(5);
+    let sample_ms = arg_value(args, "--sample-ms")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1_000);
+    let pool = match PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&db_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            eprintln!("DB connection failed: {error}");
+            std::process::exit(1);
+        }
+    };
+    collect_cex_public(pool, assets, poll_secs, sample_ms).await;
 }
