@@ -27,7 +27,7 @@ and settlement capabilities but does not itself produce `dry_run_candidate` or
       plan by default; live submission must fail closed without explicit gates.
 - [x] Package collectors/account-ops in CI-built deploy artifacts while keeping
       research hosts free of trading authority and trade deployment paused.
-- [ ] Run focused checks, full relevant suites, review the diff, commit, push,
+- [x] Run focused checks, full relevant suites, review the diff, commit, push,
       open a PR, and monitor CI.
 - [ ] Deploy only after trusted ECS identity is restored; do not bypass pinned
       host identity or trigger live/redeem operations.
@@ -51,6 +51,9 @@ and settlement capabilities but does not itself produce `dry_run_candidate` or
   16 low-severity transitive advisories and no moderate/high/critical advisory.
 - Actual Aliyun deployment and live Redeem acceptance remain blocked on trusted
   ECS identity and protected human approval; neither was bypassed in this slice.
+- PR #748 merged CEX collection as `7c516a63`, PR #746 merged guarded account
+  ops as `fd40a449`, and PR #747 merged the Polymarket V2 migration as
+  `8feefd68`; every required CI check passed.
 
 # Previous Session - Aliyun Research Runtime And Paused Trade Deploy (2026-07-11)
 
