@@ -31,15 +31,24 @@ class TradeHostPostflightTests(unittest.TestCase):
         executable(account_ops / "cli.js", "#!/usr/bin/env node\n")
         executable(account_ops / "ploy-account-ops", "#!/bin/sh\nexit 0\n")
         (account_ops / "account_ops.js").write_text("module.exports = {};\n", encoding="utf-8")
+        predict_ops = release / "tools" / "predict-fun-account-ops"
+        predict_ops.mkdir(parents=True)
+        executable(predict_ops / "cli.js", "#!/usr/bin/env node\n")
+        executable(predict_ops / "ploy-predict-account-ops", "#!/bin/sh\nexit 0\n")
+        (predict_ops / "account_ops.js").write_text("module.exports = {};\n", encoding="utf-8")
         (self.root / "bin").mkdir(parents=True)
         (self.root / "bin" / "ploy-account-ops").symlink_to(
             pathlib.Path("../current/tools/polymarket-account-ops/ploy-account-ops")
+        )
+        (self.root / "bin" / "ploy-predict-account-ops").symlink_to(
+            pathlib.Path("../current/tools/predict-fun-account-ops/ploy-predict-account-ops")
         )
         account_state = self.root / "data" / "account-ops"
         account_state.mkdir(parents=True, mode=0o700)
         account_state.chmod(0o700)
         manifest_files = [release / "bin" / name for name in ("ployd", "ployctl", "ploy-runner", "node")]
         manifest_files.extend([account_ops / "cli.js", account_ops / "account_ops.js", account_ops / "ploy-account-ops"])
+        manifest_files.extend([predict_ops / "cli.js", predict_ops / "account_ops.js", predict_ops / "ploy-predict-account-ops"])
         (release / "FILES.sha256").write_text(
             "".join(
                 f"{hashlib.sha256(item.read_bytes()).hexdigest()}  ./{item.relative_to(release)}\n"
@@ -55,7 +64,9 @@ class TradeHostPostflightTests(unittest.TestCase):
         (self.root / ".env").write_text(
             f"PLOY_RELEASE_SHA={SHA}\n"
             f"PLOY_LIVE_APPROVAL_FILE={self.root}/data/live-approvals/pending.json\n"
-            "PLOY_ACCOUNT_OPS_WRITE_ENABLED=false\n",
+            "PLOY_ACCOUNT_OPS_WRITE_ENABLED=false\n"
+            "PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED=false\n"
+            "PLOY_PREDICT_APPROVAL_WRITE_ENABLED=false\n",
             encoding="utf-8",
         )
 

@@ -85,7 +85,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: tools/polymarket-account-ops/package-lock.json
+          cache-dependency-path: |
+            tools/polymarket-account-ops/package-lock.json
+            tools/predict-fun-account-ops/package-lock.json
 
       - name: Build trade control plane
         run: |
@@ -103,6 +105,8 @@ jobs:
         run: |
           cd tools/polymarket-account-ops
           npm ci --omit=dev
+          cd ../predict-fun-account-ops
+          npm ci --omit=dev
           npm test
           npm audit --omit=dev --audit-level=high
 
@@ -113,7 +117,8 @@ jobs:
           rm -rf dist
           mkdir -p "${root}/bin" "${root}/config/strategies" \
             "${root}/config/deployments" "${root}/deployment" \
-            "${root}/scripts/drills" "${root}/tools/polymarket-account-ops"
+            "${root}/scripts/drills" "${root}/tools/polymarket-account-ops" \
+            "${root}/tools/predict-fun-account-ops"
           install -m 0755 "target/${PLATFORM_TARGET}/release/new-ployd" "${root}/bin/ployd"
           install -m 0755 "target/${PLATFORM_TARGET}/release/ployctl" "${root}/bin/ployctl"
           install -m 0755 "target/${PLATFORM_TARGET}/release/new-ploy-runner" "${root}/bin/ploy-runner"
@@ -141,6 +146,15 @@ jobs:
             tools/polymarket-account-ops/package.json \
             tools/polymarket-account-ops/package-lock.json \
             "${root}/tools/polymarket-account-ops/"
+          cp -R tools/predict-fun-account-ops/node_modules \
+            "${root}/tools/predict-fun-account-ops/node_modules"
+          install -m 0755 tools/predict-fun-account-ops/cli.js \
+            tools/predict-fun-account-ops/ploy-predict-account-ops \
+            "${root}/tools/predict-fun-account-ops/"
+          install -m 0644 tools/predict-fun-account-ops/account_ops.js \
+            tools/predict-fun-account-ops/package.json \
+            tools/predict-fun-account-ops/package-lock.json \
+            "${root}/tools/predict-fun-account-ops/"
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -328,6 +342,10 @@ jobs:
           upsert_env PLOY_ACCOUNT_OPS_WRITE_ENABLED "false"
           upsert_env PLOY_REDEEM_LEDGER "${root}/data/account-ops/redeem-ledger.jsonl"
           upsert_env PLOY_REDEEM_LOCK "${root}/data/account-ops/redeem-ledger.jsonl.lock"
+          upsert_env PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED "false"
+          upsert_env PLOY_PREDICT_APPROVAL_WRITE_ENABLED "false"
+          upsert_env PLOY_PREDICT_OPS_LEDGER "${root}/data/account-ops/predict-fun-ledger.jsonl"
+          upsert_env PLOY_PREDICT_OPS_LOCK "${root}/data/account-ops/predict-fun-ledger.jsonl.lock"
 
           grep -Eq '^(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=[^[:space:]]+' "${root}/.env" || {
             echo "trade host signing key is missing" >&2
@@ -350,6 +368,8 @@ jobs:
             ln -sfn "../current/bin/${binary}" "${root}/bin/${binary}"
           done
           ln -sfn "../current/tools/polymarket-account-ops/ploy-account-ops" "${root}/bin/ploy-account-ops"
+          ln -sfn "../current/tools/predict-fun-account-ops/ploy-predict-account-ops" \
+            "${root}/bin/ploy-predict-account-ops"
           for config in 02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml 02-pm5d-threelayer.live.toml; do
             ln -sfn "../../current/config/strategies/${config}" "${root}/config/strategies/${config}"
           done

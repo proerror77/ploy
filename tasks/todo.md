@@ -23138,3 +23138,34 @@ or live-trading evidence stages from `docs/PROJECT_SEMANTICS.md`.
 - Independent review found API-key handling, origin validation, zero-book
   health, testnet enablement, and systemd guardrail gaps; all were corrected
   before commit.
+# Predict.fun Trading Account Ops (2026-07-13)
+
+Evidence stage: `deployment/runtime safety plumbing`. This slice adds guarded
+operator adapters; it does not produce dry-run parity or authorize live trade.
+
+## TDD seams
+
+- Wallet seam: derive an EOA or validate a Predict Account against an injected
+  signer without persisting or printing the private key.
+- Order seam: market metadata from the official API becomes an exact, expiring,
+  hash-bound order plan; execution requires the same hash and an explicit write
+  gate before the official SDK signs and POSTs `/v1/orders`.
+- Redemption seam: resolved positions become an exact, expiring, hash-bound
+  plan; execution uses the official SDK's standard/neg-risk and yield routes.
+- Safety seam: check/plan never authenticate, sign, approve, submit, cancel, or
+  broadcast. Ambiguous writes are ledger-locked for reconciliation.
+
+## Files / Ownership
+
+- `tools/predict-fun-account-ops/`: official SDK adapter, CLI, focused tests.
+- trade release workflow/postflight: package the tool but keep writes disabled.
+- docs: custody, order, redemption, approval, and human-gate contract.
+
+## Tasks
+
+- [x] Add failing wallet/order/redemption plan and write-gate tests.
+- [x] Implement official SDK-backed wallet, limit-order, scoped approval, and
+      redemption ops.
+- [x] Package the tool in the paused trade release with write-disabled defaults.
+- [ ] Run dependency/security/relevant repo checks and independent review.
+- [ ] Commit, push, open PR, and monitor CI; do not deploy while ECS identity is untrusted.
