@@ -24,12 +24,26 @@ class TradeHostPostflightTests(unittest.TestCase):
         self.root = pathlib.Path(self.temp.name)
         release = self.root / "releases" / SHA
         (release / "bin").mkdir(parents=True)
-        for name in ("ployd", "ployctl", "ploy-runner"):
+        for name in ("ployd", "ployctl", "ploy-runner", "node"):
             executable(release / "bin" / name, "#!/bin/sh\nexit 0\n")
+        account_ops = release / "tools" / "polymarket-account-ops"
+        account_ops.mkdir(parents=True)
+        executable(account_ops / "cli.js", "#!/usr/bin/env node\n")
+        executable(account_ops / "ploy-account-ops", "#!/bin/sh\nexit 0\n")
+        (account_ops / "account_ops.js").write_text("module.exports = {};\n", encoding="utf-8")
+        (self.root / "bin").mkdir(parents=True)
+        (self.root / "bin" / "ploy-account-ops").symlink_to(
+            pathlib.Path("../current/tools/polymarket-account-ops/ploy-account-ops")
+        )
+        account_state = self.root / "data" / "account-ops"
+        account_state.mkdir(parents=True, mode=0o700)
+        account_state.chmod(0o700)
+        manifest_files = [release / "bin" / name for name in ("ployd", "ployctl", "ploy-runner", "node")]
+        manifest_files.extend([account_ops / "cli.js", account_ops / "account_ops.js", account_ops / "ploy-account-ops"])
         (release / "FILES.sha256").write_text(
             "".join(
-                f"{hashlib.sha256((release / 'bin' / name).read_bytes()).hexdigest()}  ./bin/{name}\n"
-                for name in ("ployd", "ployctl", "ploy-runner")
+                f"{hashlib.sha256(item.read_bytes()).hexdigest()}  ./{item.relative_to(release)}\n"
+                for item in manifest_files
             ),
             encoding="utf-8",
         )
@@ -40,7 +54,8 @@ class TradeHostPostflightTests(unittest.TestCase):
         (self.root / "current").symlink_to(pathlib.Path("releases") / SHA)
         (self.root / ".env").write_text(
             f"PLOY_RELEASE_SHA={SHA}\n"
-            f"PLOY_LIVE_APPROVAL_FILE={self.root}/data/live-approvals/pending.json\n",
+            f"PLOY_LIVE_APPROVAL_FILE={self.root}/data/live-approvals/pending.json\n"
+            "PLOY_ACCOUNT_OPS_WRITE_ENABLED=false\n",
             encoding="utf-8",
         )
 
@@ -65,6 +80,7 @@ exit 1
         )
         executable(self.bin / "curl", "#!/bin/sh\nexit 0\n")
         executable(self.bin / "pgrep", "#!/bin/sh\nexit ${FAKE_PGREP_EXIT:-1}\n")
+        executable(self.bin / "stat", "#!/bin/sh\necho root:root:700\n")
         executable(
             self.bin / "ployctl",
             """#!/bin/sh
@@ -90,6 +106,7 @@ fi
                 "PLOYCTL": str(self.bin / "ployctl"),
                 "CURL": str(self.bin / "curl"),
                 "PGREP": str(self.bin / "pgrep"),
+                "STAT": str(self.bin / "stat"),
                 **overrides,
             }
         )

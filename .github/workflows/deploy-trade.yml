@@ -80,6 +80,13 @@ jobs:
           sudo apt-get install -y pkg-config libssl-dev libpq-dev clang lld openssh-client
           sudo apt-get install -y sccache || cargo install sccache --locked
 
+      - name: Install Node.js for account ops
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/polymarket-account-ops/package-lock.json
+
       - name: Build trade control plane
         run: |
           cargo build --release --locked \
@@ -92,6 +99,13 @@ jobs:
           strip "target/${PLATFORM_TARGET}/release/ployctl" || true
           strip "target/${PLATFORM_TARGET}/release/new-ploy-runner" || true
 
+      - name: Build and test Polymarket account ops
+        run: |
+          cd tools/polymarket-account-ops
+          npm ci --omit=dev
+          npm test
+          npm audit --omit=dev --audit-level=high
+
       - name: Build immutable trade bundle
         run: |
           set -euo pipefail
@@ -99,10 +113,11 @@ jobs:
           rm -rf dist
           mkdir -p "${root}/bin" "${root}/config/strategies" \
             "${root}/config/deployments" "${root}/deployment" \
-            "${root}/scripts/drills"
+            "${root}/scripts/drills" "${root}/tools/polymarket-account-ops"
           install -m 0755 "target/${PLATFORM_TARGET}/release/new-ployd" "${root}/bin/ployd"
           install -m 0755 "target/${PLATFORM_TARGET}/release/ployctl" "${root}/bin/ployctl"
           install -m 0755 "target/${PLATFORM_TARGET}/release/new-ploy-runner" "${root}/bin/ploy-runner"
+          install -m 0755 "$(command -v node)" "${root}/bin/node"
           install -m 0644 config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml \
             "${root}/config/strategies/02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml"
           install -m 0644 config/strategies/02-pm5d-threelayer.live.toml \
@@ -116,6 +131,16 @@ jobs:
             "${root}/scripts/drills/live_dry_run.sh"
           install -m 0755 scripts/verify_trade_host_postflight.sh \
             "${root}/scripts/verify_trade_host_postflight.sh"
+          cp -R tools/polymarket-account-ops/node_modules \
+            "${root}/tools/polymarket-account-ops/node_modules"
+          install -m 0755 tools/polymarket-account-ops/cli.js \
+            "${root}/tools/polymarket-account-ops/cli.js"
+          install -m 0755 tools/polymarket-account-ops/ploy-account-ops \
+            "${root}/tools/polymarket-account-ops/ploy-account-ops"
+          install -m 0644 tools/polymarket-account-ops/account_ops.js \
+            tools/polymarket-account-ops/package.json \
+            tools/polymarket-account-ops/package-lock.json \
+            "${root}/tools/polymarket-account-ops/"
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -300,6 +325,9 @@ jobs:
           upsert_env PLOY_LISTEN_ADDR "127.0.0.1:8081"
           upsert_env PLOY_RELEASE_SHA "${git_sha}"
           upsert_env PLOY_LIVE_APPROVAL_FILE "${root}/data/live-approvals/pending.json"
+          upsert_env PLOY_ACCOUNT_OPS_WRITE_ENABLED "false"
+          upsert_env PLOY_REDEEM_LEDGER "${root}/data/account-ops/redeem-ledger.jsonl"
+          upsert_env PLOY_REDEEM_LOCK "${root}/data/account-ops/redeem-ledger.jsonl.lock"
 
           grep -Eq '^(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=[^[:space:]]+' "${root}/.env" || {
             echo "trade host signing key is missing" >&2
@@ -309,12 +337,19 @@ jobs:
             echo "trade host PLOY_LIVE_ACCOUNT_ID is missing or invalid" >&2
             exit 1
           }
+          for key in POLYMARKET_RELAYER_URL POLY_BUILDER_API_KEY POLY_BUILDER_SECRET POLY_BUILDER_PASSPHRASE POLYGON_RPC_URL POLY_WALLET_TYPE; do
+            grep -Eq "^${key}=[^[:space:]]+" "${root}/.env" || {
+              echo "trade host ${key} is missing" >&2
+              exit 1
+            }
+          done
 
           ln -sfn "releases/${git_sha}" "${root}/current.next"
           mv -Tf "${root}/current.next" "${root}/current"
           for binary in ployd ployctl ploy-runner; do
             ln -sfn "../current/bin/${binary}" "${root}/bin/${binary}"
           done
+          ln -sfn "../current/tools/polymarket-account-ops/ploy-account-ops" "${root}/bin/ploy-account-ops"
           for config in 02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml 02-pm5d-threelayer.live.toml; do
             ln -sfn "../../current/config/strategies/${config}" "${root}/config/strategies/${config}"
           done
@@ -326,6 +361,7 @@ jobs:
 
           install -m 0644 "${release_dir}/deployment/ployd.service" /etc/systemd/system/ployd.service
           chown -R ploy:ploy "${root}/data/state" "${root}/run" "${root}/logs"
+          install -d -m 0700 -o root -g root "${root}/data/account-ops"
           chown root:ploy "${root}/data/live-approvals"
           chmod 0750 "${root}/data/live-approvals"
           chown -R root:root "${release_dir}" "${root}/config" "${root}/bin" "${root}/scripts"
