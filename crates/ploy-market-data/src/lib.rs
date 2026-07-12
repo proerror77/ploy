@@ -17,6 +17,8 @@ mod gamma_keyset;
 #[cfg(feature = "live")]
 pub mod pm_trades;
 #[cfg(feature = "live")]
+pub mod predict_fun;
+#[cfg(feature = "live")]
 pub mod reference_prices;
 #[cfg(feature = "live")]
 pub mod scanner;

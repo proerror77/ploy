@@ -22,6 +22,8 @@ fn print_usage_for(program: &str) {
     #[cfg(feature = "ops")]
     eprintln!("  collect-pm-trades         Collect public Polymarket trade prints from Data API");
     #[cfg(feature = "ops")]
+    eprintln!("  collect-predict-fun       Collect Predict.fun markets and normalized order books");
+    #[cfg(feature = "ops")]
     eprintln!("  collect-binance-lob       Collect Binance L2 orderbook depth snapshots");
     #[cfg(feature = "ops")]
     eprintln!("  collect-binance-price     Collect Binance spot trade prices");
@@ -95,6 +97,12 @@ pub async fn run_with_args(args: Vec<String>) {
             ops::run_collect_pm_trades(&args).await;
             #[cfg(not(feature = "ops"))]
             eprintln!("The collect-pm-trades command requires the full/ops runner build");
+        }
+        Some("collect-predict-fun") => {
+            #[cfg(feature = "ops")]
+            ops::run_collect_predict_fun(&args).await;
+            #[cfg(not(feature = "ops"))]
+            eprintln!("The collect-predict-fun command requires the full/ops runner build");
         }
         // --- New Binance/Deribit collectors ---
         Some("collect-binance-lob") => {

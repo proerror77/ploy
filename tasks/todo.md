@@ -23075,3 +23075,66 @@ strategy promotion or live-trading gate.
 - Validation: 47 market-data Rust tests, runner full-feature check, 41 focused
   Python workflow/audit tests, and 30 workflow-security tests passed. Binance
   premium-index, open-interest, and basis REST probes also passed live.
+
+# Predict.fun Market Data Support (2026-07-13)
+
+## Goal
+
+Add Predict.fun as a first-class prediction-market venue for market discovery
+and order-book collection on the research host. This slice is collection and
+dry-run/research plumbing only; it must not enable live order submission or
+on-chain redemption without a separate approved execution adapter.
+
+## Evidence stage
+
+Integration/data-coverage evidence. Collected Predict.fun data may feed later
+exploration, but does not by itself satisfy replay, dry-run parity, promotion,
+or live-trading evidence stages from `docs/PROJECT_SEMANTICS.md`.
+
+## TDD seams
+
+- Contract seam: `VenueKind` round-trips `predict_fun` without changing the
+  existing Polymarket default.
+- API seam: official `/v1/markets` and `/v1/markets/{id}/orderbook` payloads
+  deserialize and normalize Yes/No top-of-book prices correctly.
+- Safety seam: mainnet requires an API key; the key is read from the environment
+  and never persisted, while the keyless official testnet remains usable.
+- Operator seam: `ploy-runner collect-predict-fun` persists catalog and book
+  snapshots through a dedicated schema without overloading Polymarket tables.
+
+## Files / Ownership
+
+- `crates/ploy-market-contracts/src/venue.rs`: venue contract.
+- `crates/ploy-market-data/src/predict_fun.rs`: API, normalization, collector.
+- `crates/ploy-runner-host/src/{lib.rs,ops.rs}`: operator command.
+- `migrations/050_predict_fun_market_data.sql`: persistence contract.
+- `docs/COLLECTOR_RUNBOOK.md` and config examples: operator guidance.
+
+## Tasks
+
+- [x] Add failing contract/parser/normalization/safety tests.
+- [x] Implement the smallest API client and collector that make them pass.
+- [x] Wire CLI, migration, configuration, and operator documentation.
+- [x] Run focused and workspace validation; review the diff.
+- [x] Record evidence, commit atomically, push, and open a PR.
+
+## Review
+
+- Added the `predict_fun` venue plus a dedicated official REST collector for
+  paginated market discovery and Yes-based order books. No order, wallet, live,
+  or redeem authority was added.
+- Mainnet fails closed without a zeroizing/redacted API key. Only the two
+  official HTTPS origins are accepted, redirects are disabled, and official
+  keyless testnet remains available for diagnostics.
+- Predict.fun data is isolated in `predict_fun_markets` and
+  `predict_fun_orderbook_ticks`; No-side prices and sizes are derived from the
+  official Yes book at each market's declared decimal precision.
+- The Tango bundle installs a guarded service. It starts only with a mainnet
+  key or explicit official testnet config, uses required systemd limits, and
+  deployment postflight requires both a healthy pass and fresh order-book rows.
+- Validation: 8 market-contract tests, 53 market-data tests, 12 deployment
+  boundary tests, runner ops compilation, rendered remote-shell syntax,
+  actionlint, live official testnet REST probes, and `git diff --check` passed.
+- Independent review found API-key handling, origin validation, zero-book
+  health, testnet enablement, and systemd guardrail gaps; all were corrected
+  before commit.

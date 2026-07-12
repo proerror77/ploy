@@ -8,6 +8,29 @@ STRATEGY_DIR = ROOT / "config" / "strategies"
 
 
 class RuntimeMarketDataBoundaryTests(unittest.TestCase):
+    def test_predict_fun_collector_is_deployed_but_requires_host_api_key(self) -> None:
+        runner = (ROOT / "crates/ploy-runner-host/src/lib.rs").read_text()
+        service = (ROOT / "deployment/systemd/ploy-predict-fun-collector.service").read_text()
+        workflow = (ROOT / ".github/workflows/deploy-tango-1-1.yml").read_text()
+        deploy = (ROOT / "scripts/ci/deploy_tango_cloud_assist.py").read_text()
+
+        self.assertIn("collect-predict-fun", runner)
+        self.assertIn("ExecStart=/opt/ploy/bin/ploy-runner collect-predict-fun", service)
+        self.assertIn("EnvironmentFile=/etc/ploy/predict-fun.env", service)
+        self.assertIn("Restart=always", service)
+        self.assertIn("RestartSec=5", service)
+        self.assertIn("MemoryHigh=1280M", service)
+        self.assertIn("MemoryMax=1536M", service)
+        self.assertIn("OOMPolicy=kill", service)
+        self.assertIn("050_predict_fun_market_data.sql", workflow)
+        self.assertIn("ploy-predict-fun-collector.service", workflow)
+        self.assertIn("PREDICT_FUN_API_KEY", deploy)
+        self.assertIn("predict_fun_configured", deploy)
+        self.assertIn("api-testnet\\\\.predict\\\\.fun", deploy)
+        self.assertIn("systemctl disable --now ploy-predict-fun-collector.service", deploy)
+        self.assertIn("Predict.fun collection pass complete", deploy)
+        self.assertIn("predict_fun_orderbook_ticks WHERE received_at", deploy)
+
     def test_public_cex_collector_is_deployed_and_health_gated(self) -> None:
         collector = (ROOT / "crates/ploy-market-data/src/cex_collectors.rs").read_text()
         runner = (ROOT / "crates/ploy-runner-host/src/lib.rs").read_text()

@@ -6,6 +6,7 @@ use ploy_market_data::collector::{CollectorConfig, QuoteCollector};
 use ploy_market_data::deribit_collectors::{collect_deribit_greeks, collect_deribit_iv};
 use ploy_market_data::diagnostics::check_database;
 use ploy_market_data::pm_trades::{TradeCollector, TradeCollectorConfig};
+use ploy_market_data::predict_fun::{run_collector as run_predict_fun_collector, PredictFunConfig};
 use ploy_market_data::scanner::{run_market_discovery_collector, MarketDiscoveryCollectorConfig};
 use sqlx::postgres::PgPoolOptions;
 
@@ -72,6 +73,14 @@ pub fn print_usage() {
     eprintln!(
         "  env PLOY_PM_TRADE_COLLECTOR_TAKER_ONLY      true/false Data API takerOnly (default: true)"
     );
+    eprintln!();
+    eprintln!("Options for 'collect-predict-fun':");
+    eprintln!("  --once            Run one discovery/order-book pass and exit");
+    eprintln!("  --db-url <url>    Database URL (or DATABASE_URL/PLOY_DATABASE__URL)");
+    eprintln!("  env PREDICT_FUN_API_URL                    API base URL (default: mainnet)");
+    eprintln!("  env PREDICT_FUN_API_KEY                    Required by Predict.fun mainnet");
+    eprintln!("  env PLOY_PREDICT_FUN_REFRESH_SECS          Poll interval (default: 30)");
+    eprintln!("  env PLOY_PREDICT_FUN_MARKET_DELAY_MS       Per-market delay (default: 300)");
     eprintln!();
     eprintln!("Options for 'collect-binance-lob':");
     eprintln!("  --symbols <list>  Comma-separated symbols (default: BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,HYPEUSDT,BNBUSDT)");
@@ -258,6 +267,39 @@ pub async fn run_collect_pm_trades(args: &[String]) {
     let collector = TradeCollector::new(config, pool);
     if let Err(error) = collector.run().await {
         eprintln!("Polymarket trade collector failed: {error}");
+        std::process::exit(1);
+    }
+}
+
+pub async fn run_collect_predict_fun(args: &[String]) {
+    let db_url = match db_url(args) {
+        Ok(db_url) => db_url,
+        Err(error) => {
+            eprintln!("{error}");
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+    let pool = match PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            eprintln!("Failed to connect to database: {error}");
+            std::process::exit(1);
+        }
+    };
+    let config = match PredictFunConfig::from_env(args.iter().any(|arg| arg == "--once")) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("Predict.fun configuration failed: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) = run_predict_fun_collector(config, pool).await {
+        eprintln!("Predict.fun collector failed: {error}");
         std::process::exit(1);
     }
 }

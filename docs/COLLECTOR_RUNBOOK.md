@@ -34,6 +34,8 @@ systemd units:
 - `ploy-deribit-iv-collector.service`
 - `ploy-deribit-greeks-collector.service`
 - `ploy-cex-public-collector.service`
+- `ploy-predict-fun-collector.service` (enabled only when
+  `/etc/ploy/predict-fun.env` contains `PREDICT_FUN_API_KEY`)
 
 Trigger deploys from `main`:
 
@@ -63,6 +65,8 @@ Examples:
 /opt/ploy/bin/ploy-runner collect-deribit-iv --currencies BTC,ETH,SOL --db-url "$PLOY_DATABASE__URL"
 /opt/ploy/bin/ploy-runner collect-deribit-greeks --currencies BTC,ETH,SOL --db-url "$PLOY_DATABASE__URL"
 /opt/ploy/bin/ploy-runner collect-cex-public --assets BTC,ETH,SOL --poll-secs 5 --sample-ms 1000 --db-url "$PLOY_DATABASE__URL"
+PREDICT_FUN_API_URL=https://api-testnet.predict.fun \
+  /opt/ploy/bin/ploy-runner collect-predict-fun --once --db-url "$PLOY_DATABASE__URL"
 ```
 
 `collect-cex-public` writes one normalized `cex_public_market_ticks` surface:
@@ -71,6 +75,16 @@ plus sampled L2 books from OKX `books5`, Bybit `orderbook.50`, Coinbase Advanced
 Trade `level2`, and Kraken WebSocket v2 `book`. Use the `cex-extended` gap-audit
 profile before consuming these rows in factor research. They are not part of
 the existing PM5D promotion gate by default.
+
+`collect-predict-fun` uses Predict.fun's official beta REST API to persist
+`predict_fun_markets` and normalized `predict_fun_orderbook_ticks`. Predict's
+book is Yes-based; Ploy derives No bids/asks by swapping sides and taking the
+complement at the market's declared decimal precision. Mainnet rejects startup
+without `PREDICT_FUN_API_KEY`; the official testnet permits keyless diagnostics.
+This collector does not submit orders, hold wallet keys, or redeem positions.
+Create `/etc/ploy/predict-fun.env` as a root-owned `0600` file containing only
+`PREDICT_FUN_API_KEY=...`; the default 300 ms book-request spacing stays below
+Predict.fun's documented 240 requests/minute key limit with catalog headroom.
 
 If a diagnostic requires remote secrets or production data, prefer a GitHub
 Actions workflow with environment-scoped secrets over a local command.
