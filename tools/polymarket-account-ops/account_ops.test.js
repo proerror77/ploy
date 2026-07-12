@@ -168,7 +168,11 @@ test("operation reconciliation discovers one exact relayer transaction before re
   };
   const relay = {
     client: {
-      getTransactions: async () => [transaction],
+      getTransactions: async () => [
+        { ...transaction, transactionID: "missing-account", proxyAddress: undefined },
+        { ...transaction, transactionID: "too-late", createdAt: new Date(Date.parse(at) + 11 * 60 * 1000).toISOString() },
+        transaction,
+      ],
       getTransaction: async () => [transaction],
     },
     publicClient: { readContract: async () => 150n },

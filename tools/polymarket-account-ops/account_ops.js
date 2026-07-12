@@ -367,11 +367,13 @@ async function reconcileOperation(operationId, env = process.env, dependencies =
   const relay = dependencies.relay || makeRelayClient(env);
   const transactions = await relay.client.getTransactions();
   const earliest = Date.parse(submitting.at) - 60_000;
+  const latestCreatedAt = Date.parse(submitting.at) + PLAN_TTL_MS;
   const matches = (Array.isArray(transactions) ? transactions : []).filter((candidate) => {
     const sameMetadata = candidate.metadata === submitting.metadata;
-    const sameAccount = !candidate.proxyAddress
-      || normalizeAddress(candidate.proxyAddress, "relayer proxyAddress") === normalizeAddress(context.account, "account");
-    return sameMetadata && sameAccount && Date.parse(candidate.createdAt) >= earliest;
+    const sameAccount = candidate.proxyAddress
+      && normalizeAddress(candidate.proxyAddress, "relayer proxyAddress") === normalizeAddress(context.account, "account");
+    const createdAt = Date.parse(candidate.createdAt);
+    return sameMetadata && sameAccount && createdAt >= earliest && createdAt <= latestCreatedAt;
   });
   if (matches.length !== 1) {
     throw new Error(`operation ${operationId} matched ${matches.length} relayer transactions; lock retained`);
