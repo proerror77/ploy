@@ -22,6 +22,7 @@ rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, optional = false }
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 toml.workspace = true

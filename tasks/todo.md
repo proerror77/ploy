@@ -23190,3 +23190,74 @@ operator adapters; it does not produce dry-run parity or authorize live trade.
   within ten minutes; the REST remove-only endpoint is intentionally unused.
 - PR #752 passed every required check and merged to `main` as `7c51f821`; no
   deployment was attempted because trusted ECS identity remains blocked by #751.
+
+# Polymarket Quote/Backtest Readiness Repair (2026-07-13)
+
+## Goal
+
+Repair the confirmed Polymarket quote-replay and backtest fixture regressions,
+and make promotion artifacts report conservative depth, drawdown, and
+event-level execution evidence. Keep authenticated trading fail closed: this
+slice may add read-only preflight evidence but cannot submit or resume live.
+
+## Evidence stage
+
+`diagnostic` progressing to `executable_replay` plumbing. A passing local test
+does not claim `dry_run_candidate` or `live_candidate` evidence.
+
+## TDD seams
+
+- Parquet feed seam: serialized quote rows reconstruct `MarketUpdate::Quote`
+  with explicit depth fields and remain compatible with top-of-book datasets.
+- Backtest artifact seam: results expose max drawdown, unique event count,
+  maximum decisions per event, and observed full-depth coverage.
+- Account preflight seam: authenticated readiness is read-only and fails closed
+  unless signer/auth, balance/allowance, and venue health are all proven.
+
+## Files / Ownership
+
+- Main session: implementation and integration across
+  `crates/ploy-feed-loaders`, `crates/ploy-strategy-bundles`, and the smallest
+  existing Polymarket connectivity/preflight surface.
+- Subagents: read-only failure analysis, promotion-contract audit, and final
+  review; they do not edit this worktree.
+
+## Tasks
+
+- [x] Reproduce and fix Parquet quote-depth and `OrderRecord` fixture failures.
+- [x] Add artifact drawdown, event uniqueness, and depth-coverage evidence.
+- [x] Add or tighten the read-only authenticated Polymarket readiness gate.
+- [x] Run focused and relevant package/workflow validation.
+- [x] Review, document evidence, commit atomically, push, and open a PR.
+
+## Review
+
+- Quote replay now carries ordered executable CLOB depth from PostgreSQL or the
+  hourly Parquet archive. Archive replay is scoped to event tokens and fails
+  closed unless every intersecting Shanghai hour has a non-empty full-fidelity
+  manifest and `_SUCCESS`; official settlement coverage must also be complete.
+- Backtest evidence reports actual depth-sweep fills, event-level decisions and
+  lifecycle accounting, closed-event drawdown, and a stage consistent across
+  JSON, workflow summary, issue comment, and labels. Promotion remains false
+  until the separate runtime/dry-run parity gates are satisfied.
+- `ployctl trading readiness` derives an existing L2 key through the GET-only
+  path inside a 15-second total timeout, stops the temporary heartbeat before
+  probing, verifies CLOB v2, geoblock, closed-only, raw pUSD balance, both V2
+  allowances, and signer-derived wallet identity. It neither creates a key nor
+  submits an order.
+- Live staging now requires the same named private key and exact Proxy/Safe
+  signature-to-wallet mapping used by custody/redeem. Poly1271/DEPOSIT remains
+  fail-closed because the deployed relayer does not yet support its redemption
+  lifecycle.
+- Verification passes: connectivity 22, feed-loader 8, strategy 203 unit + 6
+  integration, backtest artifact 3, ployctl 27, account-ops 12, Python contract
+  13, shellcheck, YAML parsing, formatting, diff checks, daemon/CLI checks, and
+  Parquet-feature test compilation. Feature test execution still requires the
+  Linux CI DuckDB shared library; no account, order, chain, cloud, or host write
+  occurred locally.
+- PR review follow-up closed four evidence gaps: the full-depth PostgreSQL query
+  is valid and propagates database errors, filled lifecycles without an Entry
+  decision block promotion, settlement intents cannot count as full-depth
+  fillability, and immediate retry fills update both execution counters.
+- Independent final reviews found no remaining P0/P1/P2 in the Polymarket
+  readiness or backtest-evidence slices.

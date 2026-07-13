@@ -12,6 +12,7 @@ const {
   executePlan,
   fetchPositions,
   readLedger,
+  relayerWalletRoute,
   reconcileOperation,
   reconcileTransaction,
   redeemTransaction,
@@ -109,6 +110,11 @@ test("plan fails closed on wallet and route disagreement", () => {
     () => buildPlan([position(), position({ negativeRisk: true })], { account, releaseSha, walletType: "SAFE" }, now),
     /negative-risk disagreement/,
   );
+});
+
+test("custody relayer rejects unsupported deposit/poly1271 wallets", () => {
+  assert.throws(() => relayerWalletRoute("DEPOSIT"), /poly1271 custody is not supported/);
+  assert.throws(() => relayerWalletRoute("unknown"), /walletType must be SAFE or PROXY/);
 });
 
 test("execute refuses to enter account operations while writes are disabled", async () => {

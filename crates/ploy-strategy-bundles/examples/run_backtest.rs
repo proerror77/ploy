@@ -240,6 +240,7 @@ mod tests {
                 venue_order_id: Some("venue-1".to_string()),
                 venue_order_history: vec![],
                 revision: 0,
+                idempotency_key: None,
                 state: ploy_trading::OrderState::Filled,
                 filled_qty: dec!(10),
                 rejection_reason: None,
@@ -275,6 +276,152 @@ mod tests {
         assert_eq!(evidence["orders"][0]["status"], "FILLED");
         assert_eq!(evidence["fills"][0]["fill_id"], "fill-1");
         assert_eq!(evidence["fills"][0]["fill_side"], "BUY");
+    }
+
+    #[test]
+    fn backtest_evidence_tracks_event_uniqueness_and_closed_drawdown() {
+        let started = Utc::now();
+        let mut snapshot = ploy_trading::TradingRuntimeSnapshot::default();
+        for (index, (event_id, exit_price)) in [
+            ("event-1", dec!(0.60)),
+            ("event-2", dec!(0.25)),
+            ("event-3", dec!(0.55)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let entry_intent_id = format!("entry-{index}");
+            let exit_intent_id = format!("exit-{index}");
+            let entry_order_id = format!("entry-order-{index}");
+            let exit_order_id = format!("exit-order-{index}");
+            let token_id = format!("token-{index}");
+            let opened_at = started + Duration::seconds(index as i64 * 10);
+            let closed_at = opened_at + Duration::seconds(5);
+            snapshot.intents.extend([
+                ploy_trading::TradingIntent {
+                    intent_id: entry_intent_id.clone(),
+                    deployment_id: "pm5d-test".into(),
+                    market_id: event_id.into(),
+                    token_id: token_id.clone(),
+                    side: ploy_trading::TradeSide::Buy,
+                    quantity: dec!(100),
+                    limit_price: Some(dec!(0.50)),
+                    purpose: ploy_trading::IntentPurpose::Entry,
+                    created_at: opened_at,
+                },
+                ploy_trading::TradingIntent {
+                    intent_id: exit_intent_id.clone(),
+                    deployment_id: "pm5d-test".into(),
+                    market_id: event_id.into(),
+                    token_id: token_id.clone(),
+                    side: ploy_trading::TradeSide::Sell,
+                    quantity: dec!(100),
+                    limit_price: Some(exit_price),
+                    purpose: ploy_trading::IntentPurpose::Exit,
+                    created_at: closed_at,
+                },
+            ]);
+            for (order_id, intent_id) in [
+                (entry_order_id.clone(), entry_intent_id.clone()),
+                (exit_order_id.clone(), exit_intent_id.clone()),
+            ] {
+                snapshot.orders.push(ploy_trading::OrderRecord {
+                    order_id,
+                    intent_id,
+                    deployment_id: "pm5d-test".into(),
+                    token_id: token_id.clone(),
+                    requested_qty: dec!(100),
+                    limit_price: Some(dec!(0.50)),
+                    venue_order_id: None,
+                    venue_order_history: Vec::new(),
+                    revision: 0,
+                    idempotency_key: None,
+                    state: ploy_trading::OrderState::Filled,
+                    filled_qty: dec!(100),
+                    rejection_reason: None,
+                    last_error: None,
+                });
+            }
+            snapshot.fills.extend([
+                ploy_trading::FillRecord {
+                    fill_id: format!("entry-fill-{index}"),
+                    order_id: entry_order_id,
+                    token_id: token_id.clone(),
+                    side: ploy_trading::TradeSide::Buy,
+                    quantity: dec!(100),
+                    price: dec!(0.50),
+                    fee: Decimal::ZERO,
+                    timestamp: opened_at,
+                },
+                ploy_trading::FillRecord {
+                    fill_id: format!("exit-fill-{index}"),
+                    order_id: exit_order_id,
+                    token_id,
+                    side: ploy_trading::TradeSide::Sell,
+                    quantity: dec!(100),
+                    price: exit_price,
+                    fee: Decimal::ZERO,
+                    timestamp: closed_at,
+                },
+            ]);
+        }
+        snapshot.intents.push(ploy_trading::TradingIntent {
+            intent_id: "duplicate-event-1".into(),
+            deployment_id: "pm5d-test".into(),
+            market_id: "event-1".into(),
+            token_id: "token-0".into(),
+            side: ploy_trading::TradeSide::Buy,
+            quantity: dec!(1),
+            limit_price: Some(dec!(0.50)),
+            purpose: ploy_trading::IntentPurpose::Entry,
+            created_at: started + Duration::seconds(1),
+        });
+        snapshot.intents.push(ploy_trading::TradingIntent {
+            intent_id: "orphan-exit".into(),
+            deployment_id: "pm5d-test".into(),
+            market_id: "event-without-entry".into(),
+            token_id: "orphan-token".into(),
+            side: ploy_trading::TradeSide::Sell,
+            quantity: dec!(1),
+            limit_price: Some(dec!(0.75)),
+            purpose: ploy_trading::IntentPurpose::Exit,
+            created_at: started + Duration::seconds(40),
+        });
+        snapshot.orders.push(ploy_trading::OrderRecord {
+            order_id: "orphan-exit-order".into(),
+            intent_id: "orphan-exit".into(),
+            deployment_id: "pm5d-test".into(),
+            token_id: "orphan-token".into(),
+            requested_qty: dec!(1),
+            limit_price: Some(dec!(0.75)),
+            venue_order_id: None,
+            venue_order_history: Vec::new(),
+            revision: 0,
+            idempotency_key: None,
+            state: ploy_trading::OrderState::Filled,
+            filled_qty: dec!(1),
+            rejection_reason: None,
+            last_error: None,
+        });
+        snapshot.fills.push(ploy_trading::FillRecord {
+            fill_id: "orphan-exit-fill".into(),
+            order_id: "orphan-exit-order".into(),
+            token_id: "orphan-token".into(),
+            side: ploy_trading::TradeSide::Sell,
+            quantity: dec!(1),
+            price: dec!(0.75),
+            fee: Decimal::ZERO,
+            timestamp: started + Duration::seconds(40),
+        });
+
+        let metrics = backtest_evidence_metrics(&snapshot);
+
+        assert_eq!(metrics.unique_event_count, 3);
+        assert_eq!(metrics.max_event_decisions, 2);
+        assert_eq!(metrics.closed_event_count, 3);
+        assert_eq!(metrics.open_event_count, 0);
+        assert_eq!(metrics.lifecycle_without_entry_decision_count, 1);
+        assert_eq!(metrics.max_drawdown, dec!(-25));
     }
 }
 
@@ -658,6 +805,7 @@ fn build_backtest_evaluation_artifact(
     snapshot: &ploy_trading::TradingRuntimeSnapshot,
 ) -> serde_json::Value {
     let cashflow = snapshot.fill_cashflow_summary();
+    let evidence_metrics = backtest_evidence_metrics(snapshot);
     let mut artifact_risk_flags = Vec::new();
     if snapshot.orders.is_empty() {
         artifact_risk_flags.push("no_order_level_rows");
@@ -667,7 +815,14 @@ fn build_backtest_evaluation_artifact(
     }
 
     let has_official_settlement_gate = backtest_options.require_official_settlement;
-    let has_full_depth_clob = false;
+    let has_full_depth_clob = result.non_settlement_fills_observed > 0
+        && result.full_depth_fills_observed == result.non_settlement_fills_observed;
+    let has_event_level_accounting = evidence_metrics.unique_event_count > 0
+        && evidence_metrics.missing_event_id_count == 0
+        && evidence_metrics.lifecycle_without_entry_decision_count == 0
+        && evidence_metrics.max_event_decisions <= 1
+        && evidence_metrics.open_event_count == 0
+        && evidence_metrics.closed_event_count == evidence_metrics.unique_event_count;
     let has_replay_dryrun_parity = false;
     let has_runtime_scorer_parity = false;
     let is_synthetic = source_kind == "synthetic";
@@ -678,6 +833,18 @@ fn build_backtest_evaluation_artifact(
     }
     if !has_official_settlement_gate {
         blocking_risk_flags.push("missing_official_settlement_gate");
+    }
+    if evidence_metrics.missing_event_id_count > 0 {
+        blocking_risk_flags.push("missing_event_ids");
+    }
+    if evidence_metrics.lifecycle_without_entry_decision_count > 0 {
+        blocking_risk_flags.push("lifecycle_without_entry_decision");
+    }
+    if evidence_metrics.max_event_decisions > 1 {
+        blocking_risk_flags.push("multiple_entry_decisions_per_event");
+    }
+    if !has_event_level_accounting {
+        blocking_risk_flags.push("incomplete_event_lifecycle_accounting");
     }
     if !has_replay_dryrun_parity {
         blocking_risk_flags.push("missing_replay_dryrun_parity");
@@ -691,22 +858,33 @@ fn build_backtest_evaluation_artifact(
     blocking_risk_flags.extend(artifact_risk_flags.iter().copied());
 
     let mut advisory_flags = Vec::new();
-    if source_kind == "parquet_stream" {
+    if source_kind == "parquet_stream" && result.depth_quote_updates_observed == 0 {
         advisory_flags.push("parquet_stream_uses_quote_ticks_not_full_clob_lake");
     }
     if source_kind == "db_eager" {
         advisory_flags.push("db_eager_mode_is_debug_or_small_window_only");
     }
 
-    let evidence_stage = if !is_synthetic && has_official_settlement_gate {
+    let evidence_stage = if !is_synthetic
+        && has_official_settlement_gate
+        && has_full_depth_clob
+        && has_event_level_accounting
+    {
         "executable_replay"
     } else {
         "diagnostic"
     };
-    let canonical_result = if artifact_risk_flags.is_empty() {
+    let canonical_result = if !artifact_risk_flags.is_empty() {
+        "fix-workflow-or-data-source"
+    } else if blocking_risk_flags.is_empty() {
         "continue"
     } else {
-        "fix-workflow-or-data-source"
+        "revise"
+    };
+    let full_depth_quote_coverage = if result.quote_updates_observed == 0 {
+        0.0
+    } else {
+        result.depth_quote_updates_observed as f64 / result.quote_updates_observed as f64
     };
 
     json!({
@@ -731,6 +909,7 @@ fn build_backtest_evaluation_artifact(
             "spot_sample_secs": backtest_options.spot_sample_secs,
             "official_settlement_required": has_official_settlement_gate,
             "full_depth_clob_fillability": has_full_depth_clob,
+            "event_level_accounting": has_event_level_accounting,
             "runtime_replay_parity": has_replay_dryrun_parity,
             "runtime_scorer_parity": has_runtime_scorer_parity,
         },
@@ -744,10 +923,22 @@ fn build_backtest_evaluation_artifact(
         },
         "metrics": {
             "updates_processed": result.updates_processed,
+            "quote_updates_observed": result.quote_updates_observed,
+            "depth_quote_updates_observed": result.depth_quote_updates_observed,
+            "full_depth_quote_coverage": full_depth_quote_coverage,
             "intents_submitted": result.intents_submitted,
             "orders": snapshot.orders.len(),
             "fills_recorded": result.fills_recorded,
             "fills": snapshot.fills.len(),
+            "non_settlement_fills_observed": result.non_settlement_fills_observed,
+            "full_depth_fills_observed": result.full_depth_fills_observed,
+            "unique_event_count": evidence_metrics.unique_event_count,
+            "max_event_decisions": evidence_metrics.max_event_decisions,
+            "closed_event_count": evidence_metrics.closed_event_count,
+            "open_event_count": evidence_metrics.open_event_count,
+            "missing_event_id_count": evidence_metrics.missing_event_id_count,
+            "lifecycle_without_entry_decision_count": evidence_metrics.lifecycle_without_entry_decision_count,
+            "max_drawdown": evidence_metrics.max_drawdown,
             "realized_pnl": result.pnl.realized_pnl,
             "unrealized_pnl": result.pnl.unrealized_pnl,
             "total_fees": result.pnl.total_fees,
@@ -761,6 +952,132 @@ fn build_backtest_evaluation_artifact(
         "advisory_flags": advisory_flags,
         "runtime_evidence": normalized_runtime_evidence(snapshot),
     })
+}
+
+#[derive(Debug, Default)]
+struct BacktestEvidenceMetrics {
+    unique_event_count: usize,
+    max_event_decisions: usize,
+    missing_event_id_count: usize,
+    lifecycle_without_entry_decision_count: usize,
+    closed_event_count: usize,
+    open_event_count: usize,
+    max_drawdown: Decimal,
+}
+
+#[derive(Debug, Default)]
+struct EventLifecycle {
+    net_quantity_by_token: BTreeMap<String, Decimal>,
+    net_pnl: Decimal,
+    closed_at: Option<chrono::DateTime<Utc>>,
+    has_fill: bool,
+}
+
+fn backtest_evidence_metrics(
+    snapshot: &ploy_trading::TradingRuntimeSnapshot,
+) -> BacktestEvidenceMetrics {
+    let mut entry_decisions = BTreeMap::<String, usize>::new();
+    let mut missing_event_id_count = 0usize;
+    for intent in snapshot
+        .intents
+        .iter()
+        .filter(|intent| intent.purpose == ploy_trading::IntentPurpose::Entry)
+    {
+        if intent.market_id.trim().is_empty() {
+            missing_event_id_count += 1;
+        } else {
+            *entry_decisions.entry(intent.market_id.clone()).or_default() += 1;
+        }
+    }
+
+    let intents_by_id = snapshot
+        .intents
+        .iter()
+        .map(|intent| (intent.intent_id.as_str(), intent))
+        .collect::<BTreeMap<_, _>>();
+    let orders_by_id = snapshot
+        .orders
+        .iter()
+        .map(|order| (order.order_id.as_str(), order))
+        .collect::<BTreeMap<_, _>>();
+    let mut lifecycles = BTreeMap::<String, EventLifecycle>::new();
+    for fill in &snapshot.fills {
+        let Some(intent) = orders_by_id
+            .get(fill.order_id.as_str())
+            .and_then(|order| intents_by_id.get(order.intent_id.as_str()))
+            .copied()
+        else {
+            continue;
+        };
+        if intent.market_id.trim().is_empty() {
+            continue;
+        }
+        let lifecycle = lifecycles.entry(intent.market_id.clone()).or_default();
+        let signed_quantity = match fill.side {
+            ploy_trading::TradeSide::Buy => fill.quantity,
+            ploy_trading::TradeSide::Sell => -fill.quantity,
+        };
+        *lifecycle
+            .net_quantity_by_token
+            .entry(fill.token_id.clone())
+            .or_default() += signed_quantity;
+        let signed_notional = match fill.side {
+            ploy_trading::TradeSide::Buy => -(fill.quantity * fill.price),
+            ploy_trading::TradeSide::Sell => fill.quantity * fill.price,
+        };
+        lifecycle.net_pnl += signed_notional - fill.fee;
+        lifecycle.closed_at = Some(
+            lifecycle
+                .closed_at
+                .map_or(fill.timestamp, |current| current.max(fill.timestamp)),
+        );
+        lifecycle.has_fill = true;
+    }
+
+    let mut closed = Vec::new();
+    let mut open_event_count = 0usize;
+    let lifecycle_without_entry_decision_count = lifecycles
+        .keys()
+        .filter(|event_id| !entry_decisions.contains_key(event_id.as_str()))
+        .count();
+    for event_id in entry_decisions.keys() {
+        match lifecycles.get(event_id) {
+            Some(lifecycle)
+                if lifecycle.has_fill
+                    && lifecycle
+                        .net_quantity_by_token
+                        .values()
+                        .all(Decimal::is_zero) =>
+            {
+                closed.push((
+                    lifecycle.closed_at.unwrap_or_default(),
+                    event_id.as_str(),
+                    lifecycle.net_pnl,
+                ));
+            }
+            _ => open_event_count += 1,
+        }
+    }
+    closed.sort_by_key(|(closed_at, event_id, _)| (*closed_at, *event_id));
+
+    let mut cumulative = Decimal::ZERO;
+    let mut peak = Decimal::ZERO;
+    let mut max_drawdown = Decimal::ZERO;
+    for (_, _, pnl) in &closed {
+        cumulative += *pnl;
+        peak = peak.max(cumulative);
+        max_drawdown = max_drawdown.min(cumulative - peak);
+    }
+
+    BacktestEvidenceMetrics {
+        unique_event_count: entry_decisions.len(),
+        max_event_decisions: entry_decisions.values().copied().max().unwrap_or(0),
+        missing_event_id_count,
+        lifecycle_without_entry_decision_count,
+        closed_event_count: closed.len(),
+        open_event_count,
+        max_drawdown,
+    }
 }
 
 fn normalized_runtime_evidence(

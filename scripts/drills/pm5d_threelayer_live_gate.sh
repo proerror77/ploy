@@ -217,27 +217,19 @@ if [[ "$ALERTS_NORMALIZED" != "none" ]]; then
 fi
 
 log_step "credential presence"
-require_any_env_key "Polymarket private key" "POLYMARKET_PRIVATE_KEY" "PRIVATE_KEY"
+require_env_key "POLYMARKET_PRIVATE_KEY"
 SIGNATURE_TYPE="$(first_env_value "POLY_SIGNATURE_TYPE" "POLYMARKET_SIGNATURE_TYPE" || true)"
-FUNDER_PRESENT=0
-if env_has_any_key "POLY_FUNDER" "POLYMARKET_FUNDER" "POLYMARKET_FUNDER_ADDRESS"; then
-  FUNDER_PRESENT=1
-fi
-case "$SIGNATURE_TYPE" in
-  proxy|gnosis_safe)
-    require_any_env_key "proxy funder" "POLY_FUNDER" "POLYMARKET_FUNDER" "POLYMARKET_FUNDER_ADDRESS"
+WALLET_TYPE="$(first_env_value "POLY_WALLET_TYPE" || true)"
+WALLET_TYPE="${WALLET_TYPE^^}"
+case "${SIGNATURE_TYPE}:${WALLET_TYPE}" in
+  proxy:PROXY|gnosis_safe:SAFE)
+    require_any_env_key "non-EOA funder" "POLY_FUNDER" "POLYMARKET_FUNDER" "POLYMARKET_FUNDER_ADDRESS"
     ;;
-  eoa)
-    ;;
-  "")
-    if [[ "$FUNDER_PRESENT" -eq 1 ]]; then
-      warn "POLY_SIGNATURE_TYPE is not explicit; current SDK defaults to proxy when a funder is present"
-    else
-      warn "POLY_SIGNATURE_TYPE and funder are absent; current SDK defaults to eoa"
-    fi
+  poly1271:*)
+    fail "POLY_SIGNATURE_TYPE=poly1271 is not supported by the current custody/redemption relayer"
     ;;
   *)
-    fail "unsupported POLY_SIGNATURE_TYPE: $SIGNATURE_TYPE"
+    fail "live wallet mapping must be proxy:PROXY or gnosis_safe:SAFE; got ${SIGNATURE_TYPE:-unset}:${WALLET_TYPE:-unset}"
     ;;
 esac
 
@@ -300,6 +292,13 @@ if dryrun != live:
 
 print("manifest/config gate: paused apply only")
 PY
+
+MAX_GROSS_EXPOSURE="$(extract_manifest_field max_gross_exposure)"
+log_step "Polymarket account trading readiness"
+if ! READINESS_OUTPUT="$(ployctl_capture trading readiness "$MAX_GROSS_EXPOSURE")"; then
+  fail "Polymarket account readiness failed: $READINESS_OUTPUT"
+fi
+printf '%s\n' "$READINESS_OUTPUT"
 
 RENDERED_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/ploy-live-manifest.XXXXXX.json")"
 python3 - "$MANIFEST" "$RENDERED_MANIFEST" "$NORMALIZED_LIVE_ACCOUNT_ID" <<'PY'

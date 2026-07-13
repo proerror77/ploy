@@ -36,8 +36,14 @@ Recommended:
 
 - `PLOY_OPERATOR_TOKEN` for remote `ployctl` mutation without full admin access
 - `PLOY_API_AUTH_COOKIE_SECRET` if browser sessions are used
-- `POLY_SIGNATURE_TYPE`
-- `POLY_FUNDER` when `POLY_SIGNATURE_TYPE=proxy` or `POLY_SIGNATURE_TYPE=gnosis_safe`
+- `POLY_SIGNATURE_TYPE=proxy` with `POLY_WALLET_TYPE=PROXY`, or
+  `POLY_SIGNATURE_TYPE=gnosis_safe` with `POLY_WALLET_TYPE=SAFE`
+- `POLY_FUNDER` matching the signer-derived Proxy/Safe address
+
+`poly1271`/`DEPOSIT` order signing is understood by the Rust adapter, but the
+current custody/redemption relayer does not support that wallet route. The
+deploy and live gates therefore reject it instead of presenting an incomplete
+wallet lifecycle as live-ready.
 
 ## Baseline Service Checks
 
@@ -89,6 +95,7 @@ manually reviewed:
 - `ployctl system metrics`
 - `ployctl system alerts`
 - `ployctl trading status`
+- `ployctl trading readiness 5`
 - the most recent audit log entries
 
 ## PM5D ThreeLayer Live Gate
@@ -99,9 +106,14 @@ For the current PM5D ThreeLayer setup, stage the live deployment in paused mode:
 /opt/ploy/scripts/drills/pm5d_threelayer_live_gate.sh
 ```
 
-This verifies `02-pm5d-threelayer.live.toml` against the dry-run config, applies
-`pm5d.threelayer.live` with `desired_state=paused`, and stops before any live
-orders can be placed.
+This verifies `02-pm5d-threelayer.live.toml` against the dry-run config, checks
+the authenticated Polymarket account for geoblock, closed-only status, pUSD
+balance, and both V2 allowances, applies `pm5d.threelayer.live` with
+`desired_state=paused`, and stops before any live orders can be placed.
+The readiness command derives an already-existing L2 API key with the read-only
+endpoint, never creates one, and stops its temporary SDK heartbeat task before
+the first venue probe. Missing credentials or a 15-second end-to-end timeout
+fails the gate closed.
 
 The staging script cannot resume live. Real live enablement is available only
 through `.github/workflows/approve-live-trade.yml`, which requires successful

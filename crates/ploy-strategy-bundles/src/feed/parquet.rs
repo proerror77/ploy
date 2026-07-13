@@ -380,6 +380,8 @@ fn load_pm_quotes(
             ask,
             bid_size,
             ask_size,
+            bid_levels: Vec::new(),
+            ask_levels: Vec::new(),
             ts,
         });
         count += 1;

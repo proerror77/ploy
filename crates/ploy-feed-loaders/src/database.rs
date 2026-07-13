@@ -25,11 +25,10 @@ use std::sync::Arc;
 use tracing::info;
 
 use ploy_market_contracts::{
-    l2_updates_from_depth_totals, market_update_sort_ts, normalize_token_id, HistoricalLoadOptions,
-    MarketUpdate,
+    l2_updates_from_depth_totals, market_update_sort_ts, normalize_token_id, BookLevel,
+    HistoricalLoadOptions, MarketUpdate,
 };
 
-#[cfg(test)]
 use serde_json::Value;
 
 /// How far before `from` to load spot prices for EWMA volatility warm-up.
@@ -253,39 +252,21 @@ pub async fn load_from_database_with_options(
     )
     .await?;
 
-    // 3. Polymarket quotes — prefer persisted top-of-book rows when they carry
-    // executable size. Older `ploy_runner_live` quote rows are price-only; those
-    // are useful for rough direction studies but must not drive executable PnL.
+    // 3. Polymarket quotes — prefer sampled full-depth snapshots. Top-of-book
+    // quote ticks are a diagnostic fallback only.
     let token_map = load_token_mappings(pool, symbols, from, to).await?;
-    let quote_count_before = updates.len();
-    let quote_stats = load_pm_quotes(pool, &token_map, from, to, &mut updates).await?;
-
-    // If clob_quote_ticks has no executable size, replace those price-only
-    // rows with quotes extracted from full order-book snapshots. This preserves
-    // point-in-time prices while grounding research labels in actual CLOB depth.
-    if quote_stats.rows == 0 || quote_stats.sized_rows == 0 {
-        if quote_stats.rows == 0 {
-            info!("No real quotes in clob_quote_ticks, falling back to orderbook snapshots");
-        } else {
-            info!(
-                rows = quote_stats.rows,
-                "clob_quote_ticks rows are price-only, replacing with orderbook snapshot depth"
-            );
-        }
-        updates.truncate(quote_count_before);
-        let snapshot_stats = load_pm_quotes_from_snapshots(
-            pool,
-            &token_map,
-            from,
-            to,
-            options.lob_sample_secs,
-            &mut updates,
-        )
-        .await?;
-        if snapshot_stats.rows == 0 && quote_stats.rows > 0 {
-            info!("No usable orderbook snapshots found, restoring price-only quote rows");
-            load_pm_quotes(pool, &token_map, from, to, &mut updates).await?;
-        }
+    let snapshot_stats = load_pm_quotes_from_snapshots(
+        pool,
+        &token_map,
+        from,
+        to,
+        options.lob_sample_secs,
+        &mut updates,
+    )
+    .await?;
+    if snapshot_stats.rows == 0 {
+        info!("No usable orderbook snapshots found; using diagnostic top-of-book quotes");
+        load_pm_quotes(pool, &token_map, from, to, &mut updates).await?;
     }
 
     // 4. L2 orderbook from binance_lob_ticks.
@@ -567,7 +548,6 @@ type TokenMap = std::collections::HashMap<String, (String, bool)>;
 #[derive(Debug, Default, Clone, Copy)]
 struct PmQuoteLoadStats {
     rows: usize,
-    sized_rows: usize,
 }
 
 async fn load_token_mappings(
@@ -702,10 +682,7 @@ async fn load_pm_quotes(
         });
     }
 
-    Ok(PmQuoteLoadStats {
-        rows: row_count,
-        sized_rows,
-    })
+    Ok(PmQuoteLoadStats { rows: row_count })
 }
 
 /// Fallback quote loader from `clob_orderbook_snapshots`.
@@ -731,19 +708,9 @@ async fn load_pm_quotes_from_snapshots(
     }
     let sample_secs = sample_secs.max(1) as i64;
 
-    // Extract executable top-of-book directly from JSONB depth. This intentionally
-    // avoids synthetic opposite-side prices: if a snapshot has only bids or only
-    // asks, only that executable side receives size. Downsample in SQL before
-    // expanding JSONB so full-day factor reviews do not materialize every CLOB
-    // snapshot into memory.
-    let rows: Vec<(
-        DateTime<Utc>,
-        String,
-        Option<Decimal>,
-        Option<Decimal>,
-        Option<Decimal>,
-        Option<Decimal>,
-    )> = sqlx::query_as(
+    // Downsample before transferring JSONB so full-day reviews do not load every
+    // snapshot. Preserve every level in each selected book.
+    let rows: Vec<(DateTime<Utc>, String, Value, Value)> = sqlx::query_as(
         r#"
         WITH sampled AS (
             SELECT DISTINCT ON (snapshot.token_id, snapshot.bucket)
@@ -766,39 +733,10 @@ async fn load_pm_quotes_from_snapshots(
                   AND token_id = ANY($3)
             ) snapshot
             ORDER BY snapshot.token_id, snapshot.bucket, snapshot.received_at DESC
-        ),
-        extracted AS (
-            SELECT snapshot.received_at,
-                   snapshot.token_id,
-                   best_bid.price AS best_bid,
-                   best_ask.price AS best_ask,
-                   best_bid.size AS bid_size,
-                   best_ask.size AS ask_size
-            FROM sampled snapshot
-            LEFT JOIN LATERAL (
-                SELECT (elem->>'price')::numeric AS price,
-                       (elem->>'size')::numeric AS size
-                FROM jsonb_array_elements(COALESCE(snapshot.bids, '[]'::jsonb)) AS elem
-                WHERE (elem->>'price')::numeric > 0.01
-                  AND (elem->>'price')::numeric < 0.99
-                  AND (elem->>'size')::numeric > 0
-                ORDER BY price DESC
-                LIMIT 1
-            ) best_bid ON true
-            LEFT JOIN LATERAL (
-                SELECT (elem->>'price')::numeric AS price,
-                       (elem->>'size')::numeric AS size
-                FROM jsonb_array_elements(COALESCE(snapshot.asks, '[]'::jsonb)) AS elem
-                WHERE (elem->>'price')::numeric > 0.01
-                  AND (elem->>'price')::numeric < 0.99
-                  AND (elem->>'size')::numeric > 0
-                ORDER BY price ASC
-                LIMIT 1
-            ) best_ask ON true
         )
-        SELECT received_at, token_id, best_bid, best_ask, bid_size, ask_size
-        FROM extracted
-        WHERE best_bid IS NOT NULL OR best_ask IS NOT NULL
+        SELECT received_at, token_id, bids, asks
+        FROM sampled
+        WHERE jsonb_array_length(bids) > 0 OR jsonb_array_length(asks) > 0
         ORDER BY received_at
         "#,
     )
@@ -807,41 +745,72 @@ async fn load_pm_quotes_from_snapshots(
     .bind(&token_ids)
     .bind(sample_secs)
     .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    .await?;
 
-    let sized_rows = rows
-        .iter()
-        .filter(|(_, _, _, _, bid_size, ask_size)| {
-            bid_size.is_some_and(|size| size > Decimal::ZERO)
-                || ask_size.is_some_and(|size| size > Decimal::ZERO)
-        })
-        .count();
-
-    info!(
-        count = rows.len(),
-        sized_rows,
-        sample_secs,
-        "Loaded PM quotes from clob_orderbook_snapshots (real bid/ask and size extracted from JSONB depth)"
-    );
-    let row_count = rows.len();
-    for (ts, token_id, bid, ask, bid_size, ask_size) in rows {
+    let mut row_count = 0usize;
+    for (ts, token_id, bids, asks) in rows {
+        let bid_levels = book_levels_from_json(&bids, false);
+        let ask_levels = book_levels_from_json(&asks, true);
+        if bid_levels.is_empty() && ask_levels.is_empty() {
+            continue;
+        }
+        let best_bid = bid_levels.first();
+        let best_ask = ask_levels.first();
         updates.push(MarketUpdate::Quote {
             token_id: Arc::from(token_id),
-            bid,
-            ask,
-            bid_size,
-            ask_size,
-            bid_levels: Vec::new(),
-            ask_levels: Vec::new(),
+            bid: best_bid.map(|level| level.price),
+            ask: best_ask.map(|level| level.price),
+            bid_size: best_bid.map(|level| level.size),
+            ask_size: best_ask.map(|level| level.size),
+            bid_levels,
+            ask_levels,
             ts,
         });
+        row_count += 1;
     }
 
-    Ok(PmQuoteLoadStats {
-        rows: row_count,
-        sized_rows,
-    })
+    info!(
+        count = row_count,
+        sample_secs, "Loaded full-depth PM quotes from clob_orderbook_snapshots"
+    );
+
+    Ok(PmQuoteLoadStats { rows: row_count })
+}
+
+fn book_levels_from_json(value: &Value, ascending: bool) -> Vec<BookLevel> {
+    let mut levels = value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| match item {
+            Value::Array(parts) if parts.len() >= 2 => {
+                Some((decimal_from_json(&parts[0])?, decimal_from_json(&parts[1])?))
+            }
+            Value::Object(parts) => Some((
+                decimal_from_json(parts.get("price")?)?,
+                decimal_from_json(parts.get("size")?)?,
+            )),
+            _ => None,
+        })
+        .filter(|(price, size)| {
+            *price > Decimal::new(1, 2) && *price < Decimal::new(99, 2) && *size > Decimal::ZERO
+        })
+        .map(|(price, size)| BookLevel { price, size })
+        .collect::<Vec<_>>();
+    if ascending {
+        levels.sort_by_key(|level| level.price);
+    } else {
+        levels.sort_by_key(|level| std::cmp::Reverse(level.price));
+    }
+    levels
+}
+
+fn decimal_from_json(value: &Value) -> Option<Decimal> {
+    match value {
+        Value::Number(number) => number.to_string().parse().ok(),
+        Value::String(text) => text.parse().ok(),
+        _ => None,
+    }
 }
 
 // ── L2 Data ──────────────────────────────────────────────
@@ -1030,6 +999,14 @@ async fn load_events(
 
     let event_ids: Vec<String> = rows.iter().map(|row| row.market_slug.clone()).collect();
     let settlement_prices = load_event_settlement_prices(pool, &event_ids).await?;
+    if require_official_settlement {
+        let (discovered, resolved) = official_settlement_coverage(&rows, &settlement_prices);
+        if resolved != discovered {
+            return Err(sqlx::Error::Protocol(format!(
+                "official settlement coverage is incomplete: resolved={resolved}, discovered={discovered}"
+            )));
+        }
+    }
 
     info!(count = rows.len(), "Loaded events from pm_market_metadata");
     updates.extend(build_event_updates(
@@ -1039,6 +1016,39 @@ async fn load_events(
     ));
 
     Ok(())
+}
+
+fn official_settlement_coverage(
+    rows: &[EventMetadataRow],
+    settlement_prices: &HashMap<(String, String), Decimal>,
+) -> (usize, usize) {
+    let mut discovered = 0usize;
+    let mut resolved = 0usize;
+    for row in rows {
+        let symbol = row.symbol.as_deref().unwrap_or_default();
+        let up_token = normalize_token_id(row.up_token_id.as_deref().unwrap_or_default());
+        let down_token = normalize_token_id(row.down_token_id.as_deref().unwrap_or_default());
+        if symbol.is_empty()
+            || row.start_time.is_none()
+            || row.end_time.is_none()
+            || up_token.is_empty()
+            || down_token.is_empty()
+        {
+            continue;
+        }
+        discovered += 1;
+        if resolve_up_won_from_settlements(
+            settlement_prices,
+            &row.market_slug,
+            &up_token,
+            &down_token,
+        )
+        .is_some()
+        {
+            resolved += 1;
+        }
+    }
+    (discovered, resolved)
 }
 
 fn build_event_updates(
@@ -1165,10 +1175,45 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        build_event_updates, l2_updates_from_book, near_depth, EventMetadataRow, MarketUpdate,
+        book_levels_from_json, build_event_updates, l2_updates_from_book, near_depth,
+        official_settlement_coverage, EventMetadataRow, MarketUpdate,
         BINANCE_AGG_TRADE_SAMPLED_QUERY, BINANCE_LOB_SAMPLED_QUERY, BINANCE_PRICE_SAMPLED_QUERY,
         SYNC_RECORDS_SPOT_SAMPLED_QUERY,
     };
+
+    #[test]
+    fn polymarket_depth_levels_are_decimal_sorted_and_tradeable() {
+        let bids = json!([["0.48", "10"], ["0.49", "5"], ["0.01", "999"]]);
+        let asks = json!([
+            {"price": "0.52", "size": "8"},
+            {"price": "0.51", "size": "7"}
+        ]);
+
+        let bids = book_levels_from_json(&bids, false);
+        let asks = book_levels_from_json(&asks, true);
+
+        assert_eq!(bids[0].price, dec!(0.49));
+        assert_eq!(bids[0].size, dec!(5));
+        assert_eq!(bids.len(), 2);
+        assert_eq!(asks[0].price, dec!(0.51));
+        assert_eq!(asks[0].size, dec!(7));
+    }
+
+    #[test]
+    fn full_depth_snapshot_query_does_not_separate_cte_with_a_dangling_comma() {
+        let source = include_str!("database.rs");
+        let query = &source[source
+            .find("async fn load_pm_quotes_from_snapshots")
+            .unwrap()..];
+        let query = &query[..query.find("let mut row_count").unwrap()];
+        assert!(!query.contains(
+            "ORDER BY snapshot.token_id, snapshot.bucket, snapshot.received_at DESC\n        ),\n        SELECT received_at, token_id, bids, asks"
+        ));
+        assert!(query.contains(
+            "ORDER BY snapshot.token_id, snapshot.bucket, snapshot.received_at DESC\n        )\n        SELECT received_at, token_id, bids, asks"
+        ));
+        assert!(!query.contains(".fetch_all(pool)\n    .await\n    .unwrap_or_default()"));
+    }
 
     #[test]
     fn binance_samplers_use_bucketed_index_lookups() {
@@ -1257,6 +1302,36 @@ mod tests {
             updates.is_empty(),
             "official-only mode should skip unresolved events"
         );
+    }
+
+    #[test]
+    fn official_settlement_coverage_detects_partial_event_windows() {
+        let now = Utc::now();
+        let rows = vec![
+            EventMetadataRow {
+                market_slug: "evt-1".into(),
+                symbol: Some("BTCUSDT".into()),
+                end_time: Some(now + Duration::minutes(5)),
+                start_time: Some(now),
+                up_token_id: Some("up-1".into()),
+                down_token_id: Some("down-1".into()),
+                price_to_beat: Some(dec!(100000)),
+            },
+            EventMetadataRow {
+                market_slug: "evt-2".into(),
+                symbol: Some("ETHUSDT".into()),
+                end_time: Some(now + Duration::minutes(5)),
+                start_time: Some(now),
+                up_token_id: Some("up-2".into()),
+                down_token_id: Some("down-2".into()),
+                price_to_beat: Some(dec!(3000)),
+            },
+        ];
+        let mut prices = HashMap::new();
+        prices.insert(("evt-1".to_string(), "up-1".to_string()), dec!(1));
+        prices.insert(("evt-1".to_string(), "down-1".to_string()), dec!(0));
+
+        assert_eq!(official_settlement_coverage(&rows, &prices), (2, 1));
     }
 
     #[test]

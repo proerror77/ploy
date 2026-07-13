@@ -8,6 +8,7 @@ enum Command {
     SystemAudit,
     TradingStatus,
     TradingPrincipal,
+    TradingReadiness(rust_decimal::Decimal),
     TradingInspect(String),
     TradingCancel(String, String),
     TradingReplace(
@@ -48,6 +49,14 @@ impl Command {
             }
             [_bin, trading, principal] if trading == "trading" && principal == "principal" => {
                 Ok(Self::TradingPrincipal)
+            }
+            [_bin, trading, readiness, required_pusd]
+                if trading == "trading" && readiness == "readiness" =>
+            {
+                let required_pusd = required_pusd.parse().map_err(|error| {
+                    format!("invalid required pUSD `{required_pusd}`: {error}")
+                })?;
+                Ok(Self::TradingReadiness(required_pusd))
             }
             [_bin, trading, inspect, deployment_id]
                 if trading == "trading" && inspect == "inspect" =>
@@ -132,7 +141,7 @@ impl Command {
             {
                 Ok(Self::DeploymentsArchive(deployment_id.clone()))
             }
-            _ => Err("usage: ployctl system status | ployctl system metrics | ployctl system alerts | ployctl system audit | ployctl trading status | ployctl trading principal | ployctl trading inspect <deployment-id> | ployctl trading cancel <deployment-id> <order-id> | ployctl trading replace <deployment-id> <order-id> <quantity> <limit-price|-> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id> | ployctl deployments drain <deployment-id> | ployctl deployments enable <deployment-id> | ployctl deployments disable <deployment-id> | ployctl deployments archive <deployment-id>".to_string()),
+            _ => Err("usage: ployctl system status | ployctl system metrics | ployctl system alerts | ployctl system audit | ployctl trading status | ployctl trading principal | ployctl trading readiness <required-pusd> | ployctl trading inspect <deployment-id> | ployctl trading cancel <deployment-id> <order-id> | ployctl trading replace <deployment-id> <order-id> <quantity> <limit-price|-> | ployctl deployments list | ployctl deployments inspect <deployment-id> | ployctl deployments apply <manifest.json> | ployctl deployments pause <deployment-id> | ployctl deployments resume <deployment-id> | ployctl deployments stop <deployment-id> | ployctl deployments drain <deployment-id> | ployctl deployments enable <deployment-id> | ployctl deployments disable <deployment-id> | ployctl deployments archive <deployment-id>".to_string()),
         }
     }
 }
@@ -160,6 +169,18 @@ fn execute(command: Command, client: &ControlPlaneClient) -> Result<String, Stri
         Command::TradingStatus => trading::render_trading_state(client),
         Command::TradingPrincipal => ploy_connectivity::polymarket_execution_principal_from_env()
             .map_err(|error| error.to_string()),
+        Command::TradingReadiness(required_pusd) => {
+            let readiness = ploy_connectivity::polymarket_account_readiness_from_env(required_pusd)
+                .map_err(|error| error.to_string())?;
+            Ok(format!(
+                "principal: {}\nrequired_pusd: {}\nbalance_pusd: {}\ncountry: {}\nregion: {}\nready: true",
+                readiness.principal,
+                readiness.required_pusd,
+                readiness.balance_pusd,
+                readiness.country,
+                readiness.region,
+            ))
+        }
         Command::TradingInspect(deployment_id) => {
             trading::render_one_trading_state(client, &deployment_id)
         }
@@ -256,6 +277,16 @@ mod tests {
         let command =
             Command::parse(&["ployctl", "system", "alerts"].map(str::to_string)).expect("command");
         assert_eq!(command, Command::SystemAlerts);
+    }
+
+    #[test]
+    fn parses_polymarket_account_readiness_command() {
+        let command = Command::parse(&["ployctl", "trading", "readiness", "5"].map(str::to_string))
+            .expect("command");
+        assert_eq!(
+            command,
+            Command::TradingReadiness(rust_decimal::Decimal::from(5))
+        );
     }
 
     #[test]
