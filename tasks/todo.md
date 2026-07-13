@@ -6,7 +6,7 @@
 - [x] Use it in simulated execution and backtest/research fee accounting.
 - [x] Make live Polymarket REST reconciliation confirmed-only and use cached V2 fee metadata.
 - [x] Prefer authenticated venue order/fill events over snapshot polling, with bounded fallback.
-- [x] Measure local decision-to-wire and wire-to-ack latency without enabling live trading.
+- [x] Measure local client-to-gateway and gateway-to-response latency without enabling live trading.
 
 Evidence stage: implementation hardening only. Live remains paused; this slice
 does not deploy, resume trading, or produce promotion evidence.
@@ -45,9 +45,9 @@ and submission-path bottlenecks; they do not own or edit workspace files.
 - [x] Remove avoidable synchronous/network work from the quote-to-order hot path
       while preserving pending-before-side-effect, idempotency, and Unknown on
       ambiguous submission.
-- [x] Add a no-live-order local benchmark for decision-to-wire-to-ack
+- [x] Add a no-live-order local benchmark for client-to-gateway-to-response
       instrumentation and report p50/p99/p999.
-- [ ] Run focused tests, locked compilation, independent review, atomic commits,
+- [x] Run focused tests, locked compilation, independent review, atomic commits,
       and final diff/worktree checks without deploying or resuming live trading.
 
 ## Review
@@ -106,16 +106,21 @@ and submission-path bottlenecks; they do not own or edit workspace files.
   Content-Length responses; stale idle sockets reconnect before writes without
   retrying ambiguous POST requests.
 - Local release benchmark (1001 loopback HTTP submissions with a mock acknowledged
-  gateway; no venue, wallet, or chain access): decision-to-wire p50 1902 us,
-  p99 6238 us, p999 20775 us; wire-to-ack p50 1292 us, p99 3700 us, p999 12377 us;
-  end-to-end p50 3215 us, p99 9736 us, p999 24369 us. These numbers include both
+  gateway; no venue, wallet, or chain access): client-to-gateway p50 2099 us,
+  p99 6042 us, p999 6381 us; gateway-to-response p50 1461 us, p99 3730 us, p999 5857 us;
+  end-to-end p50 3632 us, p99 9535 us, p999 12114 us. These numbers include both
   durable Pending and terminal snapshot writes but exclude real Polymarket
   network latency and chain finality.
-- Verification passed: operator contracts 23, trading 22, connectivity 23,
+- Verification passed: operator contracts 23, trading 22, connectivity 26,
   platform runtime 62, control client 14, daemon host 90 (1 ignored), strategy
-  bundles 217, plus live-execution checks for `ploy-strategy-runtime`,
+  bundles 218, plus live-execution checks for `ploy-strategy-runtime`,
   `new-ployd`, and `new-ploy-runner`. Live remains paused and no real order was
   submitted.
+- Independent Standards/Spec review found and closed the post-submit audit panic,
+  inaccurate benchmark boundary names, WS maker-side drift, duplicated pending
+  submission guards, and the original monolithic commit. The remaining REST/WS
+  matcher/fill-builder duplication is low-priority and non-blocking because both
+  paths now share the same side invariant and regression coverage.
 
 # Current Session - Market Data V2 And Redeem Repair (2026-07-12)
 
