@@ -84,6 +84,8 @@ pub struct OrderSnapshot {
     #[serde(default)]
     pub revision: u32,
     pub state: String,
+    #[serde(default)]
+    pub state_changed_at: Option<DateTime<Utc>>,
     pub filled_qty: Decimal,
     pub rejection_reason: Option<String>,
     pub last_error: Option<String>,
@@ -349,6 +351,7 @@ mod tests {
                 venue_order_history: vec!["venue-0".to_string()],
                 revision: 1,
                 state: "filled".to_string(),
+                state_changed_at: Some(timestamp),
                 filled_qty: rust_decimal::Decimal::ONE,
                 rejection_reason: None,
                 last_error: None,
@@ -386,6 +389,7 @@ mod tests {
                     "venue_order_history": ["venue-0"],
                     "revision": 1,
                     "state": "filled",
+                    "state_changed_at": timestamp,
                     "filled_qty": "1",
                     "rejection_reason": null,
                     "last_error": null,

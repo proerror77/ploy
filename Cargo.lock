@@ -5035,14 +5035,17 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "chrono",
+ "futures",
  "ploy-market-contracts",
  "ploy-trading",
  "polymarket_client_sdk_v2",
  "rust_decimal",
  "rust_decimal_macros",
  "secrecy 0.8.0",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

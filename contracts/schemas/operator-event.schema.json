@@ -613,6 +613,14 @@
         "state": {
           "type": "string"
         },
+        "state_changed_at": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
         "token_id": {
           "type": "string"
         },

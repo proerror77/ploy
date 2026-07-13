@@ -1458,6 +1458,7 @@ mod tests {
                 venue_order_history: Vec::new(),
                 revision: 0,
                 state,
+                state_changed_at: Some(chrono::Utc::now()),
                 filled_qty: if state == OrderState::PartiallyFilled {
                     dec!(0.5)
                 } else {

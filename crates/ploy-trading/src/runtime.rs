@@ -601,6 +601,7 @@ mod tests {
                 venue_order_history: vec!["venue-0".to_string()],
                 revision: 1,
                 state: OrderState::PartiallyFilled,
+                state_changed_at: Some(Utc::now()),
                 filled_qty: dec!(1),
                 rejection_reason: None,
                 last_error: None,

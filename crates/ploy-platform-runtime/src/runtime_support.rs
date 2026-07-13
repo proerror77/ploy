@@ -86,6 +86,7 @@ pub fn build_trading_state_snapshot(
                 venue_order_history: order.venue_order_history,
                 revision: order.revision,
                 state: order_state_wire(order.state),
+                state_changed_at: order.state_changed_at,
                 filled_qty: order.filled_qty,
                 rejection_reason: order.rejection_reason,
                 last_error: order.last_error,
@@ -168,6 +169,7 @@ pub fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<Tra
                 venue_order_history: order.venue_order_history,
                 revision: order.revision,
                 state: order_state_from_wire(&order.state)?,
+                state_changed_at: order.state_changed_at,
                 filled_qty: order.filled_qty,
                 rejection_reason: order.rejection_reason,
                 last_error: order.last_error,
@@ -459,10 +461,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        account_token_exposure_envelope, build_order_control_response, intent_risk_effect,
-        live_reconcile_backoff_ms, observed_state_for_desired, order_state_from_wire,
-        order_state_wire, restore_trading_runtime, trade_side_from_wire, trade_side_wire,
-        IntentRiskEffect,
+        IntentRiskEffect, account_token_exposure_envelope, build_order_control_response,
+        intent_risk_effect, live_reconcile_backoff_ms, observed_state_for_desired,
+        order_state_from_wire, order_state_wire, restore_trading_runtime, trade_side_from_wire,
+        trade_side_wire,
     };
     use ploy_operator_contracts::{
         DeploymentState, DesiredState, FillSnapshot, IntentPurpose, ObservedState, OrderSnapshot,
@@ -544,6 +546,7 @@ mod tests {
             venue_order_history: Vec::new(),
             revision: 0,
             state,
+            state_changed_at: Some(chrono::Utc::now()),
             filled_qty,
             rejection_reason: None,
             last_error: None,
@@ -642,6 +645,7 @@ mod tests {
             venue_order_history: vec!["venue-0".to_string()],
             revision: 2,
             state: OrderState::Acknowledged,
+            state_changed_at: Some(chrono::Utc::now()),
             filled_qty: Decimal::new(25, 0),
             rejection_reason: None,
             last_error: None,
@@ -704,6 +708,7 @@ mod tests {
                 venue_order_history: Vec::new(),
                 revision: 0,
                 state: "filled".to_string(),
+                state_changed_at: Some(now),
                 filled_qty: dec!(4),
                 rejection_reason: None,
                 last_error: None,
@@ -728,5 +733,6 @@ mod tests {
         assert_eq!(restored.positions[0].net_qty, dec!(4));
         assert_eq!(restored.fills.len(), 1);
         assert_eq!(restored.orders[0].state, OrderState::Filled);
+        assert_eq!(restored.orders[0].state_changed_at, Some(now));
     }
 }
