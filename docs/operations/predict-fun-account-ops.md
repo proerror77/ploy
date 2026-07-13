@@ -133,5 +133,11 @@ ploy-predict-account-ops redeem reconcile \
 ```
 
 If redemption is failed or ambiguous, keep writes disabled and reconcile the
-recorded transaction on-chain. Do not generate or execute a replacement plan
-until the retained lock and ledger evidence have been reviewed.
+recorded transaction on-chain. Redemption reconciliation requires both the
+public position to disappear and the official SDK's on-chain token balance to
+reach zero; API absence alone never clears the lock. A retained Predict lock
+also blocks installation of a new trade release. Reconciliation may therefore
+use the deployed plan's older SHA after `main` advances, but only when that SHA
+is an ancestor of current `main` and still remains the deployed release. Do not
+generate or execute a replacement plan until the retained lock and ledger
+evidence have been reviewed.

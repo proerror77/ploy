@@ -8,11 +8,13 @@ const test = require("node:test");
 const {
   buildOrderPlan,
   buildRedeemPlan,
+  executeApprovals,
   executeOrderPlan,
   executeRedeemPlan,
   loadWalletSecret,
   makeWalletSession,
   reconcileRedeem,
+  sha256,
   validatePlan,
 } = require("./account_ops");
 
@@ -28,8 +30,8 @@ const MARKET = {
   isVisible: true,
   resolution: null,
   outcomes: [
-    { name: "Yes", indexSet: 1, onChainId: "111" },
-    { name: "No", indexSet: 2, onChainId: "222" },
+    { name: "Yes", indexSet: 1, onChainId: "111", status: null },
+    { name: "No", indexSet: 2, onChainId: "222", status: null },
   ],
 };
 const CONTEXT = {
@@ -51,12 +53,17 @@ test("order plan binds official market route, account, expiry, and exact hash", 
   assert.equal(plan.kind, "predict_fun_limit_order");
   assert.equal(plan.market.isNegRisk, true);
   assert.equal(plan.order.feeRateBps, 200);
+  assert.equal(plan.order.outcomeStatus, "null");
   assert.equal(plan.order.pricePerShareWei, "425000000000000000");
   assert.equal(plan.order.makerAmount, "4250000000000000000");
   assert.equal(plan.order.takerAmount, "10000000000000000000");
   assert.equal(plan.expiresAt, "2023-11-14T22:23:20.000Z");
   assert.equal(validatePlan(plan, CONTEXT, plan.sha256, 1_700_000_001_000), plan);
   assert.throws(() => validatePlan(plan, CONTEXT, "0".repeat(64)), /plan hash mismatch/);
+  const invalidTime = { ...plan, generatedAt: "not-a-date" };
+  const { sha256: _oldHash, ...unsigned } = invalidTime;
+  invalidTime.sha256 = sha256(unsigned);
+  assert.throws(() => validatePlan(invalidTime, CONTEXT, invalidTime.sha256), /timestamps are invalid/);
 });
 
 test("order plan rejects a token or price not supported by the market", () => {
@@ -71,7 +78,10 @@ test("order plan rejects a token or price not supported by the market", () => {
   }, CONTEXT), /truncated/);
   assert.throws(() => buildOrderPlan({ ...MARKET, tradingStatus: "CLOSED" }, {
     marketId: 42, tokenId: "111", side: "BUY", quantity: "1", limitPrice: "0.5",
-  }, CONTEXT), /visible, open, and unresolved/);
+  }, CONTEXT), /registered, visible, open, and unresolved/);
+  assert.throws(() => buildOrderPlan({ ...MARKET, outcomes: [{ ...MARKET.outcomes[0], status: "WON" }] }, {
+    marketId: 42, tokenId: "111", side: "BUY", quantity: "1", limitPrice: "0.5",
+  }, CONTEXT), /outcome must be unresolved/);
 });
 
 test("redeem plan keeps standard and neg-risk amount semantics distinct", () => {
@@ -171,6 +181,41 @@ test("order execution rechecks expiry immediately before submission", async () =
   assert.equal(fs.existsSync(path.join(tmp, "ledger.jsonl.lock")), false);
 });
 
+test("approval execution rechecks TTL before every approval transaction", async () => {
+  const generatedAt = 1_700_000_000_000;
+  const plan = buildOrderPlan(MARKET, {
+    marketId: 42, tokenId: "111", side: "BUY", quantity: "10", limitPrice: "0.425",
+  }, CONTEXT, generatedAt);
+  const times = [generatedAt + 1, generatedAt + 2, generatedAt + 600_001];
+  const submitted = [];
+  const session = { builder: {
+    getApprovalSteps: () => [{ id: "one" }, { id: "two" }],
+    checkApprovals: async ([step]) => [{ step, satisfied: false }],
+    setApproval: async (step) => {
+      submitted.push(step.id);
+      return { success: true, receipt: { status: 1 } };
+    },
+  } };
+  await assert.rejects(executeApprovals(plan, plan.sha256, {
+    ...runtimeEnv(os.tmpdir()), PLOY_PREDICT_APPROVAL_WRITE_ENABLED: "true",
+  }, { session, now: () => times.shift() }), /expired/);
+  assert.deepEqual(submitted, ["one"]);
+});
+
+test("order execution rejects outcome metadata drift before signing", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "predict-outcome-drift-"));
+  const plan = buildOrderPlan(MARKET, {
+    marketId: 42, tokenId: "111", side: "BUY", quantity: "10", limitPrice: "0.425",
+  }, CONTEXT);
+  const changed = {
+    ...MARKET,
+    outcomes: [{ ...MARKET.outcomes[0], indexSet: 2 }, MARKET.outcomes[1]],
+  };
+  await assert.rejects(executeOrderPlan(plan, plan.sha256, {
+    ...runtimeEnv(tmp), PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED: "true",
+  }, { market: changed, session: fakeOrderSession(), jwt: "jwt" }), /outcome metadata changed/);
+});
+
 test("redemption execution routes neg-risk amount through official SDK and records receipt", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "predict-redeem-"));
   const positions = [{
@@ -195,6 +240,29 @@ test("redemption execution routes neg-risk amount through official SDK and recor
   assert.deepEqual(events.map((event) => event.state), ["submitting", "confirmed"]);
 });
 
+test("confirmed redemption retains its owner lock when ledger persistence fails", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "predict-ledger-failure-"));
+  const positions = [{
+    amount: "2500000000000000000",
+    market: { ...MARKET, resolution: { indexSet: 1, status: "WON" } },
+    outcome: MARKET.outcomes[0],
+  }];
+  const plan = buildRedeemPlan(positions, CONTEXT);
+  const session = { builder: {
+    getApprovalSteps: () => [],
+    checkApprovals: async () => [],
+    redeemPositions: async () => ({ success: true, receipt: { status: 1, hash: "0xtx" } }),
+  } };
+  await assert.rejects(executeRedeemPlan(plan, plan.sha256, {
+    ...runtimeEnv(tmp), PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED: "true",
+  }, {
+    positions,
+    session,
+    record: (event) => { if (event.state === "confirmed") throw new Error("disk full"); },
+  }), /disk full/);
+  assert.equal(fs.existsSync(path.join(tmp, "ledger.jsonl.lock", "owner.json")), true);
+});
+
 test("redemption reconciliation only clears the lock owned by an exact settled plan", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "predict-reconcile-"));
   const positions = [{
@@ -203,7 +271,7 @@ test("redemption reconciliation only clears the lock owned by an exact settled p
     outcome: MARKET.outcomes[0],
   }];
   const plan = buildRedeemPlan(positions, CONTEXT, 1_700_000_000_000);
-  const operationId = require("./account_ops").sha256({
+  const operationId = sha256({
     kind: plan.kind, account: plan.account, chainId: plan.chainId, planSha256: plan.sha256,
   });
   const lock = path.join(tmp, "ledger.jsonl.lock");
@@ -221,6 +289,7 @@ test("redemption reconciliation only clears the lock owned by an exact settled p
   const result = await reconcileRedeem(plan, plan.sha256, env, {
     positions: [],
     now: () => 1_700_001_000_000,
+    balanceOf: async () => 0n,
   });
   assert.equal(result.state, "reconciled");
   assert.equal(fs.existsSync(lock), false);

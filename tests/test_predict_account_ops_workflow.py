@@ -23,10 +23,14 @@ class PredictAccountOpsWorkflowContracts(unittest.TestCase):
             'PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED=true "${root}/bin/ploy-predict-account-ops"',
             'PLOY_PREDICT_RECONCILE_WRITE_ENABLED=true "${root}/bin/ploy-predict-account-ops"',
             "Revalidate current main after human approval",
+            'git merge-base --is-ancestor "${DEPLOY_SHA}" origin/main',
+            "fetch-depth: 0",
             "require_unique_false PLOY_PREDICT_RECONCILE_WRITE_ENABLED",
             "StrictHostKeyChecking yes",
         ):
             self.assertIn(required, workflow)
+        self.assertGreaterEqual(workflow.count("fetch-depth: 0"), 2)
+        self.assertNotIn("git fetch --no-tags --depth=1 origin main", workflow)
         self.assertNotIn('upsert_env PLOY_PREDICT_ACCOUNT_OPS_WRITE_ENABLED "true"', workflow)
         self.assertNotIn('upsert_env PLOY_PREDICT_APPROVAL_WRITE_ENABLED "true"', workflow)
         self.assertNotIn('upsert_env PLOY_PREDICT_RECONCILE_WRITE_ENABLED "true"', workflow)
@@ -40,6 +44,7 @@ class PredictAccountOpsWorkflowContracts(unittest.TestCase):
             'upsert_env PLOY_PREDICT_APPROVAL_WRITE_ENABLED "false"',
             'upsert_env PLOY_PREDICT_RECONCILE_WRITE_ENABLED "false"',
             'ploy-predict-account-ops',
+            "Predict account operation is locked; reconcile it before deploying a new release",
         ):
             self.assertIn(required, workflow)
         self.assertGreaterEqual(workflow.count("npm test"), 2)

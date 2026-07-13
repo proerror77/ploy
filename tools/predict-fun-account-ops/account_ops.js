@@ -105,10 +105,12 @@ function buildOrderPlan(market, input, context, now = Date.now()) {
   };
   if (!/^0x[0-9a-f]{64}$/.test(marketRoute.conditionId)) throw new Error("conditionId must be bytes32");
   if (!Number.isInteger(marketRoute.feeRateBps) || marketRoute.feeRateBps < 0) throw new Error("invalid feeRateBps");
-  if (marketRoute.tradingStatus !== "OPEN" || !marketRoute.isVisible || marketRoute.isResolved) {
-    throw new Error("market must be visible, open, and unresolved");
+  if (marketRoute.status !== "REGISTERED" || marketRoute.tradingStatus !== "OPEN"
+    || !marketRoute.isVisible || marketRoute.isResolved) {
+    throw new Error("market must be registered, visible, open, and unresolved");
   }
   if (![1, 2].includes(Number(outcome.indexSet))) throw new Error("outcome indexSet must be 1 or 2");
+  if (outcome.status != null) throw new Error("selected outcome must be unresolved");
   const quantity = positiveDecimal(input.quantity, "quantity");
   if ((quantity.split(".")[1] || "").length > 18) throw new Error("quantity exceeds 18 decimals");
   const limitPrice = price(input.limitPrice, marketRoute.decimalPrecision);
@@ -129,6 +131,7 @@ function buildOrderPlan(market, input, context, now = Date.now()) {
     order: {
       tokenId: String(outcome.onChainId),
       outcomeIndexSet: Number(outcome.indexSet),
+      outcomeStatus: String(outcome.status),
       side,
       quantity,
       limitPrice,
@@ -176,9 +179,12 @@ function validatePlan(plan, context, expectedHash, now = Date.now(), allowExpire
   if (plan.accountType !== normalized.accountType) throw new Error("plan account type mismatch");
   if (plan.chainId !== normalized.chainId) throw new Error("plan chain mismatch");
   if (plan.releaseSha !== normalized.releaseSha) throw new Error("plan release mismatch");
-  if (Date.parse(plan.generatedAt) > now + 30_000) throw new Error("plan generated in the future");
-  if ((!allowExpired && Date.parse(plan.expiresAt) <= now)
-    || Date.parse(plan.expiresAt) - Date.parse(plan.generatedAt) > PLAN_TTL_MS) {
+  const generatedAt = Date.parse(plan.generatedAt);
+  const expiresAt = Date.parse(plan.expiresAt);
+  if (!Number.isFinite(generatedAt) || !Number.isFinite(expiresAt)) throw new Error("plan timestamps are invalid");
+  if (generatedAt > now + 30_000) throw new Error("plan generated in the future");
+  if ((!allowExpired && expiresAt <= now)
+    || expiresAt <= generatedAt || expiresAt - generatedAt > PLAN_TTL_MS) {
     throw new Error("plan expired or exceeds maximum TTL");
   }
   return plan;
@@ -329,11 +335,21 @@ async function executeApprovals(plan, expectedHash, env = process.env, dependenc
   const scope = approvalScope(plan);
   const scopes = Array.isArray(scope) ? scope : [scope];
   const steps = dedupeSteps(scopes.flatMap((scope) => session.builder.getApprovalSteps(scope)));
-  if (steps.length === 0) return { success: true, steps: [] };
-  validatePlan(plan, context, expectedHash, nowFrom(dependencies));
-  const report = await session.builder.runApprovals(steps, { stopOnError: true });
-  if (!report.success) throw new Error("Predict scoped approval failed");
-  return report;
+  const results = [];
+  for (const step of steps) {
+    const [check] = await session.builder.checkApprovals([step]);
+    if (check.satisfied) {
+      results.push({ step, status: "skipped" });
+      continue;
+    }
+    validatePlan(plan, context, expectedHash, nowFrom(dependencies));
+    const transaction = await session.builder.setApproval(step);
+    if (!transaction.success || !transaction.receipt || transaction.receipt.status !== 1) {
+      throw new Error(`Predict scoped approval failed for ${step.id}`);
+    }
+    results.push({ step, status: "confirmed", transaction });
+  }
+  return { success: true, steps: results };
 }
 
 function ledgerPaths(env = process.env) {
@@ -373,9 +389,9 @@ function withWriteLock(plan, env, dependencies, work) {
   const sink = dependencies.record || ((event) => appendLedger(ledger, event));
   let retain = false;
   const record = (event) => {
+    sink(event);
     if (new Set(["submitting", "submission_unknown", "ambiguous"]).has(event.state)) retain = true;
     if (new Set(["submitted", "confirmed", "reconciled"]).has(event.state)) retain = false;
-    sink(event);
   };
   return Promise.resolve(work(record, id))
     .finally(() => {
@@ -404,8 +420,13 @@ function assertMarketUnchanged(plan, market) {
     isResolved: market.resolution != null,
   };
   if (canonical(current) !== canonical(plan.market)) throw new Error("market execution metadata changed after planning");
-  if (!(market.outcomes || []).some((outcome) => String(outcome.onChainId) === plan.order.tokenId)) {
+  const outcome = (market.outcomes || []).find((candidate) => String(candidate.onChainId) === plan.order.tokenId);
+  if (!outcome) {
     throw new Error("planned token is no longer a market outcome");
+  }
+  if (Number(outcome.indexSet) !== plan.order.outcomeIndexSet
+    || String(outcome.status) !== plan.order.outcomeStatus) {
+    throw new Error("planned outcome metadata changed after planning");
   }
 }
 
@@ -453,6 +474,10 @@ async function executeOrderPlan(plan, expectedHash, env = process.env, dependenc
       headers: { "content-type": "application/json; charset=utf-8" },
       body: JSON.stringify(body),
     }));
+    const latestMarket = dependencies.refreshMarket
+      ? await dependencies.refreshMarket()
+      : (dependencies.market || await fetchMarket(plan.market.id, context, env));
+    assertMarketUnchanged(plan, latestMarket);
     validatePlan(plan, context, expectedHash, nowFrom(dependencies));
     record({ operationId: id, state: "submitting", kind: plan.kind, orderHash: hash });
     try {
@@ -500,7 +525,8 @@ async function executeRedeemPlan(plan, expectedHash, env = process.env, dependen
       if (item.isNegRisk) options.amount = positionAmountWei(item.amount);
       const result = await session.builder.redeemPositions(options);
       if (!result.success || !result.receipt || result.receipt.status !== 1) {
-        record({ operationId: id, state: "ambiguous", kind: plan.kind, conditionId: item.conditionId });
+        const transactionHash = result.receipt?.hash || result.cause?.transactionHash || result.cause?.receipt?.hash;
+        record({ operationId: id, state: "ambiguous", kind: plan.kind, conditionId: item.conditionId, transactionHash });
         throw new Error(`Predict redemption is failed or ambiguous for ${item.conditionId}; reconcile before retry`);
       }
       const receipt = { conditionId: item.conditionId, transactionHash: result.receipt.hash };
@@ -552,6 +578,19 @@ async function reconcileRedeem(plan, expectedHash, env = process.env, dependenci
   const remaining = new Set(current.items.map((item) => `${item.conditionId}:${item.indexSet}`));
   if (plan.items.some((item) => remaining.has(`${item.conditionId}:${item.indexSet}`))) {
     throw new Error("a planned Predict redemption is still redeemable; lock retained");
+  }
+  const session = dependencies.balanceOf ? dependencies.session : (dependencies.session || await makeWalletSession(context, env));
+  for (const item of plan.items) {
+    let balance;
+    if (dependencies.balanceOf) {
+      balance = await dependencies.balanceOf(item);
+    } else {
+      const identifier = item.isYieldBearing
+        ? (item.isNegRisk ? "YIELD_BEARING_NEG_RISK_CONDITIONAL_TOKENS" : "YIELD_BEARING_CONDITIONAL_TOKENS")
+        : (item.isNegRisk ? "NEG_RISK_CONDITIONAL_TOKENS" : "CONDITIONAL_TOKENS");
+      balance = await session.builder.contracts[identifier].contract.balanceOf(context.account, BigInt(item.tokenId));
+    }
+    if (BigInt(balance) !== 0n) throw new Error("planned Predict position still has an on-chain balance; lock retained");
   }
   appendLedger(ledger, { operationId: operationIdValue, state: "reconciled", kind: plan.kind });
   fs.rmSync(lock, { recursive: true });

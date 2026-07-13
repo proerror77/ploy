@@ -30,8 +30,12 @@ function requireOption(name) {
 }
 
 function writePlan(output, plan) {
-  fs.writeFileSync(output, `${JSON.stringify(plan, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  process.stdout.write(`${JSON.stringify({ path: output, sha256: plan.sha256, kind: plan.kind })}\n`);
+  fs.writeFileSync(output, `${json(plan, 2)}\n`, { mode: 0o600, flag: "wx" });
+  process.stdout.write(`${json({ path: output, sha256: plan.sha256, kind: plan.kind })}\n`);
+}
+
+function json(value, space) {
+  return JSON.stringify(value, (_key, item) => typeof item === "bigint" ? item.toString() : item, space);
 }
 
 function readPlan() {
@@ -48,7 +52,7 @@ async function main() {
 
   if (resource === "wallet" && action === "check") {
     await makeWalletSession(context);
-    process.stdout.write(`${JSON.stringify({ account: context.account, accountType: context.accountType, chainId: context.chainId })}\n`);
+    process.stdout.write(`${json({ account: context.account, accountType: context.accountType, chainId: context.chainId })}\n`);
     return;
   }
   if (resource === "order" && action === "plan") {
@@ -65,7 +69,7 @@ async function main() {
   }
   if (resource === "redeem" && action === "check") {
     const plan = buildRedeemPlan(await fetchPositions(context), context);
-    process.stdout.write(`${JSON.stringify({ account: context.account, items: plan.items }, null, 2)}\n`);
+    process.stdout.write(`${json({ account: context.account, items: plan.items }, 2)}\n`);
     return;
   }
   if (resource === "redeem" && action === "plan") {
@@ -77,33 +81,33 @@ async function main() {
     validatePlan(plan, context, plan.sha256);
     const session = await makeWalletSession(context);
     const report = await checkApprovals(plan, session);
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.stdout.write(`${json(report, 2)}\n`);
     return;
   }
   if (new Set(["order", "redeem"]).has(resource) && action === "approve") {
     const plan = readPlan();
     const report = await executeApprovals(plan, requireOption("--sha256"));
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    process.stdout.write(`${json(report, 2)}\n`);
     return;
   }
   if (resource === "order" && action === "execute") {
     const result = await executeOrderPlan(readPlan(), requireOption("--sha256"));
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.stdout.write(`${json(result)}\n`);
     return;
   }
   if (resource === "order" && action === "reconcile") {
     const result = await reconcileOrder(readPlan(), requireOption("--sha256"));
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.stdout.write(`${json(result)}\n`);
     return;
   }
   if (resource === "redeem" && action === "execute") {
     const result = await executeRedeemPlan(readPlan(), requireOption("--sha256"));
-    process.stdout.write(`${JSON.stringify({ status: "confirmed", receipts: result })}\n`);
+    process.stdout.write(`${json({ status: "confirmed", receipts: result })}\n`);
     return;
   }
   if (resource === "redeem" && action === "reconcile") {
     const result = await reconcileRedeem(readPlan(), requireOption("--sha256"));
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.stdout.write(`${json(result)}\n`);
     return;
   }
   throw new Error("usage: ploy-predict-account-ops wallet check | order plan|approval-check|approve|execute|reconcile | redeem check|plan|approval-check|approve|execute|reconcile");

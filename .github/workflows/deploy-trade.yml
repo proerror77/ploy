@@ -267,6 +267,12 @@ jobs:
           install -d -m 0750 -o root -g ploy "${root}/data/live-approvals"
           touch "${root}/.env"
           chmod 600 "${root}/.env"
+          predict_lock="${root}/data/account-ops/predict-fun-ledger.jsonl.lock"
+          configured_predict_lock="$(grep -E '^PLOY_PREDICT_OPS_LOCK=' "${root}/.env" | tail -n 1 | cut -d= -f2- || true)"
+          [[ ! -e "${predict_lock}" && ( -z "${configured_predict_lock}" || ! -e "${configured_predict_lock}" ) ]] || {
+            echo "Predict account operation is locked; reconcile it before deploying a new release" >&2
+            exit 1
+          }
 
           previous="$(readlink "${root}/current" 2>/dev/null || true)"
           cp -a "${root}/.env" "${workdir}/env.backup"
