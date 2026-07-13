@@ -504,17 +504,13 @@ mod tests {
         .expect_err("pending live submission cannot be replaced");
 
         assert_eq!(cancel_error.kind(), ErrorKind::InvalidInput);
-        assert!(
-            cancel_error
-                .to_string()
-                .contains("submission is in progress")
-        );
+        assert!(cancel_error
+            .to_string()
+            .contains("submission is in progress"));
         assert_eq!(replace_error.kind(), ErrorKind::InvalidInput);
-        assert!(
-            replace_error
-                .to_string()
-                .contains("submission is in progress")
-        );
+        assert!(replace_error
+            .to_string()
+            .contains("submission is in progress"));
         assert_eq!(gateway.cancellations.load(Ordering::SeqCst), 0);
         assert_eq!(gateway.replacements.load(Ordering::SeqCst), 0);
         assert_eq!(

@@ -17,7 +17,7 @@ use polymarket_client_sdk::clob::ws::{
 use polymarket_client_sdk::clob::{Client, Config};
 use polymarket_client_sdk::types::{Address, B256, U256};
 use polymarket_client_sdk::{
-    POLYGON, PRIVATE_KEY_VAR, contract_config, derive_proxy_wallet, derive_safe_wallet,
+    contract_config, derive_proxy_wallet, derive_safe_wallet, POLYGON, PRIVATE_KEY_VAR,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -1897,16 +1897,16 @@ pub fn crate_marker() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        BufferedUserEvent, CancellationOutcome, CancellationRequest, ExecutionError,
-        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
-        OrderObservation, PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome,
-        ReplaceRequest, StaticExecutionGateway, TrackedOrder, UserEventStream, WalletSignatureType,
         cap_sell_quantity_to_balance, collateral_balance_to_raw,
         conditional_token_balance_to_shares, ensure_account_readiness, execution_price_override,
         normalize_aggressive_price, normalize_execution_amount, normalize_market_order_quantity,
         normalize_order_quantity, polymarket_execution_principal, raw_balance_to_pusd,
         tracked_rest_order_observation, tracked_trade_fill, tracked_user_trade_fill,
         tracked_user_trade_matches, trade_side, unique_token_ids, wallet_signature_type,
+        BufferedUserEvent, CancellationOutcome, CancellationRequest, ExecutionError,
+        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
+        OrderObservation, PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome,
+        ReplaceRequest, StaticExecutionGateway, TrackedOrder, UserEventStream, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -2106,11 +2106,9 @@ mod tests {
             .expect_err("zero balance should reject");
 
         assert!(matches!(error, ExecutionError::Validation(_)));
-        assert!(
-            error
-                .to_string()
-                .contains("no sellable conditional-token balance")
-        );
+        assert!(error
+            .to_string()
+            .contains("no sellable conditional-token balance"));
     }
 
     #[test]
@@ -2294,22 +2292,20 @@ mod tests {
                 Address::from_str("0x0000000000000000000000000000000000000001")
                     .expect("maker address"),
             )
-            .maker_orders(vec![
-                MakerOrder::builder()
-                    .order_id("venue-order-b")
-                    .owner(ApiKey::nil())
-                    .maker_address(
-                        Address::from_str("0x0000000000000000000000000000000000000002")
-                            .expect("second maker address"),
-                    )
-                    .matched_amount(dec!(2))
-                    .price(dec!(0.56))
-                    .fee_rate_bps(dec!(4))
-                    .asset_id(U256::from(1_u64))
-                    .outcome("YES")
-                    .side(polymarket_client_sdk::clob::types::Side::Sell)
-                    .build(),
-            ])
+            .maker_orders(vec![MakerOrder::builder()
+                .order_id("venue-order-b")
+                .owner(ApiKey::nil())
+                .maker_address(
+                    Address::from_str("0x0000000000000000000000000000000000000002")
+                        .expect("second maker address"),
+                )
+                .matched_amount(dec!(2))
+                .price(dec!(0.56))
+                .fee_rate_bps(dec!(4))
+                .asset_id(U256::from(1_u64))
+                .outcome("YES")
+                .side(polymarket_client_sdk::clob::types::Side::Sell)
+                .build()])
             .transaction_hash(B256::ZERO)
             .trader_side(TraderSide::Taker)
             .build();
@@ -2342,19 +2338,17 @@ mod tests {
         assert_ne!(taker_fill.fill_id, maker_fill.fill_id);
         assert_eq!(taker_fill.fee, dec!(0.03465));
         assert_eq!(maker_fill.fee, dec!(0));
-        assert!(
-            tracked_trade_fill(
-                &TrackedOrder {
-                    order_id: "order-side-mismatch".to_string(),
-                    venue_order_id: "venue-order-a".to_string(),
-                    token_id: "1".to_string(),
-                    side: TradeSide::Sell,
-                },
-                &trade,
-                ploy_market_contracts::FeeSchedule::polymarket_v2(dec!(0.07), 1, true),
-            )
-            .is_none()
-        );
+        assert!(tracked_trade_fill(
+            &TrackedOrder {
+                order_id: "order-side-mismatch".to_string(),
+                venue_order_id: "venue-order-a".to_string(),
+                token_id: "1".to_string(),
+                side: TradeSide::Sell,
+            },
+            &trade,
+            ploy_market_contracts::FeeSchedule::polymarket_v2(dec!(0.07), 1, true),
+        )
+        .is_none());
     }
 
     #[test]
@@ -2396,14 +2390,12 @@ mod tests {
                 .trader_side(TraderSide::Taker)
                 .build();
 
-            assert!(
-                tracked_trade_fill(
-                    &tracked,
-                    &trade,
-                    ploy_market_contracts::FeeSchedule::polymarket_v2(dec!(0.07), 1, true),
-                )
-                .is_none()
-            );
+            assert!(tracked_trade_fill(
+                &tracked,
+                &trade,
+                ploy_market_contracts::FeeSchedule::polymarket_v2(dec!(0.07), 1, true),
+            )
+            .is_none());
         }
     }
 

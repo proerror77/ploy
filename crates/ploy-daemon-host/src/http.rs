@@ -1,15 +1,15 @@
 use crate::events::EventBroker;
-use crate::runtime::{PloyDaemon, PreparedIntentSubmission, next_paper_intent_id};
+use crate::runtime::{next_paper_intent_id, PloyDaemon, PreparedIntentSubmission};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use ploy_operator_contracts::{
-    AgentRunCreateRequest, AgentRunCreateResponse, AgentRunRecord, AlertSnapshotEvent,
-    AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest, DeploymentControlRequest,
-    DeploymentDiagnosticsReport, DeploymentSnapshotEvent, DiagnosticsEvidence, DiagnosticsFinding,
-    DryRunPerformanceReport, IntentPurpose, MetricsSnapshotEvent, OperatorEvent,
-    OrderReplaceRequest, OversightSnapshotEvent, PaperIntentRequest, PlatformDiagnosticsReport,
-    ProposalCreateRequest, ProposalDecisionRequest, ProposalSnapshotEvent, StatusUpdate,
-    SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent, compute_oversight_report,
+    compute_oversight_report, AgentRunCreateRequest, AgentRunCreateResponse, AgentRunRecord,
+    AlertSnapshotEvent, AuditLogEntry, ControlPlaneErrorResponse, DeploymentApplyRequest,
+    DeploymentControlRequest, DeploymentDiagnosticsReport, DeploymentSnapshotEvent,
+    DiagnosticsEvidence, DiagnosticsFinding, DryRunPerformanceReport, IntentPurpose,
+    MetricsSnapshotEvent, OperatorEvent, OrderReplaceRequest, OversightSnapshotEvent,
+    PaperIntentRequest, PlatformDiagnosticsReport, ProposalCreateRequest, ProposalDecisionRequest,
+    ProposalSnapshotEvent, StatusUpdate, SystemSnapshotEvent, SystemStatus, TradingSnapshotEvent,
 };
 use ploy_platform_runtime::runtime_support::IntentAdmissionSource;
 use ploy_trading::{TradeSide, TradingIntent};
@@ -2719,11 +2719,11 @@ fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        ADMIN_SESSION_COOKIE_NAME, AppState, AuthLevel, RateLimiter, access_allowed,
-        admin_session_cookie, append_audit_entry, client_ip, content_length, handle_api_request,
-        handle_authenticated_runtime_request, handle_connection, handle_runtime_request,
-        header_end_offset, intent_admission_source, rate_limit_key, request_auth_level,
-        required_access, response_headers, route_request, snapshot_events,
+        access_allowed, admin_session_cookie, append_audit_entry, client_ip, content_length,
+        handle_api_request, handle_authenticated_runtime_request, handle_connection,
+        handle_runtime_request, header_end_offset, intent_admission_source, rate_limit_key,
+        request_auth_level, required_access, response_headers, route_request, snapshot_events,
+        AppState, AuthLevel, RateLimiter, ADMIN_SESSION_COOKIE_NAME,
     };
     use crate::events::EventBroker;
     use chrono::{Duration, Utc};
@@ -2742,7 +2742,7 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{mpsc, Arc, Mutex};
     use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -3403,13 +3403,11 @@ mod tests {
             Some("secret-token"),
             "cookie-secret",
         );
-        assert!(
-            login_headers
-                .iter()
-                .any(|(name, value)| name == "Set-Cookie"
-                    && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=v1."))
-                    && !value.contains("secret-token"))
-        );
+        assert!(login_headers
+            .iter()
+            .any(|(name, value)| name == "Set-Cookie"
+                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}=v1."))
+                && !value.contains("secret-token")));
 
         let logout_headers = response_headers(
             "POST",
@@ -3418,13 +3416,11 @@ mod tests {
             Some("secret-token"),
             "cookie-secret",
         );
-        assert!(
-            logout_headers
-                .iter()
-                .any(|(name, value)| name == "Set-Cookie"
-                    && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
-                    && value.contains("Max-Age=0"))
-        );
+        assert!(logout_headers
+            .iter()
+            .any(|(name, value)| name == "Set-Cookie"
+                && value.contains(&format!("{ADMIN_SESSION_COOKIE_NAME}="))
+                && value.contains("Max-Age=0")));
     }
 
     #[test]
@@ -3923,16 +3919,12 @@ mod tests {
         assert_eq!(alerts_code, 200);
         let alerts: Vec<ploy_operator_contracts::ActiveAlert> =
             serde_json::from_str(&alerts_body).expect("alerts json");
-        assert!(
-            alerts
-                .iter()
-                .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale)
-        );
-        assert!(
-            alerts
-                .iter()
-                .any(|alert| alert.source_id.contains("live_reconcile"))
-        );
+        assert!(alerts
+            .iter()
+            .any(|alert| alert.kind == ploy_operator_contracts::AlertKind::SourceStale));
+        assert!(alerts
+            .iter()
+            .any(|alert| alert.source_id.contains("live_reconcile")));
     }
 
     #[test]

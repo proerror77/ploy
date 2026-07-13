@@ -879,8 +879,8 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::{
-        RuntimeConfig, RuntimeMode, StrategyRuntime, observe_fill_evidence,
-        retry_attempt_from_intent_id, retry_root_intent_id,
+        observe_fill_evidence, retry_attempt_from_intent_id, retry_root_intent_id, RuntimeConfig,
+        RuntimeMode, StrategyRuntime,
     };
     use crate::traits::{
         ExecutionPolicy, ExecutionReport, Executor, Feed, MarketUpdate, NullRecorder, Recorder,
@@ -2447,13 +2447,11 @@ mod tests {
             ["pm5d_BTCUSDT_UP_retry3"]
         );
         assert_eq!(snapshot.orders.len(), 2);
-        assert!(
-            snapshot
-                .orders
-                .iter()
-                .any(|order| order.intent_id == "pm5d_BTCUSDT_UP_retry3"
-                    && order.state == ploy_trading::OrderState::Acknowledged)
-        );
+        assert!(snapshot
+            .orders
+            .iter()
+            .any(|order| order.intent_id == "pm5d_BTCUSDT_UP_retry3"
+                && order.state == ploy_trading::OrderState::Acknowledged));
     }
 
     #[tokio::test]

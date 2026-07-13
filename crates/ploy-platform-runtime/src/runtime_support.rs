@@ -461,10 +461,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        IntentRiskEffect, account_token_exposure_envelope, build_order_control_response,
-        intent_risk_effect, live_reconcile_backoff_ms, observed_state_for_desired,
-        order_state_from_wire, order_state_wire, restore_trading_runtime, trade_side_from_wire,
-        trade_side_wire,
+        account_token_exposure_envelope, build_order_control_response, intent_risk_effect,
+        live_reconcile_backoff_ms, observed_state_for_desired, order_state_from_wire,
+        order_state_wire, restore_trading_runtime, trade_side_from_wire, trade_side_wire,
+        IntentRiskEffect,
     };
     use ploy_operator_contracts::{
         DeploymentState, DesiredState, FillSnapshot, IntentPurpose, ObservedState, OrderSnapshot,
