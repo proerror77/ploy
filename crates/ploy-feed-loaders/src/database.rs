@@ -733,7 +733,7 @@ async fn load_pm_quotes_from_snapshots(
                   AND token_id = ANY($3)
             ) snapshot
             ORDER BY snapshot.token_id, snapshot.bucket, snapshot.received_at DESC
-        ),
+        )
         SELECT received_at, token_id, bids, asks
         FROM sampled
         WHERE jsonb_array_length(bids) > 0 OR jsonb_array_length(asks) > 0
@@ -745,8 +745,7 @@ async fn load_pm_quotes_from_snapshots(
     .bind(&token_ids)
     .bind(sample_secs)
     .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     let mut row_count = 0usize;
     for (ts, token_id, bids, asks) in rows {
@@ -1198,6 +1197,22 @@ mod tests {
         assert_eq!(bids.len(), 2);
         assert_eq!(asks[0].price, dec!(0.51));
         assert_eq!(asks[0].size, dec!(7));
+    }
+
+    #[test]
+    fn full_depth_snapshot_query_does_not_separate_cte_with_a_dangling_comma() {
+        let source = include_str!("database.rs");
+        let query = &source[source
+            .find("async fn load_pm_quotes_from_snapshots")
+            .unwrap()..];
+        let query = &query[..query.find("let mut row_count").unwrap()];
+        assert!(!query.contains(
+            "ORDER BY snapshot.token_id, snapshot.bucket, snapshot.received_at DESC\n        ),\n        SELECT received_at, token_id, bids, asks"
+        ));
+        assert!(query.contains(
+            "ORDER BY snapshot.token_id, snapshot.bucket, snapshot.received_at DESC\n        )\n        SELECT received_at, token_id, bids, asks"
+        ));
+        assert!(!query.contains(".fetch_all(pool)\n    .await\n    .unwrap_or_default()"));
     }
 
     #[test]

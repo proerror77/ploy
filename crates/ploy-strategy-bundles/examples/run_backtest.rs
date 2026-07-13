@@ -376,6 +376,43 @@ mod tests {
             purpose: ploy_trading::IntentPurpose::Entry,
             created_at: started + Duration::seconds(1),
         });
+        snapshot.intents.push(ploy_trading::TradingIntent {
+            intent_id: "orphan-exit".into(),
+            deployment_id: "pm5d-test".into(),
+            market_id: "event-without-entry".into(),
+            token_id: "orphan-token".into(),
+            side: ploy_trading::TradeSide::Sell,
+            quantity: dec!(1),
+            limit_price: Some(dec!(0.75)),
+            purpose: ploy_trading::IntentPurpose::Exit,
+            created_at: started + Duration::seconds(40),
+        });
+        snapshot.orders.push(ploy_trading::OrderRecord {
+            order_id: "orphan-exit-order".into(),
+            intent_id: "orphan-exit".into(),
+            deployment_id: "pm5d-test".into(),
+            token_id: "orphan-token".into(),
+            requested_qty: dec!(1),
+            limit_price: Some(dec!(0.75)),
+            venue_order_id: None,
+            venue_order_history: Vec::new(),
+            revision: 0,
+            idempotency_key: None,
+            state: ploy_trading::OrderState::Filled,
+            filled_qty: dec!(1),
+            rejection_reason: None,
+            last_error: None,
+        });
+        snapshot.fills.push(ploy_trading::FillRecord {
+            fill_id: "orphan-exit-fill".into(),
+            order_id: "orphan-exit-order".into(),
+            token_id: "orphan-token".into(),
+            side: ploy_trading::TradeSide::Sell,
+            quantity: dec!(1),
+            price: dec!(0.75),
+            fee: Decimal::ZERO,
+            timestamp: started + Duration::seconds(40),
+        });
 
         let metrics = backtest_evidence_metrics(&snapshot);
 
@@ -383,6 +420,7 @@ mod tests {
         assert_eq!(metrics.max_event_decisions, 2);
         assert_eq!(metrics.closed_event_count, 3);
         assert_eq!(metrics.open_event_count, 0);
+        assert_eq!(metrics.lifecycle_without_entry_decision_count, 1);
         assert_eq!(metrics.max_drawdown, dec!(-25));
     }
 }
@@ -781,6 +819,7 @@ fn build_backtest_evaluation_artifact(
         && result.full_depth_fills_observed == result.non_settlement_fills_observed;
     let has_event_level_accounting = evidence_metrics.unique_event_count > 0
         && evidence_metrics.missing_event_id_count == 0
+        && evidence_metrics.lifecycle_without_entry_decision_count == 0
         && evidence_metrics.max_event_decisions <= 1
         && evidence_metrics.open_event_count == 0
         && evidence_metrics.closed_event_count == evidence_metrics.unique_event_count;
@@ -797,6 +836,9 @@ fn build_backtest_evaluation_artifact(
     }
     if evidence_metrics.missing_event_id_count > 0 {
         blocking_risk_flags.push("missing_event_ids");
+    }
+    if evidence_metrics.lifecycle_without_entry_decision_count > 0 {
+        blocking_risk_flags.push("lifecycle_without_entry_decision");
     }
     if evidence_metrics.max_event_decisions > 1 {
         blocking_risk_flags.push("multiple_entry_decisions_per_event");
@@ -895,6 +937,7 @@ fn build_backtest_evaluation_artifact(
             "closed_event_count": evidence_metrics.closed_event_count,
             "open_event_count": evidence_metrics.open_event_count,
             "missing_event_id_count": evidence_metrics.missing_event_id_count,
+            "lifecycle_without_entry_decision_count": evidence_metrics.lifecycle_without_entry_decision_count,
             "max_drawdown": evidence_metrics.max_drawdown,
             "realized_pnl": result.pnl.realized_pnl,
             "unrealized_pnl": result.pnl.unrealized_pnl,
@@ -916,6 +959,7 @@ struct BacktestEvidenceMetrics {
     unique_event_count: usize,
     max_event_decisions: usize,
     missing_event_id_count: usize,
+    lifecycle_without_entry_decision_count: usize,
     closed_event_count: usize,
     open_event_count: usize,
     max_drawdown: Decimal,
@@ -992,6 +1036,10 @@ fn backtest_evidence_metrics(
 
     let mut closed = Vec::new();
     let mut open_event_count = 0usize;
+    let lifecycle_without_entry_decision_count = lifecycles
+        .keys()
+        .filter(|event_id| !entry_decisions.contains_key(event_id.as_str()))
+        .count();
     for event_id in entry_decisions.keys() {
         match lifecycles.get(event_id) {
             Some(lifecycle)
@@ -1025,6 +1073,7 @@ fn backtest_evidence_metrics(
         unique_event_count: entry_decisions.len(),
         max_event_decisions: entry_decisions.values().copied().max().unwrap_or(0),
         missing_event_id_count,
+        lifecycle_without_entry_decision_count,
         closed_event_count: closed.len(),
         open_event_count,
         max_drawdown,

@@ -102,6 +102,25 @@ fn live_retry_remainder_is_dust(remaining_qty: Decimal, limit_price: Option<Deci
         .unwrap_or(false)
 }
 
+fn observe_fill_evidence(
+    intent: &TradingIntent,
+    price_basis: Option<&str>,
+    non_settlement_fills_observed: &mut u64,
+    full_depth_fills_observed: &mut u64,
+) {
+    let is_settlement = intent.purpose == IntentPurpose::Exit
+        && intent
+            .limit_price
+            .is_some_and(|price| price == dec!(0) || price == dec!(1));
+    if is_settlement || price_basis == Some("settlement") {
+        return;
+    }
+    *non_settlement_fills_observed += 1;
+    if price_basis == Some("full_depth_sweep") {
+        *full_depth_fills_observed += 1;
+    }
+}
+
 /// Unified strategy runtime.
 ///
 /// Generic over:
@@ -352,12 +371,12 @@ where
                     }
                     self.strategy.on_fill(&fill);
                     fills_recorded += 1;
-                    if report.price_basis != Some("settlement") {
-                        non_settlement_fills_observed += 1;
-                        if report.price_basis == Some("full_depth_sweep") {
-                            full_depth_fills_observed += 1;
-                        }
-                    }
+                    observe_fill_evidence(
+                        &intent,
+                        report.price_basis,
+                        &mut non_settlement_fills_observed,
+                        &mut full_depth_fills_observed,
+                    );
                     debug!(
                         order_id = %order_id,
                         token = %fill.token_id,
@@ -453,13 +472,12 @@ where
                         }
                         self.strategy.on_fill(&fill);
                         fills_recorded += 1;
-                        let is_settlement = intent.purpose == IntentPurpose::Exit
-                            && intent
-                                .limit_price
-                                .is_some_and(|price| price == dec!(0) || price == dec!(1));
-                        if !is_settlement {
-                            non_settlement_fills_observed += 1;
-                        }
+                        observe_fill_evidence(
+                            &intent,
+                            report.price_basis,
+                            &mut non_settlement_fills_observed,
+                            &mut full_depth_fills_observed,
+                        );
                         if self
                             .trading
                             .order(&fill.order_id)
@@ -494,6 +512,8 @@ where
                         &mut pending_live_orders,
                         &mut intents_submitted,
                         &mut fills_recorded,
+                        &mut non_settlement_fills_observed,
+                        &mut full_depth_fills_observed,
                     )
                     .await
                 {
@@ -618,6 +638,8 @@ where
         pending_live_orders: &mut BTreeMap<String, PendingLiveOrder>,
         intents_submitted: &mut u64,
         fills_recorded: &mut u64,
+        non_settlement_fills_observed: &mut u64,
+        full_depth_fills_observed: &mut u64,
     ) -> Result<(), String> {
         if self.config.mode != RuntimeMode::Live || pending_live_orders.is_empty() {
             return Ok(());
@@ -781,6 +803,12 @@ where
                         .await?;
                     self.strategy.on_fill(fill);
                     *fills_recorded += 1;
+                    observe_fill_evidence(
+                        &retry_intent,
+                        report.price_basis,
+                        non_settlement_fills_observed,
+                        full_depth_fills_observed,
+                    );
                 }
             } else {
                 pending_live_orders.insert(
@@ -838,8 +866,8 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::{
-        retry_attempt_from_intent_id, retry_root_intent_id, RuntimeConfig, RuntimeMode,
-        StrategyRuntime,
+        observe_fill_evidence, retry_attempt_from_intent_id, retry_root_intent_id, RuntimeConfig,
+        RuntimeMode, StrategyRuntime,
     };
     use crate::traits::{
         ExecutionPolicy, ExecutionReport, Executor, Feed, MarketUpdate, NullRecorder, Recorder,
@@ -867,6 +895,33 @@ mod tests {
             "pm5d_BTCUSDT_UP"
         );
         assert_eq!(retry_attempt_from_intent_id("pm5d_BTCUSDT_UP_retry2"), 2);
+    }
+
+    #[test]
+    fn settlement_intent_cannot_count_as_full_depth_fillability() {
+        let mut non_settlement = 0;
+        let mut full_depth = 0;
+        let settlement = TradingIntent {
+            intent_id: "settlement".into(),
+            deployment_id: "test".into(),
+            market_id: "event".into(),
+            token_id: "token".into(),
+            side: TradeSide::Sell,
+            quantity: dec!(1),
+            limit_price: Some(dec!(1)),
+            purpose: IntentPurpose::Exit,
+            created_at: Utc::now(),
+        };
+
+        observe_fill_evidence(
+            &settlement,
+            Some("full_depth_sweep"),
+            &mut non_settlement,
+            &mut full_depth,
+        );
+
+        assert_eq!(non_settlement, 0);
+        assert_eq!(full_depth, 0);
     }
 
     #[async_trait]
@@ -1347,6 +1402,7 @@ mod tests {
     struct AcknowledgingExecutor {
         policy: ExecutionPolicy,
         submissions: Arc<Mutex<Vec<String>>>,
+        fill_on_retry: bool,
     }
 
     impl Default for AcknowledgingExecutor {
@@ -1354,6 +1410,7 @@ mod tests {
             Self {
                 policy: ExecutionPolicy::default(),
                 submissions: Arc::new(Mutex::new(Vec::new())),
+                fill_on_retry: false,
             }
         }
     }
@@ -1364,11 +1421,31 @@ mod tests {
             self.policy
         }
 
-        async fn submit(&mut self, intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
+        async fn submit(&mut self, intent: &TradingIntent, order_id: &str) -> ExecutionReport {
             self.submissions
                 .lock()
                 .unwrap()
                 .push(intent.intent_id.clone());
+            if self.fill_on_retry && intent.intent_id.ends_with("_retry2") {
+                return ExecutionReport {
+                    order_id: order_id.to_string(),
+                    fill: Some(FillRecord {
+                        fill_id: format!("fill-{order_id}"),
+                        order_id: order_id.to_string(),
+                        token_id: intent.token_id.clone(),
+                        side: intent.side,
+                        quantity: intent.quantity,
+                        price: intent.limit_price.expect("retry limit price"),
+                        fee: Decimal::ZERO,
+                        timestamp: intent.created_at,
+                    }),
+                    rejected: false,
+                    rejection_reason: None,
+                    slippage: Some(Decimal::ZERO),
+                    market_impact: Some(Decimal::ZERO),
+                    price_basis: Some("full_depth_sweep"),
+                };
+            }
             ExecutionReport {
                 order_id: "venue-order-1".into(),
                 fill: None,
@@ -2033,6 +2110,7 @@ mod tests {
                 reconcile_cycles_before_retry: 1,
             },
             submissions: submissions.clone(),
+            fill_on_retry: true,
         };
         let recorder = Box::new(CollectingRecorder {
             signals: Arc::new(Mutex::new(Vec::new())),
@@ -2060,7 +2138,7 @@ mod tests {
 
         let mut runtime = StrategyRuntime::new(strategy, feed, executor, recorder, config)
             .with_deployment_id("test.live");
-        let _ = runtime.run().await;
+        let result = runtime.run().await;
         let snapshot = runtime.trading().snapshot(&BTreeMap::new());
 
         assert_eq!(
@@ -2080,11 +2158,13 @@ mod tests {
             snapshot
                 .orders
                 .iter()
-                .filter(|order| order.state == ploy_trading::OrderState::Acknowledged)
+                .filter(|order| order.state == ploy_trading::OrderState::Filled)
                 .count(),
             1
         );
-        assert_eq!(snapshot.fills.len(), 0);
+        assert_eq!(snapshot.fills.len(), 1);
+        assert_eq!(result.non_settlement_fills_observed, 1);
+        assert_eq!(result.full_depth_fills_observed, 1);
     }
 
     #[tokio::test]
@@ -2122,6 +2202,7 @@ mod tests {
                 reconcile_cycles_before_retry: 1,
             },
             submissions: submissions.clone(),
+            fill_on_retry: false,
         };
         let recorder = Box::new(CollectingRecorder {
             signals: Arc::new(Mutex::new(Vec::new())),
@@ -2251,6 +2332,7 @@ mod tests {
                 reconcile_cycles_before_retry: 1,
             },
             submissions: submissions.clone(),
+            fill_on_retry: false,
         };
         let feed = SingleUpdateFeed {
             next: Some(MarketUpdate::SpotPrice {

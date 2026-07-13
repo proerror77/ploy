@@ -23249,11 +23249,15 @@ does not claim `dry_run_candidate` or `live_candidate` evidence.
   signature-to-wallet mapping used by custody/redeem. Poly1271/DEPOSIT remains
   fail-closed because the deployed relayer does not yet support its redemption
   lifecycle.
-- Verification passes: connectivity 22, feed-loader 7, strategy 202 unit + 6
+- Verification passes: connectivity 22, feed-loader 8, strategy 203 unit + 6
   integration, backtest artifact 3, ployctl 27, account-ops 12, Python contract
   13, shellcheck, YAML parsing, formatting, diff checks, daemon/CLI checks, and
   Parquet-feature test compilation. Feature test execution still requires the
   Linux CI DuckDB shared library; no account, order, chain, cloud, or host write
   occurred locally.
+- PR review follow-up closed four evidence gaps: the full-depth PostgreSQL query
+  is valid and propagates database errors, filled lifecycles without an Entry
+  decision block promotion, settlement intents cannot count as full-depth
+  fillability, and immediate retry fills update both execution counters.
 - Independent final reviews found no remaining P0/P1/P2 in the Polymarket
   readiness or backtest-evidence slices.

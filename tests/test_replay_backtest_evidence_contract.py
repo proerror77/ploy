@@ -26,6 +26,8 @@ class ReplayBacktestEvidenceContractTest(unittest.TestCase):
             '"max_event_decisions"',
             '"full_depth_fills_observed"',
             '"incomplete_event_lifecycle_accounting"',
+            '"lifecycle_without_entry_decision"',
+            '"lifecycle_without_entry_decision_count"',
         ]
         for snippet in required_snippets:
             self.assertIn(snippet, source)
