@@ -23168,7 +23168,7 @@ operator adapters; it does not produce dry-run parity or authorize live trade.
       venue-contract-scoped approval, and redemption/reconciliation ops.
 - [x] Package the tool in the paused trade release with write-disabled defaults.
 - [x] Run dependency/security/relevant repo checks and independent review.
-- [ ] Commit, push, open PR, and monitor CI; do not deploy while ECS identity is untrusted.
+- [x] Commit, push, open PR, and monitor CI; do not deploy while ECS identity is untrusted.
 
 ## Review
 
@@ -23188,3 +23188,5 @@ operator adapters; it does not produce dry-run parity or authorize live trade.
 - Automated Predict venue routing in `ployd`, MARKET orders, and on-chain order
   cancellation remain outside this operator-adapter slice. LIMIT orders expire
   within ten minutes; the REST remove-only endpoint is intentionally unused.
+- PR #752 passed every required check and merged to `main` as `7c51f821`; no
+  deployment was attempted because trusted ECS identity remains blocked by #751.
