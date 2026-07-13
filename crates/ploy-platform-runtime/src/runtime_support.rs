@@ -451,8 +451,8 @@ where
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
     fs::create_dir_all(parent)?;
-    let body = serde_json::to_vec_pretty(value)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let body =
+        serde_json::to_vec(value).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     let tmp_path = path.with_extension("tmp");
     fs::write(&tmp_path, &body)?;
     fs::rename(&tmp_path, path)

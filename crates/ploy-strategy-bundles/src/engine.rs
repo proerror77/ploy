@@ -289,6 +289,11 @@ where
                 let strategy_name = self.strategy.name().to_string();
                 let signal_ref = signal.as_ref();
 
+                let mut intent = self.executor.prepare_intent(&intent);
+                self.ensure_deployment_attribution(&mut intent);
+                let order_id = Uuid::new_v4().to_string();
+
+                let report = self.executor.submit(&intent, &order_id).await;
                 if let Some(signal) = signal_ref {
                     if let Err(error) = self.recorder.record_signal(signal).await {
                         warn!(%error, "Failed to persist signal record");
@@ -297,12 +302,6 @@ where
                         }
                     }
                 }
-
-                let mut intent = self.executor.prepare_intent(&intent);
-                self.ensure_deployment_attribution(&mut intent);
-                let order_id = Uuid::new_v4().to_string();
-
-                let report = self.executor.submit(&intent, &order_id).await;
                 if let Err(error) = self
                     .recorder
                     .record_order(&strategy_name, &intent, signal_ref, &report, &order_id)
@@ -1159,7 +1158,7 @@ mod tests {
     #[async_trait]
     impl Recorder for FailingRecorder {
         async fn record_signal(&mut self, _signal: &SignalRecord) -> Result<(), String> {
-            assert!(self.submissions.lock().unwrap().is_empty());
+            assert_eq!(self.submissions.lock().unwrap().len(), 1);
             Err("recorder unavailable".to_string())
         }
 
@@ -1170,7 +1169,7 @@ mod tests {
 
     #[tokio::test]
     #[should_panic(expected = "live recorder failed")]
-    async fn live_recorder_failure_stops_submission() {
+    async fn live_signal_recorder_failure_happens_after_canonical_submission() {
         let now = Utc::now();
         let submissions = Arc::new(Mutex::new(Vec::new()));
         let strategy = RecordingStrategy {

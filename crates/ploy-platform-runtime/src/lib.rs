@@ -35,8 +35,8 @@ pub use runtime_support::{
 pub use state_io::{load_proposal_store, load_registry_records, load_trading_runtimes};
 pub use trade_control::{cancel_order, replace_order};
 pub use trade_submit::{
-    finish_live_intent, prepare_live_intent, submit_live_intent, submit_paper_intent,
-    PreparedLiveIntent,
+    apply_live_intent_outcome, execute_live_intent, finish_live_intent, prepare_live_intent,
+    submit_live_intent, submit_paper_intent, PreparedLiveIntent,
 };
 pub use worker_tick::{
     build_worker_launch_spec, refresh_source_health, tick_workers, WorkerTickConfig,

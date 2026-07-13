@@ -19,6 +19,16 @@ pub fn cancel_order(
         .cloned()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
 
+    if deployment.runtime_mode == DeploymentRuntimeMode::Live
+        && order.state == OrderState::Pending
+        && order.venue_order_id.is_none()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("order `{order_id}` submission is in progress"),
+        ));
+    }
+
     if !matches!(
         order.state,
         OrderState::Pending | OrderState::Acknowledged | OrderState::PartiallyFilled
@@ -76,6 +86,16 @@ pub fn replace_order(
         .order(order_id)
         .cloned()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
+
+    if deployment.runtime_mode == DeploymentRuntimeMode::Live
+        && order.state == OrderState::Pending
+        && order.venue_order_id.is_none()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("order `{order_id}` submission is in progress"),
+        ));
+    }
 
     if !matches!(
         order.state,
@@ -204,6 +224,7 @@ mod tests {
     use ploy_trading::{
         FillRecord, IntentPurpose, OrderState, TradeSide, TradingIntent, TradingRuntime,
     };
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::io::ErrorKind;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -447,5 +468,54 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
         assert_eq!(gateway.replacements.load(Ordering::SeqCst), 0);
         assert_eq!(runtime.snapshot(&std::collections::BTreeMap::new()), before);
+    }
+
+    #[test]
+    fn live_submission_in_progress_cannot_be_canceled_or_replaced() {
+        let runtime = seeded_runtime();
+        let snapshot = runtime.snapshot(&std::collections::BTreeMap::new());
+        let mut pending = TradingRuntime::default();
+        let intent = snapshot.intents[0].clone();
+        pending
+            .submit_intent(intent, "order-1", None)
+            .expect("pending order");
+        let gateway = CountingControlGateway::default();
+
+        let cancel_error = cancel_order(
+            &mut pending,
+            &gateway,
+            &live_deployment(),
+            "example.live",
+            "order-1",
+        )
+        .expect_err("pending live submission cannot be canceled");
+        let replace_error = replace_order(
+            &mut pending,
+            &gateway,
+            &live_deployment(),
+            "example.live",
+            "order-1",
+            OrderReplaceRequest {
+                quantity: dec!(2),
+                limit_price: Some(dec!(0.47)),
+            },
+            Decimal::ZERO,
+        )
+        .expect_err("pending live submission cannot be replaced");
+
+        assert_eq!(cancel_error.kind(), ErrorKind::InvalidInput);
+        assert!(cancel_error
+            .to_string()
+            .contains("submission is in progress"));
+        assert_eq!(replace_error.kind(), ErrorKind::InvalidInput);
+        assert!(replace_error
+            .to_string()
+            .contains("submission is in progress"));
+        assert_eq!(gateway.cancellations.load(Ordering::SeqCst), 0);
+        assert_eq!(gateway.replacements.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            pending.order("order-1").expect("pending order").state,
+            OrderState::Pending
+        );
     }
 }
