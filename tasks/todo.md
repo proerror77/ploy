@@ -4,6 +4,7 @@
 
 - [x] Add one shared venue-aware fee calculator with maker/taker and rounding semantics.
 - [x] Use it in simulated execution and backtest/research fee accounting.
+- [x] Make live Polymarket REST reconciliation confirmed-only and use cached V2 fee metadata.
 - [ ] Prefer authenticated venue order/fill events over snapshot polling, with bounded fallback.
 - [ ] Measure quote-to-ack and quote-to-fill latency without enabling live trading.
 
@@ -39,6 +40,9 @@ does not deploy, resume trading, or produce promotion evidence.
   deductions, avoiding false position/PnL results.
 - Current Polymarket crypto strategy/research edge calculations use the shared 7%
   probability curve instead of the stale 2% constant.
+- Live REST reconciliation now ignores MATCHED/MINED/RETRYING/FAILED trades,
+  accepts only CONFIRMED fills, derives maker/taker platform fees from cached V2
+  `fd` metadata, and bounds the degraded REST catch-up to two seconds.
 - Fee-slice verification passed: 16 market-contract tests, 223 strategy-bundle
   tests (1 ignored), 167 research tests, research-example compilation, and
   `ploy-strategy-runtime` compilation. Existing

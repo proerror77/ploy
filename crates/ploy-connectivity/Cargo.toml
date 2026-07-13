@@ -9,13 +9,14 @@ description = "Ploy connectivity crate"
 
 [dependencies]
 alloy = { version = "1", default-features = false, features = ["signer-local"] }
+ploy-market-contracts.workspace = true
 ploy-trading.workspace = true
 polymarket-client-sdk = { package = "polymarket_client_sdk_v2", version = "=0.6.0", features = ["clob", "heartbeats"] }
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 secrecy.workspace = true
 thiserror.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 
 [dev-dependencies]
 chrono.workspace = true

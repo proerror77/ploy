@@ -40,11 +40,24 @@ pub fn reconcile_live_fills(
             let Some(venue_order_id) = order.venue_order_id.clone() else {
                 continue;
             };
+            let side = runtime
+                .intent(&order.intent_id)
+                .map(|intent| intent.side.clone())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "tracked order `{}` references missing intent `{}`",
+                            order.order_id, order.intent_id
+                        ),
+                    )
+                })?;
             order_deployments.insert(order.order_id.clone(), record.deployment_id.clone());
             tracked_orders.push(TrackedOrder {
                 order_id: order.order_id,
                 venue_order_id,
                 token_id: order.token_id,
+                side,
             });
         }
     }
