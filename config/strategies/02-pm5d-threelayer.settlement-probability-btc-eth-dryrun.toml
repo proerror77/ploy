@@ -7,7 +7,7 @@
 [runtime]
 strategy_variant = "three_layer"
 mode = "dryrun"
-throttle_hz = 10
+market_data_source = "dual"
 # Dedicated capture for the settlement-probability dry-run handoff. The
 # replay-parity gate must compare against the same deployed strategy/window,
 # not the older OBI-soft canonical recording.

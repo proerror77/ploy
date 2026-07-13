@@ -183,13 +183,11 @@ mod tests {
             .expect("write response");
         });
 
-        let client = ControlPlaneClient {
-            control_plane_addr: addr.to_string(),
-            admin_token: None,
-            operator_token: None,
-            sidecar_token: None,
-            runtime_root,
-        };
+        let mut client = ControlPlaneClient::from_runtime_root(runtime_root);
+        client.control_plane_addr = addr.to_string();
+        client.admin_token = None;
+        client.operator_token = None;
+        client.sidecar_token = None;
         let output = cancel_order(&client, "example.live", "order-1").expect("cancel output");
         assert!(output.contains("state=canceled"));
         assert!(output.contains("venue_order_id=venue-1"));
@@ -229,13 +227,11 @@ mod tests {
             .expect("write response");
         });
 
-        let client = ControlPlaneClient {
-            control_plane_addr: addr.to_string(),
-            admin_token: None,
-            operator_token: None,
-            sidecar_token: None,
-            runtime_root,
-        };
+        let mut client = ControlPlaneClient::from_runtime_root(runtime_root);
+        client.control_plane_addr = addr.to_string();
+        client.admin_token = None;
+        client.operator_token = None;
+        client.sidecar_token = None;
         let output = replace_order(
             &client,
             "example.live",

@@ -2298,7 +2298,7 @@ fn inv_normal_cdf(p: f64) -> f64 {
 }
 
 fn crypto_fee_cost(entry_price: f64) -> f64 {
-    0.02 * entry_price * (1.0 - entry_price)
+    ploy_market_contracts::polymarket_crypto_taker_fee_per_share(entry_price)
 }
 
 fn reward_risk_ratio(entry_price: f64) -> f64 {

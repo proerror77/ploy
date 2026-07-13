@@ -1,5 +1,18 @@
 # Lessons
 
+## 2026-07-13
+
+- Pattern: A five-minute prediction-market event was mistaken for a
+  minute-level execution system, leaving primary factors behind 100ms-to-5s
+  polling and a 10 Hz strategy throttle.
+- Rule: Event settlement horizon and execution frequency are separate. PM5D
+  live execution must remain tick-driven: ingest venue WebSocket updates
+  directly and evaluate every decision-relevant tick. Delayed REST/DB ticks must
+  not merge into the direct strategy hot path; recovery is a fail-closed WS
+  reconnect or an explicit operator-selected `local_db` mode. Benchmark names
+  must state whether they begin at raw wire parsing or at canonical tick receipt
+  before describing latency as HFT-grade.
+
 ## 2026-03-02
 
 - Pattern: Some links (including but not limited to X) fail with plain `curl` because content is JS-rendered, anti-bot protected, or behind login walls.

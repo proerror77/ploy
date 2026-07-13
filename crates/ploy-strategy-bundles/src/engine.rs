@@ -289,20 +289,20 @@ where
                 let strategy_name = self.strategy.name().to_string();
                 let signal_ref = signal.as_ref();
 
-                if let Some(signal) = signal_ref {
-                    if let Err(error) = self.recorder.record_signal(signal).await {
-                        warn!(%error, "Failed to persist signal record");
-                        if self.config.mode == RuntimeMode::Live {
-                            panic!("live recorder failed: {error}");
-                        }
-                    }
-                }
-
                 let mut intent = self.executor.prepare_intent(&intent);
                 self.ensure_deployment_attribution(&mut intent);
                 let order_id = Uuid::new_v4().to_string();
 
                 let report = self.executor.submit(&intent, &order_id).await;
+                let mut halt_after_submission = false;
+                if let Some(signal) = signal_ref {
+                    if let Err(error) = self.recorder.record_signal(signal).await {
+                        warn!(%error, "Failed to persist signal record");
+                        if self.config.mode == RuntimeMode::Live {
+                            halt_after_submission = true;
+                        }
+                    }
+                }
                 if let Err(error) = self
                     .recorder
                     .record_order(&strategy_name, &intent, signal_ref, &report, &order_id)
@@ -330,6 +330,9 @@ where
                     let reason = report.rejection_reason.as_deref().unwrap_or("unknown");
                     warn!(order_id = %order_id, reason = %reason, "Order rejected");
                     self.strategy.on_reject(&intent, reason);
+                    if halt_after_submission {
+                        break 'runtime;
+                    }
                     continue;
                 }
 
@@ -399,13 +402,16 @@ where
                         "Live order acknowledged without fill; waiting for reconciliation",
                     );
                 }
+                if halt_after_submission {
+                    warn!(
+                        order_id = %order_id,
+                        "Stopping live runtime after post-submit signal audit failure"
+                    );
+                    break 'runtime;
+                }
             }
 
-            let reconcile_completed = match self
-                .executor
-                .reconcile_fills(self.trading.orders())
-                .await
-            {
+            let reconcile_completed = match self.reconcile_active_fills().await {
                 Ok(fills) => {
                     let strategy_name = self.strategy.name().to_string();
                     for fill in fills {
@@ -585,6 +591,13 @@ where
     /// Read-only access to the trading runtime state.
     pub fn trading(&self) -> &TradingRuntime {
         &self.trading
+    }
+
+    async fn reconcile_active_fills(&mut self) -> Result<Vec<ploy_trading::FillRecord>, String> {
+        if self.trading.orders().active_orders() == 0 {
+            return Ok(Vec::new());
+        }
+        self.executor.reconcile_fills(self.trading.orders()).await
     }
 
     fn ensure_deployment_attribution(&self, intent: &mut TradingIntent) {
@@ -1156,7 +1169,7 @@ mod tests {
     #[async_trait]
     impl Recorder for FailingRecorder {
         async fn record_signal(&mut self, _signal: &SignalRecord) -> Result<(), String> {
-            assert!(self.submissions.lock().unwrap().is_empty());
+            assert_eq!(self.submissions.lock().unwrap().len(), 1);
             Err("recorder unavailable".to_string())
         }
 
@@ -1166,8 +1179,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "live recorder failed")]
-    async fn live_recorder_failure_stops_submission() {
+    async fn live_signal_recorder_failure_stops_after_order_state_is_recorded() {
         let now = Utc::now();
         let submissions = Arc::new(Mutex::new(Vec::new()));
         let strategy = RecordingStrategy {
@@ -1223,7 +1235,16 @@ mod tests {
             },
         );
 
-        runtime.run().await;
+        let result = runtime.run().await;
+
+        assert_eq!(submissions.lock().unwrap().len(), 1);
+        assert_eq!(result.intents_submitted, 1);
+        let snapshot = runtime.trading.snapshot(&Default::default());
+        assert_eq!(snapshot.orders.len(), 1);
+        assert_eq!(
+            snapshot.orders[0].venue_order_id.as_deref(),
+            Some("venue-order-1")
+        );
     }
 
     #[async_trait]
@@ -1495,8 +1516,65 @@ mod tests {
     }
 
     struct SkippedReconcileExecutor;
+    struct IdleReconcileCountingExecutor {
+        reconciles: Arc<Mutex<usize>>,
+    }
     struct FailingReconcileExecutor {
         submissions: usize,
+    }
+
+    #[async_trait]
+    impl Executor for IdleReconcileCountingExecutor {
+        async fn submit(&mut self, _intent: &TradingIntent, _order_id: &str) -> ExecutionReport {
+            unreachable!("noop strategy must not submit")
+        }
+
+        async fn cancel(&mut self, _order_id: &str) -> bool {
+            false
+        }
+
+        async fn reconcile_fills(
+            &mut self,
+            _orders: &OrderLedger,
+        ) -> Result<Vec<FillRecord>, String> {
+            *self.reconciles.lock().unwrap() += 1;
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_market_updates_do_not_reconcile_without_active_orders() {
+        let reconciles = Arc::new(Mutex::new(0));
+        let now = Utc::now();
+        let mut runtime = StrategyRuntime::new(
+            NoopStrategy,
+            SingleUpdateFeed {
+                next: Some(MarketUpdate::Quote {
+                    token_id: "token-up".into(),
+                    bid: Some(dec!(0.40)),
+                    ask: Some(dec!(0.41)),
+                    bid_size: Some(dec!(10)),
+                    ask_size: Some(dec!(10)),
+                    bid_levels: Vec::new(),
+                    ask_levels: Vec::new(),
+                    ts: now,
+                }),
+            },
+            IdleReconcileCountingExecutor {
+                reconciles: reconciles.clone(),
+            },
+            Box::new(NullRecorder),
+            RuntimeConfig {
+                mode: RuntimeMode::Live,
+                throttle_hz: None,
+                max_updates: None,
+                skip_settlement_exits: false,
+            },
+        );
+
+        runtime.run().await;
+
+        assert_eq!(*reconciles.lock().unwrap(), 0);
     }
 
     #[async_trait]

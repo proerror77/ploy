@@ -1,5 +1,5 @@
 use crate::events::EventBroker;
-use crate::runtime::{next_paper_intent_id, PloyDaemon};
+use crate::runtime::{next_paper_intent_id, PloyDaemon, PreparedIntentSubmission};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use ploy_operator_contracts::{
@@ -561,75 +561,53 @@ pub fn spawn_server(state: Arc<AppState>) -> io::Result<thread::JoinHandle<()>> 
 }
 
 fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result<()> {
-    let request = read_http_request(&mut stream)?;
-    if request.is_empty() {
-        return Ok(());
-    }
+    loop {
+        let request = read_http_request(&mut stream)?;
+        if request.is_empty() {
+            return Ok(());
+        }
+        let keep_alive = request.lines().any(|line| {
+            line.split_once(':').is_some_and(|(name, value)| {
+                name.eq_ignore_ascii_case("connection")
+                    && value.trim().eq_ignore_ascii_case("keep-alive")
+            })
+        });
 
-    let mut request_line = request.lines().next().unwrap_or("").split_whitespace();
-    let method = request_line.next().unwrap_or("GET");
-    let raw_path = request_line.next().unwrap_or("/");
-    let path = raw_path.split('?').next().unwrap_or(raw_path);
-    let peer_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
-    let client_addr = Some(client_ip(peer_addr.as_deref(), &request));
-    let (configured_token, operator_token, worker_token, sidecar_token, cookie_secret) =
-        match configured_auth(state) {
-            Ok(auth) => auth,
-            Err(response) => return write_json_response(stream, response),
-        };
-    let auth_level = request_auth_level(
-        &request,
-        configured_token
-            .as_ref()
-            .map(ExposeSecret::expose_secret)
-            .map(|token| token.as_str()),
-        operator_token
-            .as_ref()
-            .map(ExposeSecret::expose_secret)
-            .map(|token| token.as_str()),
-        worker_token
-            .as_ref()
-            .map(ExposeSecret::expose_secret)
-            .map(|token| token.as_str()),
-        sidecar_token
-            .as_ref()
-            .map(ExposeSecret::expose_secret)
-            .map(|token| token.as_str()),
-        cookie_secret.expose_secret(),
-    );
-    let required_access = required_access(method, path);
-    if let Some(response) =
-        rate_limit_response(method, path, client_addr.as_deref(), auth_level, state)
-    {
-        audit_request(
-            state,
-            method,
-            path,
-            client_addr.as_deref(),
-            auth_level,
-            required_access,
-            response.0,
-            "rate_limited",
-            response_message(&response.1),
+        let mut request_line = request.lines().next().unwrap_or("").split_whitespace();
+        let method = request_line.next().unwrap_or("GET");
+        let raw_path = request_line.next().unwrap_or("/");
+        let path = raw_path.split('?').next().unwrap_or(raw_path);
+        let peer_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
+        let client_addr = Some(client_ip(peer_addr.as_deref(), &request));
+        let (configured_token, operator_token, worker_token, sidecar_token, cookie_secret) =
+            match configured_auth(state) {
+                Ok(auth) => auth,
+                Err(response) => return write_json_response(stream, response),
+            };
+        let auth_level = request_auth_level(
+            &request,
+            configured_token
+                .as_ref()
+                .map(ExposeSecret::expose_secret)
+                .map(|token| token.as_str()),
+            operator_token
+                .as_ref()
+                .map(ExposeSecret::expose_secret)
+                .map(|token| token.as_str()),
+            worker_token
+                .as_ref()
+                .map(ExposeSecret::expose_secret)
+                .map(|token| token.as_str()),
+            sidecar_token
+                .as_ref()
+                .map(ExposeSecret::expose_secret)
+                .map(|token| token.as_str()),
+            cookie_secret.expose_secret(),
         );
-        return write_json_response(stream, response);
-    }
-    if method == "GET" && path == "/api/events/stream" {
-        if !access_allowed(
-            auth_level,
-            required_access,
-            configured_token.is_some(),
-            operator_token.is_some(),
-            worker_token.is_some(),
-            sidecar_token.is_some(),
-        ) {
-            let response = auth_error_response(
-                required_access,
-                configured_token.is_some(),
-                operator_token.is_some(),
-                worker_token.is_some(),
-                sidecar_token.is_some(),
-            );
+        let required_access = required_access(method, path);
+        if let Some(response) =
+            rate_limit_response(method, path, client_addr.as_deref(), auth_level, state)
+        {
             audit_request(
                 state,
                 method,
@@ -638,40 +616,85 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
                 auth_level,
                 required_access,
                 response.0,
-                "denied",
+                "rate_limited",
                 response_message(&response.1),
             );
             return write_json_response(stream, response);
         }
-        audit_request(
-            state,
-            method,
-            path,
-            client_addr.as_deref(),
-            auth_level,
-            required_access,
-            200,
-            "allowed",
-            None,
-        );
-        return handle_event_stream(stream, state);
-    }
-    if method == "GET" && path == "/reports/strategy" {
-        if !access_allowed(
-            auth_level,
-            required_access,
-            configured_token.is_some(),
-            operator_token.is_some(),
-            worker_token.is_some(),
-            sidecar_token.is_some(),
-        ) {
-            let response = auth_error_response(
+        if method == "GET" && path == "/api/events/stream" {
+            if !access_allowed(
+                auth_level,
                 required_access,
                 configured_token.is_some(),
                 operator_token.is_some(),
                 worker_token.is_some(),
                 sidecar_token.is_some(),
+            ) {
+                let response = auth_error_response(
+                    required_access,
+                    configured_token.is_some(),
+                    operator_token.is_some(),
+                    worker_token.is_some(),
+                    sidecar_token.is_some(),
+                );
+                audit_request(
+                    state,
+                    method,
+                    path,
+                    client_addr.as_deref(),
+                    auth_level,
+                    required_access,
+                    response.0,
+                    "denied",
+                    response_message(&response.1),
+                );
+                return write_json_response(stream, response);
+            }
+            audit_request(
+                state,
+                method,
+                path,
+                client_addr.as_deref(),
+                auth_level,
+                required_access,
+                200,
+                "allowed",
+                None,
             );
+            return handle_event_stream(stream, state);
+        }
+        if method == "GET" && path == "/reports/strategy" {
+            if !access_allowed(
+                auth_level,
+                required_access,
+                configured_token.is_some(),
+                operator_token.is_some(),
+                worker_token.is_some(),
+                sidecar_token.is_some(),
+            ) {
+                let response = auth_error_response(
+                    required_access,
+                    configured_token.is_some(),
+                    operator_token.is_some(),
+                    worker_token.is_some(),
+                    sidecar_token.is_some(),
+                );
+                audit_request(
+                    state,
+                    method,
+                    path,
+                    client_addr.as_deref(),
+                    auth_level,
+                    required_access,
+                    response.0,
+                    "denied",
+                    response_message(&response.1),
+                );
+                return write_json_response(stream, response);
+            }
+
+            let response =
+                build_strategy_report_html(state, query_param(raw_path, "since").as_deref());
             audit_request(
                 state,
                 method,
@@ -680,75 +703,91 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<AppState>) -> io::Result
                 auth_level,
                 required_access,
                 response.0,
-                "denied",
-                response_message(&response.1),
+                if response.0 < 400 {
+                    "allowed"
+                } else {
+                    "denied"
+                },
+                if response.0 < 400 {
+                    None
+                } else {
+                    Some("strategy report generation failed".to_string())
+                },
             );
-            return write_json_response(stream, response);
+            return write_html_response(stream, response);
         }
-
-        let response = build_strategy_report_html(state, query_param(raw_path, "since").as_deref());
-        audit_request(
-            state,
+        let body = request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .filter(|body| !body.is_empty());
+        let response = handle_authenticated_runtime_request(
             method,
             path,
-            client_addr.as_deref(),
+            body,
             auth_level,
-            required_access,
-            response.0,
-            if response.0 < 400 {
-                "allowed"
-            } else {
-                "denied"
-            },
-            if response.0 < 400 {
-                None
-            } else {
-                Some("strategy report generation failed".to_string())
-            },
+            configured_token.is_some(),
+            operator_token.is_some(),
+            worker_token.is_some(),
+            sidecar_token.is_some(),
+            state,
         );
-        return write_html_response(stream, response);
-    }
-    let body = request
-        .split_once("\r\n\r\n")
-        .map(|(_, body)| body)
-        .filter(|body| !body.is_empty());
-    let response = handle_authenticated_runtime_request(
-        method,
-        path,
-        body,
-        auth_level,
-        configured_token.is_some(),
-        operator_token.is_some(),
-        worker_token.is_some(),
-        sidecar_token.is_some(),
-        state,
-    );
-    let headers = response_headers(
-        method,
-        path,
-        response.0,
-        configured_token
-            .as_ref()
-            .map(ExposeSecret::expose_secret)
-            .map(|token| token.as_str()),
-        cookie_secret.expose_secret(),
-    );
-    audit_request(
-        state,
-        method,
-        path,
-        client_addr.as_deref(),
-        auth_level,
-        required_access,
-        response.0,
-        if response.0 < 400 {
+        let headers = response_headers(
+            method,
+            path,
+            response.0,
+            configured_token
+                .as_ref()
+                .map(ExposeSecret::expose_secret)
+                .map(|token| token.as_str()),
+            cookie_secret.expose_secret(),
+        );
+        let status_code = response.0;
+        let outcome = if status_code < 400 {
             "allowed"
         } else {
             "denied"
-        },
-        response_message(&response.1),
-    );
-    write_json_response_with_headers(stream, response, &headers)
+        };
+        let message = response_message(&response.1);
+        if method == "POST" && path.ends_with("/intents") {
+            let result = if keep_alive {
+                write_json_response_keep_alive_with_headers(stream.try_clone()?, response, &headers)
+            } else {
+                write_json_response_with_headers(stream.try_clone()?, response, &headers)
+            };
+            audit_request(
+                state,
+                method,
+                path,
+                client_addr.as_deref(),
+                auth_level,
+                required_access,
+                status_code,
+                outcome,
+                message,
+            );
+            result?;
+            if keep_alive {
+                continue;
+            }
+            return Ok(());
+        }
+        audit_request(
+            state,
+            method,
+            path,
+            client_addr.as_deref(),
+            auth_level,
+            required_access,
+            status_code,
+            outcome,
+            message,
+        );
+        if keep_alive {
+            write_json_response_keep_alive_with_headers(stream.try_clone()?, response, &headers)?;
+            continue;
+        }
+        return write_json_response_with_headers(stream, response, &headers);
+    }
 }
 
 fn read_http_request(stream: &mut TcpStream) -> io::Result<String> {
@@ -821,10 +860,20 @@ fn write_html_response(stream: TcpStream, response: (u16, String)) -> io::Result
 }
 
 fn write_response_with_headers(
+    stream: TcpStream,
+    response: (u16, String),
+    content_type: &str,
+    headers: &[(String, String)],
+) -> io::Result<()> {
+    write_response_with_headers_and_connection(stream, response, content_type, headers, false)
+}
+
+fn write_response_with_headers_and_connection(
     mut stream: TcpStream,
     response: (u16, String),
     content_type: &str,
     headers: &[(String, String)],
+    keep_alive: bool,
 ) -> io::Result<()> {
     let (status_code, body) = response;
     let extra_headers = headers
@@ -833,12 +882,13 @@ fn write_response_with_headers(
         .collect::<String>();
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: {}\r\nConnection: close\r\n{}\
+        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: {}\r\nConnection: {}\r\n{}\
          \r\n{}",
         status_code,
         status_text(status_code),
         body.len(),
         content_type,
+        if keep_alive { "keep-alive" } else { "close" },
         extra_headers,
         body
     )
@@ -850,6 +900,14 @@ fn write_json_response_with_headers(
     headers: &[(String, String)],
 ) -> io::Result<()> {
     write_response_with_headers(stream, response, "application/json", headers)
+}
+
+fn write_json_response_keep_alive_with_headers(
+    stream: TcpStream,
+    response: (u16, String),
+    headers: &[(String, String)],
+) -> io::Result<()> {
+    write_response_with_headers_and_connection(stream, response, "application/json", headers, true)
 }
 
 fn configured_auth(
@@ -2441,37 +2499,45 @@ fn handle_runtime_request_from(
                 );
             };
 
-            match state.daemon.lock() {
-                Ok(mut daemon) => {
-                    let response = daemon.submit_intent_idempotent_from(
-                        TradingIntent {
-                            intent_id: request
-                                .idempotency_key
-                                .as_deref()
-                                .map(|key| format!("request-{key}"))
-                                .unwrap_or_else(|| next_paper_intent_id(deployment_id)),
-                            deployment_id: deployment_id.to_string(),
-                            market_id: request.market_id,
-                            token_id: request.token_id,
-                            side,
-                            quantity: request.quantity,
-                            limit_price: request.limit_price,
-                            purpose: intent_purpose_from_wire(request.purpose),
-                            created_at: chrono::Utc::now(),
-                        },
-                        request.idempotency_key.as_deref(),
-                        intent_source,
-                    );
-                    publish_snapshot_events(&daemon, &state.events);
-                    match response {
-                        Ok(response) => (
-                            200,
-                            serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
-                        ),
-                        Err(err) => submit_intent_error_response(err, deployment_id),
+            let prepared = match state.daemon.lock() {
+                Ok(mut daemon) => daemon.prepare_intent_idempotent_from(
+                    TradingIntent {
+                        intent_id: request
+                            .idempotency_key
+                            .as_deref()
+                            .map(|key| format!("request-{key}"))
+                            .unwrap_or_else(|| next_paper_intent_id(deployment_id)),
+                        deployment_id: deployment_id.to_string(),
+                        market_id: request.market_id,
+                        token_id: request.token_id,
+                        side,
+                        quantity: request.quantity,
+                        limit_price: request.limit_price,
+                        purpose: intent_purpose_from_wire(request.purpose),
+                        created_at: chrono::Utc::now(),
+                    },
+                    request.idempotency_key.as_deref(),
+                    intent_source,
+                ),
+                Err(_) => return json_error(503, "daemon_lock_poisoned", None),
+            };
+            let response = match prepared {
+                Ok(PreparedIntentSubmission::Complete(response)) => Ok(response),
+                Ok(PreparedIntentSubmission::Live(prepared)) => {
+                    let outcome = prepared.execute();
+                    match state.daemon.lock() {
+                        Ok(mut daemon) => daemon.finish_prepared_live_intent(prepared, outcome),
+                        Err(_) => return json_error(503, "daemon_lock_poisoned", None),
                     }
                 }
-                Err(_) => json_error(503, "daemon_lock_poisoned", None),
+                Err(error) => Err(error),
+            };
+            match response {
+                Ok(response) => (
+                    200,
+                    serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string()),
+                ),
+                Err(err) => submit_intent_error_response(err, deployment_id),
             }
         }
         ("POST", _) if path.starts_with("/api/proposals/") && path.ends_with("/approve") => {
@@ -2654,22 +2720,37 @@ fn write_sse_event(stream: &mut TcpStream, event: &OperatorEvent) -> io::Result<
 mod tests {
     use super::{
         access_allowed, admin_session_cookie, append_audit_entry, client_ip, content_length,
-        handle_api_request, handle_authenticated_runtime_request, handle_runtime_request,
-        header_end_offset, intent_admission_source, rate_limit_key, request_auth_level,
-        required_access, response_headers, route_request, snapshot_events, AppState, AuthLevel,
-        RateLimiter, ADMIN_SESSION_COOKIE_NAME,
+        handle_api_request, handle_authenticated_runtime_request, handle_connection,
+        handle_runtime_request, header_end_offset, intent_admission_source, rate_limit_key,
+        request_auth_level, required_access, response_headers, route_request, snapshot_events,
+        AppState, AuthLevel, RateLimiter, ADMIN_SESSION_COOKIE_NAME,
     };
     use crate::events::EventBroker;
     use chrono::{Duration, Utc};
-    use ploy_connectivity::{CancellationOutcome, ReplaceOutcome, StaticExecutionGateway};
+    use ploy_connectivity::{
+        CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
+        ExecutionRequest, LiveExecutionGateway, ReplaceOutcome, ReplaceRequest,
+        StaticExecutionGateway, TrackedOrder,
+    };
     use ploy_operator_contracts::AuditLogEntry;
     use ploy_operator_contracts::{OrderReplaceRequest, PaperIntentRequest};
     use ploy_platform_runtime::runtime_support::IntentAdmissionSource;
-    use ploy_trading::{IntentPurpose as TradingIntentPurpose, TradeSide, TradingIntent};
+    use ploy_strategy_bundles::strategies::three_layer::ThreeLayerConfig;
+    use ploy_strategy_bundles::{
+        Feed, LiveFeed, MarketUpdate, StrategyDecision, StrategyLogic, ThreeLayerProfile,
+        ThreeLayerStrategy,
+    };
+    use ploy_trading::{
+        IntentPurpose as TradingIntentPurpose, OrderLedger, PositionLedger, TradeSide,
+        TradingIntent,
+    };
     use std::collections::VecDeque;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
     use std::time::{Duration as StdDuration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -2678,6 +2759,119 @@ mod tests {
             .expect("duration")
             .as_nanos();
         std::env::temp_dir().join(format!("ployd-http-{label}-{unique}"))
+    }
+
+    fn read_response_body(stream: &mut TcpStream) -> String {
+        let mut headers = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !headers.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).expect("read response headers");
+            headers.push(byte[0]);
+        }
+        let headers = String::from_utf8(headers).expect("response headers utf8");
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().expect("content length"))
+            })
+            .expect("content length header");
+        let mut body = vec![0_u8; content_length];
+        stream.read_exact(&mut body).expect("read response body");
+        String::from_utf8(body).expect("response body utf8")
+    }
+
+    fn percentile_micros(samples: &mut [u64], per_thousand: usize) -> u64 {
+        samples.sort_unstable();
+        samples[(samples.len() - 1) * per_thousand / 1_000]
+    }
+
+    #[derive(Debug)]
+    struct BlockingSubmitGateway {
+        entered: Mutex<Option<mpsc::Sender<()>>>,
+        release: Mutex<mpsc::Receiver<()>>,
+        submits: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct BenchmarkSubmitGateway {
+        entered: Arc<Mutex<Vec<Instant>>>,
+        submits: AtomicUsize,
+    }
+
+    impl LiveExecutionGateway for BenchmarkSubmitGateway {
+        fn probe(&self) -> Result<(), ExecutionError> {
+            Ok(())
+        }
+
+        fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
+            self.entered
+                .lock()
+                .expect("entered lock")
+                .push(Instant::now());
+            let sequence = self.submits.fetch_add(1, Ordering::SeqCst);
+            Ok(ExecutionOutcome::Acknowledged {
+                venue_order_id: format!("venue-benchmark-{sequence}"),
+            })
+        }
+
+        fn cancel(
+            &self,
+            _request: &CancellationRequest,
+        ) -> Result<CancellationOutcome, ExecutionError> {
+            Ok(CancellationOutcome::Canceled)
+        }
+
+        fn replace(&self, _request: &ReplaceRequest) -> Result<ReplaceOutcome, ExecutionError> {
+            unreachable!("replace is not used")
+        }
+
+        fn reconcile_fills(
+            &self,
+            _tracked_orders: &[TrackedOrder],
+        ) -> Result<Vec<ploy_trading::FillRecord>, ExecutionError> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl LiveExecutionGateway for BlockingSubmitGateway {
+        fn probe(&self) -> Result<(), ExecutionError> {
+            Ok(())
+        }
+
+        fn submit(&self, _request: &ExecutionRequest) -> Result<ExecutionOutcome, ExecutionError> {
+            self.submits.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = self.entered.lock().expect("entered lock").take() {
+                let _ = entered.send(());
+            }
+            self.release
+                .lock()
+                .expect("release lock")
+                .recv()
+                .expect("release submit");
+            Ok(ExecutionOutcome::Acknowledged {
+                venue_order_id: "venue-blocking".to_string(),
+            })
+        }
+
+        fn cancel(
+            &self,
+            _request: &CancellationRequest,
+        ) -> Result<CancellationOutcome, ExecutionError> {
+            Ok(CancellationOutcome::Canceled)
+        }
+
+        fn replace(&self, _request: &ReplaceRequest) -> Result<ReplaceOutcome, ExecutionError> {
+            unreachable!("replace is not used")
+        }
+
+        fn reconcile_fills(
+            &self,
+            _tracked_orders: &[TrackedOrder],
+        ) -> Result<Vec<ploy_trading::FillRecord>, ExecutionError> {
+            Ok(Vec::new())
+        }
     }
 
     #[test]
@@ -2693,6 +2887,264 @@ mod tests {
             "x".repeat(3000)
         );
         assert!(header_end_offset(request.as_bytes()).is_some());
+    }
+
+    #[test]
+    fn server_handles_multiple_requests_on_one_keep_alive_connection() {
+        let root = temp_dir("server-keep-alive");
+        let runtime_root = root.join("run/platform");
+        let config = crate::config::PlatformConfig {
+            runtime_root: runtime_root.clone(),
+            registry_file: root.join("data/state/deployments.json"),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..crate::config::PlatformConfig::default()
+        };
+        let daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(StaticExecutionGateway::acknowledged("unused")),
+        )
+        .expect("boot daemon");
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server_state = Arc::clone(&state);
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            handle_connection(stream, &server_state).expect("serve connection");
+        });
+        let mut client = TcpStream::connect(addr).expect("connect");
+
+        for _ in 0..2 {
+            write!(
+                client,
+                "GET /health HTTP/1.1\r\nHost: {addr}\r\nConnection: keep-alive\r\n\r\n"
+            )
+            .expect("write request");
+            assert!(read_response_body(&mut client).contains("\"status\""));
+        }
+        drop(client);
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    #[ignore = "local no-live-order latency benchmark"]
+    fn live_submit_latency_benchmark() {
+        const SAMPLES: usize = 1_001;
+        let root = temp_dir("live-submit-latency");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([{
+                "deployment_id":"benchmark.live",
+                "bundle_id":"benchmark",
+                "runtime_mode":"live",
+                "account_id":"0x1111111111111111111111111111111111111111",
+                "max_gross_exposure":"1000000",
+                "desired_state":"running",
+                "observed_state":"running"
+            }])
+            .to_string(),
+        )
+        .expect("registry");
+        let config = crate::config::PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            audit_log_file: runtime_root.join("audit-log.jsonl"),
+            worker_token: Some(secrecy::SecretString::from("benchmark-worker".to_string())),
+            request_rate_limit_per_minute: 0,
+            ..crate::config::PlatformConfig::default()
+        };
+        crate::runtime::seed_empty_live_ledgers(&config);
+        let entered = Arc::new(Mutex::new(Vec::with_capacity(SAMPLES)));
+        let mut daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(BenchmarkSubmitGateway {
+                entered: Arc::clone(&entered),
+                submits: AtomicUsize::new(0),
+            }),
+        )
+        .expect("boot daemon");
+        daemon.control_plane.deployments.set_observed_state(
+            "benchmark.live",
+            ploy_operator_contracts::ObservedState::Running,
+        );
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server_state = Arc::clone(&state);
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            handle_connection(stream, &server_state).expect("serve benchmark connection");
+        });
+        let mut client = TcpStream::connect(addr).expect("connect");
+        client.set_nodelay(true).expect("nodelay");
+        let base_ts = Utc::now();
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+        let mut strategy = ThreeLayerStrategy::new(ThreeLayerConfig {
+            symbols: vec!["BTCUSDT".to_string()],
+            profile: ThreeLayerProfile::Mixed,
+            min_direction_prob: 0.5,
+            min_distance_over_sigma: 0.0,
+            min_confirmation_score: 0.0,
+            require_confirmation: false,
+            min_drift_confirmation: 0.0,
+            min_edge: 0.0,
+            min_reward_risk: 0.0,
+            alpha_contrarian: false,
+            cex_contrarian: false,
+            probability_shrink: 1.0,
+            probability_haircut: 0.0,
+            take_profit_ask: 0.70,
+            stop_distance_pct: 0.02,
+            max_pm_lag_secs: 15,
+            min_time_remaining_secs: 1,
+            max_time_remaining_secs: 300,
+            cooldown_secs: 0,
+            stake_usd: rust_decimal::Decimal::new(25, 0),
+            max_positions: 10,
+            max_daily_trades: u32::MAX,
+            allowed_window_secs: vec![300],
+            min_entry_price: 0.01,
+            max_entry_price: 0.99,
+            min_entry_score: 0.0,
+            autofactor_runtime_score: None,
+            event_ml_model: None,
+            visible_depth_haircut: rust_decimal::Decimal::ONE,
+            max_sweep_levels: 0,
+            max_sweep_price_delta: rust_decimal::Decimal::ZERO,
+        });
+        strategy.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: Arc::from("market-1"),
+                symbol: Arc::from("BTCUSDT"),
+                up_token: Arc::from("token-1"),
+                down_token: Arc::from("token-2"),
+                end_time: base_ts + Duration::seconds(300),
+                window_secs: 300,
+                price_to_beat: Some(rust_decimal::Decimal::new(100_000, 0)),
+                resolved_up_won: None,
+            },
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: rust_decimal::Decimal::new(100_000, 0),
+                ts: base_ts,
+            },
+            &positions,
+            &orders,
+        );
+        let (tick_tx, tick_rx) = tokio::sync::broadcast::channel(16);
+        let mut tick_feed = LiveFeed::new(tick_rx);
+        let tick_runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("tick runtime");
+        let mut canonical_tick_to_decision = Vec::with_capacity(SAMPLES);
+        let mut canonical_tick_to_gateway = Vec::with_capacity(SAMPLES);
+        let mut canonical_tick_to_response = Vec::with_capacity(SAMPLES);
+        let mut client_to_gateway = Vec::with_capacity(SAMPLES);
+        let mut gateway_to_response = Vec::with_capacity(SAMPLES);
+        let mut end_to_end = Vec::with_capacity(SAMPLES);
+
+        for sequence in 0..SAMPLES {
+            let tick = MarketUpdate::Quote {
+                token_id: Arc::from("token-1"),
+                bid: Some(rust_decimal::Decimal::new(19, 2)),
+                ask: Some(rust_decimal::Decimal::new(20, 2)),
+                bid_size: Some(rust_decimal::Decimal::new(1_000, 0)),
+                ask_size: Some(rust_decimal::Decimal::new(1_000, 0)),
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
+                ts: base_ts + Duration::milliseconds(sequence as i64),
+            };
+            let tick_started = Instant::now();
+            tick_tx.send(tick).expect("broadcast canonical tick");
+            let tick = tick_runtime
+                .block_on(tick_feed.next())
+                .expect("receive canonical tick");
+            let decisions = strategy.on_update(&tick, &positions, &orders);
+            let decision_at = Instant::now();
+            let intent = match decisions.as_slice() {
+                [StrategyDecision::Enter { intent, .. }] => intent,
+                other => panic!("benchmark tick must emit one entry, got {other:?}"),
+            };
+            let body = serde_json::to_string(&PaperIntentRequest {
+                idempotency_key: Some(intent.intent_id.clone()),
+                market_id: intent.market_id.clone(),
+                token_id: intent.token_id.clone(),
+                side: match intent.side {
+                    TradeSide::Buy => "buy",
+                    TradeSide::Sell => "sell",
+                }
+                .to_string(),
+                quantity: intent.quantity,
+                limit_price: intent.limit_price,
+                purpose: ploy_operator_contracts::IntentPurpose::Entry,
+            })
+            .expect("request json");
+            let started = Instant::now();
+            write!(
+                client,
+                "POST /api/deployments/benchmark.live/intents HTTP/1.1\r\nHost: {addr}\r\nx-ploy-worker-token: benchmark-worker\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write request");
+            let response = read_response_body(&mut client);
+            let completed = Instant::now();
+            assert!(response.contains("\"state\":\"acknowledged\""));
+            let wire = entered.lock().expect("entered lock")[sequence];
+            canonical_tick_to_decision
+                .push(decision_at.duration_since(tick_started).as_micros() as u64);
+            canonical_tick_to_gateway.push(wire.duration_since(tick_started).as_micros() as u64);
+            canonical_tick_to_response
+                .push(completed.duration_since(tick_started).as_micros() as u64);
+            client_to_gateway.push(wire.duration_since(started).as_micros() as u64);
+            gateway_to_response.push(completed.duration_since(wire).as_micros() as u64);
+            end_to_end.push(completed.duration_since(started).as_micros() as u64);
+        }
+
+        println!(
+            "live-submit-latency-us canonical_tick_to_decision[p50={},p99={},p999={}] canonical_tick_to_gateway[p50={},p99={},p999={}] canonical_tick_to_response[p50={},p99={},p999={}] client_to_gateway[p50={},p99={},p999={}] gateway_to_response[p50={},p99={},p999={}] end_to_end[p50={},p99={},p999={}] samples={SAMPLES}",
+            percentile_micros(&mut canonical_tick_to_decision, 500),
+            percentile_micros(&mut canonical_tick_to_decision, 990),
+            percentile_micros(&mut canonical_tick_to_decision, 999),
+            percentile_micros(&mut canonical_tick_to_gateway, 500),
+            percentile_micros(&mut canonical_tick_to_gateway, 990),
+            percentile_micros(&mut canonical_tick_to_gateway, 999),
+            percentile_micros(&mut canonical_tick_to_response, 500),
+            percentile_micros(&mut canonical_tick_to_response, 990),
+            percentile_micros(&mut canonical_tick_to_response, 999),
+            percentile_micros(&mut client_to_gateway, 500),
+            percentile_micros(&mut client_to_gateway, 990),
+            percentile_micros(&mut client_to_gateway, 999),
+            percentile_micros(&mut gateway_to_response, 500),
+            percentile_micros(&mut gateway_to_response, 990),
+            percentile_micros(&mut gateway_to_response, 999),
+            percentile_micros(&mut end_to_end, 500),
+            percentile_micros(&mut end_to_end, 990),
+            percentile_micros(&mut end_to_end, 999),
+        );
+        drop(client);
+        server.join().expect("server thread");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3690,8 +4142,125 @@ mod tests {
 
         let trading_body =
             fs::read_to_string(runtime_root.join("trading-state.json")).expect("trading snapshot");
-        assert!(trading_body.contains("\"deployment_id\": \"example.live\""));
-        assert!(trading_body.contains("\"venue_order_id\": \"venue-live-http-1\""));
+        let trading: serde_json::Value =
+            serde_json::from_str(&trading_body).expect("snapshot json");
+        assert_eq!(trading[0]["deployment_id"], "example.live");
+        assert_eq!(
+            trading[0]["orders"][0]["venue_order_id"],
+            "venue-live-http-1"
+        );
+    }
+
+    #[test]
+    fn live_venue_submit_does_not_hold_the_daemon_mutex() {
+        let root = temp_dir("runtime-live-unlocked-submit");
+        let runtime_root = root.join("run/platform");
+        let registry_file = root.join("data/state/deployments.json");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+        fs::create_dir_all(registry_file.parent().expect("registry parent")).expect("create");
+        fs::write(
+            &registry_file,
+            serde_json::json!([{
+                "deployment_id":"example.live",
+                "bundle_id":"example",
+                "runtime_mode":"live",
+                "account_id":"0x1111111111111111111111111111111111111111",
+                "max_gross_exposure":"5",
+                "desired_state":"running",
+                "observed_state":"running"
+            }])
+            .to_string(),
+        )
+        .expect("registry");
+        let config = crate::config::PlatformConfig {
+            registry_file,
+            runtime_root: runtime_root.clone(),
+            status_file: runtime_root.join("system-status.json"),
+            deployment_status_file: runtime_root.join("deployments.json"),
+            trading_state_file: runtime_root.join("trading-state.json"),
+            ..crate::config::PlatformConfig::default()
+        };
+        crate::runtime::seed_empty_live_ledgers(&config);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let submits = Arc::new(AtomicUsize::new(0));
+        let mut daemon = crate::runtime::PloyDaemon::boot_with_live_execution(
+            &config,
+            Box::new(BlockingSubmitGateway {
+                entered: Mutex::new(Some(entered_tx)),
+                release: Mutex::new(release_rx),
+                submits: Arc::clone(&submits),
+            }),
+        )
+        .expect("boot daemon");
+        daemon.control_plane.deployments.set_observed_state(
+            "example.live",
+            ploy_operator_contracts::ObservedState::Running,
+        );
+        let state = Arc::new(AppState {
+            daemon: Arc::new(Mutex::new(daemon)),
+            events: Arc::new(EventBroker::default()),
+        });
+        let body = serde_json::to_string(&PaperIntentRequest {
+            idempotency_key: Some("blocking-1".to_string()),
+            market_id: "market-1".to_string(),
+            token_id: "token-1".to_string(),
+            side: "buy".to_string(),
+            quantity: rust_decimal::Decimal::ONE,
+            limit_price: Some(rust_decimal::Decimal::new(5, 1)),
+            purpose: ploy_operator_contracts::IntentPurpose::Entry,
+        })
+        .expect("request json");
+        let retry_body = body.clone();
+        let request_state = Arc::clone(&state);
+        let request = std::thread::spawn(move || {
+            handle_runtime_request(
+                "POST",
+                "/api/deployments/example.live/intents",
+                Some(&body),
+                &request_state,
+            )
+        });
+
+        entered_rx
+            .recv_timeout(StdDuration::from_secs(2))
+            .expect("venue submit entered");
+        let daemon_guard = state
+            .daemon
+            .try_lock()
+            .expect("daemon mutex must be available during venue submit");
+        assert_eq!(
+            daemon_guard
+                .trading
+                .get("example.live")
+                .and_then(|runtime| runtime.order("order-request-blocking-1"))
+                .expect("pending order")
+                .state,
+            ploy_trading::OrderState::Pending
+        );
+        drop(daemon_guard);
+
+        let retry_state = Arc::clone(&state);
+        let (retry_tx, retry_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = retry_tx.send(handle_runtime_request(
+                "POST",
+                "/api/deployments/example.live/intents",
+                Some(&retry_body),
+                &retry_state,
+            ));
+        });
+        let (retry_status, retry_response) = retry_rx
+            .recv_timeout(StdDuration::from_secs(2))
+            .expect("idempotent retry must not wait for venue");
+        assert_eq!(retry_status, 200);
+        assert!(retry_response.contains("\"state\":\"pending\""));
+        assert_eq!(submits.load(Ordering::SeqCst), 1);
+
+        release_tx.send(()).expect("release submit");
+        let (status, response) = request.join().expect("request thread");
+        assert_eq!(status, 200);
+        assert!(response.contains("\"state\":\"acknowledged\""));
     }
 
     #[test]
@@ -3767,8 +4336,10 @@ mod tests {
 
         let trading_body =
             fs::read_to_string(root.join("run/platform/trading-state.json")).expect("snapshot");
-        assert!(trading_body.contains("\"state\": \"unknown\""));
-        assert!(trading_body.contains("\"deployment_id\": \"example.live\""));
+        let trading: serde_json::Value =
+            serde_json::from_str(&trading_body).expect("snapshot json");
+        assert_eq!(trading[0]["orders"][0]["state"], "unknown");
+        assert_eq!(trading[0]["deployment_id"], "example.live");
     }
 
     #[test]
@@ -3856,8 +4427,13 @@ mod tests {
 
         let trading_body =
             fs::read_to_string(runtime_root.join("trading-state.json")).expect("trading snapshot");
-        assert!(trading_body.contains("\"state\": \"canceled\""));
-        assert!(trading_body.contains("\"venue_order_id\": \"venue-live-http-cancel-1\""));
+        let trading: serde_json::Value =
+            serde_json::from_str(&trading_body).expect("snapshot json");
+        assert_eq!(trading[0]["orders"][0]["state"], "canceled");
+        assert_eq!(
+            trading[0]["orders"][0]["venue_order_id"],
+            "venue-live-http-cancel-1"
+        );
     }
 
     #[test]
@@ -3952,9 +4528,13 @@ mod tests {
 
         let trading_body =
             fs::read_to_string(runtime_root.join("trading-state.json")).expect("trading snapshot");
-        assert!(trading_body.contains("\"venue_order_history\": ["));
-        assert!(trading_body.contains("venue-live-http-replace-1"));
-        assert!(trading_body.contains("\"revision\": 1"));
+        let trading: serde_json::Value =
+            serde_json::from_str(&trading_body).expect("snapshot json");
+        assert_eq!(
+            trading[0]["orders"][0]["venue_order_history"][0],
+            "venue-live-http-replace-1"
+        );
+        assert_eq!(trading[0]["orders"][0]["revision"], 1);
     }
 
     #[test]

@@ -1,3 +1,196 @@
+# Current Session - Live Hot-Path Latency (2026-07-13)
+
+## Continuation - Tick-Level Execution Correction
+
+Evidence stage: `execution_quality` implementation hardening. PM5D is a
+five-minute settlement product, but its live decision and submission path is
+still tick-driven and must be evaluated as a seconds-level market. Live remains
+paused; this slice does not deploy, resume trading, or submit a real order.
+
+### Files / Ownership
+
+- `crates/ploy-market-data/{collector,feeds,scanner}.rs`: direct Polymarket CLOB
+  book/BBA ticks and fail-closed disconnect behavior.
+- `crates/ploy-strategy-bundles/{config,strategies/three_layer}.rs`: unthrottled
+  runtime config and stale-fallback protection.
+- `crates/ploy-strategy-runtime/src/live.rs`: direct-vs-DB source selection and
+  remaining Binance tick wiring.
+- `config/strategies/02-pm5d-threelayer*.toml`: live/dry-run source parity.
+- `tasks/{todo,lessons}.md`: correction, evidence, and reusable rule.
+
+Subagents are read-only reviewers for the CLOB tick semantics, Binance direct
+feed gap, and end-to-end latency benchmark boundary; the main agent owns all
+workspace edits.
+
+### Tasks
+
+- [x] Convert Polymarket CLOB `book` and `price_change` WebSocket events into
+      immediate `MarketUpdate::Quote` ticks with venue timestamps.
+- [x] Prevent stale WebSocket deltas from mutating newer book state, clear
+      executable depth on empty books, and keep delayed REST/DB ticks out of the
+      direct hot path.
+- [x] Remove the 10 Hz ThreeLayer throttle and keep live/dry-run configs on the
+      same direct-primary source policy.
+- [x] Restore strategy-runtime compilation after moving `MarketDataSource` to
+      its canonical module import.
+- [x] Wire production-required Binance Spot/AggTrade/L2 updates directly into
+      the strategy broadcast path instead of depending on multi-second DB polls.
+- [x] Extend the no-live-order benchmark from canonical broadcast tick receipt
+      through ThreeLayer evaluation, daemon risk/persistence, mock gateway, and
+      response with p50/p99/p999 output. Raw vendor WS parsing and real venue
+      network latency remain explicitly outside this local benchmark.
+- [x] Run focused suites, full relevant package checks, formatting, Clippy,
+      independent code review, and diff validation.
+- [ ] Commit atomically, push the existing branch, update PR #755, and monitor
+      CI without deploying or resuming live trading.
+
+### Review
+
+- `Dual` and `ExternalDirect` now use one native Binance combined WebSocket for
+  `@trade`, `@aggTrade`, and `@depth20@100ms`; `LocalDb` remains the explicit
+  polled mode. Disconnects clear cached Spot state before quote ticks can open a
+  new order.
+- Polymarket `book` snapshots and `price_change` deltas maintain an in-memory
+  depth book. Empty books clear executable liquidity, stale deltas are rejected
+  before mutation, same-millisecond deltas are retained, and reconnects remain
+  fail-closed until a fresh WS snapshot. The hot path uses direct Tungstenite
+  instead of the SDK broadcast layer that hides lag events.
+- Spot, Quote, AggTrade, and L2Depth updates can all trigger immediate ThreeLayer
+  entry evaluation. The 10 Hz runtime throttle is removed from the paired live
+  and dry-run configs.
+- Local release benchmark, 1,001 canonical broadcast ticks and a mock gateway,
+  no venue/wallet/chain access: canonical tick to decision p50/p99/p999
+  `2/6/16 us`; canonical tick to gateway `2267/6942/8015 us`; canonical tick
+  to response `3797/11169/18409 us`. Raw vendor WS parsing and real Polymarket
+  network ACK remain outside this benchmark and must be measured on the trading
+  host before live promotion.
+- Verification passed: 62 live market-data tests, 228 strategy-bundle tests,
+  12 strategy-runtime live/live-execution tests, 90 daemon-host tests (1
+  ignored), `new-ployd` + full `new-ploy-runner` checks, focused Clippy with no
+  errors, formatting, and `git diff --check`. Existing workspace warnings remain.
+
+## Continuation - Venue Fees And Execution Events
+
+- [x] Add one shared venue-aware fee calculator with maker/taker and rounding semantics.
+- [x] Use it in simulated execution and backtest/research fee accounting.
+- [x] Make live Polymarket REST reconciliation confirmed-only and use cached V2 fee metadata.
+- [x] Prefer authenticated venue order/fill events over snapshot polling, with bounded fallback.
+- [x] Measure local client-to-gateway and gateway-to-response latency without enabling live trading.
+
+Evidence stage: implementation hardening only. Live remains paused; this slice
+does not deploy, resume trading, or produce promotion evidence.
+
+## Files / Ownership
+
+- `crates/ploy-strategy-bundles/src/engine.rs`: skip remote fill reconciliation
+  when no active order can produce a fill.
+- `crates/ploy-connectivity/{Cargo.toml,src/lib.rs}`: main agent owns the
+  authenticated Polymarket user-channel implementation, bounded gap recovery,
+  event mapping, and focused tests.
+- `crates/ploy-platform-runtime/src/reconcile.rs`: main agent owns applying
+  confirmed fills before order observations and the focused lifecycle tests.
+- Live submission hot-path files and latency benchmark files: main agent owns
+  edits after a read-only architecture pass identifies the narrowest safe seam.
+- `tasks/todo.md`: plan and verification evidence.
+
+Subagents are read-only reviewers for the WebSocket API seam, runtime ordering,
+and submission-path bottlenecks; they do not own or edit workspace files.
+
+## Tasks
+
+- [x] Add a failing runtime test proving idle market updates do not reconcile.
+- [x] Skip reconciliation until an active order exists.
+- [x] Run focused tests, formatting, and diff checks.
+- [x] Separate market-catalog refresh from quote refresh and lower active quote
+      polling to 100ms while keeping catalog queries at 2 seconds.
+- [x] Complete authenticated Polymarket user events with a bounded queue,
+      stable fill identity, gap detection, and five-second periodic/degraded
+      REST catch-up bounded by a two-second timeout.
+- [x] Apply confirmed fills before acknowledgement/cancellation observations in
+      the runtime reconciliation loop.
+- [x] Add focused regressions for maker/taker mapping, CONFIRMED-only fills,
+      WS/REST deduplication, early events, cancellation ordering, overflow, and
+      degraded recovery.
+- [x] Remove avoidable synchronous/network work from the quote-to-order hot path
+      while preserving pending-before-side-effect, idempotency, and Unknown on
+      ambiguous submission.
+- [x] Add a no-live-order local benchmark for client-to-gateway-to-response
+      instrumentation and report p50/p99/p999.
+- [x] Run focused tests, locked compilation, independent review, atomic commits,
+      and final diff/worktree checks without deploying or resuming live trading.
+
+## Review
+
+- Prediction-market fees now share one calculator covering probability-power,
+  notional, and per-contract formulas, role-specific maker/taker rates, exact,
+  five-place truncation, and ceiling semantics. Polymarket sub-tick fees round to
+  zero; Kalshi trade-fee ceiling, member balance precision, per-order rounding
+  accumulator, and rebates are modeled separately. Full-depth sweeps preserve
+  match-level prices for nonlinear fee calculation instead of charging the VWAP.
+- Simulated execution uses official Polymarket family defaults. Predict.fun,
+  Kalshi, and custom Polymarket families require explicit market metadata instead
+  of silently applying fixture rates; Predict.fun accepts its native bps and fee
+  asset. Share-denominated fees fail closed until canonical fills track net share
+  deductions, avoiding false position/PnL results.
+- Current Polymarket crypto strategy/research edge calculations use the shared 7%
+  probability curve instead of the stale 2% constant.
+- Live REST reconciliation now ignores MATCHED/MINED/RETRYING/FAILED trades,
+  accepts only CONFIRMED fills, derives maker/taker platform fees from cached V2
+  `fd` metadata, and bounds the degraded REST catch-up to two seconds.
+- Fee-slice verification passed: 16 market-contract tests, 223 strategy-bundle
+  tests (1 ignored), 167 research tests, research-example compilation, and
+  `ploy-strategy-runtime` compilation. Existing
+  dead-code warnings remain unchanged.
+
+- Empty-order runtime updates now perform zero fill-reconciliation calls. Active,
+  unknown, acknowledged, and partially-filled orders retain the existing
+  fail-closed reconciliation behavior.
+- Quote polling was deliberately not changed in this atomic slice because the
+  same loop also refreshes event metadata. Lowering its sleep directly would
+  amplify all remote DB queries rather than only improve quote freshness.
+- Verification passed: 203 `ploy-strategy-bundles` library tests, the
+  `ploy-strategy-runtime` live/live-execution build, workspace formatting, and
+  `git diff --check`. The build reports 16 existing dead-code warnings.
+- The DB feed now prioritizes 100ms quote ticks while retaining 2-second catalog
+  refreshes. Both timers skip missed ticks, so a slow DB response does not cause
+  a burst of stale catch-up queries; catalog failures preserve the last known
+  active-token set.
+- Second-slice verification passed: 54 live market-data tests, 11 live strategy
+  runtime tests, six market-data-boundary tests, formatting, and diff checks.
+- Authenticated Polymarket user events now drive order/fill reconciliation first.
+  The bounded queue detects overflow, connection loss, delayed/unknown order
+  states, and failed/unknown trades; REST catch-up restores confirmed fills and
+  tracked order states. Periodic five-second catch-up remains because the SDK
+  hides broadcast lag from consumers.
+- Runtime reconciliation applies confirmed fills before acknowledgement or
+  cancellation observations. Terminal/partial state cannot regress on late ACK
+  or ambiguous status, and canceled orders remain eligible for late confirmed
+  fills for 24 hours. `state_changed_at` is persisted across restart so that
+  window is durable.
+- Live submission now persists Pending before the venue side effect, releases
+  the daemon mutex during signing/posting, and persists the terminal outcome
+  afterward. Concurrent idempotent retries reuse Pending and never duplicate the
+  submit. Pending cancel/replace fails closed while submission is in progress.
+- The operator TCP client reuses keep-alive connections and reads exact
+  Content-Length responses; stale idle sockets reconnect before writes without
+  retrying ambiguous POST requests.
+- Local release benchmark (1001 loopback HTTP submissions with a mock acknowledged
+  gateway; no venue, wallet, or chain access): client-to-gateway p50 2099 us,
+  p99 6042 us, p999 6381 us; gateway-to-response p50 1461 us, p99 3730 us, p999 5857 us;
+  end-to-end p50 3632 us, p99 9535 us, p999 12114 us. These numbers include both
+  durable Pending and terminal snapshot writes but exclude real Polymarket
+  network latency and chain finality.
+- Verification passed: operator contracts 23, trading 22, connectivity 26,
+  platform runtime 62, control client 14, daemon host 90 (1 ignored), strategy
+  bundles 218, plus live-execution checks for `ploy-strategy-runtime`,
+  `new-ployd`, and `new-ploy-runner`. Live remains paused and no real order was
+  submitted.
+- Independent Standards/Spec review found and closed the post-submit audit panic,
+  inaccurate benchmark boundary names, WS maker-side drift, duplicated pending
+  submission guards, and the original monolithic commit. The remaining REST/WS
+  matcher/fill-builder duplication is low-priority and non-blocking because both
+  paths now share the same side invariant and regression coverage.
+
 # Current Session - Market Data V2 And Redeem Repair (2026-07-12)
 
 Evidence stage: `deployment/runtime safety plumbing`. This slice repairs data

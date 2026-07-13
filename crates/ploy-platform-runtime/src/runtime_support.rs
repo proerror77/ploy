@@ -86,6 +86,7 @@ pub fn build_trading_state_snapshot(
                 venue_order_history: order.venue_order_history,
                 revision: order.revision,
                 state: order_state_wire(order.state),
+                state_changed_at: order.state_changed_at,
                 filled_qty: order.filled_qty,
                 rejection_reason: order.rejection_reason,
                 last_error: order.last_error,
@@ -168,6 +169,7 @@ pub fn restore_trading_runtime(snapshot: TradingStateSnapshot) -> io::Result<Tra
                 venue_order_history: order.venue_order_history,
                 revision: order.revision,
                 state: order_state_from_wire(&order.state)?,
+                state_changed_at: order.state_changed_at,
                 filled_qty: order.filled_qty,
                 rejection_reason: order.rejection_reason,
                 last_error: order.last_error,
@@ -449,8 +451,8 @@ where
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
     fs::create_dir_all(parent)?;
-    let body = serde_json::to_vec_pretty(value)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let body =
+        serde_json::to_vec(value).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     let tmp_path = path.with_extension("tmp");
     fs::write(&tmp_path, &body)?;
     fs::rename(&tmp_path, path)
@@ -544,6 +546,7 @@ mod tests {
             venue_order_history: Vec::new(),
             revision: 0,
             state,
+            state_changed_at: Some(chrono::Utc::now()),
             filled_qty,
             rejection_reason: None,
             last_error: None,
@@ -642,6 +645,7 @@ mod tests {
             venue_order_history: vec!["venue-0".to_string()],
             revision: 2,
             state: OrderState::Acknowledged,
+            state_changed_at: Some(chrono::Utc::now()),
             filled_qty: Decimal::new(25, 0),
             rejection_reason: None,
             last_error: None,
@@ -704,6 +708,7 @@ mod tests {
                 venue_order_history: Vec::new(),
                 revision: 0,
                 state: "filled".to_string(),
+                state_changed_at: Some(now),
                 filled_qty: dec!(4),
                 rejection_reason: None,
                 last_error: None,
@@ -728,5 +733,6 @@ mod tests {
         assert_eq!(restored.positions[0].net_qty, dec!(4));
         assert_eq!(restored.fills.len(), 1);
         assert_eq!(restored.orders[0].state, OrderState::Filled);
+        assert_eq!(restored.orders[0].state_changed_at, Some(now));
     }
 }

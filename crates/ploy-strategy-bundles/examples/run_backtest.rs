@@ -242,6 +242,7 @@ mod tests {
                 revision: 0,
                 idempotency_key: None,
                 state: ploy_trading::OrderState::Filled,
+                state_changed_at: Some(timestamp),
                 filled_qty: dec!(10),
                 rejection_reason: None,
                 last_error: None,

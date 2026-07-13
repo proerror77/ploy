@@ -2311,6 +2311,7 @@ mod tests {
             } else {
                 0.0
             },
+            entry_sweep_fee_usd_15u: 0.0,
             exit_sweep_shares_15u: 15.0 / 0.70,
             entry_sweep_levels_15u: if fillable { 1.0 } else { 0.0 },
             exit_sweep_levels_15u: if fillable { 1.0 } else { 0.0 },

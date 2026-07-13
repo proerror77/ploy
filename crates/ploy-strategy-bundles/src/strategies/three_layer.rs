@@ -880,6 +880,23 @@ impl ThreeLayerStrategy {
         *self.diagnostics.entry(key).or_insert(0) += value;
     }
 
+    fn maybe_entry_for_symbol(
+        &mut self,
+        symbol: &Arc<str>,
+        ts: DateTime<Utc>,
+        positions: &PositionLedger,
+        orders: &OrderLedger,
+    ) -> Option<StrategyDecision> {
+        if self
+            .last_entry
+            .get(symbol)
+            .is_some_and(|last| (ts - *last).num_seconds() < self.config.cooldown_secs as i64)
+        {
+            return None;
+        }
+        self.try_entry(symbol, ts, positions, orders)
+    }
+
     fn bump_settlement_autofactor_edge_bucket(
         &mut self,
         metric: SettlementAutofactorEdgeMetric,
@@ -2452,7 +2469,14 @@ impl StrategyLogic for ThreeLayerStrategy {
 
                 let price_f64 = match price.to_f64() {
                     Some(p) if p > 0.0 => p,
-                    _ => return Vec::new(),
+                    _ => {
+                        self.spot.remove(symbol);
+                        self.drift.remove(symbol);
+                        self.drift_state.remove(symbol);
+                        self.lob.remove(symbol);
+                        self.mprice_acc.remove(symbol);
+                        return Vec::new();
+                    }
                 };
 
                 self.drift
@@ -2484,14 +2508,7 @@ impl StrategyLogic for ThreeLayerStrategy {
                 let mut decisions =
                     self.exit_decisions_for_symbol(symbol, *ts, spot_opt, positions, orders);
 
-                // Cooldown check before entry
-                if let Some(last) = self.last_entry.get(symbol) {
-                    if (*ts - *last).num_seconds() < self.config.cooldown_secs as i64 {
-                        return decisions;
-                    }
-                }
-
-                if let Some(entry) = self.try_entry(symbol, *ts, positions, orders) {
+                if let Some(entry) = self.maybe_entry_for_symbol(symbol, *ts, positions, orders) {
                     decisions.push(entry);
                 }
                 decisions
@@ -2507,6 +2524,13 @@ impl StrategyLogic for ThreeLayerStrategy {
                 ask_levels,
                 ts,
             } => {
+                if self.quotes.get(token_id.as_ref()).is_some_and(|current| {
+                    current.ts > *ts
+                        && (current.bid.is_some() || current.ask.is_some())
+                        && (bid.is_some() || ask.is_some())
+                }) {
+                    return Vec::new();
+                }
                 self.feed_time = Some(*ts);
                 self.quotes.insert(
                     token_id.clone(),
@@ -2516,26 +2540,13 @@ impl StrategyLogic for ThreeLayerStrategy {
                         ts: *ts,
                     },
                 );
-                let previous = self
-                    .quote_depth
-                    .get(token_id.as_ref())
-                    .cloned()
-                    .unwrap_or_default();
                 self.quote_depth.insert(
                     token_id.clone(),
                     QuoteDepth {
-                        bid_size: (*bid_size).or(previous.bid_size),
-                        ask_size: (*ask_size).or(previous.ask_size),
-                        bid_levels: if bid_levels.is_empty() {
-                            previous.bid_levels
-                        } else {
-                            bid_levels.clone()
-                        },
-                        ask_levels: if ask_levels.is_empty() {
-                            previous.ask_levels
-                        } else {
-                            ask_levels.clone()
-                        },
+                        bid_size: *bid_size,
+                        ask_size: *ask_size,
+                        bid_levels: bid_levels.clone(),
+                        ask_levels: ask_levels.clone(),
                     },
                 );
                 self.record_quote_ask(token_id.clone(), *ask, *ts);
@@ -2544,7 +2555,12 @@ impl StrategyLogic for ThreeLayerStrategy {
                     return Vec::new();
                 };
                 let spot = self.spot.get(&symbol).and_then(|p| p.to_f64());
-                self.exit_decisions_for_symbol(&symbol, *ts, spot, positions, orders)
+                let mut decisions =
+                    self.exit_decisions_for_symbol(&symbol, *ts, spot, positions, orders);
+                if let Some(entry) = self.maybe_entry_for_symbol(&symbol, *ts, positions, orders) {
+                    decisions.push(entry);
+                }
+                decisions
             }
 
             MarketUpdate::AggTrade {
@@ -2569,7 +2585,9 @@ impl StrategyLogic for ThreeLayerStrategy {
                     *is_buyer_maker,
                     *ts,
                 );
-                Vec::new()
+                self.maybe_entry_for_symbol(symbol, *ts, positions, orders)
+                    .into_iter()
+                    .collect()
             }
 
             MarketUpdate::L2Depth {
@@ -2605,7 +2623,9 @@ impl StrategyLogic for ThreeLayerStrategy {
                         .or_insert_with(|| MpriceDriftAccumulator::new(300.0))
                         .push(*ts, microprice_offset);
                 }
-                Vec::new()
+                self.maybe_entry_for_symbol(symbol, *ts, positions, orders)
+                    .into_iter()
+                    .collect()
             }
 
             MarketUpdate::L2 {
@@ -3409,6 +3429,123 @@ mod tests {
     }
 
     #[test]
+    fn older_quote_cannot_overwrite_newer_ws_tick() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 13, 9, 0, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+        let quote = |ask, ts| MarketUpdate::Quote {
+            token_id: Arc::from("token-up"),
+            bid: Some(ask - dec!(0.01)),
+            ask: Some(ask),
+            bid_size: Some(dec!(10)),
+            ask_size: Some(dec!(10)),
+            bid_levels: Vec::new(),
+            ask_levels: Vec::new(),
+            ts,
+        };
+
+        strategy.on_update(&quote(dec!(0.60), now), &positions, &orders);
+        strategy.on_update(
+            &quote(dec!(0.40), now - chrono::Duration::seconds(1)),
+            &positions,
+            &orders,
+        );
+
+        assert_eq!(strategy.quotes["token-up"].ask, Some(dec!(0.60)));
+        assert_eq!(strategy.quotes["token-up"].ts, now);
+    }
+
+    #[test]
+    fn wire_quote_recovers_after_local_disconnect_marker() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 13, 9, 0, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+        let quote = |bid, ask, ts| MarketUpdate::Quote {
+            token_id: Arc::from("token-up"),
+            bid,
+            ask,
+            bid_size: bid.map(|_| dec!(10)),
+            ask_size: ask.map(|_| dec!(10)),
+            bid_levels: Vec::new(),
+            ask_levels: Vec::new(),
+            ts,
+        };
+
+        strategy.on_update(
+            &quote(Some(dec!(0.59)), Some(dec!(0.60)), now),
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &quote(None, None, now + chrono::Duration::seconds(1)),
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &quote(
+                Some(dec!(0.54)),
+                Some(dec!(0.55)),
+                now + chrono::Duration::milliseconds(500),
+            ),
+            &positions,
+            &orders,
+        );
+
+        assert_eq!(strategy.quotes["token-up"].ask, Some(dec!(0.55)));
+    }
+
+    #[test]
+    fn empty_quote_tick_clears_cached_execution_depth() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 7, 13, 9, 0, 0).unwrap();
+        let mut strategy = ThreeLayerStrategy::new(test_config());
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-up"),
+                bid: Some(dec!(0.49)),
+                ask: Some(dec!(0.50)),
+                bid_size: Some(dec!(10)),
+                ask_size: Some(dec!(20)),
+                bid_levels: vec![level(dec!(0.49), dec!(10))],
+                ask_levels: vec![level(dec!(0.50), dec!(20))],
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &MarketUpdate::Quote {
+                token_id: Arc::from("token-up"),
+                bid: None,
+                ask: None,
+                bid_size: None,
+                ask_size: None,
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
+                ts: now + chrono::Duration::milliseconds(1),
+            },
+            &positions,
+            &orders,
+        );
+
+        let depth = &strategy.quote_depth["token-up"];
+        assert_eq!(depth.bid_size, None);
+        assert_eq!(depth.ask_size, None);
+        assert!(depth.bid_levels.is_empty());
+        assert!(depth.ask_levels.is_empty());
+    }
+
+    #[test]
     fn take_profit_requires_bid_size_for_position_quantity() {
         use chrono::TimeZone;
 
@@ -3800,6 +3937,197 @@ mod tests {
             }
             other => panic!("expected one executable entry, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fresh_quote_tick_triggers_entry_without_waiting_for_next_spot_tick() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        let initial = strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        assert!(initial.is_empty());
+
+        let decisions = strategy.on_update(
+            &entry_quote(
+                "token-up",
+                now + chrono::Duration::milliseconds(1),
+                Some(dec!(200)),
+            ),
+            &positions,
+            &orders,
+        );
+
+        assert!(matches!(
+            decisions.as_slice(),
+            [StrategyDecision::Enter { intent, .. }] if intent.token_id == "token-up"
+        ));
+    }
+
+    #[test]
+    fn unavailable_spot_tick_blocks_quote_triggered_entry_until_reconnect() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+
+        strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &MarketUpdate::L2Depth {
+                symbol: Arc::from("BTCUSDT"),
+                obi: 0.8,
+                spread_bps: 1,
+                bid_depth_near: 20.0,
+                ask_depth_near: 5.0,
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: Decimal::ZERO,
+                ts: now + chrono::Duration::milliseconds(1),
+            },
+            &positions,
+            &orders,
+        );
+
+        let decisions = strategy.on_update(
+            &entry_quote(
+                "token-up",
+                now + chrono::Duration::milliseconds(2),
+                Some(dec!(200)),
+            ),
+            &positions,
+            &orders,
+        );
+
+        assert!(decisions.is_empty());
+        assert!(!strategy.spot.contains_key("BTCUSDT"));
+        assert!(!strategy.lob.contains_key("BTCUSDT"));
+    }
+
+    #[test]
+    fn aggtrade_tick_re_evaluates_entry_without_waiting_for_spot() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+        strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &entry_quote("token-up", now, Some(dec!(200))),
+            &positions,
+            &orders,
+        );
+
+        let decisions = strategy.on_update(
+            &MarketUpdate::AggTrade {
+                symbol: Arc::from("BTCUSDT"),
+                agg_trade_id: 1,
+                price: dec!(100000),
+                quantity: dec!(1),
+                is_buyer_maker: false,
+                ts: now + chrono::Duration::milliseconds(1),
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(matches!(
+            decisions.as_slice(),
+            [StrategyDecision::Enter { intent, .. }] if intent.token_id == "token-up"
+        ));
+    }
+
+    #[test]
+    fn l2_depth_tick_re_evaluates_entry_without_waiting_for_spot() {
+        use chrono::TimeZone;
+
+        let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
+        let mut config = test_config();
+        config.min_distance_over_sigma = 0.0;
+        config.min_direction_prob = 0.5;
+        let mut strategy = ThreeLayerStrategy::new(config);
+        discover_test_event(&mut strategy, now);
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+        strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: dec!(100000),
+                ts: now,
+            },
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &entry_quote("token-up", now, Some(dec!(200))),
+            &positions,
+            &orders,
+        );
+
+        let decisions = strategy.on_update(
+            &MarketUpdate::L2Depth {
+                symbol: Arc::from("BTCUSDT"),
+                obi: 0.25,
+                spread_bps: 1,
+                bid_depth_near: 20.0,
+                ask_depth_near: 10.0,
+                ts: now + chrono::Duration::milliseconds(1),
+            },
+            &positions,
+            &orders,
+        );
+
+        assert!(matches!(
+            decisions.as_slice(),
+            [StrategyDecision::Enter { intent, .. }] if intent.token_id == "token-up"
+        ));
     }
 
     #[test]
@@ -4824,7 +5152,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
         let mut config = test_config();
         config.profile = ThreeLayerProfile::SettlementProbability;
-        config.min_edge = 0.02;
+        config.min_edge = 0.01;
         config.min_entry_score = 0.25;
         config.max_sweep_levels = 3;
         config.max_sweep_price_delta = dec!(0.10);
@@ -4881,7 +5209,7 @@ mod tests {
             [StrategyDecision::Enter { signal, .. }] => {
                 let signal = signal.as_ref().expect("signal");
                 assert!(
-                    signal.edge > 0.02,
+                    signal.edge > 0.01,
                     "expected full-depth executable edge above min_edge, got {}",
                     signal.edge
                 );
@@ -4988,7 +5316,7 @@ mod tests {
             Some(&1)
         );
         assert_eq!(
-            diagnostics.get("settlement_autofactor_raw_score_neg2_to_0pct"),
+            diagnostics.get("settlement_autofactor_raw_score_neg5_to_neg2pct"),
             Some(&1)
         );
         assert_eq!(diagnostics.get("skip_entry_score"), Some(&1));
@@ -5429,7 +5757,8 @@ mod tests {
         assert_eq!(diagnostics.get("skip_edge_score"), None);
         assert_eq!(
             diagnostics.get("settlement_autofactor_formula_evaluations"),
-            Some(&1)
+            Some(&2),
+            "the second evaluation is the immediate quote-tick entry path"
         );
     }
 

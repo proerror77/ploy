@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct ControlPlaneClient {
@@ -17,6 +18,7 @@ pub struct ControlPlaneClient {
     pub operator_token: Option<String>,
     pub sidecar_token: Option<String>,
     pub runtime_root: PathBuf,
+    connection: Arc<Mutex<Option<TcpStream>>>,
 }
 
 impl ControlPlaneClient {
@@ -36,6 +38,7 @@ impl ControlPlaneClient {
                 .ok()
                 .filter(|token| !token.trim().is_empty()),
             runtime_root: runtime_root.into(),
+            connection: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -273,6 +276,7 @@ impl ControlPlaneClient {
             operator_token: None,
             sidecar_token: None,
             runtime_root: self.runtime_root.clone(),
+            connection: Arc::clone(&self.connection),
         }
     }
 
@@ -329,27 +333,16 @@ impl ControlPlaneClient {
     where
         T: DeserializeOwned,
     {
-        let mut stream = TcpStream::connect(&self.control_plane_addr)
-            .map_err(|err| format!("connect {}: {err}", self.control_plane_addr))?;
         let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: {}\r\n{}Connection: close\r\n\r\n",
+            "GET {path} HTTP/1.1\r\nHost: {}\r\n{}Connection: keep-alive\r\n\r\n",
             self.control_plane_addr,
             self.authorization_headers()
         );
-        stream
-            .write_all(request.as_bytes())
-            .map_err(|err| format!("write request: {err}"))?;
-
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .map_err(|err| format!("read response: {err}"))?;
-
-        let (status_line, body) = split_http_response(&response)?;
+        let (status_line, body) = self.send_request(&request)?;
         if !status_line.contains("200") {
-            return Err(decode_http_error(status_line, body));
+            return Err(decode_http_error(&status_line, &body));
         }
-        serde_json::from_str(body).map_err(|err| format!("parse HTTP body: {err}"))
+        serde_json::from_str(&body).map_err(|err| format!("parse HTTP body: {err}"))
     }
 
     fn send_json<B, T>(&self, method: &str, path: &str, body: &B) -> Result<T, String>
@@ -371,57 +364,70 @@ impl ControlPlaneClient {
         B: serde::Serialize,
         T: DeserializeOwned,
     {
-        let mut stream = TcpStream::connect(&self.control_plane_addr)
-            .map_err(|err| format!("connect {}: {err}", self.control_plane_addr))?;
         let body = serde_json::to_string(body).map_err(|err| format!("serialize body: {err}"))?;
         let request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: {}\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
             self.control_plane_addr,
             authorization_headers,
             body.len(),
             body
         );
-        stream
-            .write_all(request.as_bytes())
-            .map_err(|err| format!("write request: {err}"))?;
-
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .map_err(|err| format!("read response: {err}"))?;
-
-        let (status_line, body) = split_http_response(&response)?;
+        let (status_line, body) = self.send_request(&request)?;
         if !status_line.contains("200") {
-            return Err(decode_http_error(status_line, body));
+            return Err(decode_http_error(&status_line, &body));
         }
-        serde_json::from_str(body).map_err(|err| format!("parse HTTP body: {err}"))
+        serde_json::from_str(&body).map_err(|err| format!("parse HTTP body: {err}"))
     }
 
     fn send_empty<T>(&self, method: &str, path: &str) -> Result<T, String>
     where
         T: DeserializeOwned,
     {
-        let mut stream = TcpStream::connect(&self.control_plane_addr)
-            .map_err(|err| format!("connect {}: {err}", self.control_plane_addr))?;
         let request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: {}\r\n{}Connection: close\r\n\r\n",
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\n{}Connection: keep-alive\r\n\r\n",
             self.control_plane_addr,
             self.authorization_headers()
         );
-        stream
-            .write_all(request.as_bytes())
-            .map_err(|err| format!("write request: {err}"))?;
-
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .map_err(|err| format!("read response: {err}"))?;
-
-        let (status_line, body) = split_http_response(&response)?;
+        let (status_line, body) = self.send_request(&request)?;
         if !status_line.contains("200") {
-            return Err(decode_http_error(status_line, body));
+            return Err(decode_http_error(&status_line, &body));
         }
-        serde_json::from_str(body).map_err(|err| format!("parse HTTP body: {err}"))
+        serde_json::from_str(&body).map_err(|err| format!("parse HTTP body: {err}"))
+    }
+
+    fn send_request(&self, request: &str) -> Result<(String, String), String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "control-plane connection lock poisoned".to_string())?;
+        if connection.as_mut().is_some_and(connection_closed) {
+            *connection = None;
+        }
+        if connection.is_none() {
+            let stream = TcpStream::connect(&self.control_plane_addr)
+                .map_err(|err| format!("connect {}: {err}", self.control_plane_addr))?;
+            let _ = stream.set_nodelay(true);
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+            let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+            *connection = Some(stream);
+        }
+        let stream = connection.as_mut().expect("connection initialized");
+        if let Err(error) = stream.write_all(request.as_bytes()) {
+            *connection = None;
+            return Err(format!("write request: {error}"));
+        }
+        match read_http_response(stream) {
+            Ok((status_line, body, close)) => {
+                if close {
+                    *connection = None;
+                }
+                Ok((status_line, body))
+            }
+            Err(error) => {
+                *connection = None;
+                Err(error)
+            }
+        }
     }
 
     fn authorization_headers(&self) -> String {
@@ -437,16 +443,64 @@ impl ControlPlaneClient {
     }
 }
 
-fn split_http_response(response: &str) -> Result<(&str, &str), String> {
-    let mut parts = response.splitn(2, "\r\n\r\n");
-    let status_line = parts
-        .next()
-        .and_then(|headers| headers.lines().next())
-        .ok_or_else(|| "missing HTTP status line".to_string())?;
-    let body = parts
-        .next()
-        .ok_or_else(|| "missing HTTP body".to_string())?;
-    Ok((status_line, body))
+fn connection_closed(stream: &mut TcpStream) -> bool {
+    if stream.set_nonblocking(true).is_err() {
+        return true;
+    }
+    let mut byte = [0_u8; 1];
+    let closed = match stream.peek(&mut byte) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+        Err(_) => true,
+    };
+    let _ = stream.set_nonblocking(false);
+    closed
+}
+
+fn read_http_response(stream: &mut TcpStream) -> Result<(String, String, bool), String> {
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .map_err(|err| format!("read HTTP status: {err}"))?;
+    if status_line.is_empty() {
+        return Err("missing HTTP status line".to_string());
+    }
+
+    let mut content_length = None;
+    let mut close = false;
+    loop {
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .map_err(|err| format!("read HTTP headers: {err}"))?;
+        if line.is_empty() {
+            return Err("missing HTTP body".to_string());
+        }
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = Some(
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|err| format!("invalid HTTP Content-Length: {err}"))?,
+                );
+            } else if name.eq_ignore_ascii_case("connection") {
+                close = value.trim().eq_ignore_ascii_case("close");
+            }
+        }
+    }
+    let content_length = content_length.ok_or_else(|| "missing HTTP Content-Length".to_string())?;
+    let mut body = vec![0_u8; content_length];
+    reader
+        .read_exact(&mut body)
+        .map_err(|err| format!("read HTTP body: {err}"))?;
+    let body = String::from_utf8(body).map_err(|err| format!("decode HTTP body: {err}"))?;
+    Ok((status_line, body, close))
 }
 
 fn decode_http_error(status_line: &str, body: &str) -> String {
@@ -971,6 +1025,7 @@ mod tests {
             operator_token: None,
             sidecar_token: None,
             runtime_root,
+            connection: Default::default(),
         };
 
         let response = client
@@ -1030,6 +1085,7 @@ mod tests {
             operator_token: None,
             sidecar_token: None,
             runtime_root,
+            connection: Default::default(),
         };
 
         let response = client
@@ -1089,6 +1145,7 @@ mod tests {
             operator_token: None,
             sidecar_token: None,
             runtime_root,
+            connection: Default::default(),
         };
 
         let status = client.system_snapshot().expect("status");
@@ -1134,11 +1191,106 @@ mod tests {
             operator_token: Some("operator-token".to_string()),
             sidecar_token: None,
             runtime_root,
+            connection: Default::default(),
         };
 
         let deployment = client
             .set_desired_state("example.paper", DesiredState::Paused)
             .expect("deployment");
         assert_eq!(deployment.desired_state, DesiredState::Paused);
+    }
+
+    #[test]
+    fn client_reuses_keep_alive_connection() {
+        let runtime_root = temp_dir("http-keep-alive");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept once");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .expect("read timeout");
+            for _ in 0..2 {
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).expect("read request");
+                    request.push(byte[0]);
+                }
+                assert!(String::from_utf8_lossy(&request).contains("Connection: keep-alive"));
+                let body = serde_json::json!({
+                    "status":"running",
+                    "uptime_seconds":1,
+                    "version":"0.1.0",
+                    "strategy":"platform",
+                    "last_trade_time":null,
+                    "websocket_connected":false,
+                    "database_connected":false,
+                    "error_count_1h":0,
+                    "live_reconcile_failures":0,
+                    "next_live_reconcile_at":null,
+                    "last_live_reconcile_error":null
+                })
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: keep-alive\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("write response");
+            }
+        });
+
+        let mut client = ControlPlaneClient::from_runtime_root(runtime_root);
+        client.control_plane_addr = addr.to_string();
+        assert_eq!(client.system_snapshot().expect("first").status, "running");
+        assert_eq!(client.system_snapshot().expect("second").status, "running");
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn client_reconnects_after_idle_keep_alive_socket_closes() {
+        let runtime_root = temp_dir("http-stale-keep-alive");
+        fs::create_dir_all(&runtime_root).expect("create runtime root");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut request = [0_u8; 1024];
+                let bytes_read = stream.read(&mut request).expect("read request");
+                assert!(bytes_read > 0, "request must not be empty");
+                let body = serde_json::json!({
+                    "status":"running",
+                    "uptime_seconds":1,
+                    "version":"0.1.0",
+                    "strategy":"platform",
+                    "last_trade_time":null,
+                    "websocket_connected":false,
+                    "database_connected":false,
+                    "error_count_1h":0,
+                    "live_reconcile_failures":0,
+                    "next_live_reconcile_at":null,
+                    "last_live_reconcile_error":null
+                })
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: keep-alive\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("write response");
+            }
+        });
+
+        let mut client = ControlPlaneClient::from_runtime_root(runtime_root);
+        client.control_plane_addr = addr.to_string();
+        assert_eq!(client.system_snapshot().expect("first").status, "running");
+        thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(client.system_snapshot().expect("second").status, "running");
+        server.join().expect("server");
     }
 }

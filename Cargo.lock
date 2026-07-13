@@ -5035,13 +5035,17 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "chrono",
+ "futures",
+ "ploy-market-contracts",
  "ploy-trading",
  "polymarket_client_sdk_v2",
  "rust_decimal",
  "rust_decimal_macros",
  "secrecy 0.8.0",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -5062,9 +5066,11 @@ dependencies = [
  "hmac",
  "ploy-connectivity",
  "ploy-deployments",
+ "ploy-market-contracts",
  "ploy-operator-contracts",
  "ploy-platform",
  "ploy-platform-runtime",
+ "ploy-strategy-bundles",
  "ploy-trading",
  "rand 0.8.5",
  "rust_decimal",
@@ -5073,6 +5079,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
  "uuid",
 ]
 
@@ -5105,6 +5112,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "rust_decimal",
+ "rust_decimal_macros",
  "serde",
  "serde_json",
 ]

@@ -1,5 +1,6 @@
 use crate::fills::FillRecord;
 use crate::intents::TradingIntent;
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -30,6 +31,8 @@ pub struct OrderRecord {
     #[serde(default)]
     pub revision: u32,
     pub state: OrderState,
+    #[serde(default)]
+    pub state_changed_at: Option<DateTime<Utc>>,
     pub filled_qty: Decimal,
     pub rejection_reason: Option<String>,
     pub last_error: Option<String>,
@@ -46,7 +49,12 @@ impl OrderLedger {
     pub fn restore(records: Vec<OrderRecord>) -> Self {
         let orders = records
             .into_iter()
-            .map(|record| (record.order_id.clone(), record))
+            .map(|mut record| {
+                if record.state_changed_at.is_none() {
+                    record.state_changed_at = Some(Utc::now());
+                }
+                (record.order_id.clone(), record)
+            })
             .collect();
         Self { orders }
     }
@@ -68,6 +76,7 @@ impl OrderLedger {
             venue_order_history: Vec::new(),
             revision: 0,
             state: OrderState::Pending,
+            state_changed_at: Some(Utc::now()),
             filled_qty: Decimal::ZERO,
             rejection_reason: None,
             last_error: None,
@@ -90,8 +99,13 @@ impl OrderLedger {
     ) -> Option<&OrderRecord> {
         let record = self.orders.get_mut(order_id)?;
         record.venue_order_id = Some(venue_order_id.into());
-        record.state = OrderState::Acknowledged;
-        record.last_error = None;
+        if matches!(
+            record.state,
+            OrderState::Pending | OrderState::Unknown | OrderState::Acknowledged
+        ) {
+            set_state(record, OrderState::Acknowledged);
+            record.last_error = None;
+        }
         Some(record)
     }
 
@@ -115,24 +129,28 @@ impl OrderLedger {
         record.limit_price = limit_price;
         record.revision += 1;
         record.last_error = None;
-        record.state = if record.filled_qty >= record.requested_qty {
+        let state = if record.filled_qty >= record.requested_qty {
             OrderState::Filled
         } else if record.filled_qty > Decimal::ZERO {
             OrderState::PartiallyFilled
         } else {
             OrderState::Acknowledged
         };
+        set_state(record, state);
         Some(record)
     }
 
     pub fn reject(&mut self, order_id: &str, reason: impl Into<String>) -> Option<&OrderRecord> {
         let record = self.orders.get_mut(order_id)?;
         let reason = reason.into();
-        if matches!(record.state, OrderState::Filled) {
+        if matches!(
+            record.state,
+            OrderState::PartiallyFilled | OrderState::Filled | OrderState::Canceled
+        ) {
             record.last_error = Some(reason);
             return Some(record);
         }
-        record.state = OrderState::Rejected;
+        set_state(record, OrderState::Rejected);
         record.rejection_reason = Some(reason.clone());
         record.last_error = Some(reason);
         Some(record)
@@ -156,9 +174,12 @@ impl OrderLedger {
         let record = self.orders.get_mut(order_id)?;
         if !matches!(
             record.state,
-            OrderState::Filled | OrderState::Canceled | OrderState::Rejected
+            OrderState::PartiallyFilled
+                | OrderState::Filled
+                | OrderState::Canceled
+                | OrderState::Rejected
         ) {
-            record.state = OrderState::Unknown;
+            set_state(record, OrderState::Unknown);
             record.last_error = Some(error.into());
         }
         Some(record)
@@ -169,7 +190,7 @@ impl OrderLedger {
         if matches!(record.state, OrderState::Filled | OrderState::Rejected) {
             return Some(record);
         }
-        record.state = OrderState::Canceled;
+        set_state(record, OrderState::Canceled);
         record.last_error = None;
         Some(record)
     }
@@ -220,11 +241,19 @@ impl OrderLedger {
 
 fn apply_fill_to_record(record: &mut OrderRecord, quantity: Decimal) {
     record.filled_qty += quantity;
-    record.state = if record.filled_qty >= record.requested_qty {
+    let state = if record.filled_qty >= record.requested_qty {
         OrderState::Filled
     } else {
         OrderState::PartiallyFilled
     };
+    set_state(record, state);
+}
+
+fn set_state(record: &mut OrderRecord, state: OrderState) {
+    if record.state != state {
+        record.state = state;
+        record.state_changed_at = Some(Utc::now());
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +333,74 @@ mod tests {
         let order = ledger.order("order-1").unwrap();
         assert_eq!(order.state, OrderState::Filled);
         assert_eq!(order.last_error.as_deref(), Some("late rejection"));
+    }
+
+    #[test]
+    fn late_acknowledgement_does_not_regress_filled_or_partially_filled_orders() {
+        let mut ledger = OrderLedger::default();
+        let mut intent = intent("token-a");
+        intent.quantity = dec!(2);
+        ledger.insert_from_intent("order-1", &intent);
+        ledger.acknowledge("order-1", "venue-1");
+        ledger.apply_fill(&crate::FillRecord {
+            fill_id: "fill-1".to_string(),
+            order_id: "order-1".to_string(),
+            token_id: "token-a".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(1),
+            price: dec!(0.5),
+            fee: dec!(0),
+            timestamp: Utc::now(),
+        });
+
+        ledger.acknowledge("order-1", "venue-1");
+        assert_eq!(
+            ledger.order("order-1").unwrap().state,
+            OrderState::PartiallyFilled
+        );
+
+        ledger.apply_fill(&crate::FillRecord {
+            fill_id: "fill-2".to_string(),
+            order_id: "order-1".to_string(),
+            token_id: "token-a".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(1),
+            price: dec!(0.5),
+            fee: dec!(0),
+            timestamp: Utc::now(),
+        });
+        ledger.acknowledge("order-1", "venue-1");
+        assert_eq!(ledger.order("order-1").unwrap().state, OrderState::Filled);
+    }
+
+    #[test]
+    fn late_ambiguous_or_rejected_outcome_does_not_erase_fill_or_cancel_state() {
+        let mut ledger = OrderLedger::default();
+        let mut intent = intent("token-a");
+        intent.quantity = dec!(2);
+        ledger.insert_from_intent("order-1", &intent);
+        ledger.acknowledge("order-1", "venue-1");
+        ledger.apply_fill(&crate::FillRecord {
+            fill_id: "fill-1".to_string(),
+            order_id: "order-1".to_string(),
+            token_id: "token-a".to_string(),
+            side: TradeSide::Buy,
+            quantity: dec!(1),
+            price: dec!(0.5),
+            fee: dec!(0),
+            timestamp: Utc::now(),
+        });
+
+        ledger.mark_unknown("order-1", "response lost");
+        ledger.reject("order-1", "late rejection");
+        assert_eq!(
+            ledger.order("order-1").unwrap().state,
+            OrderState::PartiallyFilled
+        );
+
+        ledger.cancel("order-1");
+        ledger.reject("order-1", "later rejection");
+        assert_eq!(ledger.order("order-1").unwrap().state, OrderState::Canceled);
     }
 
     #[test]

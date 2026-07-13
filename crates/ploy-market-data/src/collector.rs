@@ -149,7 +149,7 @@ enum OfficialMarketSettlementStatus {
     Unknown,
 }
 
-const POLYMARKET_CLOB_WS_ENDPOINT: &str = "wss://ws-subscriptions-clob.polymarket.com";
+pub(crate) const POLYMARKET_CLOB_WS_ENDPOINT: &str = "wss://ws-subscriptions-clob.polymarket.com";
 const POLYMARKET_RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
 const DEFAULT_PERSIST_QUEUE_CAPACITY: usize = 4_096;

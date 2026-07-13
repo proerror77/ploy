@@ -17,11 +17,20 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeZone, Utc};
 use futures::{SinkExt, StreamExt};
+use ploy_market_contracts::{l2_updates_from_depth_totals, MarketUpdate};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::PgPool;
+use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
+
+use crate::reference_prices::{
+    market_symbol_to_binance_symbol, upsert_reference_price, ReferenceAssetClass,
+    ReferencePriceKey, ReferencePriceRegistry, ReferencePriceSnapshot, ReferencePriceSource,
+};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -40,6 +49,278 @@ fn parse_symbols(raw: &str) -> Vec<String> {
 fn ms_to_utc(ms: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(ms / 1000, ((ms % 1000) * 1_000_000) as u32)
         .unwrap()
+}
+
+fn market_updates_from_combined_stream(
+    payload: &Value,
+    received_at: DateTime<Utc>,
+) -> Vec<MarketUpdate> {
+    let Some(data) = payload.get("data") else {
+        return Vec::new();
+    };
+    let event = data
+        .get("e")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("stream")
+                .and_then(Value::as_str)
+                .and_then(|stream| stream.split('@').nth(1))
+        })
+        .unwrap_or_default();
+
+    if event.eq_ignore_ascii_case("aggTrade") {
+        let Some(symbol) = data.get("s").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let Some(agg_trade_id) = data.get("a").and_then(Value::as_u64) else {
+            return Vec::new();
+        };
+        let Some(price) = data
+            .get("p")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<Decimal>().ok())
+            .filter(|price| *price > Decimal::ZERO)
+        else {
+            return Vec::new();
+        };
+        let Some(quantity) = data
+            .get("q")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<Decimal>().ok())
+            .filter(|quantity| *quantity > Decimal::ZERO)
+        else {
+            return Vec::new();
+        };
+        let Some(ts) = data
+            .get("T")
+            .and_then(Value::as_i64)
+            .and_then(|millis| Utc.timestamp_millis_opt(millis).single())
+        else {
+            return Vec::new();
+        };
+        return vec![MarketUpdate::AggTrade {
+            symbol: Arc::from(symbol.to_uppercase()),
+            agg_trade_id,
+            price,
+            quantity,
+            is_buyer_maker: data.get("m").and_then(Value::as_bool).unwrap_or(false),
+            ts,
+        }];
+    }
+
+    if event.eq_ignore_ascii_case("trade") {
+        let Some(symbol) = data.get("s").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let Some(price) = data
+            .get("p")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<Decimal>().ok())
+            .filter(|price| *price > Decimal::ZERO)
+        else {
+            return Vec::new();
+        };
+        let Some(ts) = data
+            .get("T")
+            .and_then(Value::as_i64)
+            .and_then(|millis| Utc.timestamp_millis_opt(millis).single())
+        else {
+            return Vec::new();
+        };
+        return vec![MarketUpdate::SpotPrice {
+            symbol: Arc::from(symbol.to_uppercase()),
+            price,
+            ts,
+        }];
+    }
+
+    if event.to_ascii_lowercase().starts_with("depth") {
+        let Some(symbol) = data.get("s").and_then(Value::as_str).or_else(|| {
+            payload
+                .get("stream")
+                .and_then(Value::as_str)
+                .and_then(|stream| stream.split('@').next())
+        }) else {
+            return Vec::new();
+        };
+        let bids = data
+            .get("b")
+            .or_else(|| data.get("bids"))
+            .and_then(Value::as_array)
+            .map(|levels| parse_level(levels))
+            .unwrap_or_default();
+        let asks = data
+            .get("a")
+            .or_else(|| data.get("asks"))
+            .and_then(Value::as_array)
+            .map(|levels| parse_level(levels))
+            .unwrap_or_default();
+        let (Some((best_bid, _)), Some((best_ask, _))) = (bids.first(), asks.first()) else {
+            return Vec::new();
+        };
+        if best_ask < best_bid {
+            return Vec::new();
+        }
+        let mid_price = (*best_bid + *best_ask) / Decimal::from(2);
+        if mid_price <= Decimal::ZERO {
+            return Vec::new();
+        }
+        let spread_bps = ((*best_ask - *best_bid) / mid_price * Decimal::from(10_000))
+            .round_dp(0)
+            .to_u32()
+            .unwrap_or(u32::MAX);
+        let bid_depth = sum_volume(&bids, 5);
+        let ask_depth = sum_volume(&asks, 5);
+        let Some(obi) = obi(bid_depth, ask_depth).to_f64() else {
+            return Vec::new();
+        };
+        let ts = data
+            .get("E")
+            .and_then(Value::as_i64)
+            .and_then(|millis| Utc.timestamp_millis_opt(millis).single())
+            .unwrap_or(received_at);
+        return l2_updates_from_depth_totals(
+            &symbol.to_uppercase(),
+            obi,
+            spread_bps,
+            bid_depth,
+            ask_depth,
+            ts,
+        );
+    }
+
+    Vec::new()
+}
+
+fn send_unavailable_spot_ticks(tx: &broadcast::Sender<MarketUpdate>, symbols: &[String]) -> bool {
+    let ts = Utc::now();
+    symbols.iter().all(|symbol| {
+        tx.send(MarketUpdate::SpotPrice {
+            symbol: Arc::from(symbol.as_str()),
+            price: Decimal::ZERO,
+            ts,
+        })
+        .is_ok()
+    })
+}
+
+/// Stream Binance spot, aggTrade, and partial-depth ticks directly into a
+/// strategy runtime without putting PostgreSQL on the quote-to-decision path.
+///
+/// The standalone collectors remain responsible for durable tick persistence.
+pub fn spawn_binance_tick_feed(
+    tx: Arc<broadcast::Sender<MarketUpdate>>,
+    reference_prices: ReferencePriceRegistry,
+    symbols: Vec<String>,
+    depth_levels: usize,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let symbols = symbols
+            .into_iter()
+            .map(|symbol| symbol.trim().to_uppercase())
+            .filter(|symbol| !symbol.is_empty())
+            .collect::<Vec<_>>();
+        let depth_levels = match depth_levels {
+            5 | 10 | 20 => depth_levels,
+            _ => 20,
+        };
+        let streams = symbols
+            .iter()
+            .flat_map(|symbol| {
+                let symbol = symbol.to_lowercase();
+                [
+                    format!("{symbol}@trade"),
+                    format!("{symbol}@aggTrade"),
+                    format!("{symbol}@depth{depth_levels}@100ms"),
+                ]
+            })
+            .collect::<Vec<_>>();
+        if streams.is_empty() {
+            warn!("Direct Binance tick feed has no configured symbols");
+            return;
+        }
+
+        let mut reconnect_delay = Duration::from_millis(250);
+        loop {
+            let (mut write, mut read) = match binance_connect(&streams).await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    warn!(%error, ?reconnect_delay, "Direct Binance tick feed connect failed");
+                    if !send_unavailable_spot_ticks(&tx, &symbols) {
+                        return;
+                    }
+                    tokio::time::sleep(reconnect_delay).await;
+                    reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(5));
+                    continue;
+                }
+            };
+            reconnect_delay = Duration::from_millis(250);
+            info!(symbols = ?symbols, depth_levels, "Direct Binance tick feed connected");
+
+            while let Some(message) = read.next().await {
+                match message {
+                    Ok(Message::Text(text)) => {
+                        let payload: Value = match serde_json::from_str(&text) {
+                            Ok(payload) => payload,
+                            Err(error) => {
+                                warn!(%error, "Direct Binance tick payload was invalid JSON");
+                                continue;
+                            }
+                        };
+                        let received_at = Utc::now();
+                        for update in market_updates_from_combined_stream(&payload, received_at) {
+                            let reference_snapshot = match &update {
+                                MarketUpdate::SpotPrice { symbol, price, ts } => {
+                                    Some(ReferencePriceSnapshot {
+                                        key: ReferencePriceKey {
+                                            source: ReferencePriceSource::Binance,
+                                            symbol: market_symbol_to_binance_symbol(symbol),
+                                        },
+                                        asset_class: ReferenceAssetClass::Crypto,
+                                        value: *price,
+                                        full_accuracy_value: None,
+                                        source_timestamp: *ts,
+                                        received_at: Utc::now(),
+                                        is_carried_forward: false,
+                                    })
+                                }
+                                _ => None,
+                            };
+                            if tx.send(update).is_err() {
+                                return;
+                            }
+                            if let Some(snapshot) = reference_snapshot {
+                                upsert_reference_price(&reference_prices, snapshot).await;
+                            }
+                        }
+                    }
+                    Ok(Message::Ping(payload)) => {
+                        if let Err(error) = write.send(Message::Pong(payload)).await {
+                            warn!(%error, "Direct Binance tick feed pong failed");
+                            break;
+                        }
+                    }
+                    Ok(Message::Pong(_)) => {}
+                    Ok(Message::Close(frame)) => {
+                        warn!(?frame, "Direct Binance tick feed closed");
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(%error, "Direct Binance tick feed receive failed");
+                        break;
+                    }
+                }
+            }
+
+            if !send_unavailable_spot_ticks(&tx, &symbols) {
+                return;
+            }
+            tokio::time::sleep(reconnect_delay).await;
+            reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(5));
+        }
+    })
 }
 
 /// Shared signal — set to false on shutdown request.
@@ -564,4 +845,113 @@ async fn run_lob_ws(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::market_updates_from_combined_stream;
+    use chrono::Utc;
+    use ploy_market_contracts::MarketUpdate;
+    use rust_decimal_macros::dec;
+    use serde_json::json;
+
+    #[test]
+    fn direct_binance_trade_tick_becomes_spot_update() {
+        let payload = json!({
+            "stream": "btcusdt@trade",
+            "data": {
+                "e": "trade",
+                "E": 1712205600120_i64,
+                "s": "BTCUSDT",
+                "p": "65000.25",
+                "q": "0.015",
+                "T": 1712205600123_i64
+            }
+        });
+
+        let updates = market_updates_from_combined_stream(&payload, Utc::now());
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(
+            &updates[0],
+            MarketUpdate::SpotPrice { symbol, price, ts }
+                if symbol.as_ref() == "BTCUSDT"
+                    && *price == dec!(65000.25)
+                    && ts.timestamp_millis() == 1_712_205_600_123
+        ));
+    }
+
+    #[test]
+    fn direct_binance_aggtrade_tick_preserves_aggressor_metadata() {
+        let payload = json!({
+            "stream": "ethusdt@aggTrade",
+            "data": {
+                "e": "aggTrade",
+                "E": 1712205600450_i64,
+                "s": "ETHUSDT",
+                "a": 987_u64,
+                "p": "3500.75",
+                "q": "1.25",
+                "T": 1712205600456_i64,
+                "m": true
+            }
+        });
+
+        let updates = market_updates_from_combined_stream(&payload, Utc::now());
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(
+            &updates[0],
+            MarketUpdate::AggTrade {
+                symbol,
+                agg_trade_id,
+                price,
+                quantity,
+                is_buyer_maker,
+                ts,
+            } if symbol.as_ref() == "ETHUSDT"
+                && *agg_trade_id == 987
+                && *price == dec!(3500.75)
+                && *quantity == dec!(1.25)
+                && *is_buyer_maker
+                && ts.timestamp_millis() == 1_712_205_600_456
+        ));
+    }
+
+    #[test]
+    fn direct_binance_depth_tick_becomes_l2_updates() {
+        let payload = json!({
+            "stream": "btcusdt@depth20@100ms",
+            "data": {
+                "E": 1712205600789_i64,
+                "lastUpdateId": 42_i64,
+                "bids": [["99.95", "5"], ["99.90", "3"]],
+                "asks": [["100.05", "2"], ["100.10", "4"]]
+            }
+        });
+
+        let updates = market_updates_from_combined_stream(&payload, Utc::now());
+        assert_eq!(updates.len(), 2);
+        assert!(matches!(
+            &updates[0],
+            MarketUpdate::L2 {
+                symbol,
+                obi,
+                spread_bps,
+                ts,
+            } if symbol.as_ref() == "BTCUSDT"
+                && (*obi - (2.0 / 14.0)).abs() < 1e-9
+                && *spread_bps == 10
+                && ts.timestamp_millis() == 1_712_205_600_789
+        ));
+        assert!(matches!(
+            &updates[1],
+            MarketUpdate::L2Depth {
+                symbol,
+                bid_depth_near,
+                ask_depth_near,
+                ..
+            } if symbol.as_ref() == "BTCUSDT"
+                && (*bid_depth_near - 8.0).abs() < 1e-9
+                && (*ask_depth_near - 6.0).abs() < 1e-9
+        ));
+    }
 }

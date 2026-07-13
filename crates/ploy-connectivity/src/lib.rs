@@ -1,28 +1,46 @@
 use alloy::signers::local::PrivateKeySigner;
+use chrono::{DateTime, Utc};
+use futures::StreamExt;
+use ploy_market_contracts::{FeeSchedule, LiquidityRole};
 use ploy_trading::{FillRecord, TradeSide};
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::{Normal, Signer};
 use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, TradesRequest};
-use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
-use polymarket_client_sdk::clob::types::{Amount, AssetType, OrderType, Side, SignatureType};
+use polymarket_client_sdk::clob::types::response::{MakerOrder, OpenOrderResponse, TradeResponse};
+use polymarket_client_sdk::clob::types::{
+    Amount, AssetType, OrderStatusType, OrderType, Side, SignatureType, TradeStatusType,
+};
+use polymarket_client_sdk::clob::ws::types::response::{OrderMessageType, TradeMessageStatus};
+use polymarket_client_sdk::clob::ws::{
+    ChannelType, Client as WsClient, OrderMessage, TradeMessage, WsMessage,
+};
 use polymarket_client_sdk::clob::{Client, Config};
-use polymarket_client_sdk::types::{Address, U256};
+use polymarket_client_sdk::types::{Address, B256, U256};
 use polymarket_client_sdk::{
     contract_config, derive_proxy_wallet, derive_safe_wallet, POLYGON, PRIVATE_KEY_VAR,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use secrecy::{ExposeSecret, SecretString};
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock, RwLock};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 pub const CRATE_MARKER: &str = "ploy-connectivity";
 const DEFAULT_POLY_CLOB_HOST: &str = "https://clob.polymarket.com";
 const TERMINAL_CURSOR: &str = "LTE=";
 const MAX_CONCURRENT_TRADE_RECONCILE_REQUESTS: usize = 10;
 const TRADE_RECONCILE_LOOKBACK_SECS: u64 = 24 * 60 * 60;
+const TRADE_RECONCILE_TIMEOUT: Duration = Duration::from_secs(2);
+const FEE_SCHEDULE_TTL: Duration = Duration::from_secs(5 * 60);
+const USER_EVENT_QUEUE_CAPACITY: usize = 4_096;
+const USER_EVENT_RECONNECT_DELAY: Duration = Duration::from_millis(250);
+const USER_EVENT_HEALTH_INTERVAL: Duration = Duration::from_millis(100);
+const USER_EVENT_PERIODIC_CATCH_UP: Duration = Duration::from_secs(5);
 const CONDITIONAL_TOKEN_DECIMALS: u32 = 6;
 const ACCOUNT_READINESS_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -66,6 +84,34 @@ pub struct TrackedOrder {
     pub order_id: String,
     pub venue_order_id: String,
     pub token_id: String,
+    pub side: TradeSide,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum OrderObservation {
+    Acknowledged {
+        order_id: String,
+        venue_order_id: String,
+    },
+    Canceled {
+        order_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReconcileBatch {
+    pub fills: Vec<FillRecord>,
+    pub order_observations: Vec<OrderObservation>,
+}
+
+impl ReconcileBatch {
+    #[must_use]
+    pub fn fills_only(fills: Vec<FillRecord>) -> Self {
+        Self {
+            fills,
+            order_observations: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +172,14 @@ pub trait LiveExecutionGateway: Send + Sync + std::fmt::Debug {
         &self,
         tracked_orders: &[TrackedOrder],
     ) -> Result<Vec<FillRecord>, ExecutionError>;
+
+    fn reconcile_updates(
+        &self,
+        tracked_orders: &[TrackedOrder],
+    ) -> Result<ReconcileBatch, ExecutionError> {
+        self.reconcile_fills(tracked_orders)
+            .map(ReconcileBatch::fills_only)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -134,7 +188,7 @@ pub struct StaticExecutionGateway {
     result: Result<ExecutionOutcome, ExecutionError>,
     cancel_result: Result<CancellationOutcome, ExecutionError>,
     replace_result: Result<ReplaceOutcome, ExecutionError>,
-    reconcile_result: Result<Vec<FillRecord>, ExecutionError>,
+    reconcile_result: Result<ReconcileBatch, ExecutionError>,
 }
 
 impl StaticExecutionGateway {
@@ -149,7 +203,7 @@ impl StaticExecutionGateway {
             replace_result: Ok(ReplaceOutcome::Replaced {
                 venue_order_id: format!("{venue_order_id}-replaced"),
             }),
-            reconcile_result: Ok(Vec::new()),
+            reconcile_result: Ok(ReconcileBatch::default()),
         }
     }
 
@@ -162,7 +216,7 @@ impl StaticExecutionGateway {
             }),
             cancel_result: Ok(CancellationOutcome::Canceled),
             replace_result: Ok(ReplaceOutcome::Rejected { reason }),
-            reconcile_result: Ok(Vec::new()),
+            reconcile_result: Ok(ReconcileBatch::default()),
         }
     }
 
@@ -172,7 +226,7 @@ impl StaticExecutionGateway {
             result: Err(error.clone()),
             cancel_result: Ok(CancellationOutcome::Canceled),
             replace_result: Err(error),
-            reconcile_result: Ok(Vec::new()),
+            reconcile_result: Ok(ReconcileBatch::default()),
         }
     }
 
@@ -195,7 +249,12 @@ impl StaticExecutionGateway {
     }
 
     pub fn with_reconciled_fills(mut self, fills: Vec<FillRecord>) -> Self {
-        self.reconcile_result = Ok(fills);
+        self.reconcile_result = Ok(ReconcileBatch::fills_only(fills));
+        self
+    }
+
+    pub fn with_reconciled_updates(mut self, updates: ReconcileBatch) -> Self {
+        self.reconcile_result = Ok(updates);
         self
     }
 
@@ -203,7 +262,7 @@ impl StaticExecutionGateway {
         mut self,
         result: Result<Vec<FillRecord>, ExecutionError>,
     ) -> Self {
-        self.reconcile_result = result;
+        self.reconcile_result = result.map(ReconcileBatch::fills_only);
         self
     }
 }
@@ -228,6 +287,13 @@ impl LiveExecutionGateway for StaticExecutionGateway {
         &self,
         _tracked_orders: &[TrackedOrder],
     ) -> Result<Vec<FillRecord>, ExecutionError> {
+        self.reconcile_result.clone().map(|batch| batch.fills)
+    }
+
+    fn reconcile_updates(
+        &self,
+        _tracked_orders: &[TrackedOrder],
+    ) -> Result<ReconcileBatch, ExecutionError> {
         self.reconcile_result.clone()
     }
 
@@ -412,12 +478,84 @@ pub fn polymarket_account_readiness_from_env(
     PolymarketExecutionGateway::from_env()?.account_readiness(required_pusd)
 }
 
+#[derive(Debug)]
+enum BufferedUserEvent {
+    Order(OrderMessage),
+    Trade(TradeMessage),
+}
+
+#[derive(Debug)]
+struct UserEventStream {
+    sender: mpsc::Sender<BufferedUserEvent>,
+    receiver: Mutex<mpsc::Receiver<BufferedUserEvent>>,
+    started: AtomicBool,
+    connected: AtomicBool,
+    gap_detected: AtomicBool,
+    last_catch_up: Mutex<Instant>,
+}
+
+impl UserEventStream {
+    fn new() -> Self {
+        let (sender, receiver) = mpsc::channel(USER_EVENT_QUEUE_CAPACITY);
+        Self {
+            sender,
+            receiver: Mutex::new(receiver),
+            started: AtomicBool::new(false),
+            connected: AtomicBool::new(false),
+            gap_detected: AtomicBool::new(true),
+            last_catch_up: Mutex::new(Instant::now()),
+        }
+    }
+
+    fn enqueue(&self, event: BufferedUserEvent) {
+        if self.sender.try_send(event).is_err() {
+            self.gap_detected.store(true, Ordering::Release);
+        }
+    }
+
+    fn drain(&self) -> Result<Vec<BufferedUserEvent>, ExecutionError> {
+        let mut receiver = self
+            .receiver
+            .lock()
+            .map_err(|_| ExecutionError::Transport("user event queue poisoned".to_string()))?;
+        let mut events = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            events.push(event);
+        }
+        Ok(events)
+    }
+
+    fn begin_catch_up(&self) -> Result<bool, ExecutionError> {
+        let periodic_catch_up_due = self
+            .last_catch_up
+            .lock()
+            .map_err(|_| ExecutionError::Transport("user event catch-up clock poisoned".into()))?
+            .elapsed()
+            >= USER_EVENT_PERIODIC_CATCH_UP;
+        let gap_detected = self.gap_detected.swap(false, Ordering::AcqRel);
+        Ok(gap_detected || !self.connected.load(Ordering::Acquire) || periodic_catch_up_due)
+    }
+
+    fn finish_catch_up(&self, succeeded: bool) {
+        if succeeded {
+            if let Ok(mut last_catch_up) = self.last_catch_up.lock() {
+                *last_catch_up = Instant::now();
+            }
+        }
+        if !succeeded || !self.connected.load(Ordering::Acquire) {
+            self.gap_detected.store(true, Ordering::Release);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PolymarketExecutionGateway {
     config: PolymarketExecutionConfig,
     runtime: Arc<tokio::runtime::Runtime>,
     signer: Arc<OnceLock<PrivateKeySigner>>,
     client: Arc<RwLock<Option<Client<Authenticated<Normal>>>>>,
+    fee_schedules: Arc<RwLock<HashMap<U256, (FeeSchedule, Instant)>>>,
+    user_events: Arc<UserEventStream>,
 }
 
 impl PolymarketExecutionGateway {
@@ -437,6 +575,8 @@ impl PolymarketExecutionGateway {
             runtime: Arc::new(runtime),
             signer: Arc::new(OnceLock::new()),
             client: Arc::new(RwLock::new(None)),
+            fee_schedules: Arc::new(RwLock::new(HashMap::new())),
+            user_events: Arc::new(UserEventStream::new()),
         }
     }
 
@@ -496,6 +636,24 @@ impl PolymarketExecutionGateway {
                 .await
                 .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))
         })
+    }
+
+    fn ensure_user_event_stream(&self, client: &Client<Authenticated<Normal>>) {
+        if self
+            .user_events
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let credentials = client.credentials().clone();
+        let address = client.address();
+        let state = Arc::clone(&self.user_events);
+        self.runtime.spawn(async move {
+            run_user_event_stream(credentials, address, state).await;
+        });
     }
 
     fn clear_client_cache(&self) {
@@ -637,6 +795,88 @@ impl PolymarketExecutionGateway {
     }
 }
 
+async fn run_user_event_stream(
+    credentials: polymarket_client_sdk::auth::Credentials,
+    address: Address,
+    state: Arc<UserEventStream>,
+) {
+    loop {
+        let ws = match WsClient::default().authenticate(credentials.clone(), address) {
+            Ok(client) => client,
+            Err(error) => {
+                state.connected.store(false, Ordering::Release);
+                state.gap_detected.store(true, Ordering::Release);
+                tracing::warn!(%error, "authenticate Polymarket user WebSocket failed");
+                tokio::time::sleep(USER_EVENT_RECONNECT_DELAY).await;
+                continue;
+            }
+        };
+        let stream = match ws.subscribe_user_events(Vec::new()) {
+            Ok(stream) => stream,
+            Err(error) => {
+                state.connected.store(false, Ordering::Release);
+                state.gap_detected.store(true, Ordering::Release);
+                tracing::warn!(%error, "subscribe Polymarket user WebSocket failed");
+                tokio::time::sleep(USER_EVENT_RECONNECT_DELAY).await;
+                continue;
+            }
+        };
+        let mut stream = std::pin::pin!(stream);
+        let mut health = tokio::time::interval(USER_EVENT_HEALTH_INTERVAL);
+        health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                message = stream.next() => {
+                    let Some(message) = message else {
+                        break;
+                    };
+                    match message {
+                        Ok(WsMessage::Trade(trade)) => {
+                            if matches!(
+                                trade.status,
+                                TradeMessageStatus::Failed | TradeMessageStatus::Unknown(_)
+                            ) {
+                                state.gap_detected.store(true, Ordering::Release);
+                            }
+                            state.enqueue(BufferedUserEvent::Trade(trade));
+                        }
+                        Ok(WsMessage::Order(order)) => {
+                            if matches!(order.msg_type, Some(OrderMessageType::Unknown(_)))
+                                || matches!(
+                                    order.status,
+                                    Some(OrderStatusType::Delayed | OrderStatusType::Unknown(_))
+                                )
+                            {
+                                state.gap_detected.store(true, Ordering::Release);
+                            }
+                            state.enqueue(BufferedUserEvent::Order(order));
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            state.connected.store(false, Ordering::Release);
+                            state.gap_detected.store(true, Ordering::Release);
+                            tracing::warn!(%error, "Polymarket user WebSocket stream error");
+                            break;
+                        }
+                    }
+                }
+                _ = health.tick() => {
+                    let connected = ws.connection_state(ChannelType::User).is_connected();
+                    let was_connected = state.connected.swap(connected, Ordering::AcqRel);
+                    if was_connected && !connected {
+                        state.gap_detected.store(true, Ordering::Release);
+                    }
+                }
+            }
+        }
+
+        state.connected.store(false, Ordering::Release);
+        state.gap_detected.store(true, Ordering::Release);
+        tokio::time::sleep(USER_EVENT_RECONNECT_DELAY).await;
+    }
+}
+
 impl LiveExecutionGateway for PolymarketExecutionGateway {
     fn probe(&self) -> Result<(), ExecutionError> {
         let client = self.get_or_init_client()?;
@@ -758,40 +998,70 @@ impl LiveExecutionGateway for PolymarketExecutionGateway {
         let client = self.get_or_init_client()?;
 
         let result = self.runtime.block_on(async {
-            let token_ids = unique_token_ids(tracked_orders)?;
-            let mut trades = Vec::new();
-
-            for chunk in token_ids.chunks(MAX_CONCURRENT_TRADE_RECONCILE_REQUESTS) {
-                let mut tasks = Vec::with_capacity(chunk.len());
-
-                for token_id in chunk {
-                    let client = client.clone();
-                    let token_id = *token_id;
-                    tasks.push(tokio::spawn(async move {
-                        load_trades_for_token(client, token_id).await
-                    }));
-                }
-
-                for task in tasks {
-                    let mut token_trades = task.await.map_err(|err| {
-                        ExecutionError::Transport(format!("join trade reconciliation task: {err}"))
-                    })??;
-                    trades.append(&mut token_trades);
-                }
-            }
-
-            let mut fills = Vec::new();
-            for trade in &trades {
-                for tracked_order in tracked_orders {
-                    if let Some(fill) = tracked_trade_fill(tracked_order, trade) {
-                        fills.push(fill);
-                    }
-                }
-            }
-
-            Ok(fills)
+            tokio::time::timeout(
+                TRADE_RECONCILE_TIMEOUT,
+                reconcile_rest_fills(&client, &self.fee_schedules, tracked_orders),
+            )
+            .await
+            .map_err(|_| {
+                ExecutionError::Transport(format!(
+                    "trade reconciliation timed out after {}ms",
+                    TRADE_RECONCILE_TIMEOUT.as_millis()
+                ))
+            })?
         });
 
+        if let Err(error) = &result {
+            self.maybe_clear_client_cache(error);
+        }
+        result
+    }
+
+    fn reconcile_updates(
+        &self,
+        tracked_orders: &[TrackedOrder],
+    ) -> Result<ReconcileBatch, ExecutionError> {
+        if tracked_orders.is_empty() {
+            return Ok(ReconcileBatch::default());
+        }
+
+        let client = self.get_or_init_client()?;
+        self.ensure_user_event_stream(&client);
+
+        let events = self.user_events.drain()?;
+        let catch_up_required = self.user_events.begin_catch_up()?;
+        let result = self.runtime.block_on(async {
+            let mut batch =
+                reconcile_user_events(&client, &self.fee_schedules, tracked_orders, events).await?;
+
+            if catch_up_required {
+                let rest_batch = tokio::time::timeout(
+                    TRADE_RECONCILE_TIMEOUT,
+                    reconcile_rest_updates(&client, &self.fee_schedules, tracked_orders),
+                )
+                .await
+                .map_err(|_| {
+                    ExecutionError::Transport(format!(
+                        "trade reconciliation timed out after {}ms",
+                        TRADE_RECONCILE_TIMEOUT.as_millis()
+                    ))
+                })??;
+                batch.fills.extend(rest_batch.fills);
+                batch
+                    .order_observations
+                    .extend(rest_batch.order_observations);
+            }
+
+            deduplicate_fills(&mut batch.fills);
+            deduplicate_order_observations(&mut batch.order_observations);
+            Ok(batch)
+        });
+
+        if catch_up_required {
+            self.user_events.finish_catch_up(result.is_ok());
+        } else if result.is_err() {
+            self.user_events.gap_detected.store(true, Ordering::Release);
+        }
         if let Err(error) = &result {
             self.maybe_clear_client_cache(error);
         }
@@ -993,6 +1263,148 @@ async fn load_trades_for_token(
     Ok(trades)
 }
 
+async fn polymarket_fee_schedule(
+    client: &Client<Authenticated<Normal>>,
+    cache: &RwLock<HashMap<U256, (FeeSchedule, Instant)>>,
+    token_id: U256,
+    condition_id: B256,
+) -> Result<FeeSchedule, ExecutionError> {
+    if let Some(schedule) = cache
+        .read()
+        .map_err(|_| ExecutionError::Transport("fee schedule cache poisoned".to_string()))?
+        .get(&token_id)
+        .filter(|(_, loaded_at)| loaded_at.elapsed() < FEE_SCHEDULE_TTL)
+        .map(|(schedule, _)| *schedule)
+    {
+        return Ok(schedule);
+    }
+
+    let market = client
+        .clob_market_info(&condition_id.to_string())
+        .await
+        .map_err(|err| ExecutionError::Transport(format!("load V2 market fee metadata: {err}")))?;
+    if !market
+        .tokens
+        .iter()
+        .flatten()
+        .any(|token| token.token_id == token_id)
+    {
+        return Err(ExecutionError::Validation(format!(
+            "market fee metadata for condition `{condition_id}` does not include token `{token_id}`"
+        )));
+    }
+    let schedule = market.fee_details.as_ref().map_or_else(
+        || FeeSchedule::polymarket_v2(Decimal::ZERO, 0, true),
+        |fees| FeeSchedule::polymarket_v2(fees.rate, fees.exponent, fees.taker_only),
+    );
+
+    cache
+        .write()
+        .map_err(|_| ExecutionError::Transport("fee schedule cache poisoned".to_string()))?
+        .insert(token_id, (schedule, Instant::now()));
+    Ok(schedule)
+}
+
+async fn reconcile_rest_fills(
+    client: &Client<Authenticated<Normal>>,
+    fee_schedules: &RwLock<HashMap<U256, (FeeSchedule, Instant)>>,
+    tracked_orders: &[TrackedOrder],
+) -> Result<Vec<FillRecord>, ExecutionError> {
+    let token_ids = unique_token_ids(tracked_orders)?;
+    let mut trades = Vec::new();
+
+    for chunk in token_ids.chunks(MAX_CONCURRENT_TRADE_RECONCILE_REQUESTS) {
+        let mut tasks = tokio::task::JoinSet::new();
+        for token_id in chunk {
+            let client = client.clone();
+            let token_id = *token_id;
+            tasks.spawn(async move { load_trades_for_token(client, token_id).await });
+        }
+        while let Some(task) = tasks.join_next().await {
+            let mut token_trades = task.map_err(|err| {
+                ExecutionError::Transport(format!("join trade reconciliation task: {err}"))
+            })??;
+            trades.append(&mut token_trades);
+        }
+    }
+
+    let mut fills = Vec::new();
+    for trade in &trades {
+        if !matches!(trade.status, TradeStatusType::Confirmed) {
+            continue;
+        }
+        if !tracked_orders
+            .iter()
+            .any(|tracked_order| tracked_trade_matches(tracked_order, trade))
+        {
+            continue;
+        }
+        let fee_schedule =
+            polymarket_fee_schedule(client, fee_schedules, trade.asset_id, trade.market).await?;
+        for tracked_order in tracked_orders {
+            if let Some(fill) = tracked_trade_fill(tracked_order, trade, fee_schedule) {
+                fills.push(fill);
+            }
+        }
+    }
+    Ok(fills)
+}
+
+async fn load_order_observation(
+    client: Client<Authenticated<Normal>>,
+    tracked_order: TrackedOrder,
+) -> Result<Option<OrderObservation>, ExecutionError> {
+    let order = client
+        .order(&tracked_order.venue_order_id)
+        .await
+        .map_err(|err| {
+            ExecutionError::Transport(format!(
+                "load order `{}`: {err}",
+                tracked_order.venue_order_id
+            ))
+        })?;
+    tracked_rest_order_observation(&tracked_order, &order)
+}
+
+async fn reconcile_rest_order_observations(
+    client: &Client<Authenticated<Normal>>,
+    tracked_orders: &[TrackedOrder],
+) -> Result<Vec<OrderObservation>, ExecutionError> {
+    let mut observations = Vec::new();
+    for chunk in tracked_orders.chunks(MAX_CONCURRENT_TRADE_RECONCILE_REQUESTS) {
+        let mut tasks = tokio::task::JoinSet::new();
+        for tracked_order in chunk {
+            tasks.spawn(load_order_observation(
+                client.clone(),
+                tracked_order.clone(),
+            ));
+        }
+        while let Some(task) = tasks.join_next().await {
+            if let Some(observation) = task.map_err(|err| {
+                ExecutionError::Transport(format!("join order reconciliation task: {err}"))
+            })?? {
+                observations.push(observation);
+            }
+        }
+    }
+    Ok(observations)
+}
+
+async fn reconcile_rest_updates(
+    client: &Client<Authenticated<Normal>>,
+    fee_schedules: &RwLock<HashMap<U256, (FeeSchedule, Instant)>>,
+    tracked_orders: &[TrackedOrder],
+) -> Result<ReconcileBatch, ExecutionError> {
+    let (fills, order_observations) = tokio::try_join!(
+        reconcile_rest_fills(client, fee_schedules, tracked_orders),
+        reconcile_rest_order_observations(client, tracked_orders),
+    )?;
+    Ok(ReconcileBatch {
+        fills,
+        order_observations,
+    })
+}
+
 async fn sell_quantity_capped_to_balance(
     client: &Client<Authenticated<Normal>>,
     token_id: U256,
@@ -1162,17 +1574,30 @@ fn normalize_execution_amount(
     }
 }
 
-fn tracked_trade_fill(tracked_order: &TrackedOrder, trade: &TradeResponse) -> Option<FillRecord> {
+fn tracked_trade_fill(
+    tracked_order: &TrackedOrder,
+    trade: &TradeResponse,
+    fee_schedule: FeeSchedule,
+) -> Option<FillRecord> {
+    if !matches!(trade.status, TradeStatusType::Confirmed) {
+        return None;
+    }
+    let tracked_token_id = U256::from_str(&tracked_order.token_id).ok()?;
     if trade.taker_order_id == tracked_order.venue_order_id {
-        let side = trade_side(trade.side.clone())?;
+        if trade.asset_id != tracked_token_id {
+            return None;
+        }
+        if trade_side(trade.side)? != tracked_order.side {
+            return None;
+        }
         return Some(FillRecord {
             fill_id: tracked_fill_id(tracked_order, &trade.id),
             order_id: tracked_order.order_id.clone(),
             token_id: tracked_order.token_id.clone(),
-            side,
+            side: tracked_order.side,
             quantity: trade.size,
             price: trade.price,
-            fee: fee_from_bps(trade.size, trade.price, trade.fee_rate_bps),
+            fee: fee_schedule.calculate(trade.size, trade.price, LiquidityRole::Taker),
             timestamp: trade.match_time,
         });
     }
@@ -1181,29 +1606,276 @@ fn tracked_trade_fill(tracked_order: &TrackedOrder, trade: &TradeResponse) -> Op
         .maker_orders
         .iter()
         .find(|maker_order| maker_order.order_id == tracked_order.venue_order_id)
-        .and_then(|maker_order| tracked_maker_fill(tracked_order, trade, maker_order))
+        .and_then(|maker_order| {
+            tracked_maker_fill(
+                tracked_order,
+                trade,
+                maker_order,
+                tracked_token_id,
+                fee_schedule,
+            )
+        })
+}
+
+fn tracked_trade_matches(tracked_order: &TrackedOrder, trade: &TradeResponse) -> bool {
+    if !matches!(trade.status, TradeStatusType::Confirmed) {
+        return false;
+    }
+    let Ok(tracked_token_id) = U256::from_str(&tracked_order.token_id) else {
+        return false;
+    };
+    if trade.taker_order_id == tracked_order.venue_order_id {
+        return trade.asset_id == tracked_token_id
+            && trade_side(trade.side) == Some(tracked_order.side);
+    }
+    trade.maker_orders.iter().any(|maker_order| {
+        maker_order.order_id == tracked_order.venue_order_id
+            && maker_order.asset_id == tracked_token_id
+            && trade_side(maker_order.side) == Some(tracked_order.side)
+    })
 }
 
 fn tracked_maker_fill(
     tracked_order: &TrackedOrder,
     trade: &TradeResponse,
     maker_order: &MakerOrder,
+    tracked_token_id: U256,
+    fee_schedule: FeeSchedule,
 ) -> Option<FillRecord> {
-    let side = trade_side(maker_order.side.clone())?;
+    if maker_order.asset_id != tracked_token_id {
+        return None;
+    }
+    if trade_side(maker_order.side)? != tracked_order.side {
+        return None;
+    }
     Some(FillRecord {
         fill_id: tracked_fill_id(tracked_order, &trade.id),
         order_id: tracked_order.order_id.clone(),
         token_id: tracked_order.token_id.clone(),
-        side,
+        side: tracked_order.side,
         quantity: maker_order.matched_amount,
         price: maker_order.price,
-        fee: fee_from_bps(
+        fee: fee_schedule.calculate(
             maker_order.matched_amount,
             maker_order.price,
-            maker_order.fee_rate_bps,
+            LiquidityRole::Maker,
         ),
         timestamp: trade.match_time,
     })
+}
+
+fn user_trade_timestamp(trade: &TradeMessage) -> Option<DateTime<Utc>> {
+    trade
+        .matchtime
+        .or(trade.timestamp)
+        .or(trade.last_update)
+        .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
+}
+
+fn maker_side_from_taker(side: Side) -> Option<TradeSide> {
+    match trade_side(side)? {
+        TradeSide::Buy => Some(TradeSide::Sell),
+        TradeSide::Sell => Some(TradeSide::Buy),
+    }
+}
+
+fn tracked_user_trade_fill(
+    tracked_order: &TrackedOrder,
+    trade: &TradeMessage,
+    fee_schedule: FeeSchedule,
+) -> Option<FillRecord> {
+    if !matches!(trade.status, TradeMessageStatus::Confirmed) {
+        return None;
+    }
+    let tracked_token_id = U256::from_str(&tracked_order.token_id).ok()?;
+    let timestamp = user_trade_timestamp(trade)?;
+
+    if trade.taker_order_id.as_deref() == Some(tracked_order.venue_order_id.as_str()) {
+        if trade.asset_id != tracked_token_id || trade_side(trade.side)? != tracked_order.side {
+            return None;
+        }
+        return Some(FillRecord {
+            fill_id: tracked_fill_id(tracked_order, &trade.id),
+            order_id: tracked_order.order_id.clone(),
+            token_id: tracked_order.token_id.clone(),
+            side: tracked_order.side,
+            quantity: trade.size,
+            price: trade.price,
+            fee: fee_schedule.calculate(trade.size, trade.price, LiquidityRole::Taker),
+            timestamp,
+        });
+    }
+
+    let maker_order = trade
+        .maker_orders
+        .iter()
+        .find(|maker_order| maker_order.order_id == tracked_order.venue_order_id)?;
+    if maker_order.asset_id != tracked_token_id
+        || maker_side_from_taker(trade.side)? != tracked_order.side
+    {
+        return None;
+    }
+    Some(FillRecord {
+        fill_id: tracked_fill_id(tracked_order, &trade.id),
+        order_id: tracked_order.order_id.clone(),
+        token_id: tracked_order.token_id.clone(),
+        side: tracked_order.side,
+        quantity: maker_order.matched_amount,
+        price: maker_order.price,
+        fee: fee_schedule.calculate(
+            maker_order.matched_amount,
+            maker_order.price,
+            LiquidityRole::Maker,
+        ),
+        timestamp,
+    })
+}
+
+fn tracked_order_observation(
+    tracked_order: &TrackedOrder,
+    order: &OrderMessage,
+) -> Option<OrderObservation> {
+    let tracked_token_id = U256::from_str(&tracked_order.token_id).ok()?;
+    if order.id != tracked_order.venue_order_id
+        || order.asset_id != tracked_token_id
+        || trade_side(order.side)? != tracked_order.side
+    {
+        return None;
+    }
+
+    if matches!(order.msg_type, Some(OrderMessageType::Cancellation))
+        || matches!(order.status, Some(OrderStatusType::Canceled))
+    {
+        return Some(OrderObservation::Canceled {
+            order_id: tracked_order.order_id.clone(),
+        });
+    }
+    if matches!(order.msg_type, Some(OrderMessageType::Placement))
+        || matches!(
+            order.status,
+            Some(OrderStatusType::Live | OrderStatusType::Unmatched | OrderStatusType::Matched)
+        )
+    {
+        return Some(OrderObservation::Acknowledged {
+            order_id: tracked_order.order_id.clone(),
+            venue_order_id: tracked_order.venue_order_id.clone(),
+        });
+    }
+    None
+}
+
+fn tracked_rest_order_observation(
+    tracked_order: &TrackedOrder,
+    order: &OpenOrderResponse,
+) -> Result<Option<OrderObservation>, ExecutionError> {
+    let tracked_token_id = U256::from_str(&tracked_order.token_id).map_err(|err| {
+        ExecutionError::Validation(format!(
+            "invalid tracked token `{}`: {err}",
+            tracked_order.token_id
+        ))
+    })?;
+    if order.id != tracked_order.venue_order_id
+        || order.asset_id != tracked_token_id
+        || trade_side(order.side) != Some(tracked_order.side)
+    {
+        return Err(ExecutionError::Validation(format!(
+            "venue order `{}` does not match tracked order `{}`",
+            order.id, tracked_order.order_id
+        )));
+    }
+
+    match &order.status {
+        OrderStatusType::Live | OrderStatusType::Unmatched | OrderStatusType::Matched => {
+            Ok(Some(OrderObservation::Acknowledged {
+                order_id: tracked_order.order_id.clone(),
+                venue_order_id: tracked_order.venue_order_id.clone(),
+            }))
+        }
+        OrderStatusType::Canceled => Ok(Some(OrderObservation::Canceled {
+            order_id: tracked_order.order_id.clone(),
+        })),
+        OrderStatusType::Delayed | OrderStatusType::Unknown(_) => {
+            Err(ExecutionError::Transport(format!(
+                "venue order `{}` has unresolved status `{}`",
+                tracked_order.venue_order_id, order.status
+            )))
+        }
+        _ => Err(ExecutionError::Transport(format!(
+            "venue order `{}` has unsupported status `{}`",
+            tracked_order.venue_order_id, order.status
+        ))),
+    }
+}
+
+fn tracked_user_trade_matches(tracked_order: &TrackedOrder, trade: &TradeMessage) -> bool {
+    if !matches!(trade.status, TradeMessageStatus::Confirmed) {
+        return false;
+    }
+    let Ok(tracked_token_id) = U256::from_str(&tracked_order.token_id) else {
+        return false;
+    };
+    if trade.taker_order_id.as_deref() == Some(tracked_order.venue_order_id.as_str()) {
+        return trade.asset_id == tracked_token_id
+            && trade_side(trade.side) == Some(tracked_order.side);
+    }
+    trade.maker_orders.iter().any(|maker_order| {
+        maker_order.order_id == tracked_order.venue_order_id
+            && maker_order.asset_id == tracked_token_id
+            && maker_side_from_taker(trade.side) == Some(tracked_order.side)
+    })
+}
+
+async fn reconcile_user_events(
+    client: &Client<Authenticated<Normal>>,
+    fee_schedules: &RwLock<HashMap<U256, (FeeSchedule, Instant)>>,
+    tracked_orders: &[TrackedOrder],
+    events: Vec<BufferedUserEvent>,
+) -> Result<ReconcileBatch, ExecutionError> {
+    let mut batch = ReconcileBatch::default();
+    for event in events {
+        match event {
+            BufferedUserEvent::Trade(trade) => {
+                if !matches!(trade.status, TradeMessageStatus::Confirmed) {
+                    continue;
+                }
+                if !tracked_orders
+                    .iter()
+                    .any(|tracked_order| tracked_user_trade_matches(tracked_order, &trade))
+                {
+                    continue;
+                }
+                let fee_schedule =
+                    polymarket_fee_schedule(client, fee_schedules, trade.asset_id, trade.market)
+                        .await?;
+                for tracked_order in tracked_orders {
+                    if let Some(fill) = tracked_user_trade_fill(tracked_order, &trade, fee_schedule)
+                    {
+                        batch.fills.push(fill);
+                    }
+                }
+            }
+            BufferedUserEvent::Order(order) => {
+                for tracked_order in tracked_orders {
+                    if let Some(observation) = tracked_order_observation(tracked_order, &order) {
+                        if !batch.order_observations.contains(&observation) {
+                            batch.order_observations.push(observation);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(batch)
+}
+
+fn deduplicate_fills(fills: &mut Vec<FillRecord>) {
+    let mut seen = HashSet::with_capacity(fills.len());
+    fills.retain(|fill| seen.insert(fill.fill_id.clone()));
+}
+
+fn deduplicate_order_observations(observations: &mut Vec<OrderObservation>) {
+    let mut seen = HashSet::with_capacity(observations.len());
+    observations.retain(|observation| seen.insert(observation.clone()));
 }
 
 fn tracked_fill_id(tracked_order: &TrackedOrder, trade_id: &str) -> String {
@@ -1218,10 +1890,6 @@ fn trade_side(side: Side) -> Option<TradeSide> {
     }
 }
 
-fn fee_from_bps(quantity: Decimal, price: Decimal, fee_rate_bps: Decimal) -> Decimal {
-    quantity * price * fee_rate_bps / Decimal::from(10_000_u64)
-}
-
 pub fn crate_marker() -> &'static str {
     CRATE_MARKER
 }
@@ -1233,22 +1901,29 @@ mod tests {
         conditional_token_balance_to_shares, ensure_account_readiness, execution_price_override,
         normalize_aggressive_price, normalize_execution_amount, normalize_market_order_quantity,
         normalize_order_quantity, polymarket_execution_principal, raw_balance_to_pusd,
-        tracked_trade_fill, trade_side, unique_token_ids, wallet_signature_type,
-        CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
-        ExecutionRequest, LiveExecutionGateway, OrderExecutionType, PolymarketExecutionConfig,
-        PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, StaticExecutionGateway,
-        TrackedOrder, WalletSignatureType,
+        tracked_rest_order_observation, tracked_trade_fill, tracked_user_trade_fill,
+        tracked_user_trade_matches, trade_side, unique_token_ids, wallet_signature_type,
+        BufferedUserEvent, CancellationOutcome, CancellationRequest, ExecutionError,
+        ExecutionOutcome, ExecutionRequest, LiveExecutionGateway, OrderExecutionType,
+        OrderObservation, PolymarketExecutionConfig, PolymarketExecutionGateway, ReplaceOutcome,
+        ReplaceRequest, StaticExecutionGateway, TrackedOrder, UserEventStream, WalletSignatureType,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
     use polymarket_client_sdk::auth::ApiKey;
-    use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
-    use polymarket_client_sdk::clob::types::{Side, TradeStatusType, TraderSide};
+    use polymarket_client_sdk::clob::types::response::{
+        MakerOrder, OpenOrderResponse, TradeResponse,
+    };
+    use polymarket_client_sdk::clob::types::{
+        OrderStatusType, OrderType, Side, TradeStatusType, TraderSide,
+    };
+    use polymarket_client_sdk::clob::ws::types::response::TradeMessage;
     use polymarket_client_sdk::types::{Address, B256, U256};
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use secrecy::SecretString;
     use std::str::FromStr;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn static_gateway_returns_acknowledged_outcome() {
@@ -1539,6 +2214,7 @@ mod tests {
                 order_id: "order-1".to_string(),
                 venue_order_id: "venue-order-1".to_string(),
                 token_id: "1".to_string(),
+                side: TradeSide::Buy,
             }])
             .expect("fills");
 
@@ -1606,7 +2282,7 @@ mod tests {
             .size(dec!(2))
             .fee_rate_bps(dec!(5))
             .price(dec!(0.55))
-            .status(TradeStatusType::Matched)
+            .status(TradeStatusType::Confirmed)
             .match_time(Utc::now())
             .last_update(Utc::now())
             .outcome("YES")
@@ -1638,24 +2314,89 @@ mod tests {
             &TrackedOrder {
                 order_id: "order-a".to_string(),
                 venue_order_id: "venue-order-a".to_string(),
-                token_id: "token-a".to_string(),
+                token_id: "1".to_string(),
+                side: TradeSide::Buy,
             },
             &trade,
+            ploy_market_contracts::FeeSchedule::polymarket_v2(dec!(0.07), 1, true),
         )
         .expect("taker fill");
         let maker_fill = tracked_trade_fill(
             &TrackedOrder {
                 order_id: "order-b".to_string(),
                 venue_order_id: "venue-order-b".to_string(),
-                token_id: "token-b".to_string(),
+                token_id: "1".to_string(),
+                side: TradeSide::Sell,
             },
             &trade,
+            ploy_market_contracts::FeeSchedule::polymarket_v2(dec!(0.07), 1, true),
         )
         .expect("maker fill");
 
         assert_eq!(taker_fill.fill_id, "trade-1:order-a");
         assert_eq!(maker_fill.fill_id, "trade-1:order-b");
         assert_ne!(taker_fill.fill_id, maker_fill.fill_id);
+        assert_eq!(taker_fill.fee, dec!(0.03465));
+        assert_eq!(maker_fill.fee, dec!(0));
+        assert!(tracked_trade_fill(
+            &TrackedOrder {
+                order_id: "order-side-mismatch".to_string(),
+                venue_order_id: "venue-order-a".to_string(),
+                token_id: "1".to_string(),
+                side: TradeSide::Sell,
+            },
+            &trade,
+            ploy_market_contracts::FeeSchedule::polymarket_v2(dec!(0.07), 1, true),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn reconciliation_ignores_non_confirmed_trade_statuses() {
+        let tracked = TrackedOrder {
+            order_id: "order-a".to_string(),
+            venue_order_id: "venue-order-a".to_string(),
+            token_id: "1".to_string(),
+            side: TradeSide::Buy,
+        };
+
+        for status in [
+            TradeStatusType::Matched,
+            TradeStatusType::Mined,
+            TradeStatusType::Retrying,
+            TradeStatusType::Failed,
+        ] {
+            let trade = TradeResponse::builder()
+                .id("trade-status")
+                .taker_order_id("venue-order-a")
+                .market(B256::ZERO)
+                .asset_id(U256::from(1_u64))
+                .side(polymarket_client_sdk::clob::types::Side::Buy)
+                .size(dec!(2))
+                .fee_rate_bps(dec!(5))
+                .price(dec!(0.55))
+                .status(status)
+                .match_time(Utc::now())
+                .last_update(Utc::now())
+                .outcome("YES")
+                .bucket_index(0)
+                .owner(ApiKey::nil())
+                .maker_address(
+                    Address::from_str("0x0000000000000000000000000000000000000001")
+                        .expect("maker address"),
+                )
+                .maker_orders(Vec::new())
+                .transaction_hash(B256::ZERO)
+                .trader_side(TraderSide::Taker)
+                .build();
+
+            assert!(tracked_trade_fill(
+                &tracked,
+                &trade,
+                ploy_market_contracts::FeeSchedule::polymarket_v2(dec!(0.07), 1, true),
+            )
+            .is_none());
+        }
     }
 
     #[test]
@@ -1665,20 +2406,167 @@ mod tests {
                 order_id: "order-1".to_string(),
                 venue_order_id: "venue-1".to_string(),
                 token_id: "10".to_string(),
+                side: TradeSide::Buy,
             },
             TrackedOrder {
                 order_id: "order-2".to_string(),
                 venue_order_id: "venue-2".to_string(),
                 token_id: "10".to_string(),
+                side: TradeSide::Sell,
             },
             TrackedOrder {
                 order_id: "order-3".to_string(),
                 venue_order_id: "venue-3".to_string(),
                 token_id: "11".to_string(),
+                side: TradeSide::Buy,
             },
         ])
         .expect("valid token ids");
 
         assert_eq!(token_ids, vec![U256::from(10), U256::from(11)]);
+    }
+
+    fn user_trade(status: &str) -> TradeMessage {
+        serde_json::from_str(&format!(
+            r#"{{
+                "asset_id":"1",
+                "event_type":"trade",
+                "id":"trade-ws",
+                "last_update":"1672290701",
+                "maker_orders":[{{
+                    "asset_id":"1",
+                    "matched_amount":"2",
+                    "order_id":"venue-maker",
+                    "outcome":"YES",
+                    "owner":"00000000-0000-0000-0000-000000000000",
+                    "price":"0.56"
+                }}],
+                "market":"0x0000000000000000000000000000000000000000000000000000000000000000",
+                "match_time":"1672290701",
+                "outcome":"YES",
+                "owner":"00000000-0000-0000-0000-000000000000",
+                "price":"0.55",
+                "side":"BUY",
+                "size":"2",
+                "status":"{status}",
+                "taker_order_id":"venue-taker",
+                "timestamp":"1672290701",
+                "trade_owner":"00000000-0000-0000-0000-000000000000",
+                "type":"TRADE"
+            }}"#
+        ))
+        .expect("valid user trade fixture")
+    }
+
+    #[test]
+    fn user_trade_reconciliation_is_confirmed_only_and_preserves_liquidity_role() {
+        let taker = TrackedOrder {
+            order_id: "order-taker".to_string(),
+            venue_order_id: "venue-taker".to_string(),
+            token_id: "1".to_string(),
+            side: TradeSide::Buy,
+        };
+        let maker = TrackedOrder {
+            order_id: "order-maker".to_string(),
+            venue_order_id: "venue-maker".to_string(),
+            token_id: "1".to_string(),
+            side: TradeSide::Sell,
+        };
+        let fee_schedule = ploy_market_contracts::FeeSchedule::polymarket_v2(dec!(0.07), 1, true);
+
+        for status in ["MATCHED", "MINED", "RETRYING", "FAILED"] {
+            assert!(tracked_user_trade_fill(&taker, &user_trade(status), fee_schedule).is_none());
+        }
+
+        let confirmed = user_trade("CONFIRMED");
+        let taker_fill =
+            tracked_user_trade_fill(&taker, &confirmed, fee_schedule).expect("taker fill");
+        let maker_fill =
+            tracked_user_trade_fill(&maker, &confirmed, fee_schedule).expect("maker fill");
+        assert_eq!(taker_fill.fill_id, "trade-ws:order-taker");
+        assert_eq!(maker_fill.fill_id, "trade-ws:order-maker");
+        assert_eq!(taker_fill.fee, dec!(0.03465));
+        assert_eq!(maker_fill.fee, Decimal::ZERO);
+
+        let wrong_maker_side = TrackedOrder {
+            side: TradeSide::Buy,
+            ..maker
+        };
+        assert!(tracked_user_trade_fill(&wrong_maker_side, &confirmed, fee_schedule).is_none());
+        assert!(!tracked_user_trade_matches(&wrong_maker_side, &confirmed));
+    }
+
+    #[test]
+    fn rest_order_recovery_validates_identity_and_maps_status() {
+        let tracked = TrackedOrder {
+            order_id: "order-1".to_string(),
+            venue_order_id: "venue-1".to_string(),
+            token_id: "1".to_string(),
+            side: TradeSide::Buy,
+        };
+        let order = |status| {
+            OpenOrderResponse::builder()
+                .id("venue-1")
+                .status(status)
+                .owner(ApiKey::nil())
+                .maker_address(Address::ZERO)
+                .market(B256::ZERO)
+                .asset_id(U256::from(1_u64))
+                .side(Side::Buy)
+                .original_size(dec!(2))
+                .size_matched(dec!(1))
+                .price(dec!(0.55))
+                .associate_trades(Vec::new())
+                .outcome("YES")
+                .created_at(Utc::now())
+                .expiration(Utc::now())
+                .order_type(OrderType::GTC)
+                .build()
+        };
+
+        assert_eq!(
+            tracked_rest_order_observation(&tracked, &order(OrderStatusType::Matched))
+                .expect("matched order"),
+            Some(OrderObservation::Acknowledged {
+                order_id: "order-1".to_string(),
+                venue_order_id: "venue-1".to_string(),
+            })
+        );
+        assert_eq!(
+            tracked_rest_order_observation(&tracked, &order(OrderStatusType::Canceled))
+                .expect("canceled order"),
+            Some(OrderObservation::Canceled {
+                order_id: "order-1".to_string(),
+            })
+        );
+
+        let mut wrong_token = order(OrderStatusType::Live);
+        wrong_token.asset_id = U256::from(2_u64);
+        assert!(tracked_rest_order_observation(&tracked, &wrong_token).is_err());
+        assert!(
+            tracked_rest_order_observation(&tracked, &order(OrderStatusType::Delayed)).is_err()
+        );
+    }
+
+    #[test]
+    fn user_event_gap_is_bounded_and_not_cleared_while_degraded() {
+        let state = UserEventStream::new();
+        state.gap_detected.store(false, Ordering::Release);
+        let trade = user_trade("CONFIRMED");
+        for _ in 0..=super::USER_EVENT_QUEUE_CAPACITY {
+            state.enqueue(BufferedUserEvent::Trade(trade.clone()));
+        }
+        assert!(state.gap_detected.load(Ordering::Acquire));
+
+        state.connected.store(false, Ordering::Release);
+        assert!(state.begin_catch_up().expect("catch-up state"));
+        state.finish_catch_up(true);
+        assert!(state.gap_detected.load(Ordering::Acquire));
+
+        state.connected.store(true, Ordering::Release);
+        assert!(state.begin_catch_up().expect("catch-up state"));
+        state.gap_detected.store(true, Ordering::Release);
+        state.finish_catch_up(true);
+        assert!(state.gap_detected.load(Ordering::Acquire));
     }
 }

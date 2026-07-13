@@ -1,10 +1,12 @@
+use ploy_market_data::binance_collectors::spawn_binance_tick_feed;
 use ploy_market_data::feeds::{
     spawn_chainlink_feed, spawn_db_aggtrade_feed, spawn_db_l2_feed, spawn_db_polymarket_feed,
-    spawn_db_spot_feed, spawn_pyth_reference_feed, spawn_spot_feed,
+    spawn_db_spot_feed, spawn_pyth_reference_feed,
 };
 use ploy_market_data::reference_prices::new_reference_price_registry;
 use ploy_market_data::scanner::spawn_market_scanner;
 use ploy_market_data::sports_feed::spawn_sports_feed;
+use ploy_strategy_bundles::config::MarketDataSource;
 use ploy_strategy_bundles::{
     Feed, FullConfig, LiveFeed, RecordingFeed, RuntimeMode, StrategyLogic,
 };
@@ -14,6 +16,10 @@ use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
+
+fn uses_db_primary_ticks(source: MarketDataSource) -> bool {
+    source.uses_local_db() && !source.uses_external_direct()
+}
 
 #[cfg(all(feature = "live", feature = "live-execution"))]
 mod execution {
@@ -581,27 +587,29 @@ async fn run_live_or_dry_run(
     let mut feed_handles = Vec::new();
     if market_data_source.uses_local_db() {
         if let Some(ref db) = db_pool {
-            feed_handles.push(spawn_db_spot_feed(tx.clone(), symbols.to_vec(), db.clone()));
-            feed_handles.push(spawn_db_aggtrade_feed(
-                tx.clone(),
-                symbols.to_vec(),
-                db.clone(),
-            ));
-            feed_handles.push(spawn_db_l2_feed(tx.clone(), symbols.to_vec(), db.clone()));
-            feed_handles.push(spawn_db_polymarket_feed(
-                tx.clone(),
-                symbols.to_vec(),
-                db.clone(),
-            ));
+            if uses_db_primary_ticks(market_data_source) {
+                feed_handles.push(spawn_db_spot_feed(tx.clone(), symbols.to_vec(), db.clone()));
+                feed_handles.push(spawn_db_polymarket_feed(
+                    tx.clone(),
+                    symbols.to_vec(),
+                    db.clone(),
+                ));
+                feed_handles.push(spawn_db_aggtrade_feed(
+                    tx.clone(),
+                    symbols.to_vec(),
+                    db.clone(),
+                ));
+                feed_handles.push(spawn_db_l2_feed(tx.clone(), symbols.to_vec(), db.clone()));
+            }
         }
     }
 
     if market_data_source.uses_external_direct() {
-        feed_handles.push(spawn_spot_feed(
+        feed_handles.push(spawn_binance_tick_feed(
             tx.clone(),
             reference_prices.clone(),
             symbols.to_vec(),
-            db_pool.clone(),
+            20,
         ));
         feed_handles.push(spawn_chainlink_feed(
             tx.clone(),
@@ -706,6 +714,18 @@ async fn run_live_or_dry_run(
     }
 
     result
+}
+
+#[cfg(test)]
+mod feed_source_tests {
+    use super::{uses_db_primary_ticks, MarketDataSource};
+
+    #[test]
+    fn dual_market_data_keeps_primary_ticks_direct() {
+        assert!(uses_db_primary_ticks(MarketDataSource::LocalDb));
+        assert!(!uses_db_primary_ticks(MarketDataSource::Dual));
+        assert!(!uses_db_primary_ticks(MarketDataSource::ExternalDirect));
+    }
 }
 
 #[cfg(all(feature = "live", feature = "live-execution"))]

@@ -4,7 +4,10 @@
 //! The `[runtime].mode` field selects which Feed and Executor are wired.
 
 use chrono::{DateTime, Utc};
-use ploy_market_contracts::{InstrumentKind, PredictionFamily, VenueKind};
+use ploy_market_contracts::{
+    FeeAsset, FeeFormula, FeeRounding, FeeSchedule, InstrumentKind, LiquidityRole,
+    PredictionFamily, VenueKind,
+};
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -102,7 +105,9 @@ pub enum MarketDataSource {
     LocalDb,
     /// Open direct public feeds from this strategy runner.
     ExternalDirect,
-    /// Consume local DB feeds and also open direct public feeds.
+    /// Open direct public feeds while retaining the local DB for persistence,
+    /// metadata, and recovery services. Polled DB ticks are not merged into the
+    /// strategy hot path because they can duplicate or reorder direct ticks.
     Dual,
 }
 
@@ -212,6 +217,30 @@ pub struct SimExecutionSection {
     pub max_sweep_levels: usize,
     #[serde(default)]
     pub max_sweep_price_delta: f64,
+    #[serde(default)]
+    pub fee_formula: SimFeeFormula,
+    pub taker_fee_rate: Option<f64>,
+    pub maker_fee_rate: Option<f64>,
+    pub taker_fee_rate_bps: Option<u32>,
+    pub maker_fee_rate_bps: Option<u32>,
+    pub fee_exponent: Option<u32>,
+    pub fee_taker_only: Option<bool>,
+    pub fee_rounding_dp: Option<u32>,
+    pub minimum_fee: Option<f64>,
+    pub fee_balance_precision_dp: Option<u32>,
+    pub fee_asset: Option<FeeAsset>,
+    #[serde(default = "default_liquidity_role")]
+    pub liquidity_role: LiquidityRole,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SimFeeFormula {
+    #[default]
+    VenueDefault,
+    ProbabilityPower,
+    Notional,
+    PerContract,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -263,6 +292,10 @@ fn default_visible_depth_haircut() -> f64 {
     1.0
 }
 
+fn default_liquidity_role() -> LiquidityRole {
+    LiquidityRole::Taker
+}
+
 impl Default for SimExecutionSection {
     fn default() -> Self {
         Self {
@@ -278,6 +311,18 @@ impl Default for SimExecutionSection {
             visible_depth_haircut: 1.0,
             max_sweep_levels: 0,
             max_sweep_price_delta: 0.0,
+            fee_formula: SimFeeFormula::VenueDefault,
+            taker_fee_rate: None,
+            maker_fee_rate: None,
+            taker_fee_rate_bps: None,
+            maker_fee_rate_bps: None,
+            fee_exponent: None,
+            fee_taker_only: None,
+            fee_rounding_dp: None,
+            minimum_fee: None,
+            fee_balance_precision_dp: None,
+            fee_asset: None,
+            liquidity_role: LiquidityRole::Taker,
         }
     }
 }
@@ -372,6 +417,151 @@ impl FullConfig {
     /// Build SimulatedExecutorConfig from the parsed config.
     pub fn sim_executor_config(&self) -> SimulatedExecutorConfig {
         let e = &self.execution;
+        let default_schedule =
+            default_fee_schedule(self.runtime.venue, self.runtime.prediction_family);
+        let formula = match e.fee_formula {
+            SimFeeFormula::VenueDefault => match default_schedule.formula {
+                FeeFormula::ProbabilityPower { .. } => FeeFormula::ProbabilityPower {
+                    exponent: e
+                        .fee_exponent
+                        .unwrap_or_else(|| match default_schedule.formula {
+                            FeeFormula::ProbabilityPower { exponent } => exponent,
+                            _ => 1,
+                        }),
+                },
+                formula => formula,
+            },
+            SimFeeFormula::ProbabilityPower => FeeFormula::ProbabilityPower {
+                exponent: e.fee_exponent.unwrap_or(1),
+            },
+            SimFeeFormula::Notional => FeeFormula::Notional,
+            SimFeeFormula::PerContract => FeeFormula::PerContract,
+        };
+        let taker_rate_decimal = e
+            .taker_fee_rate
+            .and_then(Decimal::from_f64)
+            .filter(|rate| *rate >= Decimal::ZERO);
+        let maker_rate_decimal = e
+            .maker_fee_rate
+            .and_then(Decimal::from_f64)
+            .filter(|rate| *rate >= Decimal::ZERO);
+        let taker_rate_bps = e
+            .taker_fee_rate_bps
+            .map(|bps| Decimal::from(bps) / Decimal::from(10_000_u32));
+        let maker_rate_bps = e
+            .maker_fee_rate_bps
+            .map(|bps| Decimal::from(bps) / Decimal::from(10_000_u32));
+        let taker_rate_override = taker_rate_decimal.or(taker_rate_bps);
+        let maker_rate_override = maker_rate_decimal.or(maker_rate_bps);
+        let taker_rate = taker_rate_override.unwrap_or(default_schedule.taker_rate);
+        let maker_rate = if self.runtime.venue == VenueKind::Polymarket
+            && e.fee_taker_only == Some(true)
+        {
+            Decimal::ZERO
+        } else {
+            maker_rate_override.unwrap_or_else(|| {
+                if self.runtime.venue == VenueKind::Polymarket && e.fee_taker_only == Some(false) {
+                    taker_rate
+                } else {
+                    default_schedule.maker_rate
+                }
+            })
+        };
+        let rounding = e
+            .fee_rounding_dp
+            .map_or(default_schedule.rounding, |decimal_places| {
+                FeeRounding::Ceiling { decimal_places }
+            });
+        let minimum_fee_override = e
+            .minimum_fee
+            .and_then(Decimal::from_f64)
+            .filter(|fee| *fee >= Decimal::ZERO);
+        let minimum_fee = minimum_fee_override.unwrap_or(default_schedule.minimum_fee);
+        let override_values_valid = !(e.taker_fee_rate.is_some() && taker_rate_decimal.is_none())
+            && !(e.maker_fee_rate.is_some() && maker_rate_decimal.is_none())
+            && !(e.minimum_fee.is_some() && minimum_fee_override.is_none())
+            && !(e.taker_fee_rate.is_some() && e.taker_fee_rate_bps.is_some())
+            && !(e.maker_fee_rate.is_some() && e.maker_fee_rate_bps.is_some());
+        let polymarket_fd_override_requested =
+            matches!(self.runtime.prediction_family, PredictionFamily::Custom(_))
+                || taker_rate_override.is_some()
+                || maker_rate_override.is_some()
+                || e.fee_exponent.is_some()
+                || e.fee_taker_only.is_some()
+                || e.fee_formula != SimFeeFormula::VenueDefault
+                || e.fee_rounding_dp.is_some()
+                || e.minimum_fee.is_some();
+        let venue_metadata_complete = match self.runtime.venue {
+            VenueKind::Polymarket => {
+                if polymarket_fd_override_requested {
+                    taker_rate_override.is_some()
+                        && e.fee_exponent.is_some()
+                        && e.fee_taker_only.is_some()
+                        && maker_rate_override.is_none()
+                        && matches!(
+                            e.fee_formula,
+                            SimFeeFormula::VenueDefault | SimFeeFormula::ProbabilityPower
+                        )
+                        && e.fee_rounding_dp.is_none()
+                        && e.minimum_fee.is_none()
+                } else {
+                    true
+                }
+            }
+            VenueKind::PredictFun => {
+                taker_rate_override.is_some()
+                    && matches!(
+                        e.fee_formula,
+                        SimFeeFormula::VenueDefault | SimFeeFormula::Notional
+                    )
+                    && e.fee_exponent.is_none()
+                    && e.fee_taker_only.is_none()
+                    && e.fee_rounding_dp.is_none()
+                    && e.minimum_fee.is_none()
+            }
+            VenueKind::Kalshi => {
+                let formula_valid = match e.fee_formula {
+                    SimFeeFormula::ProbabilityPower => matches!(e.fee_exponent, None | Some(1)),
+                    SimFeeFormula::PerContract => e.fee_exponent.is_none(),
+                    SimFeeFormula::VenueDefault | SimFeeFormula::Notional => false,
+                };
+                taker_rate_override.is_some()
+                    && formula_valid
+                    && matches!(e.fee_balance_precision_dp, None | Some(2 | 4))
+                    && matches!(e.fee_rounding_dp, None | Some(4))
+                    && (e.minimum_fee.is_none() || minimum_fee_override == Some(Decimal::ZERO))
+                    && e.fee_taker_only.is_none()
+                    && matches!(e.fee_asset, None | Some(FeeAsset::Collateral))
+            }
+            VenueKind::Sportsbook => true,
+        };
+        let maker_metadata_complete = e.liquidity_role != LiquidityRole::Maker
+            || match self.runtime.venue {
+                VenueKind::Polymarket => {
+                    !matches!(self.runtime.prediction_family, PredictionFamily::Custom(_))
+                        || e.fee_taker_only.is_some()
+                }
+                VenueKind::PredictFun | VenueKind::Kalshi => maker_rate_override.is_some(),
+                VenueKind::Sportsbook => true,
+            };
+        let metadata_complete =
+            override_values_valid && venue_metadata_complete && maker_metadata_complete;
+        let mut fee_schedule = if metadata_complete {
+            FeeSchedule::new(formula, maker_rate, taker_rate, rounding, minimum_fee)
+        } else {
+            FeeSchedule::new(formula, maker_rate, taker_rate, rounding, minimum_fee)
+                .require_market_metadata()
+        };
+        if self.runtime.venue == VenueKind::Kalshi {
+            fee_schedule =
+                fee_schedule.with_kalshi_balance_rounding(e.fee_balance_precision_dp.unwrap_or(2));
+        }
+        let fee_asset = e.fee_asset.or(match self.runtime.venue {
+            VenueKind::PredictFun => None,
+            VenueKind::Polymarket | VenueKind::Kalshi | VenueKind::Sportsbook => {
+                Some(FeeAsset::Collateral)
+            }
+        });
         SimulatedExecutorConfig {
             use_spread: e.use_spread,
             spread_pct: Decimal::try_from(e.spread_pct).unwrap_or_default(),
@@ -385,6 +575,9 @@ impl FullConfig {
             visible_depth_haircut: Decimal::try_from(e.visible_depth_haircut)
                 .unwrap_or(Decimal::ONE),
             max_sweep_levels: e.max_sweep_levels,
+            fee_schedule,
+            fee_asset,
+            liquidity_role: e.liquidity_role,
         }
     }
 
@@ -398,9 +591,55 @@ impl FullConfig {
     }
 }
 
+fn default_fee_schedule(venue: VenueKind, family: PredictionFamily) -> FeeSchedule {
+    match venue {
+        VenueKind::Polymarket => {
+            let rate = match family {
+                PredictionFamily::CryptoExpiry => Decimal::new(7, 2),
+                PredictionFamily::Politics => Decimal::new(4, 2),
+                PredictionFamily::SportsPregame | PredictionFamily::SportsLive => {
+                    Decimal::new(5, 2)
+                }
+                PredictionFamily::Custom(_) => Decimal::ZERO,
+            };
+            let schedule = FeeSchedule::polymarket_v2(rate, 1, true);
+            if matches!(family, PredictionFamily::Custom(_)) {
+                schedule.require_market_metadata()
+            } else {
+                schedule
+            }
+        }
+        VenueKind::PredictFun => FeeSchedule::new(
+            FeeFormula::Notional,
+            Decimal::ZERO,
+            Decimal::ZERO,
+            FeeRounding::Exact,
+            Decimal::ZERO,
+        )
+        .require_market_metadata(),
+        VenueKind::Kalshi => FeeSchedule::new(
+            FeeFormula::ProbabilityPower { exponent: 1 },
+            Decimal::ZERO,
+            Decimal::ZERO,
+            FeeRounding::Ceiling { decimal_places: 4 },
+            Decimal::ZERO,
+        )
+        .with_kalshi_balance_rounding(2)
+        .require_market_metadata(),
+        VenueKind::Sportsbook => FeeSchedule::new(
+            FeeFormula::Notional,
+            Decimal::ZERO,
+            Decimal::ZERO,
+            FeeRounding::Exact,
+            Decimal::ZERO,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
 
     const SAMPLE_TOML: &str = r#"
 [runtime]
@@ -726,6 +965,259 @@ venue = "sportsbook"
     }
 
     #[test]
+    fn venue_specific_market_metadata_is_required_when_rates_vary_by_market() {
+        let predict = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "backtest"
+venue = "predict_fun"
+
+[strategy]
+"#,
+        )
+        .unwrap()
+        .sim_executor_config();
+        assert_eq!(
+            predict.fee_schedule.formula,
+            ploy_market_contracts::FeeFormula::Notional
+        );
+        assert!(!predict.fee_schedule.is_configured());
+        assert_eq!(predict.fee_asset, None);
+
+        let kalshi = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "backtest"
+venue = "kalshi"
+
+[strategy]
+"#,
+        )
+        .unwrap()
+        .sim_executor_config();
+        assert!(!kalshi.fee_schedule.is_configured());
+        assert_eq!(
+            kalshi.fee_asset,
+            Some(ploy_market_contracts::FeeAsset::Collateral)
+        );
+    }
+
+    #[test]
+    fn predict_fun_market_fee_bps_and_asset_configure_simulation() {
+        let predict = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "backtest"
+venue = "predict_fun"
+
+[strategy]
+
+[execution]
+taker_fee_rate_bps = 200
+maker_fee_rate_bps = 200
+fee_asset = "collateral"
+"#,
+        )
+        .unwrap()
+        .sim_executor_config();
+
+        assert!(predict.fee_schedule.is_configured());
+        assert_eq!(
+            predict.fee_schedule.calculate(
+                dec!(10),
+                dec!(0.50),
+                ploy_market_contracts::LiquidityRole::Taker,
+            ),
+            dec!(0.10)
+        );
+        assert_eq!(
+            predict.fee_asset,
+            Some(ploy_market_contracts::FeeAsset::Collateral)
+        );
+    }
+
+    #[test]
+    fn maker_simulation_requires_maker_rate_metadata() {
+        let missing = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "backtest"
+venue = "predict_fun"
+
+[strategy]
+
+[execution]
+taker_fee_rate_bps = 200
+fee_asset = "collateral"
+liquidity_role = "maker"
+"#,
+        )
+        .unwrap()
+        .sim_executor_config();
+        assert!(!missing.fee_schedule.is_configured());
+
+        let complete = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "backtest"
+venue = "predict_fun"
+
+[strategy]
+
+[execution]
+taker_fee_rate_bps = 200
+maker_fee_rate_bps = 200
+fee_asset = "collateral"
+liquidity_role = "maker"
+"#,
+        )
+        .unwrap()
+        .sim_executor_config();
+        assert!(complete.fee_schedule.is_configured());
+    }
+
+    #[test]
+    fn custom_polymarket_requires_complete_fd_metadata() {
+        let mut config = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "backtest"
+
+[strategy]
+"#,
+        )
+        .unwrap();
+        config.runtime.prediction_family = PredictionFamily::Custom(1);
+        config.execution.taker_fee_rate = Some(0.04);
+        assert!(!config.sim_executor_config().fee_schedule.is_configured());
+
+        config.execution.fee_exponent = Some(1);
+        config.execution.fee_taker_only = Some(true);
+        let complete = config.sim_executor_config();
+        assert!(complete.fee_schedule.is_configured());
+        assert_eq!(complete.fee_schedule.taker_rate, dec!(0.04));
+        assert_eq!(complete.fee_schedule.maker_rate, dec!(0));
+    }
+
+    #[test]
+    fn polymarket_fd_override_is_atomic() {
+        let mut config = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "backtest"
+
+[strategy]
+"#,
+        )
+        .unwrap();
+        assert!(config.sim_executor_config().fee_schedule.is_configured());
+
+        config.execution.taker_fee_rate = Some(0.07);
+        assert!(!config.sim_executor_config().fee_schedule.is_configured());
+
+        config.execution.fee_exponent = Some(1);
+        config.execution.fee_taker_only = Some(true);
+        assert!(config.sim_executor_config().fee_schedule.is_configured());
+    }
+
+    #[test]
+    fn invalid_or_ambiguous_fee_rates_fail_closed() {
+        let mut config = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "backtest"
+venue = "predict_fun"
+
+[strategy]
+
+[execution]
+fee_asset = "collateral"
+"#,
+        )
+        .unwrap();
+        config.execution.taker_fee_rate = Some(f64::NAN);
+        assert!(!config.sim_executor_config().fee_schedule.is_configured());
+
+        config.execution.taker_fee_rate = Some(-0.01);
+        assert!(!config.sim_executor_config().fee_schedule.is_configured());
+
+        config.execution.taker_fee_rate = Some(0.02);
+        config.execution.taker_fee_rate_bps = Some(200);
+        assert!(!config.sim_executor_config().fee_schedule.is_configured());
+    }
+
+    #[test]
+    fn simulated_fee_overrides_capture_market_specific_schedule() {
+        let config = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "backtest"
+venue = "kalshi"
+
+[strategy]
+
+[execution]
+fee_formula = "per_contract"
+taker_fee_rate = 0.03
+maker_fee_rate = 0.01
+fee_rounding_dp = 4
+liquidity_role = "maker"
+"#,
+        )
+        .unwrap()
+        .sim_executor_config();
+
+        assert_eq!(
+            config.fee_schedule.formula,
+            ploy_market_contracts::FeeFormula::PerContract
+        );
+        assert_eq!(
+            config.liquidity_role,
+            ploy_market_contracts::LiquidityRole::Maker
+        );
+        assert_eq!(
+            config
+                .fee_schedule
+                .calculate(dec!(2), dec!(0.50), config.liquidity_role,),
+            dec!(0.02)
+        );
+    }
+
+    #[test]
+    fn kalshi_rejects_non_venue_fee_semantics() {
+        let mut config = FullConfig::from_toml(
+            r#"
+[runtime]
+mode = "backtest"
+venue = "kalshi"
+
+[strategy]
+
+[execution]
+fee_formula = "probability_power"
+taker_fee_rate = 0.07
+"#,
+        )
+        .unwrap();
+        assert!(config.sim_executor_config().fee_schedule.is_configured());
+
+        config.execution.fee_exponent = Some(2);
+        assert!(!config.sim_executor_config().fee_schedule.is_configured());
+        config.execution.fee_exponent = Some(1);
+
+        config.execution.fee_rounding_dp = Some(2);
+        assert!(!config.sim_executor_config().fee_schedule.is_configured());
+        config.execution.fee_rounding_dp = Some(4);
+
+        config.execution.minimum_fee = Some(0.01);
+        assert!(!config.sim_executor_config().fee_schedule.is_configured());
+        config.execution.minimum_fee = Some(0.0);
+
+        config.execution.fee_balance_precision_dp = Some(3);
+        assert!(!config.sim_executor_config().fee_schedule.is_configured());
+    }
+
+    #[test]
     fn roadmap_config_family_parses() {
         let config_dir = strategy_config_dir();
 
@@ -833,6 +1325,26 @@ venue = "sportsbook"
             dryrun_strategy.insert(risk_key.to_string(), live_strategy[risk_key].clone());
         }
         assert_eq!(dryrun, live);
+    }
+
+    #[test]
+    fn threelayer_live_pair_uses_unthrottled_external_ticks() {
+        let config_dir = strategy_config_dir();
+        for file in [
+            "02-pm5d-threelayer.live.toml",
+            "02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+        ] {
+            let config = FullConfig::from_file(config_dir.join(file).to_str().unwrap()).unwrap();
+            assert_eq!(
+                config.runtime.market_data_source,
+                MarketDataSource::Dual,
+                "{file} must use direct ticks with DB-only fallback factors"
+            );
+            assert_eq!(
+                config.runtime.throttle_hz, None,
+                "{file} must evaluate every market tick"
+            );
+        }
     }
 
     #[test]

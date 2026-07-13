@@ -63,6 +63,7 @@ pub fn submit_live_intent(
     finish_live_intent(runtime, gateway, prepared)
 }
 
+#[derive(Debug, Clone)]
 pub enum PreparedLiveIntent {
     Existing(PaperIntentResponse),
     Pending {
@@ -121,12 +122,20 @@ pub fn finish_live_intent(
     gateway: &dyn LiveExecutionGateway,
     prepared: PreparedLiveIntent,
 ) -> io::Result<PaperIntentResponse> {
-    let (intent, order_id) = match prepared {
-        PreparedLiveIntent::Existing(response) => return Ok(response),
-        PreparedLiveIntent::Pending { intent, order_id } => (intent, order_id),
-    };
+    let outcome = execute_live_intent(gateway, &prepared);
+    apply_live_intent_outcome(runtime, prepared, outcome)
+}
 
-    let outcome = gateway.submit(&ExecutionRequest {
+pub fn execute_live_intent(
+    gateway: &dyn LiveExecutionGateway,
+    prepared: &PreparedLiveIntent,
+) -> Result<ExecutionOutcome, ploy_connectivity::ExecutionError> {
+    let PreparedLiveIntent::Pending { intent, order_id } = prepared else {
+        return Err(ploy_connectivity::ExecutionError::Validation(
+            "existing live intent must not be submitted again".to_string(),
+        ));
+    };
+    gateway.submit(&ExecutionRequest {
         order_id: order_id.clone(),
         token_id: intent.token_id.clone(),
         side: intent.side,
@@ -134,51 +143,41 @@ pub fn finish_live_intent(
         limit_price: intent.limit_price,
         order_type: OrderExecutionType::GTC,
         aggressive_ticks: 0,
-    });
+    })
+}
 
+pub fn apply_live_intent_outcome(
+    runtime: &mut TradingRuntime,
+    prepared: PreparedLiveIntent,
+    outcome: Result<ExecutionOutcome, ploy_connectivity::ExecutionError>,
+) -> io::Result<PaperIntentResponse> {
+    let (intent, order_id) = match prepared {
+        PreparedLiveIntent::Existing(response) => return Ok(response),
+        PreparedLiveIntent::Pending { intent, order_id } => (intent, order_id),
+    };
     match outcome {
         Ok(ExecutionOutcome::Acknowledged { venue_order_id }) => {
-            runtime.acknowledge_order(&order_id, venue_order_id.clone());
-            Ok(PaperIntentResponse {
-                deployment_id: intent.deployment_id,
-                intent_id: intent.intent_id,
-                order_id,
-                state: "acknowledged".to_string(),
-                venue_order_id: Some(venue_order_id),
-                rejection_reason: None,
-                last_error: None,
-            })
+            runtime.acknowledge_order(&order_id, venue_order_id);
         }
         Ok(ExecutionOutcome::Rejected { reason }) => {
-            runtime.reject_order(&order_id, reason.clone());
-            Ok(PaperIntentResponse {
-                deployment_id: intent.deployment_id,
-                intent_id: intent.intent_id,
-                order_id,
-                state: "rejected".to_string(),
-                venue_order_id: None,
-                rejection_reason: Some(reason.clone()),
-                last_error: Some(reason),
-            })
+            runtime.reject_order(&order_id, reason);
         }
         Err(err) => {
             runtime.mark_order_unknown(&order_id, err.to_string());
-            Ok(PaperIntentResponse {
-                deployment_id: intent.deployment_id,
-                intent_id: intent.intent_id,
-                order_id,
-                state: "unknown".to_string(),
-                venue_order_id: None,
-                rejection_reason: None,
-                last_error: Some(err.to_string()),
-            })
         }
     }
+    let order = runtime
+        .order(&order_id)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "prepared order not found"))?;
+    Ok(response_for_order(intent.deployment_id, order))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{submit_live_intent, submit_paper_intent};
+    use super::{
+        apply_live_intent_outcome, execute_live_intent, prepare_live_intent, submit_live_intent,
+        submit_paper_intent,
+    };
     use ploy_connectivity::{
         CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
         ExecutionRequest, LiveExecutionGateway, ReplaceOutcome, ReplaceRequest, TrackedOrder,
@@ -371,5 +370,34 @@ mod tests {
         assert_eq!(replay.order_id, first.order_id);
         assert_eq!(gateway.submits.load(Ordering::SeqCst), 1);
         assert_eq!(replay_gateway.submits.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn live_submit_execution_is_separate_from_pending_and_terminal_state_changes() {
+        let mut runtime = TradingRuntime::default();
+        let gateway = CountingGateway::default();
+        let prepared =
+            prepare_live_intent(&mut runtime, intent(), Some("request-1")).expect("prepare");
+        assert_eq!(
+            runtime
+                .order("order-intent-1")
+                .expect("pending order")
+                .state,
+            ploy_trading::OrderState::Pending
+        );
+
+        let outcome = execute_live_intent(&gateway, &prepared);
+        assert_eq!(
+            runtime
+                .order("order-intent-1")
+                .expect("pending order")
+                .state,
+            ploy_trading::OrderState::Pending
+        );
+
+        let response = apply_live_intent_outcome(&mut runtime, prepared, outcome)
+            .expect("apply submission outcome");
+        assert_eq!(response.state, "acknowledged");
+        assert_eq!(gateway.submits.load(Ordering::SeqCst), 1);
     }
 }

@@ -2,7 +2,9 @@ use crate::config::PlatformConfig;
 use crate::events::EventBroker;
 use crate::http::publish_snapshot_events;
 use chrono::{DateTime, Utc};
-use ploy_connectivity::{LiveExecutionGateway, PolymarketExecutionGateway};
+use ploy_connectivity::{
+    ExecutionError, ExecutionOutcome, LiveExecutionGateway, PolymarketExecutionGateway,
+};
 use ploy_deployments::WorkerSupervisor;
 use ploy_operator_contracts::{
     ActiveAlert, DeploymentApplyRequest, DeploymentControlRequest, DeploymentRuntimeMode,
@@ -15,11 +17,12 @@ use ploy_platform_runtime::runtime_support::{
     account_token_exposure_envelope, intent_risk_effect, IntentAdmissionSource,
 };
 use ploy_platform_runtime::{
-    apply_deployment as apply_deployment_record, apply_loaded_registry_state,
+    apply_deployment as apply_deployment_record,
+    apply_live_intent_outcome as apply_live_runtime_intent_outcome, apply_loaded_registry_state,
     build_trading_state_snapshot, cancel_order as cancel_runtime_order,
     control_deployment as control_deployment_record,
     enforce_exposure_limit as enforce_intent_exposure_limit, ensure_intent_allowed,
-    finish_live_intent as finish_live_runtime_intent, load_proposal_store, load_registry_records,
+    execute_live_intent as execute_live_runtime_intent, load_proposal_store, load_registry_records,
     load_trading_runtimes, mark_live_runtime_degraded as mark_runtime_degraded_state,
     mark_runtime_healthy as mark_runtime_healthy_state, mark_venue_healthy, order_state_wire,
     prepare_live_intent as prepare_live_runtime_intent,
@@ -44,6 +47,40 @@ use std::thread;
 use std::time::Duration;
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug)]
+pub enum PreparedIntentSubmission {
+    Complete(PaperIntentResponse),
+    Live(PreparedDaemonLiveIntent),
+}
+
+#[derive(Debug)]
+pub struct PreparedDaemonLiveIntent {
+    deployment_id: String,
+    prepared: PreparedLiveIntent,
+    gateway: Arc<dyn LiveExecutionGateway>,
+}
+
+impl PreparedDaemonLiveIntent {
+    pub fn execute(&self) -> Result<ExecutionOutcome, ExecutionError> {
+        execute_live_runtime_intent(self.gateway.as_ref(), &self.prepared)
+    }
+}
+
+fn response_for_runtime_order(
+    deployment_id: &str,
+    order: &ploy_trading::OrderRecord,
+) -> PaperIntentResponse {
+    PaperIntentResponse {
+        deployment_id: deployment_id.to_string(),
+        intent_id: order.intent_id.clone(),
+        order_id: order.order_id.clone(),
+        state: order_state_wire(order.state),
+        venue_order_id: order.venue_order_id.clone(),
+        rejection_reason: order.rejection_reason.clone(),
+        last_error: order.last_error.clone(),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct LiveApprovalReceipt {
@@ -77,7 +114,7 @@ pub struct PloyDaemon {
     pub supervisor: WorkerSupervisor,
     pub trading: BTreeMap<String, TradingRuntime>,
     proposals: ProposalStore,
-    live_execution: Box<dyn LiveExecutionGateway>,
+    live_execution: Arc<dyn LiveExecutionGateway>,
     live_reconcile_failures: u32,
     next_live_reconcile_at: Option<DateTime<Utc>>,
     last_live_reconcile_error: Option<String>,
@@ -119,7 +156,7 @@ impl PloyDaemon {
             supervisor: WorkerSupervisor::default(),
             trading: BTreeMap::new(),
             proposals: ProposalStore::default(),
-            live_execution,
+            live_execution: Arc::from(live_execution),
             live_reconcile_failures: 0,
             next_live_reconcile_at: None,
             last_live_reconcile_error: None,
@@ -664,6 +701,21 @@ impl PloyDaemon {
         idempotency_key: Option<&str>,
         source: IntentAdmissionSource,
     ) -> io::Result<PaperIntentResponse> {
+        match self.prepare_intent_idempotent_from(intent, idempotency_key, source)? {
+            PreparedIntentSubmission::Complete(response) => Ok(response),
+            PreparedIntentSubmission::Live(prepared) => {
+                let outcome = prepared.execute();
+                self.finish_prepared_live_intent(prepared, outcome)
+            }
+        }
+    }
+
+    pub fn prepare_intent_idempotent_from(
+        &mut self,
+        intent: TradingIntent,
+        idempotency_key: Option<&str>,
+        source: IntentAdmissionSource,
+    ) -> io::Result<PreparedIntentSubmission> {
         let mut deployment = self
             .control_plane
             .deployments
@@ -673,7 +725,7 @@ impl PloyDaemon {
         if let Some(response) =
             self.account_idempotent_response(&deployment.account_id, &intent, idempotency_key)?
         {
-            return Ok(response);
+            return Ok(PreparedIntentSubmission::Complete(response));
         }
 
         self.refresh_source_health();
@@ -726,10 +778,12 @@ impl PloyDaemon {
         )?;
 
         match deployment.runtime_mode {
-            DeploymentRuntimeMode::Paper => {
-                self.submit_paper_intent_idempotent(intent, idempotency_key)
+            DeploymentRuntimeMode::Paper => Ok(PreparedIntentSubmission::Complete(
+                self.submit_paper_intent_idempotent(intent, idempotency_key)?,
+            )),
+            DeploymentRuntimeMode::Live => {
+                self.prepare_live_intent_submission(intent, idempotency_key)
             }
-            DeploymentRuntimeMode::Live => self.submit_live_intent(intent, idempotency_key),
         }
     }
 
@@ -875,28 +929,48 @@ impl PloyDaemon {
         )
     }
 
-    fn submit_live_intent(
+    fn prepare_live_intent_submission(
         &mut self,
         intent: TradingIntent,
         idempotency_key: Option<&str>,
-    ) -> io::Result<PaperIntentResponse> {
+    ) -> io::Result<PreparedIntentSubmission> {
         let deployment_id = intent.deployment_id.clone();
         let prepared = prepare_live_runtime_intent(
             self.trading.entry(deployment_id.clone()).or_default(),
             intent,
             idempotency_key,
         )?;
-        if matches!(prepared, PreparedLiveIntent::Pending { .. }) {
-            self.persist_trading_state()?;
+        match prepared {
+            PreparedLiveIntent::Existing(response) => {
+                Ok(PreparedIntentSubmission::Complete(response))
+            }
+            prepared @ PreparedLiveIntent::Pending { .. } => {
+                self.persist_trading_state()?;
+                Ok(PreparedIntentSubmission::Live(PreparedDaemonLiveIntent {
+                    deployment_id,
+                    prepared,
+                    gateway: Arc::clone(&self.live_execution),
+                }))
+            }
         }
-        let mut response = finish_live_runtime_intent(
+    }
+
+    pub fn finish_prepared_live_intent(
+        &mut self,
+        prepared: PreparedDaemonLiveIntent,
+        outcome: Result<ExecutionOutcome, ExecutionError>,
+    ) -> io::Result<PaperIntentResponse> {
+        let submission_ambiguous = outcome.is_err();
+        let deployment_id = prepared.deployment_id;
+        let mut response = apply_live_runtime_intent_outcome(
             self.trading
                 .get_mut(&deployment_id)
                 .expect("prepared live runtime"),
-            self.live_execution.as_ref(),
-            prepared,
+            prepared.prepared,
+            outcome,
         )?;
-        if response.state != "unknown" {
+        let mut pause_live = submission_ambiguous;
+        if !submission_ambiguous {
             if let Err(error) = self.persist_trading_state() {
                 self.trading
                     .get_mut(&deployment_id)
@@ -905,12 +979,17 @@ impl PloyDaemon {
                         &response.order_id,
                         format!("final persistence failed: {error}"),
                     );
-                response.state = "unknown".to_string();
-                response.venue_order_id = None;
-                response.last_error = Some(format!("final persistence failed: {error}"));
+                response = response_for_runtime_order(
+                    &deployment_id,
+                    self.trading
+                        .get(&deployment_id)
+                        .and_then(|runtime| runtime.order(&response.order_id))
+                        .expect("prepared live order"),
+                );
+                pause_live = true;
             }
         }
-        if response.state == "unknown" {
+        if pause_live {
             let _ = control_deployment_record(
                 &mut self.control_plane.deployments,
                 &deployment_id,
@@ -1458,6 +1537,7 @@ mod tests {
                 venue_order_history: Vec::new(),
                 revision: 0,
                 state,
+                state_changed_at: Some(chrono::Utc::now()),
                 filled_qty: if state == OrderState::PartiallyFilled {
                     dec!(0.5)
                 } else {
