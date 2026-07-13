@@ -23138,3 +23138,53 @@ or live-trading evidence stages from `docs/PROJECT_SEMANTICS.md`.
 - Independent review found API-key handling, origin validation, zero-book
   health, testnet enablement, and systemd guardrail gaps; all were corrected
   before commit.
+# Predict.fun Trading Account Ops (2026-07-13)
+
+Evidence stage: `deployment/runtime safety plumbing`. This slice adds guarded
+operator adapters; it does not produce dry-run parity or authorize live trade.
+
+## TDD seams
+
+- Wallet seam: derive an EOA or validate a Predict Account against an injected
+  signer without persisting or printing the private key.
+- Order seam: market metadata from the official API becomes an exact, expiring,
+  hash-bound order plan; execution requires the same hash and an explicit write
+  gate before the official SDK signs and POSTs `/v1/orders`.
+- Redemption seam: resolved positions become an exact, expiring, hash-bound
+  plan; execution uses the official SDK's standard/neg-risk and yield routes.
+- Safety seam: check/plan never authenticate, sign, approve, submit, cancel, or
+  broadcast. Ambiguous writes are ledger-locked for reconciliation.
+
+## Files / Ownership
+
+- `tools/predict-fun-account-ops/`: official SDK adapter, CLI, focused tests.
+- trade release workflow/postflight: package the tool but keep writes disabled.
+- docs: custody, order, redemption, approval, and human-gate contract.
+
+## Tasks
+
+- [x] Add failing wallet/order/redemption plan and write-gate tests.
+- [x] Implement official SDK-backed wallet, exact limit-order,
+      venue-contract-scoped approval, and redemption/reconciliation ops.
+- [x] Package the tool in the paused trade release with write-disabled defaults.
+- [x] Run dependency/security/relevant repo checks and independent review.
+- [ ] Commit, push, open PR, and monitor CI; do not deploy while ECS identity is untrusted.
+
+## Review
+
+- The official SDK 1.3.6 is pinned with ethers 6.17.0. Plans bind the exact
+  maker/taker amounts, market/outcome state, account, chain, release, TTL, and
+  content hash; SDK truncation and metadata drift fail before signing.
+- EOA and Predict Account signers are injected only on the trade host. This is
+  deliberately documented as a one-shot procedural adapter, not KMS/HSM
+  custody or cryptographically mandatory human approval.
+- Approval, execution, and reconciliation use separate default-false gates and
+  one exact protected workflow action. Owner-bound locks retain ambiguous
+  order/redemption writes until exact reconciliation.
+- Verification currently passes 12 Predict tests with zero npm advisories, 11
+  existing Polymarket account-op tests (16 known low transitive advisories), 11
+  deployment Python tests, 31 workflow/release Rust tests, actionlint, shell
+  syntax, and diff checks. No wallet, venue, cloud, or remote write occurred.
+- Automated Predict venue routing in `ployd`, MARKET orders, and on-chain order
+  cancellation remain outside this operator-adapter slice. LIMIT orders expire
+  within ten minutes; the REST remove-only endpoint is intentionally unused.
