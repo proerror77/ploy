@@ -994,7 +994,9 @@ mod tests {
             let mut request = [0_u8; 1024];
             let bytes = stream.read(&mut request).expect("read request");
             let request = String::from_utf8_lossy(&request[..bytes]);
-            assert!(request.starts_with("POST /api/deployments/example.live/orders/order-1/cancel"));
+            assert!(
+                request.starts_with("POST /api/deployments/example.live/orders/order-1/cancel")
+            );
 
             let body = serde_json::to_string(&OrderControlResponse {
                 deployment_id: "example.live".to_string(),
@@ -1260,7 +1262,8 @@ mod tests {
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().expect("accept");
                 let mut request = [0_u8; 1024];
-                stream.read(&mut request).expect("read request");
+                let bytes_read = stream.read(&mut request).expect("read request");
+                assert!(bytes_read > 0, "request must not be empty");
                 let body = serde_json::json!({
                     "status":"running",
                     "uptime_seconds":1,
