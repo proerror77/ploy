@@ -1587,14 +1587,14 @@ fn tracked_trade_fill(
         if trade.asset_id != tracked_token_id {
             return None;
         }
-        if trade_side(trade.side.clone())? != tracked_order.side {
+        if trade_side(trade.side)? != tracked_order.side {
             return None;
         }
         return Some(FillRecord {
             fill_id: tracked_fill_id(tracked_order, &trade.id),
             order_id: tracked_order.order_id.clone(),
             token_id: tracked_order.token_id.clone(),
-            side: tracked_order.side.clone(),
+            side: tracked_order.side,
             quantity: trade.size,
             price: trade.price,
             fee: fee_schedule.calculate(trade.size, trade.price, LiquidityRole::Taker),
@@ -1626,12 +1626,12 @@ fn tracked_trade_matches(tracked_order: &TrackedOrder, trade: &TradeResponse) ->
     };
     if trade.taker_order_id == tracked_order.venue_order_id {
         return trade.asset_id == tracked_token_id
-            && trade_side(trade.side.clone()) == Some(tracked_order.side);
+            && trade_side(trade.side) == Some(tracked_order.side);
     }
     trade.maker_orders.iter().any(|maker_order| {
         maker_order.order_id == tracked_order.venue_order_id
             && maker_order.asset_id == tracked_token_id
-            && trade_side(maker_order.side.clone()) == Some(tracked_order.side)
+            && trade_side(maker_order.side) == Some(tracked_order.side)
     })
 }
 
@@ -1645,14 +1645,14 @@ fn tracked_maker_fill(
     if maker_order.asset_id != tracked_token_id {
         return None;
     }
-    if trade_side(maker_order.side.clone())? != tracked_order.side {
+    if trade_side(maker_order.side)? != tracked_order.side {
         return None;
     }
     Some(FillRecord {
         fill_id: tracked_fill_id(tracked_order, &trade.id),
         order_id: tracked_order.order_id.clone(),
         token_id: tracked_order.token_id.clone(),
-        side: tracked_order.side.clone(),
+        side: tracked_order.side,
         quantity: maker_order.matched_amount,
         price: maker_order.price,
         fee: fee_schedule.calculate(
@@ -1672,6 +1672,13 @@ fn user_trade_timestamp(trade: &TradeMessage) -> Option<DateTime<Utc>> {
         .and_then(|timestamp| DateTime::from_timestamp(timestamp, 0))
 }
 
+fn maker_side_from_taker(side: Side) -> Option<TradeSide> {
+    match trade_side(side)? {
+        TradeSide::Buy => Some(TradeSide::Sell),
+        TradeSide::Sell => Some(TradeSide::Buy),
+    }
+}
+
 fn tracked_user_trade_fill(
     tracked_order: &TrackedOrder,
     trade: &TradeMessage,
@@ -1684,16 +1691,14 @@ fn tracked_user_trade_fill(
     let timestamp = user_trade_timestamp(trade)?;
 
     if trade.taker_order_id.as_deref() == Some(tracked_order.venue_order_id.as_str()) {
-        if trade.asset_id != tracked_token_id
-            || trade_side(trade.side.clone())? != tracked_order.side
-        {
+        if trade.asset_id != tracked_token_id || trade_side(trade.side)? != tracked_order.side {
             return None;
         }
         return Some(FillRecord {
             fill_id: tracked_fill_id(tracked_order, &trade.id),
             order_id: tracked_order.order_id.clone(),
             token_id: tracked_order.token_id.clone(),
-            side: tracked_order.side.clone(),
+            side: tracked_order.side,
             quantity: trade.size,
             price: trade.price,
             fee: fee_schedule.calculate(trade.size, trade.price, LiquidityRole::Taker),
@@ -1705,14 +1710,16 @@ fn tracked_user_trade_fill(
         .maker_orders
         .iter()
         .find(|maker_order| maker_order.order_id == tracked_order.venue_order_id)?;
-    if maker_order.asset_id != tracked_token_id {
+    if maker_order.asset_id != tracked_token_id
+        || maker_side_from_taker(trade.side)? != tracked_order.side
+    {
         return None;
     }
     Some(FillRecord {
         fill_id: tracked_fill_id(tracked_order, &trade.id),
         order_id: tracked_order.order_id.clone(),
         token_id: tracked_order.token_id.clone(),
-        side: tracked_order.side.clone(),
+        side: tracked_order.side,
         quantity: maker_order.matched_amount,
         price: maker_order.price,
         fee: fee_schedule.calculate(
@@ -1731,7 +1738,7 @@ fn tracked_order_observation(
     let tracked_token_id = U256::from_str(&tracked_order.token_id).ok()?;
     if order.id != tracked_order.venue_order_id
         || order.asset_id != tracked_token_id
-        || trade_side(order.side.clone())? != tracked_order.side
+        || trade_side(order.side)? != tracked_order.side
     {
         return None;
     }
@@ -1769,7 +1776,7 @@ fn tracked_rest_order_observation(
     })?;
     if order.id != tracked_order.venue_order_id
         || order.asset_id != tracked_token_id
-        || trade_side(order.side.clone()) != Some(tracked_order.side)
+        || trade_side(order.side) != Some(tracked_order.side)
     {
         return Err(ExecutionError::Validation(format!(
             "venue order `{}` does not match tracked order `{}`",
@@ -1809,11 +1816,12 @@ fn tracked_user_trade_matches(tracked_order: &TrackedOrder, trade: &TradeMessage
     };
     if trade.taker_order_id.as_deref() == Some(tracked_order.venue_order_id.as_str()) {
         return trade.asset_id == tracked_token_id
-            && trade_side(trade.side.clone()) == Some(tracked_order.side);
+            && trade_side(trade.side) == Some(tracked_order.side);
     }
     trade.maker_orders.iter().any(|maker_order| {
         maker_order.order_id == tracked_order.venue_order_id
             && maker_order.asset_id == tracked_token_id
+            && maker_side_from_taker(trade.side) == Some(tracked_order.side)
     })
 }
 
@@ -1896,10 +1904,9 @@ mod tests {
         cap_sell_quantity_to_balance, collateral_balance_to_raw,
         conditional_token_balance_to_shares, ensure_account_readiness, execution_price_override,
         normalize_aggressive_price, normalize_execution_amount, normalize_market_order_quantity,
-        normalize_order_quantity, polymarket_execution_principal,
-        polymarket_signature_type_from_env, raw_balance_to_pusd, tracked_rest_order_observation,
-        tracked_trade_fill, tracked_user_trade_fill, trade_side, unique_token_ids,
-        wallet_signature_type,
+        normalize_order_quantity, polymarket_execution_principal, raw_balance_to_pusd,
+        tracked_rest_order_observation, tracked_trade_fill, tracked_user_trade_fill,
+        tracked_user_trade_matches, trade_side, unique_token_ids, wallet_signature_type,
     };
     use chrono::Utc;
     use ploy_trading::{FillRecord, TradeSide};
@@ -2488,6 +2495,13 @@ mod tests {
         assert_eq!(maker_fill.fill_id, "trade-ws:order-maker");
         assert_eq!(taker_fill.fee, dec!(0.03465));
         assert_eq!(maker_fill.fee, Decimal::ZERO);
+
+        let wrong_maker_side = TrackedOrder {
+            side: TradeSide::Buy,
+            ..maker
+        };
+        assert!(tracked_user_trade_fill(&wrong_maker_side, &confirmed, fee_schedule).is_none());
+        assert!(!tracked_user_trade_matches(&wrong_maker_side, &confirmed));
     }
 
     #[test]

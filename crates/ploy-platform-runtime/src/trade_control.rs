@@ -7,6 +7,22 @@ use ploy_platform::DeploymentRecord;
 use ploy_trading::{OrderState, TradingRuntime};
 use std::io;
 
+fn reject_submission_in_progress(
+    deployment: &DeploymentRecord,
+    order: &ploy_trading::OrderRecord,
+) -> io::Result<()> {
+    if deployment.runtime_mode == DeploymentRuntimeMode::Live
+        && order.state == OrderState::Pending
+        && order.venue_order_id.is_none()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("order `{}` submission is in progress", order.order_id),
+        ));
+    }
+    Ok(())
+}
+
 pub fn cancel_order(
     runtime: &mut TradingRuntime,
     gateway: &dyn LiveExecutionGateway,
@@ -19,15 +35,7 @@ pub fn cancel_order(
         .cloned()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
 
-    if deployment.runtime_mode == DeploymentRuntimeMode::Live
-        && order.state == OrderState::Pending
-        && order.venue_order_id.is_none()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("order `{order_id}` submission is in progress"),
-        ));
-    }
+    reject_submission_in_progress(deployment, &order)?;
 
     if !matches!(
         order.state,
@@ -87,15 +95,7 @@ pub fn replace_order(
         .cloned()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "order not found"))?;
 
-    if deployment.runtime_mode == DeploymentRuntimeMode::Live
-        && order.state == OrderState::Pending
-        && order.venue_order_id.is_none()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("order `{order_id}` submission is in progress"),
-        ));
-    }
+    reject_submission_in_progress(deployment, &order)?;
 
     if !matches!(
         order.state,
@@ -504,13 +504,17 @@ mod tests {
         .expect_err("pending live submission cannot be replaced");
 
         assert_eq!(cancel_error.kind(), ErrorKind::InvalidInput);
-        assert!(cancel_error
-            .to_string()
-            .contains("submission is in progress"));
+        assert!(
+            cancel_error
+                .to_string()
+                .contains("submission is in progress")
+        );
         assert_eq!(replace_error.kind(), ErrorKind::InvalidInput);
-        assert!(replace_error
-            .to_string()
-            .contains("submission is in progress"));
+        assert!(
+            replace_error
+                .to_string()
+                .contains("submission is in progress")
+        );
         assert_eq!(gateway.cancellations.load(Ordering::SeqCst), 0);
         assert_eq!(gateway.replacements.load(Ordering::SeqCst), 0);
         assert_eq!(

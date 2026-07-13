@@ -41,7 +41,7 @@ pub fn reconcile_live_fills(
                     ) || (matches!(order.state, ploy_trading::OrderState::Canceled)
                         && order
                             .state_changed_at
-                            .map_or(true, |changed_at| changed_at >= terminal_cutoff)))
+                            .is_none_or(|changed_at| changed_at >= terminal_cutoff)))
             })
         {
             let Some(venue_order_id) = order.venue_order_id.clone() else {
@@ -49,7 +49,7 @@ pub fn reconcile_live_fills(
             };
             let side = runtime
                 .intent(&order.intent_id)
-                .map(|intent| intent.side.clone())
+                .map(|intent| intent.side)
                 .ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -75,7 +75,7 @@ pub fn reconcile_live_fills(
 
     let batch = live_execution
         .reconcile_updates(&tracked_orders)
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+        .map_err(|err| io::Error::other(err.to_string()))?;
 
     let mut recorded = 0;
     for fill in batch.fills {

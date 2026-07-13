@@ -294,11 +294,12 @@ where
                 let order_id = Uuid::new_v4().to_string();
 
                 let report = self.executor.submit(&intent, &order_id).await;
+                let mut halt_after_submission = false;
                 if let Some(signal) = signal_ref {
                     if let Err(error) = self.recorder.record_signal(signal).await {
                         warn!(%error, "Failed to persist signal record");
                         if self.config.mode == RuntimeMode::Live {
-                            panic!("live recorder failed: {error}");
+                            halt_after_submission = true;
                         }
                     }
                 }
@@ -329,6 +330,9 @@ where
                     let reason = report.rejection_reason.as_deref().unwrap_or("unknown");
                     warn!(order_id = %order_id, reason = %reason, "Order rejected");
                     self.strategy.on_reject(&intent, reason);
+                    if halt_after_submission {
+                        break 'runtime;
+                    }
                     continue;
                 }
 
@@ -397,6 +401,13 @@ where
                         token = %intent.token_id,
                         "Live order acknowledged without fill; waiting for reconciliation",
                     );
+                }
+                if halt_after_submission {
+                    warn!(
+                        order_id = %order_id,
+                        "Stopping live runtime after post-submit signal audit failure"
+                    );
+                    break 'runtime;
                 }
             }
 
@@ -868,8 +879,8 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use super::{
-        observe_fill_evidence, retry_attempt_from_intent_id, retry_root_intent_id, RuntimeConfig,
-        RuntimeMode, StrategyRuntime,
+        RuntimeConfig, RuntimeMode, StrategyRuntime, observe_fill_evidence,
+        retry_attempt_from_intent_id, retry_root_intent_id,
     };
     use crate::traits::{
         ExecutionPolicy, ExecutionReport, Executor, Feed, MarketUpdate, NullRecorder, Recorder,
@@ -1168,8 +1179,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "live recorder failed")]
-    async fn live_signal_recorder_failure_happens_after_canonical_submission() {
+    async fn live_signal_recorder_failure_stops_after_order_state_is_recorded() {
         let now = Utc::now();
         let submissions = Arc::new(Mutex::new(Vec::new()));
         let strategy = RecordingStrategy {
@@ -1225,7 +1235,16 @@ mod tests {
             },
         );
 
-        runtime.run().await;
+        let result = runtime.run().await;
+
+        assert_eq!(submissions.lock().unwrap().len(), 1);
+        assert_eq!(result.intents_submitted, 1);
+        let snapshot = runtime.trading.snapshot(&Default::default());
+        assert_eq!(snapshot.orders.len(), 1);
+        assert_eq!(
+            snapshot.orders[0].venue_order_id.as_deref(),
+            Some("venue-order-1")
+        );
     }
 
     #[async_trait]
@@ -2428,11 +2447,13 @@ mod tests {
             ["pm5d_BTCUSDT_UP_retry3"]
         );
         assert_eq!(snapshot.orders.len(), 2);
-        assert!(snapshot
-            .orders
-            .iter()
-            .any(|order| order.intent_id == "pm5d_BTCUSDT_UP_retry3"
-                && order.state == ploy_trading::OrderState::Acknowledged));
+        assert!(
+            snapshot
+                .orders
+                .iter()
+                .any(|order| order.intent_id == "pm5d_BTCUSDT_UP_retry3"
+                    && order.state == ploy_trading::OrderState::Acknowledged)
+        );
     }
 
     #[tokio::test]
