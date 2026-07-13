@@ -4824,7 +4824,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 4, 25, 6, 9, 0).unwrap();
         let mut config = test_config();
         config.profile = ThreeLayerProfile::SettlementProbability;
-        config.min_edge = 0.02;
+        config.min_edge = 0.01;
         config.min_entry_score = 0.25;
         config.max_sweep_levels = 3;
         config.max_sweep_price_delta = dec!(0.10);
@@ -4881,7 +4881,7 @@ mod tests {
             [StrategyDecision::Enter { signal, .. }] => {
                 let signal = signal.as_ref().expect("signal");
                 assert!(
-                    signal.edge > 0.02,
+                    signal.edge > 0.01,
                     "expected full-depth executable edge above min_edge, got {}",
                     signal.edge
                 );
@@ -4988,7 +4988,7 @@ mod tests {
             Some(&1)
         );
         assert_eq!(
-            diagnostics.get("settlement_autofactor_raw_score_neg2_to_0pct"),
+            diagnostics.get("settlement_autofactor_raw_score_neg5_to_neg2pct"),
             Some(&1)
         );
         assert_eq!(diagnostics.get("skip_entry_score"), Some(&1));

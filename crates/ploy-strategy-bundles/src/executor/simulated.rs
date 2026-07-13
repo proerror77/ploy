@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use ploy_market_contracts::{BookLevel, FeeAccumulator, FeeAsset, FeeSchedule, LiquidityRole};
 use ploy_trading::{FillRecord, IntentPurpose, TradeSide, TradingIntent};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -19,8 +20,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::traits::{ExecutionReport, Executor, MarketUpdate};
-use ploy_market_contracts::BookLevel;
-
 const MIN_BINARY_PRICE: Decimal = dec!(0.01);
 const MAX_BINARY_PRICE: Decimal = dec!(0.99);
 
@@ -53,6 +52,12 @@ pub struct SimulatedExecutorConfig {
     pub visible_depth_haircut: Decimal,
     /// Maximum number of full-depth levels to sweep. Zero means unlimited.
     pub max_sweep_levels: usize,
+    /// Venue-specific fee schedule used by backtest and dry-run fills.
+    pub fee_schedule: FeeSchedule,
+    /// Asset in which the venue charges the simulated fee.
+    pub fee_asset: Option<FeeAsset>,
+    /// Assumed maker/taker role for simulated fills.
+    pub liquidity_role: LiquidityRole,
 }
 
 impl Default for SimulatedExecutorConfig {
@@ -69,6 +74,9 @@ impl Default for SimulatedExecutorConfig {
             require_lob_liquidity: false,
             visible_depth_haircut: Decimal::ONE,
             max_sweep_levels: 0,
+            fee_schedule: FeeSchedule::default(),
+            fee_asset: Some(FeeAsset::Collateral),
+            liquidity_role: LiquidityRole::Taker,
         }
     }
 }
@@ -99,12 +107,6 @@ impl SimulatedExecutor {
 
     fn clamp_price(price: Decimal) -> Decimal {
         price.max(MIN_BINARY_PRICE).min(MAX_BINARY_PRICE)
-    }
-
-    /// Polymarket trading fee: 2% × p × (1 − p) per share.
-    fn crypto_trade_fee(fill_price: Decimal) -> Decimal {
-        let p_factor = fill_price * (Decimal::ONE - fill_price);
-        dec!(0.02) * p_factor
     }
 
     /// Simulate a buy fill from a quoted executable price.
@@ -184,10 +186,11 @@ impl SimulatedExecutor {
         visible_depth_haircut: Decimal,
         max_sweep_levels: usize,
         allow_partial: bool,
-    ) -> Result<(Decimal, Decimal), String> {
+    ) -> Result<(Decimal, Decimal, Vec<(Decimal, Decimal)>), String> {
         let mut remaining = shares.max(Decimal::ZERO);
         let mut filled = Decimal::ZERO;
         let mut notional = Decimal::ZERO;
+        let mut fee_legs = Vec::new();
         let level_limit = if max_sweep_levels == 0 {
             usize::MAX
         } else {
@@ -213,6 +216,7 @@ impl SimulatedExecutor {
             remaining -= take;
             filled += take;
             notional += take * price;
+            fee_legs.push((take, price));
         }
 
         if filled <= Decimal::ZERO {
@@ -224,14 +228,24 @@ impl SimulatedExecutor {
             ));
         }
 
-        Ok((notional / filled, filled))
+        Ok((notional / filled, filled, fee_legs))
     }
 
     fn simulate_lob_fill(
         &self,
         intent: &TradingIntent,
         signal_price: Decimal,
-    ) -> Result<(Decimal, Decimal, Decimal, Decimal, &'static str), String> {
+    ) -> Result<
+        (
+            Decimal,
+            Decimal,
+            Decimal,
+            Decimal,
+            &'static str,
+            Vec<(Decimal, Decimal)>,
+        ),
+        String,
+    > {
         let quote = self
             .quotes
             .get(&intent.token_id)
@@ -245,7 +259,7 @@ impl SimulatedExecutor {
                     .map(Self::clamp_price)
                     .unwrap_or_else(|| quote.ask.map(Self::clamp_price).unwrap_or(dec!(0.99)));
                 if !quote.ask_levels.is_empty() {
-                    let (avg_price, filled_qty) = Self::sweep_levels(
+                    let (avg_price, filled_qty, fee_legs) = Self::sweep_levels(
                         &quote.ask_levels,
                         requested,
                         TradeSide::Buy,
@@ -261,6 +275,7 @@ impl SimulatedExecutor {
                         avg_price - reference,
                         Decimal::ZERO,
                         "full_depth_sweep",
+                        fee_legs,
                     ));
                 }
 
@@ -296,6 +311,7 @@ impl SimulatedExecutor {
                     ask - reference,
                     Decimal::ZERO,
                     "top_book_quote",
+                    vec![(filled_qty, ask)],
                 ))
             }
             TradeSide::Sell => {
@@ -304,7 +320,7 @@ impl SimulatedExecutor {
                     .map(Self::clamp_price)
                     .unwrap_or_else(|| quote.bid.map(Self::clamp_price).unwrap_or(dec!(0.01)));
                 if !quote.bid_levels.is_empty() {
-                    let (avg_price, filled_qty) = Self::sweep_levels(
+                    let (avg_price, filled_qty, fee_legs) = Self::sweep_levels(
                         &quote.bid_levels,
                         requested,
                         TradeSide::Sell,
@@ -320,6 +336,7 @@ impl SimulatedExecutor {
                         reference - avg_price,
                         Decimal::ZERO,
                         "full_depth_sweep",
+                        fee_legs,
                     ));
                 }
 
@@ -355,6 +372,7 @@ impl SimulatedExecutor {
                     reference - bid,
                     Decimal::ZERO,
                     "top_book_quote",
+                    vec![(filled_qty, bid)],
                 ))
             }
         }
@@ -433,6 +451,51 @@ impl Executor for SimulatedExecutor {
         let is_settlement = intent.purpose == IntentPurpose::Exit
             && (signal_price == Decimal::ZERO || signal_price == Decimal::ONE);
 
+        if !is_settlement && !self.config.fee_schedule.is_configured() {
+            return ExecutionReport {
+                order_id: order_id.to_string(),
+                fill: None,
+                rejected: true,
+                rejection_reason: Some(
+                    "Market fee metadata is required for simulated execution".into(),
+                ),
+                slippage: None,
+                market_impact: None,
+                price_basis: None,
+            };
+        }
+        let charges_fee = self
+            .config
+            .fee_schedule
+            .rate_for(self.config.liquidity_role)
+            > Decimal::ZERO;
+        if !is_settlement && charges_fee && self.config.fee_asset.is_none() {
+            return ExecutionReport {
+                order_id: order_id.to_string(),
+                fill: None,
+                rejected: true,
+                rejection_reason: Some(
+                    "Market fee asset metadata is required for simulated execution".into(),
+                ),
+                slippage: None,
+                market_impact: None,
+                price_basis: None,
+            };
+        }
+        if !is_settlement && charges_fee && self.config.fee_asset == Some(FeeAsset::Shares) {
+            return ExecutionReport {
+                order_id: order_id.to_string(),
+                fill: None,
+                rejected: true,
+                rejection_reason: Some(
+                    "Share-denominated fees require net-position accounting".into(),
+                ),
+                slippage: None,
+                market_impact: None,
+                price_basis: None,
+            };
+        }
+
         let simulated = if is_settlement {
             Ok((
                 signal_price,
@@ -440,6 +503,7 @@ impl Executor for SimulatedExecutor {
                 Decimal::ZERO,
                 Decimal::ZERO,
                 "settlement",
+                Vec::new(),
             ))
         } else if self.config.require_lob_liquidity {
             self.simulate_lob_fill(intent, signal_price)
@@ -458,10 +522,11 @@ impl Executor for SimulatedExecutor {
                 } else {
                     "signal_limit"
                 },
+                vec![(filled_qty, fill_price)],
             ))
         };
 
-        let (fill_price, filled_qty, slippage, impact, price_basis) = match simulated {
+        let (fill_price, filled_qty, slippage, impact, price_basis, fee_legs) = match simulated {
             Ok(fill) => fill,
             Err(reason) => {
                 return ExecutionReport {
@@ -491,7 +556,28 @@ impl Executor for SimulatedExecutor {
         let fee = if is_settlement {
             Decimal::ZERO
         } else {
-            Self::crypto_trade_fee(fill_price) * filled_qty
+            let revenue_sign = match intent.side {
+                TradeSide::Buy => -Decimal::ONE,
+                TradeSide::Sell => Decimal::ONE,
+            };
+            let mut accumulator = FeeAccumulator::default();
+            let fee = fee_legs
+                .iter()
+                .map(|(leg_quantity, leg_price)| {
+                    self.config
+                        .fee_schedule
+                        .charge(
+                            *leg_quantity,
+                            *leg_price,
+                            self.config.liquidity_role,
+                            *leg_quantity * *leg_price * revenue_sign,
+                            &mut accumulator,
+                        )
+                        .expect("fee schedule was checked above")
+                        .net_fee
+                })
+                .sum();
+            fee
         };
 
         let fill = FillRecord {
@@ -876,11 +962,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_fee_uses_pm_rate() {
+    async fn entry_fee_uses_configured_venue_schedule() {
         let config = SimulatedExecutorConfig {
             use_spread: false,
             enable_market_impact: false,
             enable_partial_fills: false,
+            fee_schedule: ploy_market_contracts::FeeSchedule::polymarket_v2(dec!(0.07), 1, true),
+            liquidity_role: ploy_market_contracts::LiquidityRole::Taker,
             ..Default::default()
         };
         let mut exec = SimulatedExecutor::new(config);
@@ -888,8 +976,155 @@ mod tests {
 
         let report = exec.submit(&intent, "test-order-5").await;
         let fill = report.fill.expect("fill");
-        // fee = 0.02 × 0.50 × 0.50 × 10 = 0.05
-        assert_eq!(fill.fee.round_dp(6), dec!(0.05));
+        assert_eq!(fill.fee, dec!(0.175));
+    }
+
+    #[tokio::test]
+    async fn maker_fill_uses_maker_rate() {
+        let config = SimulatedExecutorConfig {
+            fee_schedule: ploy_market_contracts::FeeSchedule::new(
+                ploy_market_contracts::FeeFormula::Notional,
+                dec!(0.005),
+                dec!(0.02),
+                ploy_market_contracts::FeeRounding::Exact,
+                Decimal::ZERO,
+            ),
+            liquidity_role: ploy_market_contracts::LiquidityRole::Maker,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(10));
+
+        let fill = exec
+            .submit(&intent, "test-order-maker-fee")
+            .await
+            .fill
+            .expect("fill");
+
+        assert_eq!(fill.fee, dec!(0.025));
+    }
+
+    #[tokio::test]
+    async fn missing_market_fee_metadata_rejects_fill() {
+        let config = SimulatedExecutorConfig {
+            fee_schedule: ploy_market_contracts::FeeSchedule::unconfigured(
+                ploy_market_contracts::FeeFormula::Notional,
+            ),
+            fee_asset: Some(ploy_market_contracts::FeeAsset::Collateral),
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(10));
+
+        let report = exec.submit(&intent, "missing-market-fee").await;
+
+        assert!(report.rejected);
+        assert_eq!(
+            report.rejection_reason.as_deref(),
+            Some("Market fee metadata is required for simulated execution")
+        );
+    }
+
+    #[tokio::test]
+    async fn share_denomination_fails_closed_until_fill_contract_tracks_fee_asset() {
+        let config = SimulatedExecutorConfig {
+            fee_asset: Some(ploy_market_contracts::FeeAsset::Shares),
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(10));
+
+        let report = exec.submit(&intent, "share-fee").await;
+
+        assert!(report.rejected);
+        assert_eq!(
+            report.rejection_reason.as_deref(),
+            Some("Share-denominated fees require net-position accounting")
+        );
+    }
+
+    #[tokio::test]
+    async fn explicitly_fee_free_market_does_not_require_fee_asset() {
+        let config = SimulatedExecutorConfig {
+            fee_schedule: ploy_market_contracts::FeeSchedule::new(
+                ploy_market_contracts::FeeFormula::Notional,
+                dec!(0),
+                dec!(0),
+                ploy_market_contracts::FeeRounding::Exact,
+                dec!(0),
+            ),
+            fee_asset: None,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(10));
+
+        let fill = exec
+            .submit(&intent, "fee-free")
+            .await
+            .fill
+            .expect("fee-free fill");
+
+        assert_eq!(fill.fee, dec!(0));
+    }
+
+    #[tokio::test]
+    async fn kalshi_match_legs_share_one_order_rounding_accumulator() {
+        let config = SimulatedExecutorConfig {
+            require_lob_liquidity: true,
+            fee_schedule: ploy_market_contracts::FeeSchedule::new(
+                ploy_market_contracts::FeeFormula::ProbabilityPower { exponent: 1 },
+                dec!(0),
+                dec!(0.07),
+                ploy_market_contracts::FeeRounding::Ceiling { decimal_places: 4 },
+                dec!(0),
+            )
+            .with_kalshi_balance_rounding(2),
+            fee_asset: Some(ploy_market_contracts::FeeAsset::Collateral),
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        exec.observe_market_update(&quote_update_with_levels(
+            Vec::new(),
+            vec![
+                level(dec!(0.50), dec!(0.30)),
+                level(dec!(0.50), dec!(0.30)),
+                level(dec!(0.50), dec!(0.30)),
+            ],
+        ));
+        let intent = test_intent(TradeSide::Buy, dec!(0.50), dec!(0.90));
+
+        let fill = exec
+            .submit(&intent, "kalshi-partials")
+            .await
+            .fill
+            .expect("fill");
+
+        assert_eq!(fill.fee, dec!(0.0200));
+    }
+
+    #[tokio::test]
+    async fn full_depth_probability_fees_are_rounded_per_match_level() {
+        let config = SimulatedExecutorConfig {
+            require_lob_liquidity: true,
+            fee_schedule: ploy_market_contracts::FeeSchedule::polymarket_v2(dec!(0.07), 1, true),
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        exec.observe_market_update(&quote_update_with_levels(
+            Vec::new(),
+            vec![level(dec!(0.20), dec!(1)), level(dec!(0.80), dec!(1))],
+        ));
+        let intent = test_intent(TradeSide::Buy, dec!(0.90), dec!(2));
+
+        let fill = exec
+            .submit(&intent, "multi-level-fee")
+            .await
+            .fill
+            .expect("fill");
+
+        assert_eq!(fill.price, dec!(0.50));
+        assert_eq!(fill.fee, dec!(0.02240));
     }
 
     #[tokio::test]

@@ -208,6 +208,8 @@ pub struct FactorObservationV2 {
     pub entry_sweep_avg_price_15u: f64,
     pub exit_sweep_avg_price_15u: f64,
     pub entry_sweep_shares_15u: f64,
+    #[serde(default = "nan_f64")]
+    pub entry_sweep_fee_usd_15u: f64,
     pub exit_sweep_shares_15u: f64,
     pub entry_sweep_levels_15u: f64,
     pub exit_sweep_levels_15u: f64,
@@ -7082,8 +7084,13 @@ struct SweepFill {
     fillable: bool,
     avg_price: f64,
     shares: f64,
+    fee_usd: f64,
     levels_used: f64,
     slippage_bps: f64,
+}
+
+fn nan_f64() -> f64 {
+    f64::NAN
 }
 
 impl Default for SweepFill {
@@ -7092,6 +7099,7 @@ impl Default for SweepFill {
             fillable: false,
             avg_price: f64::NAN,
             shares: f64::NAN,
+            fee_usd: f64::NAN,
             levels_used: f64::NAN,
             slippage_bps: f64::NAN,
         }
@@ -7158,6 +7166,7 @@ fn sweep_buy_to_stake_with_config(
     let mut remaining = stake_usd;
     let mut spent = 0.0;
     let mut shares = 0.0;
+    let mut fee_usd = 0.0;
     let mut levels_used = 0.0;
     for level in levels
         .iter()
@@ -7173,7 +7182,10 @@ fn sweep_buy_to_stake_with_config(
             continue;
         }
         spent += take_notional;
-        shares += take_notional / level.price;
+        let take_shares = take_notional / level.price;
+        shares += take_shares;
+        fee_usd +=
+            ploy_market_contracts::polymarket_crypto_taker_fee_cost(take_shares, level.price);
         remaining -= take_notional;
         levels_used += 1.0;
     }
@@ -7185,6 +7197,7 @@ fn sweep_buy_to_stake_with_config(
         fillable: true,
         avg_price,
         shares,
+        fee_usd,
         levels_used,
         slippage_bps: ((avg_price - reference_price).max(0.0) / reference_price) * 10_000.0,
     }
@@ -7215,6 +7228,7 @@ fn sweep_sell_shares_with_config(
     let mut remaining = shares_to_sell;
     let mut proceeds = 0.0;
     let mut sold = 0.0;
+    let mut fee_usd = 0.0;
     let mut levels_used = 0.0;
     for level in levels
         .iter()
@@ -7227,6 +7241,8 @@ fn sweep_sell_shares_with_config(
         let take_shares = remaining.min(level.size * haircut);
         proceeds += take_shares * level.price;
         sold += take_shares;
+        fee_usd +=
+            ploy_market_contracts::polymarket_crypto_taker_fee_cost(take_shares, level.price);
         remaining -= take_shares;
         levels_used += 1.0;
     }
@@ -7238,6 +7254,7 @@ fn sweep_sell_shares_with_config(
         fillable: true,
         avg_price,
         shares: sold,
+        fee_usd,
         levels_used,
         slippage_bps: ((reference_price - avg_price).max(0.0) / reference_price) * 10_000.0,
     }
@@ -7404,8 +7421,8 @@ fn build_full_depth_execution_sample(
             )
         })
         .unwrap_or_default();
-    let entry_fee = if entry_sweep.fillable && valid_price(entry_sweep.avg_price) {
-        entry_sweep.shares * crypto_fee_cost(entry_sweep.avg_price)
+    let entry_fee = if entry_sweep.fillable && entry_sweep.fee_usd.is_finite() {
+        entry_sweep.fee_usd
     } else {
         f64::NAN
     };
@@ -7454,9 +7471,9 @@ fn build_full_depth_execution_sample(
                 )
             })
             .unwrap_or_default();
-        let reprice_pnl = exit_sweep
-            .fillable
-            .then_some(exit_sweep.shares * exit_sweep.avg_price - stake_usd - entry_fee);
+        let reprice_pnl = exit_sweep.fillable.then_some(
+            exit_sweep.shares * exit_sweep.avg_price - stake_usd - entry_fee - exit_sweep.fee_usd,
+        );
         match horizon_secs {
             5 => {
                 sample.exit_5s_fillable = exit_sweep.fillable;
@@ -8513,17 +8530,16 @@ fn side_row(
         }
     };
 
-    let fee_per_share = if valid_price(entry_ask) {
-        crypto_fee_cost(entry_ask)
-    } else {
-        f64::NAN
-    };
     let entry_shares = if valid_price(entry_ask) {
         stake_usd / entry_ask
     } else {
         f64::NAN
     };
-    let entry_fee_usd = entry_shares * fee_per_share;
+    let entry_fee_usd = if entry_shares.is_finite() {
+        ploy_market_contracts::polymarket_crypto_taker_fee_cost(entry_shares, entry_ask)
+    } else {
+        f64::NAN
+    };
     let entry_fillable = entry_shares.is_finite()
         && entry_ask_size.is_finite()
         && entry_ask_size + EPS >= entry_shares;
@@ -8584,33 +8600,42 @@ fn side_row(
         f64::NAN
     };
     let roundtrip_pnl_now_15u = if entry_fillable && exit_fillable && valid_price(exit_bid) {
-        Some(entry_shares * exit_bid - stake_usd - entry_fee_usd)
+        let exit_fee_usd =
+            ploy_market_contracts::polymarket_crypto_taker_fee_cost(entry_shares, exit_bid);
+        Some(entry_shares * exit_bid - stake_usd - entry_fee_usd - exit_fee_usd)
     } else {
         None
     };
-    let full_depth_entry_fee_usd = if entry_sweep.fillable && valid_price(entry_sweep.avg_price) {
-        entry_sweep.shares * crypto_fee_cost(entry_sweep.avg_price)
+    let full_depth_entry_fee_usd = if entry_sweep.fillable && entry_sweep.fee_usd.is_finite() {
+        entry_sweep.fee_usd
     } else {
         f64::NAN
     };
     let roundtrip_pnl_now_full_depth_15u =
         if entry_sweep.fillable && exit_sweep.fillable && full_depth_entry_fee_usd.is_finite() {
-            Some(entry_sweep.shares * exit_sweep.avg_price - stake_usd - full_depth_entry_fee_usd)
+            Some(
+                entry_sweep.shares * exit_sweep.avg_price
+                    - stake_usd
+                    - full_depth_entry_fee_usd
+                    - exit_sweep.fee_usd,
+            )
         } else {
             None
         };
     let roundtrip_cost_usd = if let Some(pnl) = roundtrip_pnl_now_15u {
         -pnl
     } else if valid_price(entry_ask) && valid_price(exit_bid) && entry_shares.is_finite() {
-        (stake_usd - entry_shares * exit_bid + entry_fee_usd).max(0.0)
+        let exit_fee_usd =
+            ploy_market_contracts::polymarket_crypto_taker_fee_cost(entry_shares, exit_bid);
+        (stake_usd - entry_shares * exit_bid + entry_fee_usd + exit_fee_usd).max(0.0)
     } else {
         f64::NAN
     };
     let executable_pnl = if entry_fillable && settlement_win.is_finite() {
         Some(if settlement_win >= 0.5 {
-            stake_usd * (1.0 / entry_ask - 1.0) - stake_usd * fee_per_share / entry_ask
+            stake_usd * (1.0 / entry_ask - 1.0) - entry_fee_usd
         } else {
-            -stake_usd - stake_usd * fee_per_share / entry_ask
+            -stake_usd - entry_fee_usd
         })
     } else {
         None
@@ -8628,8 +8653,8 @@ fn side_row(
         None
     };
     let conservative_entry_fee_usd =
-        if conservative_entry_sweep.fillable && valid_price(conservative_entry_sweep.avg_price) {
-            conservative_entry_sweep.shares * crypto_fee_cost(conservative_entry_sweep.avg_price)
+        if conservative_entry_sweep.fillable && conservative_entry_sweep.fee_usd.is_finite() {
+            conservative_entry_sweep.fee_usd
         } else {
             f64::NAN
         };
@@ -8768,6 +8793,7 @@ fn side_row(
         entry_sweep_avg_price_15u: entry_sweep.avg_price,
         exit_sweep_avg_price_15u: exit_sweep.avg_price,
         entry_sweep_shares_15u: entry_sweep.shares,
+        entry_sweep_fee_usd_15u: entry_sweep.fee_usd,
         exit_sweep_shares_15u: exit_sweep.shares,
         entry_sweep_levels_15u: entry_sweep.levels_used,
         exit_sweep_levels_15u: exit_sweep.levels_used,
@@ -8965,10 +8991,15 @@ fn set_future_exit_labels(
     let bid_change = finite_diff(future.exit_bid, rows[idx].exit_bid);
     let fillable = Some(bool_num(future.label_exit_fillable));
     let pnl = if rows[idx].entry_shares.is_finite() && valid_price(future.exit_bid) {
+        let exit_fee = ploy_market_contracts::polymarket_crypto_taker_fee_cost(
+            rows[idx].entry_shares,
+            future.exit_bid,
+        );
         Some(
             rows[idx].entry_shares * future.exit_bid
                 - rows[idx].stake_usd
-                - rows[idx].entry_fee_usd,
+                - rows[idx].entry_fee_usd
+                - exit_fee,
         )
     } else {
         None
@@ -8990,10 +9021,13 @@ fn set_future_exit_labels(
         .fillable
         .then_some(full_depth_exit.shares * full_depth_exit.avg_price);
     let full_depth_pnl = full_depth_value.and_then(|value| {
-        if rows[idx].stake_usd.is_finite() && rows[idx].entry_sweep_avg_price_15u.is_finite() {
-            let fee = rows[idx].entry_sweep_shares_15u
-                * crypto_fee_cost(rows[idx].entry_sweep_avg_price_15u);
-            Some(value - rows[idx].stake_usd - fee)
+        if rows[idx].stake_usd.is_finite() && rows[idx].entry_sweep_fee_usd_15u.is_finite() {
+            Some(
+                value
+                    - rows[idx].stake_usd
+                    - rows[idx].entry_sweep_fee_usd_15u
+                    - full_depth_exit.fee_usd,
+            )
         } else {
             None
         }
@@ -9701,7 +9735,7 @@ fn bool_num(value: bool) -> f64 {
 }
 
 fn crypto_fee_cost(entry_price: f64) -> f64 {
-    0.02 * entry_price * (1.0 - entry_price)
+    ploy_market_contracts::polymarket_crypto_taker_fee_per_share(entry_price)
 }
 
 #[cfg(test)]
@@ -10540,6 +10574,27 @@ mod tests {
         assert!(up.label_full_depth_executable_pnl_15u.unwrap() > 0.0);
         assert_eq!(up.entry_sweep_levels_15u, 2.0);
         assert!(up.entry_sweep_slippage_bps > 0.0);
+    }
+
+    #[test]
+    fn full_depth_sweep_charges_probability_fee_per_level() {
+        let levels = vec![
+            crate::factors::ResearchPmBookLevel {
+                price: 0.20,
+                size: 1.0,
+            },
+            crate::factors::ResearchPmBookLevel {
+                price: 0.80,
+                size: 1.0,
+            },
+        ];
+
+        let fill = sweep_buy_to_stake(&levels, 0.20, 1.0);
+
+        assert!(fill.fillable);
+        assert!((fill.avg_price - 0.50).abs() < EPS);
+        assert!((fill.shares - 2.0).abs() < EPS);
+        assert!((fill.fee_usd - 0.0224).abs() < EPS);
     }
 
     #[test]

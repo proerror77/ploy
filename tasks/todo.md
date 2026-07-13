@@ -1,5 +1,12 @@
 # Current Session - Live Hot-Path Latency (2026-07-13)
 
+## Continuation - Venue Fees And Execution Events
+
+- [x] Add one shared venue-aware fee calculator with maker/taker and rounding semantics.
+- [x] Use it in simulated execution and backtest/research fee accounting.
+- [ ] Prefer authenticated venue order/fill events over snapshot polling, with bounded fallback.
+- [ ] Measure quote-to-ack and quote-to-fill latency without enabling live trading.
+
 Evidence stage: implementation hardening only. Live remains paused; this slice
 does not deploy, resume trading, or produce promotion evidence.
 
@@ -18,6 +25,24 @@ does not deploy, resume trading, or produce promotion evidence.
       polling to 100ms while keeping catalog queries at 2 seconds.
 
 ## Review
+
+- Prediction-market fees now share one calculator covering probability-power,
+  notional, and per-contract formulas, role-specific maker/taker rates, exact,
+  five-place truncation, and ceiling semantics. Polymarket sub-tick fees round to
+  zero; Kalshi trade-fee ceiling, member balance precision, per-order rounding
+  accumulator, and rebates are modeled separately. Full-depth sweeps preserve
+  match-level prices for nonlinear fee calculation instead of charging the VWAP.
+- Simulated execution uses official Polymarket family defaults. Predict.fun,
+  Kalshi, and custom Polymarket families require explicit market metadata instead
+  of silently applying fixture rates; Predict.fun accepts its native bps and fee
+  asset. Share-denominated fees fail closed until canonical fills track net share
+  deductions, avoiding false position/PnL results.
+- Current Polymarket crypto strategy/research edge calculations use the shared 7%
+  probability curve instead of the stale 2% constant.
+- Fee-slice verification passed: 16 market-contract tests, 223 strategy-bundle
+  tests (1 ignored), 167 research tests, research-example compilation, and
+  `ploy-strategy-runtime` compilation. Existing
+  dead-code warnings remain unchanged.
 
 - Empty-order runtime updates now perform zero fill-reconciliation calls. Active,
   unknown, acknowledged, and partially-filled orders retain the existing

@@ -1085,7 +1085,7 @@ fn valid_pm_price(value: f64) -> bool {
 }
 
 fn pm_fee_cost(entry_price: f64) -> f64 {
-    0.02 * entry_price * (1.0 - entry_price)
+    ploy_market_contracts::polymarket_crypto_taker_fee_per_share(entry_price)
 }
 
 fn settlement_edge(probability: f64, entry_price: f64) -> f64 {
@@ -3160,6 +3160,7 @@ mod tests {
             entry_sweep_avg_price_15u: 0.50,
             exit_sweep_avg_price_15u: 0.48,
             entry_sweep_shares_15u: 30.0,
+            entry_sweep_fee_usd_15u: 0.0,
             exit_sweep_shares_15u: 30.0,
             entry_sweep_levels_15u: 1.0,
             exit_sweep_levels_15u: 1.0,
