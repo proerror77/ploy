@@ -5,8 +5,8 @@
 - [x] Add one shared venue-aware fee calculator with maker/taker and rounding semantics.
 - [x] Use it in simulated execution and backtest/research fee accounting.
 - [x] Make live Polymarket REST reconciliation confirmed-only and use cached V2 fee metadata.
-- [ ] Prefer authenticated venue order/fill events over snapshot polling, with bounded fallback.
-- [ ] Measure quote-to-ack and quote-to-fill latency without enabling live trading.
+- [x] Prefer authenticated venue order/fill events over snapshot polling, with bounded fallback.
+- [x] Measure local decision-to-wire and wire-to-ack latency without enabling live trading.
 
 Evidence stage: implementation hardening only. Live remains paused; this slice
 does not deploy, resume trading, or produce promotion evidence.
@@ -15,7 +15,17 @@ does not deploy, resume trading, or produce promotion evidence.
 
 - `crates/ploy-strategy-bundles/src/engine.rs`: skip remote fill reconciliation
   when no active order can produce a fill.
+- `crates/ploy-connectivity/{Cargo.toml,src/lib.rs}`: main agent owns the
+  authenticated Polymarket user-channel implementation, bounded gap recovery,
+  event mapping, and focused tests.
+- `crates/ploy-platform-runtime/src/reconcile.rs`: main agent owns applying
+  confirmed fills before order observations and the focused lifecycle tests.
+- Live submission hot-path files and latency benchmark files: main agent owns
+  edits after a read-only architecture pass identifies the narrowest safe seam.
 - `tasks/todo.md`: plan and verification evidence.
+
+Subagents are read-only reviewers for the WebSocket API seam, runtime ordering,
+and submission-path bottlenecks; they do not own or edit workspace files.
 
 ## Tasks
 
@@ -24,6 +34,21 @@ does not deploy, resume trading, or produce promotion evidence.
 - [x] Run focused tests, formatting, and diff checks.
 - [x] Separate market-catalog refresh from quote refresh and lower active quote
       polling to 100ms while keeping catalog queries at 2 seconds.
+- [x] Complete authenticated Polymarket user events with a bounded queue,
+      stable fill identity, gap detection, and five-second periodic/degraded
+      REST catch-up bounded by a two-second timeout.
+- [x] Apply confirmed fills before acknowledgement/cancellation observations in
+      the runtime reconciliation loop.
+- [x] Add focused regressions for maker/taker mapping, CONFIRMED-only fills,
+      WS/REST deduplication, early events, cancellation ordering, overflow, and
+      degraded recovery.
+- [x] Remove avoidable synchronous/network work from the quote-to-order hot path
+      while preserving pending-before-side-effect, idempotency, and Unknown on
+      ambiguous submission.
+- [x] Add a no-live-order local benchmark for decision-to-wire-to-ack
+      instrumentation and report p50/p99/p999.
+- [ ] Run focused tests, locked compilation, independent review, atomic commits,
+      and final diff/worktree checks without deploying or resuming live trading.
 
 ## Review
 
@@ -63,6 +88,34 @@ does not deploy, resume trading, or produce promotion evidence.
   active-token set.
 - Second-slice verification passed: 54 live market-data tests, 11 live strategy
   runtime tests, six market-data-boundary tests, formatting, and diff checks.
+- Authenticated Polymarket user events now drive order/fill reconciliation first.
+  The bounded queue detects overflow, connection loss, delayed/unknown order
+  states, and failed/unknown trades; REST catch-up restores confirmed fills and
+  tracked order states. Periodic five-second catch-up remains because the SDK
+  hides broadcast lag from consumers.
+- Runtime reconciliation applies confirmed fills before acknowledgement or
+  cancellation observations. Terminal/partial state cannot regress on late ACK
+  or ambiguous status, and canceled orders remain eligible for late confirmed
+  fills for 24 hours. `state_changed_at` is persisted across restart so that
+  window is durable.
+- Live submission now persists Pending before the venue side effect, releases
+  the daemon mutex during signing/posting, and persists the terminal outcome
+  afterward. Concurrent idempotent retries reuse Pending and never duplicate the
+  submit. Pending cancel/replace fails closed while submission is in progress.
+- The operator TCP client reuses keep-alive connections and reads exact
+  Content-Length responses; stale idle sockets reconnect before writes without
+  retrying ambiguous POST requests.
+- Local release benchmark (1001 loopback HTTP submissions with a mock acknowledged
+  gateway; no venue, wallet, or chain access): decision-to-wire p50 1902 us,
+  p99 6238 us, p999 20775 us; wire-to-ack p50 1292 us, p99 3700 us, p999 12377 us;
+  end-to-end p50 3215 us, p99 9736 us, p999 24369 us. These numbers include both
+  durable Pending and terminal snapshot writes but exclude real Polymarket
+  network latency and chain finality.
+- Verification passed: operator contracts 23, trading 22, connectivity 23,
+  platform runtime 62, control client 14, daemon host 90 (1 ignored), strategy
+  bundles 217, plus live-execution checks for `ploy-strategy-runtime`,
+  `new-ployd`, and `new-ploy-runner`. Live remains paused and no real order was
+  submitted.
 
 # Current Session - Market Data V2 And Redeem Repair (2026-07-12)
 
