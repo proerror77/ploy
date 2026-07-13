@@ -97,7 +97,9 @@ pub struct PloyDaemon {
 
 impl PloyDaemon {
     pub fn boot(config: &PlatformConfig) -> io::Result<Self> {
-        Self::boot_with_live_execution(config, Box::new(PolymarketExecutionGateway::from_env()))
+        let gateway = PolymarketExecutionGateway::from_env()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        Self::boot_with_live_execution(config, Box::new(gateway))
     }
 
     pub fn boot_with_live_execution(

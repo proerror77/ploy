@@ -56,8 +56,12 @@ pub struct RuntimeConfig {
 pub struct RuntimeResult {
     pub mode: RuntimeMode,
     pub updates_processed: u64,
+    pub quote_updates_observed: u64,
+    pub depth_quote_updates_observed: u64,
     pub intents_submitted: u64,
     pub fills_recorded: u64,
+    pub non_settlement_fills_observed: u64,
+    pub full_depth_fills_observed: u64,
     pub pnl: PnlSnapshot,
     pub risk: RiskSnapshot,
     pub elapsed_secs: f64,
@@ -176,8 +180,12 @@ where
     pub async fn run(&mut self) -> RuntimeResult {
         let start = std::time::Instant::now();
         let mut updates_processed: u64 = 0;
+        let mut quote_updates_observed: u64 = 0;
+        let mut depth_quote_updates_observed: u64 = 0;
         let mut intents_submitted: u64 = 0;
         let mut fills_recorded: u64 = 0;
+        let mut non_settlement_fills_observed: u64 = 0;
+        let mut full_depth_fills_observed: u64 = 0;
         let mut last_eval_ts: Option<DateTime<Utc>> = None;
         let mut pending_live_orders = self.initial_pending_live_orders();
 
@@ -189,6 +197,17 @@ where
 
         'runtime: while let Some(update) = self.feed.next().await {
             updates_processed += 1;
+            if let MarketUpdate::Quote {
+                bid_levels,
+                ask_levels,
+                ..
+            } = &update
+            {
+                quote_updates_observed += 1;
+                if !bid_levels.is_empty() || !ask_levels.is_empty() {
+                    depth_quote_updates_observed += 1;
+                }
+            }
             self.executor.observe_market_update(&update);
 
             if let MarketUpdate::EventExpired { event_id, .. } = &update {
@@ -333,6 +352,12 @@ where
                     }
                     self.strategy.on_fill(&fill);
                     fills_recorded += 1;
+                    if report.price_basis != Some("settlement") {
+                        non_settlement_fills_observed += 1;
+                        if report.price_basis == Some("full_depth_sweep") {
+                            full_depth_fills_observed += 1;
+                        }
+                    }
                     debug!(
                         order_id = %order_id,
                         token = %fill.token_id,
@@ -428,6 +453,13 @@ where
                         }
                         self.strategy.on_fill(&fill);
                         fills_recorded += 1;
+                        let is_settlement = intent.purpose == IntentPurpose::Exit
+                            && intent
+                                .limit_price
+                                .is_some_and(|price| price == dec!(0) || price == dec!(1));
+                        if !is_settlement {
+                            non_settlement_fills_observed += 1;
+                        }
                         if self
                             .trading
                             .order(&fill.order_id)
@@ -504,8 +536,12 @@ where
         let result = RuntimeResult {
             mode: self.config.mode,
             updates_processed,
+            quote_updates_observed,
+            depth_quote_updates_observed,
             intents_submitted,
             fills_recorded,
+            non_settlement_fills_observed,
+            full_depth_fills_observed,
             pnl: snapshot.pnl,
             risk: snapshot.risk,
             elapsed_secs: elapsed,
@@ -978,8 +1014,14 @@ mod tests {
                     ask: Some(dec!(0.59)),
                     bid_size: Some(dec!(100)),
                     ask_size: Some(dec!(100)),
-                    bid_levels: vec![],
-                    ask_levels: vec![],
+                    bid_levels: vec![ploy_market_contracts::BookLevel {
+                        price: dec!(0.58),
+                        size: dec!(100),
+                    }],
+                    ask_levels: vec![ploy_market_contracts::BookLevel {
+                        price: dec!(0.59),
+                        size: dec!(100),
+                    }],
                     ts: now + Duration::milliseconds(300),
                 },
             ]),
@@ -1009,6 +1051,8 @@ mod tests {
         let result = runtime.run().await;
 
         assert_eq!(result.updates_processed, 4);
+        assert_eq!(result.quote_updates_observed, 2);
+        assert_eq!(result.depth_quote_updates_observed, 1);
         assert_eq!(
             seen_updates.lock().unwrap().as_slice(),
             ["spot", "quote", "quote"]
@@ -1263,7 +1307,7 @@ mod tests {
                 rejection_reason: None,
                 slippage: Some(Decimal::ZERO),
                 market_impact: Some(Decimal::ZERO),
-                price_basis: None,
+                price_basis: Some("full_depth_sweep"),
             }
         }
 
@@ -1569,6 +1613,8 @@ mod tests {
 
         let result = runtime.run().await;
         assert_eq!(result.fills_recorded, 1);
+        assert_eq!(result.non_settlement_fills_observed, 1);
+        assert_eq!(result.full_depth_fills_observed, 0);
         assert_eq!(runtime.trading().positions().net_qty("token-up"), dec!(2));
     }
 
@@ -1671,6 +1717,8 @@ mod tests {
 
         assert_eq!(result.intents_submitted, 1);
         assert_eq!(result.fills_recorded, 1);
+        assert_eq!(result.non_settlement_fills_observed, 1);
+        assert_eq!(result.full_depth_fills_observed, 1);
         assert_eq!(order_store.lock().unwrap().len(), 1);
         assert_eq!(fill_store.lock().unwrap().as_slice(), ["fill-1"]);
     }

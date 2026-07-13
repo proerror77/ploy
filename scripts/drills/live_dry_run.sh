@@ -222,21 +222,21 @@ if env_has_any_key \
 else
   warn "operator credential not configured; dry-run will rely on local ployctl access"
 fi
-require_any_env_key "Polymarket private key" "POLYMARKET_PRIVATE_KEY" "PRIVATE_KEY"
+require_env_key "POLYMARKET_PRIVATE_KEY"
 SIGNATURE_TYPE="$(first_env_value "POLY_SIGNATURE_TYPE" "POLYMARKET_SIGNATURE_TYPE" || true)"
-FUNDER_PRESENT=0
-if env_has_any_key "POLY_FUNDER" "POLYMARKET_FUNDER" "POLYMARKET_FUNDER_ADDRESS"; then
-  FUNDER_PRESENT=1
-fi
-if [[ -n "${SIGNATURE_TYPE}" ]]; then
-  if [[ "${SIGNATURE_TYPE}" == "proxy" || "${SIGNATURE_TYPE}" == "gnosis_safe" ]]; then
-    require_any_env_key "proxy funder" "POLY_FUNDER" "POLYMARKET_FUNDER" "POLYMARKET_FUNDER_ADDRESS"
-  elif [[ "${SIGNATURE_TYPE}" != "eoa" ]]; then
-    fail "unsupported POLY_SIGNATURE_TYPE: ${SIGNATURE_TYPE}"
-  fi
-elif [[ "${FUNDER_PRESENT}" -eq 1 ]]; then
-  warn "POLY_SIGNATURE_TYPE is not explicit; current SDK defaults to proxy when a funder is present"
-fi
+WALLET_TYPE="$(first_env_value "POLY_WALLET_TYPE" || true)"
+WALLET_TYPE="${WALLET_TYPE^^}"
+case "${SIGNATURE_TYPE}:${WALLET_TYPE}" in
+  proxy:PROXY|gnosis_safe:SAFE)
+    require_any_env_key "non-EOA funder" "POLY_FUNDER" "POLYMARKET_FUNDER" "POLYMARKET_FUNDER_ADDRESS"
+    ;;
+  poly1271:*)
+    fail "POLY_SIGNATURE_TYPE=poly1271 is not supported by the current custody/redemption relayer"
+    ;;
+  *)
+    fail "wallet mapping must be proxy:PROXY or gnosis_safe:SAFE; got ${SIGNATURE_TYPE:-unset}:${WALLET_TYPE:-unset}"
+    ;;
+esac
 [[ -f "${STATE_ROOT}/deployments.json" ]] || fail "missing deployments state file: ${STATE_ROOT}/deployments.json"
 [[ -f "${RUNTIME_ROOT}/system-status.json" ]] || fail "missing system status snapshot: ${RUNTIME_ROOT}/system-status.json"
 [[ -f "${RUNTIME_ROOT}/deployments.json" ]] || fail "missing deployment snapshot: ${RUNTIME_ROOT}/deployments.json"

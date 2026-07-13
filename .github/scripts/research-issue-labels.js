@@ -43,6 +43,10 @@ const LABEL_DEFINITIONS = {
     color: "1d76db",
     description: "Issue has diagnostic research evidence; not deployable by itself",
   },
+  "evidence:executable-replay": {
+    color: "1d76db",
+    description: "Issue has executable-price replay evidence; parity gates still apply",
+  },
   "evidence:factor-review": {
     color: "1d76db",
     description: "Issue has factor review workflow evidence",
@@ -82,6 +86,7 @@ const LABEL_DEFINITIONS = {
 };
 
 const MANAGED_STATE_PREFIXES = ["decision:", "parity:", "evidence:missing-"];
+const MANAGED_STATE_LABELS = new Set(["evidence:diagnostic", "evidence:executable-replay"]);
 
 function normalizeLabel(name) {
   return String(name || "").trim();
@@ -137,7 +142,8 @@ async function applyResearchIssueLabels({ github, context, core, issue_number, l
 
   for (const label of current) {
     const name = label.name;
-    const managed = MANAGED_STATE_PREFIXES.some((prefix) => name.startsWith(prefix));
+    const managed = MANAGED_STATE_LABELS.has(name)
+      || MANAGED_STATE_PREFIXES.some((prefix) => name.startsWith(prefix));
     if (!managed || nextSet.has(name)) continue;
     await github.rest.issues.removeLabel({
       owner: context.repo.owner,

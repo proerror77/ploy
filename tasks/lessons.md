@@ -378,3 +378,15 @@
   Retry the runtime tick while waiting for a spawned fixture under CI load, and
   explicitly stop the final child before the test returns so parallel suites do
   not accumulate orphan workers and starve later spawns.
+
+## 2026-07-13
+
+- Pattern: A generic “exchange trading works” check can accidentally prove the
+  Binance reference-data lane while leaving the requested Polymarket quote,
+  order, settlement, and wallet lifecycle unverified.
+- Rule: For Polymarket readiness, report four separate truths: live quote/data
+  reachability, local order-construction/reconciliation tests, executable-depth
+  replay/backtest evidence, and authenticated account/order evidence. Never use
+  Binance feed health or an unauthenticated quote as proof that a Polymarket
+  order can be accepted; do not place a funded test order without explicit live
+  authorization.

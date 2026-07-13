@@ -192,6 +192,11 @@ fn run_background(
     let agg_glob = format!("{data_dir}/binance_agg_trade_ticks/*.parquet");
     let lob_glob = format!("{data_dir}/binance_lob_ticks/*.parquet");
     let quote_glob = format!("{data_dir}/clob_quote_ticks/*.parquet");
+    let orderbook_dir = format!("{data_dir}/orderbook_snapshots");
+    let orderbook_glob = format!("{orderbook_dir}/**/*.parquet");
+    if Path::new(&orderbook_dir).exists() {
+        validate_orderbook_archive_window(Path::new(&orderbook_dir), from, to)?;
+    }
 
     // ── 1. Load events separately (small, ~11K rows) ────────────────────────
     let events = load_events_vec(
@@ -203,6 +208,7 @@ fn run_background(
         require_official_settlement,
     )?;
     info!(count = events.len(), "StreamingParquetFeed: loaded events");
+    let token_filter = event_token_filter_sql(&events);
     let mut evt_idx = 0;
 
     // ── 2. Build UNION ALL query for the big tables ─────────────────────────
@@ -214,7 +220,7 @@ fn run_background(
             "SELECT epoch_us(trade_time)::BIGINT AS ts_us, \
                     {SPOT_SOURCE_RANK} AS source_rank, \
                     'spot' AS typ, \
-                    symbol AS s1, NULL AS s2, \
+                    symbol AS s1, NULL AS s2, NULL AS s3, \
                     CAST(price AS DOUBLE) AS f1, 0.0 AS f2, 0.0 AS f3, 0.0 AS f4, \
                     CAST(0 AS BIGINT) AS i1, false AS b1 \
              FROM read_parquet('{spot_glob}') \
@@ -232,7 +238,7 @@ fn run_background(
             "SELECT epoch_us(trade_time)::BIGINT AS ts_us, \
                     {AGG_SOURCE_RANK} AS source_rank, \
                     'agg' AS typ, \
-                    symbol AS s1, NULL AS s2, \
+                    symbol AS s1, NULL AS s2, NULL AS s3, \
                     CAST(price AS DOUBLE) AS f1, CAST(quantity AS DOUBLE) AS f2, \
                     0.0 AS f3, 0.0 AS f4, \
                     CAST(agg_trade_id AS BIGINT) AS i1, is_buyer_maker AS b1 \
@@ -252,7 +258,7 @@ fn run_background(
             "SELECT epoch_us(event_time)::BIGINT AS ts_us, \
                     {LOB_SOURCE_RANK} AS source_rank, \
                     'lob' AS typ, \
-                    symbol AS s1, NULL AS s2, \
+                    symbol AS s1, NULL AS s2, NULL AS s3, \
                     CAST(COALESCE(obi_5, 0.0) AS DOUBLE) AS f1, \
                     CAST(COALESCE(spread_bps, 0.0) AS DOUBLE) AS f2, \
                     CAST(COALESCE(bid_volume_5, 0.0) AS DOUBLE) AS f3, \
@@ -265,23 +271,40 @@ fn run_background(
         ));
     }
 
-    // PM quotes — align with database.rs: DISTINCT ON per-second per-token, trusted sources only.
-    // Prefer book rows with executable size over later price-only rows in the same second.
-    if Path::new(&format!("{data_dir}/clob_quote_ticks")).exists() {
+    // Prefer the full-fidelity CLOB archive. If it is present, missing rows for
+    // the requested window fail closed instead of silently mixing top-book data.
+    if Path::new(&orderbook_dir).exists() {
         parts.push(format!(
-            "SELECT ts_us, source_rank, typ, s1, s2, f1, f2, f3, f4, i1, b1 \
+            "SELECT EPOCH_US(received_at)::BIGINT AS ts_us, \
+                    {QUOTE_SOURCE_RANK} AS source_rank, \
+                    'quote_depth' AS typ, \
+                    token_id AS s1, CAST(bids AS VARCHAR) AS s2, \
+                    CAST(asks AS VARCHAR) AS s3, \
+                    NULL AS f1, NULL AS f2, NULL AS f3, NULL AS f4, \
+                    CAST(0 AS BIGINT) AS i1, false AS b1 \
+             FROM read_parquet('{orderbook_glob}') \
+             WHERE received_at >= TIMESTAMPTZ '{from_str}' \
+               AND received_at <= TIMESTAMPTZ '{to_str}' \
+               {token_filter}"
+        ));
+    // Legacy PM quote ticks remain useful for diagnostics, but never carry
+    // full-depth evidence.
+    } else if Path::new(&format!("{data_dir}/clob_quote_ticks")).exists() {
+        parts.push(format!(
+            "SELECT ts_us, source_rank, typ, s1, s2, s3, f1, f2, f3, f4, i1, b1 \
              FROM ( \
                  SELECT DISTINCT ON (date_trunc('second', received_at), token_id) \
                         EPOCH_US(received_at)::BIGINT AS ts_us, \
                         {QUOTE_SOURCE_RANK} AS source_rank, \
                         'quote' AS typ, \
-                        token_id AS s1, NULL AS s2, \
+                        token_id AS s1, NULL AS s2, NULL AS s3, \
                         CAST(best_bid AS DOUBLE) AS f1, CAST(best_ask AS DOUBLE) AS f2, \
                         CAST(bid_size AS DOUBLE) AS f3, CAST(ask_size AS DOUBLE) AS f4, \
                         CAST(0 AS BIGINT) AS i1, false AS b1 \
                  FROM read_parquet('{quote_glob}') \
                  WHERE received_at >= TIMESTAMPTZ '{from_str}' \
                    AND received_at <= TIMESTAMPTZ '{to_str}' \
+                   {token_filter} \
                    AND source IN ('polymarket_ws', 'polymarket_ws_collector', 'ploy_runner_live') \
                    AND best_bid IS NOT NULL AND best_ask IS NOT NULL \
                    AND (best_bid > 0.01 AND best_bid < 0.99 OR best_ask > 0.01 AND best_ask < 0.99) \
@@ -318,18 +341,19 @@ fn run_background(
             row.get::<_, String>(1)?,         // typ
             row.get::<_, Option<String>>(2)?, // s1
             row.get::<_, Option<String>>(3)?, // s2
-            row.get::<_, Option<f64>>(4)?,    // f1 (nullable for quotes with NULL bid)
-            row.get::<_, Option<f64>>(5)?,    // f2
-            row.get::<_, Option<f64>>(6)?,    // f3
-            row.get::<_, Option<f64>>(7)?,    // f4
-            row.get::<_, Option<i64>>(8)?,    // i1
-            row.get::<_, Option<bool>>(9)?,   // b1
+            row.get::<_, Option<String>>(4)?, // s3
+            row.get::<_, Option<f64>>(5)?,    // f1 (nullable for quotes with NULL bid)
+            row.get::<_, Option<f64>>(6)?,    // f2
+            row.get::<_, Option<f64>>(7)?,    // f3
+            row.get::<_, Option<f64>>(8)?,    // f4
+            row.get::<_, Option<i64>>(9)?,    // i1
+            row.get::<_, Option<bool>>(10)?,  // b1
         ))
     })?;
 
     let mut total = 0usize;
     for row in rows {
-        let (ts_us, typ, s1, _s2, f1_opt, f2_opt, f3_opt, f4_opt, i1_opt, b1_opt) = row?;
+        let (ts_us, typ, s1, s2, s3, f1_opt, f2_opt, f3_opt, f4_opt, i1_opt, b1_opt) = row?;
 
         // Insert any events that should come before this row
         while evt_idx < events.len() && should_send_event_before_row(events[evt_idx].0, ts_us) {
@@ -343,6 +367,8 @@ fn run_background(
             ts_us,
             typ,
             s1,
+            s2,
+            s3,
             f1: f1_opt,
             f2: f2_opt,
             f3: f3_opt,
@@ -388,6 +414,8 @@ struct StreamRow {
     ts_us: i64,
     typ: String,
     s1: Option<String>,
+    s2: Option<String>,
+    s3: Option<String>,
     f1: Option<f64>,
     f2: Option<f64>,
     f3: Option<f64>,
@@ -459,11 +487,81 @@ fn market_updates_from_row(row: StreamRow) -> Vec<MarketUpdate> {
                     ask,
                     bid_size,
                     ask_size,
+                    bid_levels: Vec::new(),
+                    ask_levels: Vec::new(),
+                    ts,
+                }]
+            }
+        }
+        "quote_depth" => {
+            let token_id: std::sync::Arc<str> = std::sync::Arc::from(row.s1.unwrap_or_default());
+            let bid_levels = book_levels_from_json(row.s2.as_deref(), false);
+            let ask_levels = book_levels_from_json(row.s3.as_deref(), true);
+            if bid_levels.is_empty() && ask_levels.is_empty() {
+                Vec::new()
+            } else {
+                let best_bid = bid_levels.first();
+                let best_ask = ask_levels.first();
+                vec![MarketUpdate::Quote {
+                    token_id,
+                    bid: best_bid.map(|level| level.price),
+                    ask: best_ask.map(|level| level.price),
+                    bid_size: best_bid.map(|level| level.size),
+                    ask_size: best_ask.map(|level| level.size),
+                    bid_levels,
+                    ask_levels,
                     ts,
                 }]
             }
         }
         _ => Vec::new(),
+    }
+}
+
+#[cfg(feature = "parquet-feed")]
+fn book_levels_from_json(
+    value: Option<&str>,
+    ascending: bool,
+) -> Vec<ploy_market_contracts::BookLevel> {
+    use ploy_market_contracts::BookLevel;
+    use rust_decimal_macros::dec;
+
+    let Ok(serde_json::Value::Array(items)) =
+        serde_json::from_str::<serde_json::Value>(value.unwrap_or("[]"))
+    else {
+        return Vec::new();
+    };
+    let mut levels = items
+        .iter()
+        .filter_map(|item| match item {
+            serde_json::Value::Array(parts) if parts.len() >= 2 => {
+                Some((decimal_from_json(&parts[0])?, decimal_from_json(&parts[1])?))
+            }
+            serde_json::Value::Object(parts) => Some((
+                decimal_from_json(parts.get("price")?)?,
+                decimal_from_json(parts.get("size")?)?,
+            )),
+            _ => None,
+        })
+        .filter(|(price, size)| {
+            *price > dec!(0.01) && *price < dec!(0.99) && *size > rust_decimal::Decimal::ZERO
+        })
+        .map(|(price, size)| BookLevel { price, size })
+        .collect::<Vec<_>>();
+    if ascending {
+        levels.sort_by_key(|level| level.price);
+    } else {
+        levels.sort_by_key(|level| std::cmp::Reverse(level.price));
+    }
+    levels
+}
+
+#[cfg(feature = "parquet-feed")]
+fn decimal_from_json(value: &serde_json::Value) -> Option<rust_decimal::Decimal> {
+    match value {
+        serde_json::Value::Number(number) => number.to_string().parse().ok(),
+        serde_json::Value::String(text) => text.parse().ok(),
+        _ => None,
     }
 }
 
@@ -495,7 +593,7 @@ const QUOTE_SOURCE_RANK: u8 = 40;
 #[cfg(feature = "parquet-feed")]
 fn build_union_sql(parts: &[String]) -> String {
     format!(
-        "SELECT ts_us, typ, s1, s2, f1, f2, f3, f4, i1, b1 \
+        "SELECT ts_us, typ, s1, s2, s3, f1, f2, f3, f4, i1, b1 \
          FROM ({}) \
          ORDER BY ts_us, source_rank, s1, i1, f1, f2, f3, f4",
         parts.join(" UNION ALL ")
@@ -627,7 +725,26 @@ fn load_events_vec(
     }
 
     let discovered_event_rows = event_rows.len();
-    let mut resolved_event_rows = 0usize;
+    let resolved_event_rows = event_rows
+        .iter()
+        .filter(|row| {
+            resolve_up_won_from_settlements(
+                &settlement_prices,
+                &row.market_slug,
+                &row.up_token,
+                &row.down_token,
+            )
+            .is_some()
+        })
+        .count();
+    if require_official_settlement && resolved_event_rows != discovered_event_rows {
+        return Err(format!(
+            "official settlement coverage is incomplete \
+             (resolved={resolved_event_rows}, event_rows={discovered_event_rows}, settlement_prices={})",
+            settlement_prices.len()
+        )
+        .into());
+    }
     let mut events = Vec::new();
     for row in event_rows {
         let resolved_up_won = resolve_up_won_from_settlements(
@@ -639,10 +756,6 @@ fn load_events_vec(
         if require_official_settlement && resolved_up_won.is_none() {
             continue;
         }
-        if resolved_up_won.is_some() {
-            resolved_event_rows += 1;
-        }
-
         let up_token: Arc<str> = Arc::from(row.up_token);
         let down_token: Arc<str> = Arc::from(row.down_token);
         if row.symbol.is_empty() || up_token.is_empty() || down_token.is_empty() {
@@ -682,15 +795,6 @@ fn load_events_vec(
                 resolved_up_won,
             },
         ));
-    }
-
-    if require_official_settlement && discovered_event_rows > 0 && resolved_event_rows == 0 {
-        return Err(format!(
-            "official settlement required but no PM event metadata rows matched settlement payouts \
-             (event_rows={discovered_event_rows}, settlement_prices={})",
-            settlement_prices.len()
-        )
-        .into());
     }
 
     events.sort_by(|(left_ts, left), (right_ts, right)| {
@@ -790,6 +894,116 @@ fn symbol_filter_sql(symbols: &[String]) -> String {
     format!("AND symbol IN ({list})")
 }
 
+#[cfg(feature = "parquet-feed")]
+fn event_token_filter_sql(events: &[(i64, MarketUpdate)]) -> String {
+    let mut tokens = events
+        .iter()
+        .filter_map(|(_, update)| match update {
+            MarketUpdate::EventDiscovered {
+                up_token,
+                down_token,
+                ..
+            } => Some([up_token.as_ref(), down_token.as_ref()]),
+            _ => None,
+        })
+        .flatten()
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    tokens.sort();
+    tokens.dedup();
+    if tokens.is_empty() {
+        return "AND 1 = 0".to_string();
+    }
+    let list = tokens
+        .iter()
+        .map(|token| format!("'{}'", token.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("AND token_id IN ({list})")
+}
+
+#[cfg(feature = "parquet-feed")]
+fn validate_orderbook_archive_window(
+    root: &std::path::Path,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use chrono::{FixedOffset, TimeZone};
+
+    if to < from {
+        return Err("full-depth archive window end precedes start".into());
+    }
+    let shanghai = FixedOffset::east_opt(8 * 60 * 60).expect("valid UTC+8 offset");
+    let start_hour = from.timestamp().div_euclid(3600) * 3600;
+    let end_hour = to.timestamp().div_euclid(3600) * 3600;
+    let mut epoch = start_hour;
+    while epoch <= end_hour {
+        let utc = Utc
+            .timestamp_opt(epoch, 0)
+            .single()
+            .ok_or("invalid archive hour")?;
+        let local = utc.with_timezone(&shanghai);
+        let day = local.format("%Y-%m-%d").to_string();
+        let hour = local.format("%H").to_string();
+        let hour_dir = root.join(format!("date={day}/hour={hour}"));
+        let marker = hour_dir.join("_SUCCESS");
+        let manifest_path = hour_dir.join("manifest.json");
+        let parquet_path = hour_dir.join("snapshots.parquet");
+        if !marker.is_file() || !manifest_path.is_file() || !parquet_path.is_file() {
+            return Err(
+                format!("incomplete full-depth archive hour: {}", hour_dir.display()).into(),
+            );
+        }
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+        let row_count = manifest
+            .get("row_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        let expected_sha256 = manifest
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if manifest
+            .get("full_fidelity")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+            || manifest.get("date").and_then(serde_json::Value::as_str) != Some(day.as_str())
+            || manifest.get("hour").and_then(serde_json::Value::as_str) != Some(hour.as_str())
+            || row_count == 0
+            || std::fs::metadata(&parquet_path)?.len() == 0
+            || expected_sha256.len() != 64
+            || sha256_file(&parquet_path)? != expected_sha256
+        {
+            return Err(format!(
+                "invalid full-depth archive manifest: {}",
+                manifest_path.display()
+            )
+            .into());
+        }
+        epoch += 3600;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "parquet-feed")]
+fn sha256_file(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 #[cfg(all(test, feature = "parquet-feed"))]
 mod tests {
     use super::*;
@@ -826,9 +1040,9 @@ mod tests {
 
     #[test]
     fn union_query_orders_same_timestamp_sources_deterministically() {
-        let sql = build_union_sql(&["SELECT 1 AS ts_us, 10 AS source_rank, 'spot' AS typ, 'BTCUSDT' AS s1, NULL AS s2, 1.0 AS f1, 0.0 AS f2, 0.0 AS f3, 0.0 AS f4, 0 AS i1, false AS b1".to_string()]);
+        let sql = build_union_sql(&["SELECT 1 AS ts_us, 10 AS source_rank, 'spot' AS typ, 'BTCUSDT' AS s1, NULL AS s2, NULL AS s3, 1.0 AS f1, 0.0 AS f2, 0.0 AS f3, 0.0 AS f4, 0 AS i1, false AS b1".to_string()]);
 
-        assert!(sql.contains("SELECT ts_us, typ, s1, s2, f1, f2, f3, f4, i1, b1"));
+        assert!(sql.contains("SELECT ts_us, typ, s1, s2, s3, f1, f2, f3, f4, i1, b1"));
         assert!(sql.contains("ORDER BY ts_us, source_rank, s1, i1, f1, f2, f3, f4"));
         assert!(SPOT_SOURCE_RANK < AGG_SOURCE_RANK);
         assert!(AGG_SOURCE_RANK < LOB_SOURCE_RANK);
@@ -836,10 +1050,68 @@ mod tests {
     }
 
     #[test]
+    fn full_depth_archive_requires_every_intersecting_shanghai_hour() {
+        let root =
+            std::env::temp_dir().join(format!("ploy-orderbook-window-{}", uuid::Uuid::new_v4()));
+        let from = Utc.with_ymd_and_hms(2026, 7, 1, 15, 30, 0).unwrap();
+        let to = Utc.with_ymd_and_hms(2026, 7, 1, 16, 30, 0).unwrap();
+        for (day, hour) in [("2026-07-01", "23"), ("2026-07-02", "00")] {
+            let hour_dir = root.join(format!("date={day}/hour={hour}"));
+            std::fs::create_dir_all(&hour_dir).unwrap();
+            std::fs::write(hour_dir.join("_SUCCESS"), "").unwrap();
+            let parquet_path = hour_dir.join("snapshots.parquet");
+            std::fs::write(&parquet_path, "fixture").unwrap();
+            std::fs::write(
+                hour_dir.join("manifest.json"),
+                serde_json::json!({
+                    "date": day,
+                    "hour": hour,
+                    "row_count": 1,
+                    "full_fidelity": true,
+                    "sha256": sha256_file(&parquet_path).unwrap()
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        assert!(validate_orderbook_archive_window(&root, from, to).is_ok());
+        std::fs::remove_file(root.join("date=2026-07-02/hour=00/_SUCCESS")).unwrap();
+        assert!(validate_orderbook_archive_window(&root, from, to)
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete full-depth archive hour"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn events_are_emitted_before_same_timestamp_rows() {
         assert!(should_send_event_before_row(1_000, 1_000));
         assert!(should_send_event_before_row(999, 1_000));
         assert!(!should_send_event_before_row(1_001, 1_000));
+    }
+
+    #[test]
+    fn archive_quotes_are_scoped_to_discovered_event_tokens() {
+        let ts = Utc.timestamp_micros(1_000_000).unwrap();
+        let events = vec![(
+            1_000_000,
+            MarketUpdate::EventDiscovered {
+                event_id: Arc::from("event-a"),
+                symbol: Arc::from("BTCUSDT"),
+                up_token: Arc::from("up-token"),
+                down_token: Arc::from("down-token"),
+                end_time: ts,
+                window_secs: 300,
+                price_to_beat: Some(dec!(50000)),
+                resolved_up_won: None,
+            },
+        )];
+
+        assert_eq!(
+            event_token_filter_sql(&events),
+            "AND token_id IN ('down-token', 'up-token')"
+        );
+        assert_eq!(event_token_filter_sql(&[]), "AND 1 = 0");
     }
 
     #[test]
@@ -883,6 +1155,8 @@ mod tests {
             ts_us: 1_000_000,
             typ: "lob".to_string(),
             s1: Some("BTCUSDT".to_string()),
+            s2: None,
+            s3: None,
             f1: Some(0.25),
             f2: Some(3.0),
             f3: Some(12.5),
@@ -902,6 +1176,8 @@ mod tests {
             ts_us: 1_000_000,
             typ: "agg".to_string(),
             s1: Some("BTCUSDT".to_string()),
+            s2: None,
+            s3: None,
             f1: Some(51000.0),
             f2: Some(0.42),
             f3: None,
@@ -930,6 +1206,8 @@ mod tests {
             ts_us: 1_000_000,
             typ: "quote".to_string(),
             s1: Some("token".to_string()),
+            s2: None,
+            s3: None,
             f1: None,
             f2: None,
             f3: None,
@@ -947,6 +1225,8 @@ mod tests {
             ts_us: 1_000_000,
             typ: "quote".to_string(),
             s1: Some("token".to_string()),
+            s2: None,
+            s3: None,
             f1: Some(0.5),
             f2: Some(0.75),
             f3: Some(12.0),
@@ -962,12 +1242,54 @@ mod tests {
                 ask,
                 bid_size,
                 ask_size,
+                bid_levels,
+                ask_levels,
                 ..
             } => {
                 assert_eq!(*bid, Some(dec!(0.5)));
                 assert_eq!(*ask, Some(dec!(0.75)));
                 assert_eq!(*bid_size, Some(dec!(12)));
                 assert_eq!(*ask_size, Some(dec!(13)));
+                assert!(bid_levels.is_empty());
+                assert!(ask_levels.is_empty());
+            }
+            other => panic!("expected Quote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn orderbook_row_preserves_sorted_executable_depth() {
+        let updates = market_updates_from_row(StreamRow {
+            ts_us: 1_000_000,
+            typ: "quote_depth".to_string(),
+            s1: Some("token".to_string()),
+            s2: Some(r#"[["0.48","10"],["0.49","5"]]"#.to_string()),
+            s3: Some(r#"[{"price":"0.52","size":"8"},{"price":"0.51","size":"7"}]"#.to_string()),
+            f1: None,
+            f2: None,
+            f3: None,
+            f4: None,
+            i1: None,
+            b1: None,
+        });
+
+        assert_eq!(updates.len(), 1);
+        match &updates[0] {
+            MarketUpdate::Quote {
+                bid,
+                ask,
+                bid_size,
+                ask_size,
+                bid_levels,
+                ask_levels,
+                ..
+            } => {
+                assert_eq!(*bid, Some(dec!(0.49)));
+                assert_eq!(*ask, Some(dec!(0.51)));
+                assert_eq!(*bid_size, Some(dec!(5)));
+                assert_eq!(*ask_size, Some(dec!(7)));
+                assert_eq!(bid_levels.len(), 2);
+                assert_eq!(ask_levels.len(), 2);
             }
             other => panic!("expected Quote, got {other:?}"),
         }
@@ -1038,9 +1360,8 @@ mod tests {
         assert!(quote_section.contains("CASE WHEN bid_size IS NOT NULL AND bid_size > 0"));
         assert!(source.contains("pm_token_settlements"));
         assert!(source.contains("if require_official_settlement && resolved_up_won.is_none()"));
-        assert!(
-            source.contains("official settlement required but no PM event metadata rows matched")
-        );
+        assert!(source.contains("official settlement coverage is incomplete"));
+        assert!(source.contains("resolved_event_rows != discovered_event_rows"));
     }
 
     fn section_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {

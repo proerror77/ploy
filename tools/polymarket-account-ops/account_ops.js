@@ -81,6 +81,13 @@ function normalizeAddress(value, field) {
   }
 }
 
+function relayerWalletRoute(walletType) {
+  const normalized = String(walletType || "").toUpperCase();
+  if (normalized === "SAFE") return { walletType: normalized, txType: RelayerTxType.SAFE };
+  if (normalized === "PROXY") return { walletType: normalized, txType: RelayerTxType.PROXY };
+  throw new Error("walletType must be SAFE or PROXY; DEPOSIT/poly1271 custody is not supported");
+}
+
 function buildPlan(positions, context, now = Date.now()) {
   const account = normalizeAddress(context.account, "account");
   if (!/^[0-9a-f]{40}$/.test(context.releaseSha)) {
@@ -262,14 +269,13 @@ function makeRelayClient(env = process.env) {
     secret: requireEnv("POLY_BUILDER_SECRET", env),
     passphrase: requireEnv("POLY_BUILDER_PASSPHRASE", env),
   }});
-  const walletType = requireEnv("POLY_WALLET_TYPE", env).toUpperCase();
+  const { walletType, txType } = relayerWalletRoute(requireEnv("POLY_WALLET_TYPE", env));
   const derived = walletType === "SAFE"
     ? deriveSafe(account.address, CONTRACTS.safeFactory)
     : deriveProxyWallet(account.address, CONTRACTS.proxyFactory);
   if (normalizeAddress(derived, "derived wallet") !== normalizeAddress(requireEnv("PLOY_LIVE_ACCOUNT_ID", env), "live account")) {
     throw new Error("signer-derived wallet does not match PLOY_LIVE_ACCOUNT_ID");
   }
-  const txType = walletType === "SAFE" ? RelayerTxType.SAFE : RelayerTxType.PROXY;
   return {
     client: new RelayClient(requireEnv("POLYMARKET_RELAYER_URL", env), CHAIN_ID, wallet, builderConfig, txType),
     publicClient: createPublicClient({ chain: polygon, transport: http(rpcUrl) }),
@@ -468,6 +474,7 @@ module.exports = {
   executePlan,
   fetchPositions,
   readLedger,
+  relayerWalletRoute,
   reconcileOperation,
   reconcileTransaction,
   redeemTransaction,

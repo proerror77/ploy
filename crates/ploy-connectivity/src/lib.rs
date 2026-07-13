@@ -7,7 +7,9 @@ use polymarket_client_sdk::clob::types::response::{MakerOrder, TradeResponse};
 use polymarket_client_sdk::clob::types::{Amount, AssetType, OrderType, Side, SignatureType};
 use polymarket_client_sdk::clob::{Client, Config};
 use polymarket_client_sdk::types::{Address, U256};
-use polymarket_client_sdk::{POLYGON, PRIVATE_KEY_VAR};
+use polymarket_client_sdk::{
+    contract_config, derive_proxy_wallet, derive_safe_wallet, POLYGON, PRIVATE_KEY_VAR,
+};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use secrecy::{ExposeSecret, SecretString};
@@ -22,6 +24,7 @@ const TERMINAL_CURSOR: &str = "LTE=";
 const MAX_CONCURRENT_TRADE_RECONCILE_REQUESTS: usize = 10;
 const TRADE_RECONCILE_LOOKBACK_SECS: u64 = 24 * 60 * 60;
 const CONDITIONAL_TOKEN_DECIMALS: u32 = 6;
+const ACCOUNT_READINESS_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Order execution type for live trading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -238,6 +241,7 @@ pub enum WalletSignatureType {
     Eoa,
     Proxy,
     GnosisSafe,
+    Poly1271,
 }
 
 impl WalletSignatureType {
@@ -246,6 +250,7 @@ impl WalletSignatureType {
             Self::Eoa => SignatureType::Eoa,
             Self::Proxy => SignatureType::Proxy,
             Self::GnosisSafe => SignatureType::GnosisSafe,
+            Self::Poly1271 => SignatureType::Poly1271,
         }
     }
 }
@@ -264,6 +269,7 @@ impl FromStr for WalletSignatureType {
             "eoa" => Ok(Self::Eoa),
             "proxy" => Ok(Self::Proxy),
             "gnosis_safe" => Ok(Self::GnosisSafe),
+            "poly1271" => Ok(Self::Poly1271),
             other => Err(ExecutionError::Configuration(format!(
                 "unsupported POLY_SIGNATURE_TYPE `{other}`"
             ))),
@@ -282,20 +288,22 @@ pub struct PolymarketExecutionConfig {
 
 impl Default for PolymarketExecutionConfig {
     fn default() -> Self {
-        let funder = polymarket_funder_from_env();
         Self {
             host: DEFAULT_POLY_CLOB_HOST.to_string(),
-            private_key: polymarket_private_key_from_env().map(SecretString::from),
+            private_key: None,
             use_server_time: true,
-            signature_type: polymarket_signature_type_from_env(funder.is_some()),
-            funder,
+            signature_type: WalletSignatureType::Eoa,
+            funder: None,
         }
     }
 }
 
 impl PolymarketExecutionConfig {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, ExecutionError> {
         let mut config = Self::default();
+        config.private_key = polymarket_private_key_from_env().map(SecretString::from);
+        config.funder = polymarket_funder_from_env();
+        config.signature_type = polymarket_signature_type_from_env(config.funder.is_some())?;
 
         if let Ok(value) = std::env::var("POLY_CLOB_HOST") {
             config.host = value;
@@ -304,43 +312,104 @@ impl PolymarketExecutionConfig {
             config.use_server_time = matches!(value.as_str(), "1" | "true" | "TRUE" | "yes");
         }
 
-        config
+        Ok(config)
     }
 }
 
 pub fn polymarket_execution_principal_from_env() -> Result<String, ExecutionError> {
-    polymarket_execution_principal(&PolymarketExecutionConfig::from_env())
+    polymarket_execution_principal(&PolymarketExecutionConfig::from_env()?)
 }
 
 pub fn polymarket_execution_principal(
     config: &PolymarketExecutionConfig,
 ) -> Result<String, ExecutionError> {
+    let signer = signer_from_config(config)?;
     match config.signature_type {
-        WalletSignatureType::Eoa => {
-            let private_key = config
-                .private_key
-                .as_ref()
-                .map(ExposeSecret::expose_secret)
-                .ok_or_else(|| {
-                    ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
-                })?;
-            let signer = PrivateKeySigner::from_str(private_key).map_err(|err| {
-                ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
-            })?;
-            Ok(format!("{:#x}", signer.address()))
-        }
-        WalletSignatureType::Proxy | WalletSignatureType::GnosisSafe => {
-            let funder = config.funder.as_deref().ok_or_else(|| {
-                ExecutionError::Configuration(
-                    "POLY_FUNDER is required for proxy or gnosis_safe signatures".to_string(),
-                )
-            })?;
-            let address = Address::from_str(funder).map_err(|err| {
-                ExecutionError::Configuration(format!("invalid POLY_FUNDER: {err}"))
-            })?;
+        WalletSignatureType::Eoa => Ok(format!("{:#x}", signer.address())),
+        WalletSignatureType::Proxy
+        | WalletSignatureType::GnosisSafe
+        | WalletSignatureType::Poly1271 => {
+            let address = validated_funder(config, signer.address())?.expect("non-EOA funder");
             Ok(format!("{address:#x}"))
         }
     }
+}
+
+fn signer_from_config(
+    config: &PolymarketExecutionConfig,
+) -> Result<PrivateKeySigner, ExecutionError> {
+    let private_key = config
+        .private_key
+        .as_ref()
+        .map(ExposeSecret::expose_secret)
+        .ok_or_else(|| {
+            ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
+        })?;
+    PrivateKeySigner::from_str(private_key)
+        .map_err(|error| {
+            ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {error}"))
+        })
+        .map(|signer| signer.with_chain_id(Some(POLYGON)))
+}
+
+fn validated_funder(
+    config: &PolymarketExecutionConfig,
+    signer: Address,
+) -> Result<Option<Address>, ExecutionError> {
+    let configured = config
+        .funder
+        .as_deref()
+        .map(Address::from_str)
+        .transpose()
+        .map_err(|error| ExecutionError::Configuration(format!("invalid POLY_FUNDER: {error}")))?;
+    let derived = match config.signature_type {
+        WalletSignatureType::Eoa => {
+            if configured.is_some() {
+                return Err(ExecutionError::Configuration(
+                    "POLY_FUNDER must not be set for eoa signatures".to_string(),
+                ));
+            }
+            return Ok(None);
+        }
+        WalletSignatureType::Proxy => derive_proxy_wallet(signer, POLYGON),
+        WalletSignatureType::GnosisSafe => derive_safe_wallet(signer, POLYGON),
+        WalletSignatureType::Poly1271 => {
+            let funder = configured
+                .filter(|address| *address != Address::ZERO)
+                .ok_or_else(|| {
+                    ExecutionError::Configuration(
+                        "POLY_FUNDER is required for poly1271 signatures".to_string(),
+                    )
+                })?;
+            return Ok(Some(funder));
+        }
+    }
+    .ok_or_else(|| {
+        ExecutionError::Configuration("wallet derivation is unavailable on Polygon".to_string())
+    })?;
+
+    if configured.is_some_and(|configured| configured != derived) {
+        return Err(ExecutionError::Configuration(format!(
+            "POLY_FUNDER does not match the signer-derived {:?} wallet {derived:#x}",
+            config.signature_type
+        )));
+    }
+    Ok(Some(derived))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PolymarketAccountReadiness {
+    pub principal: String,
+    pub required_pusd: Decimal,
+    pub balance_pusd: Decimal,
+    pub country: String,
+    pub region: String,
+}
+
+pub fn polymarket_account_readiness_from_env(
+    required_pusd: Decimal,
+) -> Result<PolymarketAccountReadiness, ExecutionError> {
+    PolymarketExecutionGateway::from_env()?.account_readiness(required_pusd)
 }
 
 #[derive(Debug, Clone)]
@@ -352,8 +421,8 @@ pub struct PolymarketExecutionGateway {
 }
 
 impl PolymarketExecutionGateway {
-    pub fn from_env() -> Self {
-        Self::new(PolymarketExecutionConfig::from_env())
+    pub fn from_env() -> Result<Self, ExecutionError> {
+        Ok(Self::new(PolymarketExecutionConfig::from_env()?))
     }
 
     pub fn new(config: PolymarketExecutionConfig) -> Self {
@@ -376,20 +445,7 @@ impl PolymarketExecutionGateway {
             return Ok(signer.clone());
         }
 
-        let private_key = self
-            .config
-            .private_key
-            .as_ref()
-            .map(ExposeSecret::expose_secret)
-            .ok_or_else(|| {
-                ExecutionError::Configuration(format!("{PRIVATE_KEY_VAR} is not configured"))
-            })?;
-
-        let signer = PrivateKeySigner::from_str(private_key)
-            .map_err(|err| {
-                ExecutionError::Configuration(format!("invalid {PRIVATE_KEY_VAR}: {err}"))
-            })?
-            .with_chain_id(Some(POLYGON));
+        let signer = signer_from_config(&self.config)?;
 
         let _ = self.signer.set(signer);
         Ok(self.signer.get().expect("signer set above").clone())
@@ -405,16 +461,23 @@ impl PolymarketExecutionGateway {
             return Ok(client.clone());
         }
 
-        let signer = self.get_or_init_signer()?;
-        let funder = self
-            .config
-            .funder
-            .as_deref()
-            .map(Address::from_str)
-            .transpose()
-            .map_err(|err| ExecutionError::Configuration(format!("invalid POLY_FUNDER: {err}")))?;
+        let client = self.authenticate_client()?;
 
-        let client = self.runtime.block_on(async {
+        let mut guard = self
+            .client
+            .write()
+            .map_err(|_| ExecutionError::Transport("client cache poisoned".to_string()))?;
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        *guard = Some(client.clone());
+        Ok(client)
+    }
+
+    fn authenticate_client(&self) -> Result<Client<Authenticated<Normal>>, ExecutionError> {
+        let signer = self.get_or_init_signer()?;
+        let funder = validated_funder(&self.config, signer.address())?;
+        self.runtime.block_on(async {
             let client = Client::new(
                 &self.config.host,
                 Config::builder()
@@ -432,17 +495,7 @@ impl PolymarketExecutionGateway {
             auth.authenticate()
                 .await
                 .map_err(|err| ExecutionError::Transport(format!("authenticate client: {err}")))
-        })?;
-
-        let mut guard = self
-            .client
-            .write()
-            .map_err(|_| ExecutionError::Transport("client cache poisoned".to_string()))?;
-        if let Some(existing) = guard.as_ref() {
-            return Ok(existing.clone());
-        }
-        *guard = Some(client.clone());
-        Ok(client)
+        })
     }
 
     fn clear_client_cache(&self) {
@@ -455,6 +508,132 @@ impl PolymarketExecutionGateway {
         if is_auth_recovery_error(error) {
             self.clear_client_cache();
         }
+    }
+
+    pub fn account_readiness(
+        &self,
+        required_pusd: Decimal,
+    ) -> Result<PolymarketAccountReadiness, ExecutionError> {
+        let required_raw = pusd_to_raw(required_pusd)?;
+        let principal = polymarket_execution_principal(&self.config)?;
+        let signer = self.get_or_init_signer()?;
+        let funder = validated_funder(&self.config, signer.address())?;
+        let (geoblock, closed_only, balance_allowance) = self.runtime.block_on(async {
+            tokio::time::timeout(ACCOUNT_READINESS_TIMEOUT, async {
+                let client = Client::new(
+                    &self.config.host,
+                    Config::builder()
+                        .use_server_time(self.config.use_server_time)
+                        .heartbeat_interval(Duration::from_secs(60))
+                        .build(),
+                )
+                .map_err(|error| {
+                    ExecutionError::Transport(format!("build readiness client: {error}"))
+                })?;
+                let credentials = client
+                    .derive_api_key(&signer, None)
+                    .await
+                    .map_err(|error| {
+                        ExecutionError::Transport(format!(
+                            "derive existing Polymarket API credentials: {error}"
+                        ))
+                    })?;
+                let mut auth = client
+                    .authentication_builder(&signer)
+                    .credentials(credentials)
+                    .signature_type(self.config.signature_type.into_sdk());
+                if let Some(funder) = funder {
+                    auth = auth.funder(funder);
+                }
+                let mut client = auth.authenticate().await.map_err(|error| {
+                    ExecutionError::Transport(format!("authenticate readiness client: {error}"))
+                })?;
+                client.stop_heartbeats().await.map_err(|error| {
+                    ExecutionError::Transport(format!("stop readiness-client heartbeats: {error}"))
+                })?;
+                if client.heartbeats_active() {
+                    return Err(ExecutionError::Transport(
+                        "readiness client heartbeat task is still active".to_string(),
+                    ));
+                }
+                let version = client.version().await.map_err(|error| {
+                    ExecutionError::Transport(format!("CLOB version probe: {error}"))
+                })?;
+                if version != 2 {
+                    return Err(ExecutionError::Validation(format!(
+                        "Polymarket CLOB API v2 is required; host reported v{version}"
+                    )));
+                }
+                let geoblock = client.check_geoblock().await.map_err(|error| {
+                    ExecutionError::Transport(format!("geoblock probe: {error}"))
+                })?;
+                let closed_only = client.closed_only_mode().await.map_err(|error| {
+                    ExecutionError::Transport(format!("closed-only probe: {error}"))
+                })?;
+                let balance_allowance = client
+                    .balance_allowance(
+                        BalanceAllowanceRequest::builder()
+                            .asset_type(AssetType::Collateral)
+                            .build(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        ExecutionError::Transport(format!(
+                            "collateral balance/allowance probe: {error}"
+                        ))
+                    })?;
+                Ok::<_, ExecutionError>((geoblock, closed_only, balance_allowance))
+            })
+            .await
+            .map_err(|_| {
+                ExecutionError::Transport(format!(
+                    "Polymarket account readiness timed out after {} seconds",
+                    ACCOUNT_READINESS_TIMEOUT.as_secs()
+                ))
+            })?
+        })?;
+
+        let balance_raw = collateral_balance_to_raw(balance_allowance.balance)?;
+        let standard_exchange = contract_config(POLYGON, false)
+            .and_then(|config| config.exchange_v2)
+            .ok_or_else(|| {
+                ExecutionError::Configuration(
+                    "missing Polygon standard V2 exchange contract".to_string(),
+                )
+            })?;
+        let neg_risk_exchange = contract_config(POLYGON, true)
+            .and_then(|config| config.exchange_v2)
+            .ok_or_else(|| {
+                ExecutionError::Configuration(
+                    "missing Polygon neg-risk V2 exchange contract".to_string(),
+                )
+            })?;
+        let standard_allowance = balance_allowance
+            .allowances
+            .get(&standard_exchange)
+            .map(String::as_str)
+            .unwrap_or("0");
+        let neg_risk_allowance = balance_allowance
+            .allowances
+            .get(&neg_risk_exchange)
+            .map(String::as_str)
+            .unwrap_or("0");
+        ensure_account_readiness(
+            geoblock.blocked,
+            closed_only.closed_only,
+            balance_raw,
+            standard_allowance,
+            neg_risk_allowance,
+            required_raw,
+        )?;
+
+        Ok(PolymarketAccountReadiness {
+            principal,
+            required_pusd,
+            balance_pusd: raw_balance_to_pusd(balance_raw)?,
+            country: geoblock.country,
+            region: geoblock.region,
+        })
     }
 }
 
@@ -725,18 +904,27 @@ fn polymarket_funder_from_env() -> Option<String> {
     ])
 }
 
-fn polymarket_signature_type_from_env(has_funder: bool) -> WalletSignatureType {
-    first_env_value(&["POLY_SIGNATURE_TYPE", "POLYMARKET_SIGNATURE_TYPE"])
-        .map(|value| WalletSignatureType::from_str(&value))
+fn wallet_signature_type(
+    value: Option<&str>,
+    has_funder: bool,
+) -> Result<WalletSignatureType, ExecutionError> {
+    value
+        .map(WalletSignatureType::from_str)
         .transpose()
-        .unwrap_or(None)
-        .unwrap_or_else(|| {
-            if has_funder {
+        .map(|value| {
+            value.unwrap_or(if has_funder {
                 WalletSignatureType::Proxy
             } else {
                 WalletSignatureType::Eoa
-            }
+            })
         })
+}
+
+fn polymarket_signature_type_from_env(
+    has_funder: bool,
+) -> Result<WalletSignatureType, ExecutionError> {
+    let value = first_env_value(&["POLY_SIGNATURE_TYPE", "POLYMARKET_SIGNATURE_TYPE"]);
+    wallet_signature_type(value.as_deref(), has_funder)
 }
 
 fn is_auth_recovery_error(error: &ExecutionError) -> bool {
@@ -854,6 +1042,87 @@ fn conditional_token_balance_to_shares(balance: Decimal) -> Decimal {
     }
 }
 
+fn pusd_to_raw(value: Decimal) -> Result<U256, ExecutionError> {
+    if value <= Decimal::ZERO {
+        return Err(ExecutionError::Validation(
+            "required pUSD must be greater than zero".to_string(),
+        ));
+    }
+    let raw = value
+        .checked_mul(Decimal::from(10_u64.pow(CONDITIONAL_TOKEN_DECIMALS)))
+        .ok_or_else(|| ExecutionError::Validation("required pUSD is out of range".to_string()))?;
+    if !raw.fract().is_zero() {
+        return Err(ExecutionError::Validation(
+            "required pUSD supports at most 6 decimal places".to_string(),
+        ));
+    }
+    U256::from_str(&raw.trunc().to_string()).map_err(|error| {
+        ExecutionError::Validation(format!("required pUSD is out of range: {error}"))
+    })
+}
+
+fn collateral_balance_to_raw(balance: Decimal) -> Result<U256, ExecutionError> {
+    if balance < Decimal::ZERO {
+        return Err(ExecutionError::Transport(
+            "venue returned a negative collateral balance".to_string(),
+        ));
+    }
+    if !balance.fract().is_zero() {
+        return Err(ExecutionError::Transport(format!(
+            "venue returned a fractional raw collateral balance: {balance}"
+        )));
+    }
+    U256::from_str(&balance.trunc().to_string()).map_err(|error| {
+        ExecutionError::Transport(format!("invalid raw collateral balance: {error}"))
+    })
+}
+
+fn raw_balance_to_pusd(balance: U256) -> Result<Decimal, ExecutionError> {
+    let raw = Decimal::from_str(&balance.to_string()).map_err(|error| {
+        ExecutionError::Transport(format!("raw collateral balance is out of range: {error}"))
+    })?;
+    Ok(raw / Decimal::from(10_u64.pow(CONDITIONAL_TOKEN_DECIMALS)))
+}
+
+fn ensure_account_readiness(
+    geoblocked: bool,
+    closed_only: bool,
+    balance_raw: U256,
+    standard_allowance: &str,
+    neg_risk_allowance: &str,
+    required_raw: U256,
+) -> Result<(), ExecutionError> {
+    if geoblocked {
+        return Err(ExecutionError::Validation(
+            "Polymarket trading is geoblocked from this host".to_string(),
+        ));
+    }
+    if closed_only {
+        return Err(ExecutionError::Validation(
+            "Polymarket account is in closed-only mode".to_string(),
+        ));
+    }
+    if balance_raw < required_raw {
+        return Err(ExecutionError::Validation(format!(
+            "insufficient pUSD balance: required_raw={required_raw}, available_raw={balance_raw}"
+        )));
+    }
+    for (label, allowance) in [
+        ("standard V2", standard_allowance),
+        ("neg-risk V2", neg_risk_allowance),
+    ] {
+        let allowance = U256::from_str(allowance).map_err(|error| {
+            ExecutionError::Transport(format!("invalid {label} allowance: {error}"))
+        })?;
+        if allowance < required_raw {
+            return Err(ExecutionError::Validation(format!(
+                "insufficient {label} allowance: required_raw={required_raw}, available_raw={allowance}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn normalize_aggressive_price(
     limit_price: Decimal,
     side: TradeSide,
@@ -960,10 +1229,11 @@ pub fn crate_marker() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        cap_sell_quantity_to_balance, conditional_token_balance_to_shares,
-        execution_price_override, normalize_aggressive_price, normalize_execution_amount,
-        normalize_market_order_quantity, normalize_order_quantity, polymarket_execution_principal,
-        polymarket_signature_type_from_env, tracked_trade_fill, trade_side, unique_token_ids,
+        cap_sell_quantity_to_balance, collateral_balance_to_raw,
+        conditional_token_balance_to_shares, ensure_account_readiness, execution_price_override,
+        normalize_aggressive_price, normalize_execution_amount, normalize_market_order_quantity,
+        normalize_order_quantity, polymarket_execution_principal, raw_balance_to_pusd,
+        tracked_trade_fill, trade_side, unique_token_ids, wallet_signature_type,
         CancellationOutcome, CancellationRequest, ExecutionError, ExecutionOutcome,
         ExecutionRequest, LiveExecutionGateway, OrderExecutionType, PolymarketExecutionConfig,
         PolymarketExecutionGateway, ReplaceOutcome, ReplaceRequest, StaticExecutionGateway,
@@ -1014,13 +1284,25 @@ mod tests {
         assert_eq!(eoa, "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf");
 
         let proxy = polymarket_execution_principal(&PolymarketExecutionConfig {
-            private_key: None,
+            private_key: Some(SecretString::from(
+                "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
+            )),
             signature_type: WalletSignatureType::Proxy,
-            funder: Some("0x1111111111111111111111111111111111111111".to_string()),
+            funder: Some("0x365f0ca36ae1f641e02fe3b7743673da42a13a70".to_string()),
             ..PolymarketExecutionConfig::default()
         })
         .expect("proxy principal");
-        assert_eq!(proxy, "0x1111111111111111111111111111111111111111");
+        assert_eq!(proxy, "0x365f0ca36ae1f641e02fe3b7743673da42a13a70");
+
+        let mismatched_proxy = polymarket_execution_principal(&PolymarketExecutionConfig {
+            private_key: Some(SecretString::from(
+                "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string(),
+            )),
+            signature_type: WalletSignatureType::Proxy,
+            funder: Some("0x1111111111111111111111111111111111111111".to_string()),
+            ..PolymarketExecutionConfig::default()
+        });
+        assert!(mismatched_proxy.is_err());
     }
 
     #[test]
@@ -1127,6 +1409,23 @@ mod tests {
     }
 
     #[test]
+    fn collateral_readiness_balance_is_always_raw_base_units() {
+        assert_eq!(
+            collateral_balance_to_raw(dec!(5000000)).expect("raw balance"),
+            U256::from(5_000_000_u64)
+        );
+        assert_eq!(
+            collateral_balance_to_raw(dec!(5000000.0)).expect("raw balance with scale"),
+            U256::from(5_000_000_u64)
+        );
+        assert!(collateral_balance_to_raw(dec!(5000000.5)).is_err());
+        assert_eq!(
+            raw_balance_to_pusd(U256::from(5_000_000_u64)).expect("display balance"),
+            dec!(5)
+        );
+    }
+
+    #[test]
     fn sell_quantity_rejects_when_conditional_token_balance_is_zero() {
         let error = cap_sell_quantity_to_balance(dec!(5), Decimal::ZERO)
             .expect_err("zero balance should reject");
@@ -1145,12 +1444,62 @@ mod tests {
     #[test]
     fn signature_type_defaults_to_proxy_when_funder_is_present() {
         assert_eq!(
-            polymarket_signature_type_from_env(true),
+            wallet_signature_type(None, true).expect("default"),
             WalletSignatureType::Proxy
         );
         assert_eq!(
-            polymarket_signature_type_from_env(false),
+            wallet_signature_type(None, false).expect("default"),
             WalletSignatureType::Eoa
+        );
+        assert_eq!(
+            wallet_signature_type(Some("poly1271"), true).expect("deposit wallet"),
+            WalletSignatureType::Poly1271
+        );
+        assert!(wallet_signature_type(Some("typo"), false).is_err());
+    }
+
+    #[test]
+    fn account_readiness_fails_closed_on_every_trading_gate() {
+        let required = U256::from(5_000_000_u64);
+        let enough = U256::from(10_000_000_u64);
+        let allowance = "10000000";
+
+        assert!(
+            ensure_account_readiness(false, false, enough, allowance, allowance, required).is_ok()
+        );
+        assert!(
+            ensure_account_readiness(true, false, enough, allowance, allowance, required).is_err()
+        );
+        assert!(
+            ensure_account_readiness(false, true, enough, allowance, allowance, required).is_err()
+        );
+        assert!(
+            ensure_account_readiness(false, false, U256::ZERO, allowance, allowance, required)
+                .is_err()
+        );
+        assert!(ensure_account_readiness(false, false, enough, "0", allowance, required).is_err());
+        assert!(ensure_account_readiness(false, false, enough, allowance, "0", required).is_err());
+    }
+
+    #[test]
+    fn readiness_uses_a_dedicated_client_with_heartbeats_stopped() {
+        let source = include_str!("lib.rs");
+        let readiness = &source[source.find("pub fn account_readiness").unwrap()..];
+        let readiness = &readiness[..readiness.find("impl LiveExecutionGateway").unwrap()];
+
+        assert!(readiness.contains("derive_api_key(&signer, None)"));
+        assert!(readiness.contains(".credentials(credentials)"));
+        assert!(readiness.contains("stop_heartbeats().await"));
+        assert!(readiness.contains("heartbeats_active()"));
+        assert!(!readiness.contains("create_or_derive_api_key"));
+        assert!(!readiness.contains("create_api_key"));
+        assert!(
+            readiness.find("tokio::time::timeout").unwrap()
+                < readiness.find("derive_api_key(&signer, None)").unwrap()
+        );
+        assert!(
+            readiness.find("stop_heartbeats().await").unwrap()
+                < readiness.find("client.version().await").unwrap()
         );
     }
 

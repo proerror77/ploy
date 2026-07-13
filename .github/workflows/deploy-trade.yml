@@ -356,8 +356,8 @@ jobs:
           upsert_env PLOY_PREDICT_OPS_LEDGER "${root}/data/account-ops/predict-fun-ledger.jsonl"
           upsert_env PLOY_PREDICT_OPS_LOCK "${root}/data/account-ops/predict-fun-ledger.jsonl.lock"
 
-          grep -Eq '^(POLYMARKET_PRIVATE_KEY|PRIVATE_KEY)=[^[:space:]]+' "${root}/.env" || {
-            echo "trade host signing key is missing" >&2
+          grep -Eq '^POLYMARKET_PRIVATE_KEY=[^[:space:]]+' "${root}/.env" || {
+            echo "trade host POLYMARKET_PRIVATE_KEY is missing" >&2
             exit 1
           }
           grep -Eq '^PLOY_LIVE_ACCOUNT_ID=0[xX][0-9a-fA-F]{40}$' "${root}/.env" || {
@@ -370,6 +370,24 @@ jobs:
               exit 1
             }
           done
+          set -a
+          # shellcheck disable=SC1091
+          . "${root}/.env"
+          set +a
+          signature_type="${POLY_SIGNATURE_TYPE:-${POLYMARKET_SIGNATURE_TYPE:-}}"
+          wallet_type="${POLY_WALLET_TYPE^^}"
+          case "${signature_type}:${wallet_type}" in
+            proxy:PROXY|gnosis_safe:SAFE)
+              ;;
+            poly1271:*)
+              echo "POLY_SIGNATURE_TYPE=poly1271 is not supported by the deployed custody/redemption relayer" >&2
+              exit 1
+              ;;
+            *)
+              echo "trade host wallet mapping must be proxy:PROXY or gnosis_safe:SAFE" >&2
+              exit 1
+              ;;
+          esac
 
           ln -sfn "releases/${git_sha}" "${root}/current.next"
           mv -Tf "${root}/current.next" "${root}/current"

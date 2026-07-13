@@ -74,12 +74,15 @@ when the mismatch is understood and tracked as a follow-up issue.
 | Live approval | `.github/workflows/approve-live-trade.yml` | Validate exact-SHA replay/dry-run/parity evidence, then require protected human approval before bounded live resume |
 
 `backtest.yml` emits `strategy_backtest_evaluation` as replay/backtest
-evidence, not as dry-run or live promotion evidence. Its `data_dir` path uses
-the legacy streaming Parquet feed for quote-tick replay; it does not consume the
-full-fidelity CLOB lake under `/opt/ploy/data/lake/orderbook_snapshots` yet.
-Treat profitable backtest metrics as blocked for promotion until the artifact
-also has full-depth CLOB fillability, official settlement, replay/dry-run
-parity, and runtime scorer parity. The machine-readable fields
+evidence, not as dry-run or live promotion evidence. Its `data_dir` path now
+prefers `orderbook_snapshots` from the full-fidelity CLOB lake under
+`/opt/ploy/data/lake/orderbook_snapshots` and falls back to legacy quote ticks
+only when no full-depth directory is present. The artifact reports observed
+depth-quote coverage and only marks full-depth CLOB fillability when every
+non-settlement fill actually used the simulator's `full_depth_sweep`
+price basis. Treat profitable metrics as blocked for promotion until the
+artifact also has official settlement, event-level lifecycle accounting,
+replay/dry-run parity, and runtime scorer parity. The machine-readable fields
 `evidence_stage`, `promotion_ready`, `blocking_risk_flags`, and
 `advisory_flags` are the operator-facing source of truth for that distinction.
 

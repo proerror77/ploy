@@ -51,12 +51,21 @@ class StrategyConfigContractTests(unittest.TestCase):
         self.assertIn("PLOY_LIVE_ACCOUNT_ID", script)
         self.assertIn("NORMALIZED_LIVE_ACCOUNT_ID", script)
         self.assertIn("trading principal", script)
+        self.assertIn("trading readiness", script)
+        self.assertIn('require_env_key "POLYMARKET_PRIVATE_KEY"', script)
+        self.assertIn("poly1271 is not supported", script)
+        self.assertIn("proxy:PROXY", script)
+        self.assertIn("gnosis_safe:SAFE", script)
         self.assertIn("does not match execution principal", script)
         self.assertIn("mktemp", script)
         self.assertIn('deployments apply "$RENDERED_MANIFEST"', script)
         self.assertIn("Only the protected live-approval workflow may resume", script)
         self.assertNotIn("--go-live", script)
         self.assertNotIn('deployments resume "$DEPLOYMENT_ID"', script)
+        self.assertLess(
+            script.index("trading readiness"),
+            script.index('deployments apply "$RENDERED_MANIFEST"'),
+        )
 
     def test_live_gate_manifest_config_parity_fixture_executes(self) -> None:
         script = (ROOT / "scripts" / "drills" / "pm5d_threelayer_live_gate.sh").read_text()
