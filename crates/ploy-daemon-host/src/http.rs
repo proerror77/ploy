@@ -2735,7 +2735,15 @@ mod tests {
     use ploy_operator_contracts::AuditLogEntry;
     use ploy_operator_contracts::{OrderReplaceRequest, PaperIntentRequest};
     use ploy_platform_runtime::runtime_support::IntentAdmissionSource;
-    use ploy_trading::{IntentPurpose as TradingIntentPurpose, TradeSide, TradingIntent};
+    use ploy_strategy_bundles::strategies::three_layer::ThreeLayerConfig;
+    use ploy_strategy_bundles::{
+        Feed, LiveFeed, MarketUpdate, StrategyDecision, StrategyLogic, ThreeLayerProfile,
+        ThreeLayerStrategy,
+    };
+    use ploy_trading::{
+        IntentPurpose as TradingIntentPurpose, OrderLedger, PositionLedger, TradeSide,
+        TradingIntent,
+    };
     use std::collections::VecDeque;
     use std::fs;
     use std::io::{Read, Write};
@@ -2984,18 +2992,110 @@ mod tests {
         });
         let mut client = TcpStream::connect(addr).expect("connect");
         client.set_nodelay(true).expect("nodelay");
+        let base_ts = Utc::now();
+        let positions = PositionLedger::default();
+        let orders = OrderLedger::default();
+        let mut strategy = ThreeLayerStrategy::new(ThreeLayerConfig {
+            symbols: vec!["BTCUSDT".to_string()],
+            profile: ThreeLayerProfile::Mixed,
+            min_direction_prob: 0.5,
+            min_distance_over_sigma: 0.0,
+            min_confirmation_score: 0.0,
+            require_confirmation: false,
+            min_drift_confirmation: 0.0,
+            min_edge: 0.0,
+            min_reward_risk: 0.0,
+            alpha_contrarian: false,
+            cex_contrarian: false,
+            probability_shrink: 1.0,
+            probability_haircut: 0.0,
+            take_profit_ask: 0.70,
+            stop_distance_pct: 0.02,
+            max_pm_lag_secs: 15,
+            min_time_remaining_secs: 1,
+            max_time_remaining_secs: 300,
+            cooldown_secs: 0,
+            stake_usd: rust_decimal::Decimal::new(25, 0),
+            max_positions: 10,
+            max_daily_trades: u32::MAX,
+            allowed_window_secs: vec![300],
+            min_entry_price: 0.01,
+            max_entry_price: 0.99,
+            min_entry_score: 0.0,
+            autofactor_runtime_score: None,
+            event_ml_model: None,
+            visible_depth_haircut: rust_decimal::Decimal::ONE,
+            max_sweep_levels: 0,
+            max_sweep_price_delta: rust_decimal::Decimal::ZERO,
+        });
+        strategy.on_update(
+            &MarketUpdate::EventDiscovered {
+                event_id: Arc::from("market-1"),
+                symbol: Arc::from("BTCUSDT"),
+                up_token: Arc::from("token-1"),
+                down_token: Arc::from("token-2"),
+                end_time: base_ts + Duration::seconds(300),
+                window_secs: 300,
+                price_to_beat: Some(rust_decimal::Decimal::new(100_000, 0)),
+                resolved_up_won: None,
+            },
+            &positions,
+            &orders,
+        );
+        strategy.on_update(
+            &MarketUpdate::SpotPrice {
+                symbol: Arc::from("BTCUSDT"),
+                price: rust_decimal::Decimal::new(100_000, 0),
+                ts: base_ts,
+            },
+            &positions,
+            &orders,
+        );
+        let (tick_tx, tick_rx) = tokio::sync::broadcast::channel(16);
+        let mut tick_feed = LiveFeed::new(tick_rx);
+        let tick_runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("tick runtime");
+        let mut canonical_tick_to_decision = Vec::with_capacity(SAMPLES);
+        let mut canonical_tick_to_gateway = Vec::with_capacity(SAMPLES);
+        let mut canonical_tick_to_response = Vec::with_capacity(SAMPLES);
         let mut client_to_gateway = Vec::with_capacity(SAMPLES);
         let mut gateway_to_response = Vec::with_capacity(SAMPLES);
         let mut end_to_end = Vec::with_capacity(SAMPLES);
 
         for sequence in 0..SAMPLES {
+            let tick = MarketUpdate::Quote {
+                token_id: Arc::from("token-1"),
+                bid: Some(rust_decimal::Decimal::new(19, 2)),
+                ask: Some(rust_decimal::Decimal::new(20, 2)),
+                bid_size: Some(rust_decimal::Decimal::new(1_000, 0)),
+                ask_size: Some(rust_decimal::Decimal::new(1_000, 0)),
+                bid_levels: Vec::new(),
+                ask_levels: Vec::new(),
+                ts: base_ts + Duration::milliseconds(sequence as i64),
+            };
+            let tick_started = Instant::now();
+            tick_tx.send(tick).expect("broadcast canonical tick");
+            let tick = tick_runtime
+                .block_on(tick_feed.next())
+                .expect("receive canonical tick");
+            let decisions = strategy.on_update(&tick, &positions, &orders);
+            let decision_at = Instant::now();
+            let intent = match decisions.as_slice() {
+                [StrategyDecision::Enter { intent, .. }] => intent,
+                other => panic!("benchmark tick must emit one entry, got {other:?}"),
+            };
             let body = serde_json::to_string(&PaperIntentRequest {
-                idempotency_key: Some(format!("latency-{sequence}")),
-                market_id: "market-1".to_string(),
-                token_id: "token-1".to_string(),
-                side: "buy".to_string(),
-                quantity: rust_decimal::Decimal::new(1, 4),
-                limit_price: Some(rust_decimal::Decimal::new(5, 1)),
+                idempotency_key: Some(intent.intent_id.clone()),
+                market_id: intent.market_id.clone(),
+                token_id: intent.token_id.clone(),
+                side: match intent.side {
+                    TradeSide::Buy => "buy",
+                    TradeSide::Sell => "sell",
+                }
+                .to_string(),
+                quantity: intent.quantity,
+                limit_price: intent.limit_price,
                 purpose: ploy_operator_contracts::IntentPurpose::Entry,
             })
             .expect("request json");
@@ -3011,13 +3111,27 @@ mod tests {
             let completed = Instant::now();
             assert!(response.contains("\"state\":\"acknowledged\""));
             let wire = entered.lock().expect("entered lock")[sequence];
+            canonical_tick_to_decision
+                .push(decision_at.duration_since(tick_started).as_micros() as u64);
+            canonical_tick_to_gateway.push(wire.duration_since(tick_started).as_micros() as u64);
+            canonical_tick_to_response
+                .push(completed.duration_since(tick_started).as_micros() as u64);
             client_to_gateway.push(wire.duration_since(started).as_micros() as u64);
             gateway_to_response.push(completed.duration_since(wire).as_micros() as u64);
             end_to_end.push(completed.duration_since(started).as_micros() as u64);
         }
 
         println!(
-            "live-submit-latency-us client_to_gateway[p50={},p99={},p999={}] gateway_to_response[p50={},p99={},p999={}] end_to_end[p50={},p99={},p999={}] samples={SAMPLES}",
+            "live-submit-latency-us canonical_tick_to_decision[p50={},p99={},p999={}] canonical_tick_to_gateway[p50={},p99={},p999={}] canonical_tick_to_response[p50={},p99={},p999={}] client_to_gateway[p50={},p99={},p999={}] gateway_to_response[p50={},p99={},p999={}] end_to_end[p50={},p99={},p999={}] samples={SAMPLES}",
+            percentile_micros(&mut canonical_tick_to_decision, 500),
+            percentile_micros(&mut canonical_tick_to_decision, 990),
+            percentile_micros(&mut canonical_tick_to_decision, 999),
+            percentile_micros(&mut canonical_tick_to_gateway, 500),
+            percentile_micros(&mut canonical_tick_to_gateway, 990),
+            percentile_micros(&mut canonical_tick_to_gateway, 999),
+            percentile_micros(&mut canonical_tick_to_response, 500),
+            percentile_micros(&mut canonical_tick_to_response, 990),
+            percentile_micros(&mut canonical_tick_to_response, 999),
             percentile_micros(&mut client_to_gateway, 500),
             percentile_micros(&mut client_to_gateway, 990),
             percentile_micros(&mut client_to_gateway, 999),

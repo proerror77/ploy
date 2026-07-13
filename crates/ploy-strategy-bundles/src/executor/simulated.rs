@@ -416,6 +416,7 @@ impl Executor for SimulatedExecutor {
             ..
         } = update
         {
+            let clears_book = bid.is_none() && ask.is_none();
             let previous = self
                 .quotes
                 .get(token_id.as_ref())
@@ -426,14 +427,26 @@ impl Executor for SimulatedExecutor {
                 QuoteLiquidity {
                     bid: *bid,
                     ask: *ask,
-                    bid_size: bid_size.or(previous.bid_size),
-                    ask_size: ask_size.or(previous.ask_size),
-                    bid_levels: if bid_levels.is_empty() {
+                    bid_size: if clears_book {
+                        None
+                    } else {
+                        bid_size.or(previous.bid_size)
+                    },
+                    ask_size: if clears_book {
+                        None
+                    } else {
+                        ask_size.or(previous.ask_size)
+                    },
+                    bid_levels: if clears_book {
+                        Vec::new()
+                    } else if bid_levels.is_empty() {
                         previous.bid_levels
                     } else {
                         bid_levels.clone()
                     },
-                    ask_levels: if ask_levels.is_empty() {
+                    ask_levels: if clears_book {
+                        Vec::new()
+                    } else if ask_levels.is_empty() {
                         previous.ask_levels
                     } else {
                         ask_levels.clone()
@@ -872,6 +885,33 @@ mod tests {
         let fill = report.fill.expect("last known top-of-book size");
         assert_eq!(fill.price, dec!(0.50));
         assert_eq!(fill.quantity, dec!(8));
+    }
+
+    #[tokio::test]
+    async fn empty_quote_clears_last_observed_liquidity() {
+        let config = SimulatedExecutorConfig {
+            require_lob_liquidity: true,
+            enable_partial_fills: true,
+            ..Default::default()
+        };
+        let mut exec = SimulatedExecutor::new(config);
+        exec.observe_market_update(&quote_update(
+            Some(dec!(0.49)),
+            Some(dec!(0.50)),
+            Some(dec!(50)),
+            Some(dec!(8)),
+        ));
+        exec.observe_market_update(&quote_update(None, None, None, None));
+
+        let report = exec
+            .submit(
+                &test_intent(TradeSide::Buy, dec!(0.50), dec!(25)),
+                "test-order-empty-book",
+            )
+            .await;
+
+        assert!(report.rejected);
+        assert!(report.fill.is_none());
     }
 
     #[tokio::test]

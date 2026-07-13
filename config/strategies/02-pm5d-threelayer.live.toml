@@ -7,7 +7,7 @@
 [runtime]
 strategy_variant = "three_layer"
 mode = "live"
-throttle_hz = 10
+market_data_source = "dual"
 
 [strategy]
 symbols = ["BTCUSDT", "ETHUSDT"]

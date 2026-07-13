@@ -13,7 +13,8 @@ use crate::traits::{Feed, MarketUpdate};
 /// Live feed that consumes market updates from a broadcast channel.
 ///
 /// Multiple strategies can subscribe to the same broadcast sender.
-/// Lagged messages are skipped with a warning.
+/// Any lag closes the feed so live/dry-run runtimes fail closed instead of
+/// evaluating against a market state with missing deltas.
 pub struct LiveFeed {
     rx: broadcast::Receiver<MarketUpdate>,
 }
@@ -28,15 +29,39 @@ impl LiveFeed {
 #[async_trait]
 impl Feed for LiveFeed {
     async fn next(&mut self) -> Option<MarketUpdate> {
-        loop {
-            match self.rx.recv().await {
-                Ok(update) => return Some(update),
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(skipped = n, "LiveFeed lagged, skipping messages");
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => return None,
+        match self.rx.recv().await {
+            Ok(update) => Some(update),
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!(skipped = n, "LiveFeed lagged; closing feed fail-closed");
+                None
             }
+            Err(broadcast::error::RecvError::Closed) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LiveFeed;
+    use crate::traits::{Feed, MarketUpdate};
+    use chrono::Utc;
+    use rust_decimal::Decimal;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+
+    #[tokio::test]
+    async fn lagged_live_feed_closes_fail_closed() {
+        let (tx, rx) = broadcast::channel(1);
+        let mut feed = LiveFeed::new(rx);
+        let update = |price| MarketUpdate::SpotPrice {
+            symbol: Arc::from("BTCUSDT"),
+            price,
+            ts: Utc::now(),
+        };
+
+        tx.send(update(Decimal::ONE)).unwrap();
+        tx.send(update(Decimal::from(2))).unwrap();
+
+        assert!(feed.next().await.is_none());
     }
 }

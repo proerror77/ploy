@@ -105,7 +105,9 @@ pub enum MarketDataSource {
     LocalDb,
     /// Open direct public feeds from this strategy runner.
     ExternalDirect,
-    /// Consume local DB feeds and also open direct public feeds.
+    /// Open direct public feeds while retaining the local DB for persistence,
+    /// metadata, and recovery services. Polled DB ticks are not merged into the
+    /// strategy hot path because they can duplicate or reorder direct ticks.
     Dual,
 }
 
@@ -1323,6 +1325,26 @@ taker_fee_rate = 0.07
             dryrun_strategy.insert(risk_key.to_string(), live_strategy[risk_key].clone());
         }
         assert_eq!(dryrun, live);
+    }
+
+    #[test]
+    fn threelayer_live_pair_uses_unthrottled_external_ticks() {
+        let config_dir = strategy_config_dir();
+        for file in [
+            "02-pm5d-threelayer.live.toml",
+            "02-pm5d-threelayer.settlement-probability-btc-eth-dryrun.toml",
+        ] {
+            let config = FullConfig::from_file(config_dir.join(file).to_str().unwrap()).unwrap();
+            assert_eq!(
+                config.runtime.market_data_source,
+                MarketDataSource::Dual,
+                "{file} must use direct ticks with DB-only fallback factors"
+            );
+            assert_eq!(
+                config.runtime.throttle_hz, None,
+                "{file} must evaluate every market tick"
+            );
+        }
     }
 
     #[test]

@@ -25,7 +25,7 @@ use crate::discovery::crypto::discover_crypto_markets;
 use crate::discovery::crypto::DiscoveredCryptoMarket;
 use crate::discovery::sports::discover_sports_markets;
 use crate::discovery::upsert_market_catalog;
-use crate::feeds::spawn_quote_feed_until;
+use crate::feeds::spawn_clob_ws_quote_feed_until;
 use crate::gamma_keyset::fetch_markets;
 use crate::reference_prices::{new_reference_price_registry, ReferencePriceRegistry};
 
@@ -246,13 +246,11 @@ pub fn spawn_market_scanner(
                             total_tracked = tracked.len(),
                             "Discovered new markets, subscribing to quotes",
                         );
-                        let handle = spawn_quote_feed_until(
+                        quote_handles.push(spawn_clob_ws_quote_feed_until(
                             tx.clone(),
                             new_tokens,
-                            pool.clone(),
                             quote_stop_at,
-                        );
-                        quote_handles.push(handle);
+                        ));
                     } else {
                         debug!(tracked = tracked.len(), "Scanner poll: no new markets");
                     }
@@ -496,9 +494,11 @@ async fn recover_pending_open_positions(
             tokens = new_tokens.len(),
             "Recovery: subscribing to quote feeds for pending positions"
         );
-        let handle =
-            spawn_quote_feed_until(tx.clone(), new_tokens, Some(pool.clone()), recovery_stop_at);
-        quote_handles.push(handle);
+        quote_handles.push(spawn_clob_ws_quote_feed_until(
+            tx.clone(),
+            new_tokens,
+            recovery_stop_at,
+        ));
     }
 }
 

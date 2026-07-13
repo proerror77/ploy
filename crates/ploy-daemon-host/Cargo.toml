@@ -26,5 +26,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+ploy-market-contracts.workspace = true
+ploy-strategy-bundles.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }

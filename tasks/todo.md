@@ -1,5 +1,74 @@
 # Current Session - Live Hot-Path Latency (2026-07-13)
 
+## Continuation - Tick-Level Execution Correction
+
+Evidence stage: `execution_quality` implementation hardening. PM5D is a
+five-minute settlement product, but its live decision and submission path is
+still tick-driven and must be evaluated as a seconds-level market. Live remains
+paused; this slice does not deploy, resume trading, or submit a real order.
+
+### Files / Ownership
+
+- `crates/ploy-market-data/{collector,feeds,scanner}.rs`: direct Polymarket CLOB
+  book/BBA ticks and fail-closed disconnect behavior.
+- `crates/ploy-strategy-bundles/{config,strategies/three_layer}.rs`: unthrottled
+  runtime config and stale-fallback protection.
+- `crates/ploy-strategy-runtime/src/live.rs`: direct-vs-DB source selection and
+  remaining Binance tick wiring.
+- `config/strategies/02-pm5d-threelayer*.toml`: live/dry-run source parity.
+- `tasks/{todo,lessons}.md`: correction, evidence, and reusable rule.
+
+Subagents are read-only reviewers for the CLOB tick semantics, Binance direct
+feed gap, and end-to-end latency benchmark boundary; the main agent owns all
+workspace edits.
+
+### Tasks
+
+- [x] Convert Polymarket CLOB `book` and `price_change` WebSocket events into
+      immediate `MarketUpdate::Quote` ticks with venue timestamps.
+- [x] Prevent stale WebSocket deltas from mutating newer book state, clear
+      executable depth on empty books, and keep delayed REST/DB ticks out of the
+      direct hot path.
+- [x] Remove the 10 Hz ThreeLayer throttle and keep live/dry-run configs on the
+      same direct-primary source policy.
+- [x] Restore strategy-runtime compilation after moving `MarketDataSource` to
+      its canonical module import.
+- [x] Wire production-required Binance Spot/AggTrade/L2 updates directly into
+      the strategy broadcast path instead of depending on multi-second DB polls.
+- [x] Extend the no-live-order benchmark from canonical broadcast tick receipt
+      through ThreeLayer evaluation, daemon risk/persistence, mock gateway, and
+      response with p50/p99/p999 output. Raw vendor WS parsing and real venue
+      network latency remain explicitly outside this local benchmark.
+- [x] Run focused suites, full relevant package checks, formatting, Clippy,
+      independent code review, and diff validation.
+- [ ] Commit atomically, push the existing branch, update PR #755, and monitor
+      CI without deploying or resuming live trading.
+
+### Review
+
+- `Dual` and `ExternalDirect` now use one native Binance combined WebSocket for
+  `@trade`, `@aggTrade`, and `@depth20@100ms`; `LocalDb` remains the explicit
+  polled mode. Disconnects clear cached Spot state before quote ticks can open a
+  new order.
+- Polymarket `book` snapshots and `price_change` deltas maintain an in-memory
+  depth book. Empty books clear executable liquidity, stale deltas are rejected
+  before mutation, same-millisecond deltas are retained, and reconnects remain
+  fail-closed until a fresh WS snapshot. The hot path uses direct Tungstenite
+  instead of the SDK broadcast layer that hides lag events.
+- Spot, Quote, AggTrade, and L2Depth updates can all trigger immediate ThreeLayer
+  entry evaluation. The 10 Hz runtime throttle is removed from the paired live
+  and dry-run configs.
+- Local release benchmark, 1,001 canonical broadcast ticks and a mock gateway,
+  no venue/wallet/chain access: canonical tick to decision p50/p99/p999
+  `2/6/16 us`; canonical tick to gateway `2267/6942/8015 us`; canonical tick
+  to response `3797/11169/18409 us`. Raw vendor WS parsing and real Polymarket
+  network ACK remain outside this benchmark and must be measured on the trading
+  host before live promotion.
+- Verification passed: 62 live market-data tests, 228 strategy-bundle tests,
+  12 strategy-runtime live/live-execution tests, 90 daemon-host tests (1
+  ignored), `new-ployd` + full `new-ploy-runner` checks, focused Clippy with no
+  errors, formatting, and `git diff --check`. Existing workspace warnings remain.
+
 ## Continuation - Venue Fees And Execution Events
 
 - [x] Add one shared venue-aware fee calculator with maker/taker and rounding semantics.

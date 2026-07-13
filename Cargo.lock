@@ -5066,9 +5066,11 @@ dependencies = [
  "hmac",
  "ploy-connectivity",
  "ploy-deployments",
+ "ploy-market-contracts",
  "ploy-operator-contracts",
  "ploy-platform",
  "ploy-platform-runtime",
+ "ploy-strategy-bundles",
  "ploy-trading",
  "rand 0.8.5",
  "rust_decimal",
@@ -5077,6 +5079,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
  "uuid",
 ]
 
